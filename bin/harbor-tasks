@@ -1,0 +1,422 @@
+#!/usr/bin/env node
+'use strict';
+
+// harbor-tasks: read and edit Harbor's task list from a terminal, which is how a
+// Claude session (any project, any config home) works with it.
+//
+// It is the SAME document, the SAME reducer and the SAME atomic, locked writer
+// the app uses; there is no second implementation of what a task means. Harbor
+// watches the file, so an edit made here appears in the open app within a
+// moment, and an edit made in the app is visible here immediately.
+//
+// Design notes that matter to whoever automates against this:
+//   * Every command takes --json and prints one JSON object, so a caller never
+//     has to parse prose.
+//   * A task is addressable by its id OR by a unique piece of its title. An
+//     ambiguous match is an ERROR that lists the candidates; it never guesses.
+//   * A refusal exits non-zero and says why on stderr. Nothing fails silently.
+
+const path = require('node:path');
+const fs = require('node:fs');
+
+const APP = path.join(path.dirname(__dirname), 'app');
+const model = require(path.join(APP, 'src/shared/tasks-model.cjs'));
+const tasksFile = require(path.join(APP, 'src/shared/tasks-file.cjs'));
+const { createTaskStore } = require(path.join(APP, 'src/main/providers/tasks.js'));
+
+const QUIET = { error() {}, warn() {}, log() {} };
+
+function readConfiguredFile() {
+  try {
+    const configFile = tasksFile.defaultConfigFile();
+    return JSON.parse(fs.readFileSync(configFile, 'utf8')).paths?.tasksFile || null;
+  } catch { return null; }
+}
+
+// ─── argument parsing ──────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  const flags = {};
+  const positional = [];
+  const repeatable = new Set(['tag', 'untag']);
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) { positional.push(arg); continue; }
+    const [rawName, inlineValue] = arg.slice(2).split(/=(.*)/s);
+    const name = rawName;
+    const boolish = new Set([
+      'json', 'star', 'no-star', 'my-day', 'no-my-day', 'help', 'all', 'done', 'quiet',
+    ]);
+    let value;
+    if (inlineValue !== undefined) value = inlineValue;
+    else if (boolish.has(name)) value = true;
+    else { i += 1; value = argv[i]; }
+    if (repeatable.has(name)) (flags[name] ||= []).push(value);
+    else flags[name] = value;
+  }
+  return { flags, positional };
+}
+
+/** today | tomorrow | +Nd | -Nd | YYYY-MM-DD | none/clear */
+function parseDue(value, today) {
+  if (value === undefined || value === null) return undefined;
+  const text = String(value).trim().toLowerCase();
+  if (!text || text === 'none' || text === 'clear' || text === 'null') return null;
+  if (text === 'today') return today;
+  if (text === 'tomorrow') return model.shiftDay(today, 1);
+  if (text === 'yesterday') return model.shiftDay(today, -1);
+  const relative = text.match(/^([+-])(\d+)\s*d(ays?)?$/);
+  if (relative) return model.shiftDay(today, Number(relative[2]) * (relative[1] === '-' ? -1 : 1));
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  throw new Error(`could not read "${value}" as a date; use YYYY-MM-DD, today, tomorrow, +3d`);
+}
+
+// ─── lookups that never guess ──────────────────────────────────────────────
+
+function resolveTask(doc, needle) {
+  if (!needle) throw new Error('which task? pass an id or part of its title');
+  const exact = doc.tasks.find((t) => t.id === needle);
+  if (exact) return exact;
+  const query = String(needle).toLowerCase();
+  const matches = doc.tasks.filter((t) => t.title.toLowerCase().includes(query));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) throw new Error(`no task matches "${needle}"`);
+  const shown = matches.slice(0, 10).map((t) => `  ${t.id}  ${t.title}`).join('\n');
+  throw new Error(
+    `"${needle}" matches ${matches.length} tasks; use an id or a longer phrase:\n${shown}`,
+  );
+}
+
+function resolveList(doc, needle) {
+  if (!needle) return null;
+  const exact = doc.lists.find((l) => l.id === needle);
+  if (exact) return exact;
+  const query = String(needle).toLowerCase();
+  const matches = doc.lists.filter((l) => l.name.toLowerCase().includes(query));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) {
+    throw new Error(`no list matches "${needle}"; lists are: ${doc.lists.map((l) => l.name).join(', ')}`);
+  }
+  throw new Error(`"${needle}" matches ${matches.length} lists: ${matches.map((l) => l.name).join(', ')}`);
+}
+
+// ─── rendering ─────────────────────────────────────────────────────────────
+
+function taskJson(doc, task, today) {
+  const kids = model.childrenOf(doc, task.id);
+  return {
+    id: task.id,
+    title: task.title,
+    notes: task.notes || null,
+    done: task.done,
+    status: task.done ? 'done' : 'open',
+    list: doc.lists.find((l) => l.id === task.listId)?.name || null,
+    listId: task.listId,
+    parentId: task.parentId,
+    level: task.depth + 1,
+    starred: task.starred,
+    myDay: model.isMyDay(task, today),
+    myDayDate: task.myDayDate,
+    dueDate: task.dueDate,
+    dueState: model.dueState(task, today),
+    tags: task.tags,
+    subtaskIds: kids.map((k) => k.id),
+    subtasksOpen: kids.filter((k) => !k.done).length,
+    subtasksTotal: kids.length,
+    createdAt: new Date(task.createdAt).toISOString(),
+    updatedAt: new Date(task.updatedAt).toISOString(),
+    completedAt: task.completedAt ? new Date(task.completedAt).toISOString() : null,
+  };
+}
+
+function line(doc, row, today) {
+  const task = row.task;
+  const indent = '  '.repeat(row.depth);
+  const box = task.done ? '[x]' : '[ ]';
+  const marks = [task.starred ? '*' : '', model.isMyDay(task, today) ? '~' : ''].join('');
+  const bits = [];
+  const listName = doc.lists.find((l) => l.id === task.listId)?.name;
+  if (listName) bits.push(listName);
+  if (row.dueLabel) bits.push(row.dueLabel.replace(/^Due /, 'due '));
+  if (task.tags.length) bits.push(task.tags.map((t) => `#${t}`).join(' '));
+  if (row.childCount) bits.push(`${row.childDoneCount}/${row.childCount} sub`);
+  const trail = row.breadcrumb?.length ? `  (under ${row.breadcrumb.join(' > ')})` : '';
+  return `${indent}${box}${marks ? ` ${marks}` : ''} ${task.title}${trail}`
+    + (bits.length ? `\n${indent}      ${bits.join(' · ')}  [${task.id}]` : `\n${indent}      [${task.id}]`);
+}
+
+const USAGE = `harbor-tasks: read and edit Harbor's task list.
+
+  harbor-tasks list [--view VIEW] [--list NAME] [--tag TAG] [--search TEXT] [--all] [--json]
+  harbor-tasks show <id|title...>  [--json]
+  harbor-tasks add "TITLE" [--list NAME] [--parent ID|TITLE] [--due DATE]
+                           [--star] [--my-day] [--tag TAG]... [--notes TEXT] [--json]
+  harbor-tasks update <id|title> [--title TEXT] [--notes TEXT] [--due DATE]
+                           [--star|--no-star] [--my-day|--no-my-day]
+                           [--tag TAG]... [--untag TAG]... [--list NAME] [--json]
+  harbor-tasks done <id|title>          mark complete (sub-tasks complete with it)
+  harbor-tasks undone <id|title>        reopen
+  harbor-tasks rm <id|title>            delete the task AND its sub-tasks
+  harbor-tasks lists [--json]
+  harbor-tasks list-add "NAME" [--color HEX] | list-rename <id|name> "NEW" | list-rm <id|name>
+  harbor-tasks list-color <id|name> <HEX|auto>
+  harbor-tasks file                     print the file being edited
+
+VIEW    myday | important | planned | all (default) | completed
+DATE    YYYY-MM-DD | today | tomorrow | +3d | -1d | none
+--all   include completed tasks in a list
+
+Sub-tasks go three levels deep. --parent puts a task under another one.
+Tasks are addressed by id or by a unique piece of the title.`;
+
+// ─── commands ──────────────────────────────────────────────────────────────
+
+async function main(argv) {
+  const { flags, positional } = parseArgs(argv);
+  const command = positional[0] || (flags.help ? 'help' : 'list');
+  if (command === 'help' || flags.help) { console.log(USAGE); return 0; }
+
+  const store = createTaskStore({
+    file: tasksFile.resolveTasksFile({ configuredFile: readConfiguredFile() }),
+    logger: QUIET,
+  });
+  const today = model.dayKey();
+  const json = Boolean(flags.json);
+  const out = (payload, text) => {
+    if (json) console.log(JSON.stringify(payload, null, 2));
+    else if (text) console.log(text);
+  };
+
+  const apply = async (op) => {
+    const result = await store.mutate(op);
+    if (!result.ok) throw new Error(result.reason || 'that change did not save');
+    return result;
+  };
+
+  if (command === 'file') {
+    out({ ok: true, file: store.file }, store.file);
+    return 0;
+  }
+
+  const { doc } = await store.read();
+
+  switch (command) {
+    case 'list': {
+      const listArg = flags.list ? resolveList(doc, flags.list) : null;
+      const view = listArg ? 'list' : (flags.view || 'all');
+      if (!listArg && !['myday', 'important', 'planned', 'all', 'completed'].includes(view)) {
+        throw new Error(`unknown view "${view}"; use myday, important, planned, all or completed`);
+      }
+      const rows = model.selectRows(doc, {
+        view,
+        listId: listArg?.id || null,
+        today,
+        query: flags.search || '',
+        tag: flags.tag?.[0] || null,
+        sort: 'manual',
+      });
+      // `--view completed` asks for completed work, so every match lands in
+      // rows.done and rows.open is empty: showing only the open half would
+      // answer "nothing" to the one question where nothing is never the answer.
+      const shown = flags.all || view === 'completed'
+        ? [...rows.open, ...rows.done]
+        : rows.open;
+      if (json) {
+        out({
+          ok: true,
+          file: store.file,
+          today,
+          view: listArg ? `list:${listArg.name}` : view,
+          count: shown.length,
+          tasks: shown.map((row) => ({ ...taskJson(doc, row.task, today), level: row.depth + 1 })),
+        });
+        return 0;
+      }
+      const heading = listArg ? listArg.name : view;
+      if (shown.length === 0) { console.log(`(nothing in ${heading})`); return 0; }
+      console.log(`${heading} — ${rows.open.length} open${rows.done.length ? `, ${rows.done.length} completed` : ''}`);
+      for (const row of shown) console.log(line(doc, row, today));
+      return 0;
+    }
+
+    case 'show': {
+      const task = resolveTask(doc, positional.slice(1).join(' '));
+      const payload = taskJson(doc, task, today);
+      if (json) { out({ ok: true, task: payload }); return 0; }
+      console.log(`${task.title}  [${task.id}]`);
+      console.log(`  status     ${payload.status}${payload.completedAt ? ` (${payload.completedAt})` : ''}`);
+      console.log(`  list       ${payload.list}${task.parentId ? `  (sub-task, level ${payload.level})` : ''}`);
+      console.log(`  due        ${payload.dueDate || '-'}${payload.dueState ? ` (${payload.dueState})` : ''}`);
+      console.log(`  important  ${payload.starred ? 'yes' : 'no'}`);
+      console.log(`  my day     ${payload.myDay ? 'yes' : 'no'}`);
+      console.log(`  tags       ${payload.tags.join(', ') || '-'}`);
+      console.log(`  sub-tasks  ${payload.subtasksTotal ? `${payload.subtasksTotal - payload.subtasksOpen}/${payload.subtasksTotal} done` : '-'}`);
+      console.log(`  created    ${payload.createdAt}`);
+      console.log(`  modified   ${payload.updatedAt}`);
+      if (payload.notes) console.log(`  notes\n${payload.notes.split('\n').map((l) => `    ${l}`).join('\n')}`);
+      for (const kid of model.childrenOf(doc, task.id)) {
+        console.log(`  - [${kid.done ? 'x' : ' '}] ${kid.title}  [${kid.id}]`);
+      }
+      return 0;
+    }
+
+    case 'add': {
+      const title = positional.slice(1).join(' ');
+      if (!title) throw new Error('what should the task be called?');
+      const parent = flags.parent ? resolveTask(doc, flags.parent) : null;
+      const list = flags.list ? resolveList(doc, flags.list) : null;
+      const result = await apply({
+        type: 'task.add',
+        title,
+        parentId: parent?.id || null,
+        listId: list?.id || null,
+        dueDate: parseDue(flags.due, today) ?? null,
+        starred: flags.star === true,
+        myDay: flags['my-day'] === true,
+        tags: flags.tag || [],
+        notes: flags.notes || '',
+      });
+      const task = result.doc.tasks.find((t) => t.id === result.taskId);
+      out(
+        { ok: true, task: taskJson(result.doc, task, today) },
+        `added: ${task.title}  [${task.id}]`,
+      );
+      return 0;
+    }
+
+    case 'update': {
+      const task = resolveTask(doc, positional.slice(1).join(' '));
+      const patch = {};
+      if (flags.title !== undefined) patch.title = flags.title;
+      if (flags.notes !== undefined) patch.notes = flags.notes;
+      if (flags.due !== undefined) patch.dueDate = parseDue(flags.due, today);
+      if (flags.star) patch.starred = true;
+      if (flags['no-star']) patch.starred = false;
+      if (flags['my-day']) patch.myDay = true;
+      if (flags['no-my-day']) patch.myDay = false;
+      if (flags.tag || flags.untag) {
+        const drop = new Set((flags.untag || []).map(model.tagKey));
+        patch.tags = [...task.tags.filter((t) => !drop.has(model.tagKey(t))), ...(flags.tag || [])];
+      }
+      if (flags.list !== undefined) patch.listId = resolveList(doc, flags.list).id;
+      if (Object.keys(patch).length === 0) throw new Error('nothing to change; pass at least one field');
+      const result = await apply({ type: 'task.update', taskId: task.id, patch });
+      const updated = result.doc.tasks.find((t) => t.id === task.id);
+      out(
+        { ok: true, task: taskJson(result.doc, updated, today) },
+        `updated: ${updated.title}  [${updated.id}]`,
+      );
+      return 0;
+    }
+
+    case 'done':
+    case 'undone': {
+      const task = resolveTask(doc, positional.slice(1).join(' '));
+      const result = await apply({ type: 'task.setDone', taskId: task.id, done: command === 'done' });
+      const updated = result.doc.tasks.find((t) => t.id === task.id);
+      out(
+        { ok: true, task: taskJson(result.doc, updated, today) },
+        `${command === 'done' ? 'completed' : 'reopened'}: ${updated.title}`,
+      );
+      return 0;
+    }
+
+    case 'rm':
+    case 'delete': {
+      const task = resolveTask(doc, positional.slice(1).join(' '));
+      const result = await apply({ type: 'task.remove', taskId: task.id });
+      out(
+        { ok: true, removed: result.removed ?? 1, title: task.title },
+        `deleted: ${task.title}${result.removed > 1 ? ` (and ${result.removed - 1} sub-task${result.removed > 2 ? 's' : ''})` : ''}`,
+      );
+      return 0;
+    }
+
+    case 'lists': {
+      const stats = model.counts(doc, today);
+      if (json) {
+        out({
+          ok: true,
+          file: store.file,
+          lists: doc.lists.map((l) => ({ id: l.id, name: l.name, open: stats.byList[l.id] || 0 })),
+          smart: {
+            myDay: stats.myday,
+            important: stats.important,
+            planned: stats.planned,
+            all: stats.all,
+            completed: stats.completed,
+            overdue: stats.overdue,
+            dueToday: stats.dueToday,
+          },
+          tags: model.tagIndex(doc).map((t) => ({ tag: t.tag, open: t.open, total: t.total })),
+        });
+        return 0;
+      }
+      for (const list of doc.lists) console.log(`${String(stats.byList[list.id] || 0).padStart(4)}  ${list.name}  [${list.id}]`);
+      console.log(`\nmy day ${stats.myday} · important ${stats.important} · planned ${stats.planned} · overdue ${stats.overdue} · due today ${stats.dueToday} · completed ${stats.completed}`);
+      const tags = model.tagIndex(doc);
+      if (tags.length) console.log(`tags: ${tags.map((t) => `${t.tag}(${t.open})`).join(' ')}`);
+      return 0;
+    }
+
+    case 'list-add': {
+      const name = positional.slice(1).join(' ');
+      const color = typeof flags.color === 'string' ? flags.color : null;
+      // Refuse a bad hex HERE rather than let applyOp quietly store null: from
+      // a CLI the flag was typed on purpose, so silently ignoring it would
+      // report success for something that did not happen.
+      if (color !== null && model.cleanColor(color) === null) {
+        throw new Error(`"${color}" is not a colour; use a hex value like #4ec9b6`);
+      }
+      const result = await apply({ type: 'list.add', name, color });
+      out(
+        { ok: true, listId: result.listId, name, color: model.cleanColor(color) },
+        `added list: ${name}  [${result.listId}]${color ? `  ${model.cleanColor(color)}` : ''}`,
+      );
+      return 0;
+    }
+
+    case 'list-color': {
+      const list = resolveList(doc, positional[1]);
+      const raw = positional[2] === 'auto' || positional[2] === 'none' ? null : positional[2];
+      if (raw !== null && model.cleanColor(raw) === null) {
+        throw new Error(`"${raw}" is not a colour; use a hex value like #4ec9b6, or "auto" to clear it`);
+      }
+      await apply({ type: 'list.color', listId: list.id, color: raw });
+      out(
+        { ok: true, listId: list.id, color: model.cleanColor(raw) },
+        raw ? `${list.name} is now ${model.cleanColor(raw)}` : `${list.name} is back to automatic colour`,
+      );
+      return 0;
+    }
+
+    case 'list-rename': {
+      const list = resolveList(doc, positional[1]);
+      const name = positional.slice(2).join(' ');
+      await apply({ type: 'list.rename', listId: list.id, name });
+      out({ ok: true, listId: list.id, name }, `renamed ${list.name} to ${name}`);
+      return 0;
+    }
+
+    case 'list-rm': {
+      const list = resolveList(doc, positional[1]);
+      await apply({ type: 'list.remove', listId: list.id });
+      out({ ok: true, listId: list.id }, `deleted list: ${list.name} (and everything in it)`);
+      return 0;
+    }
+
+    default:
+      throw new Error(`unknown command "${command}"\n\n${USAGE}`);
+  }
+}
+
+main(process.argv.slice(2))
+  .then((code) => process.exit(code || 0))
+  .catch((error) => {
+    const message = String(error?.message || error);
+    if (process.argv.includes('--json')) {
+      console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+    }
+    console.error(`harbor-tasks: ${message}`);
+    process.exit(1);
+  });

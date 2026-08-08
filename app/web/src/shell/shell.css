@@ -1,0 +1,101 @@
+/* One active conversation fills the measured visual viewport. */
+.app-shell .app-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.shell-screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.shell-screen-sessions {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.shell-drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.shell-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.shell-drawer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(88vw, 380px);
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: 18px 0 48px rgba(0, 0, 0, 0.38);
+  animation: shell-drawer-in 180ms ease-out;
+}
+
+.shell-drawer .session-browser {
+  position: absolute;
+  width: 100%;
+}
+
+@keyframes shell-drawer-in {
+  from { translate: -100% 0; }
+  to { translate: 0 0; }
+}
+
+.shell-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shell-browse-btn {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--sub);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* The model chip was capped at max-width:92px while "Opus 5 · xhigh" needs 99,
+   so the one thing Pat has twice said he must be able to see rendered as
+   "Opus 5 · x…". And the plan chip was pinned to a 44px square, which is what
+   forced it to a single letter: the CSS and the JSX slice were enforcing each
+   other. Both now size to their content and share the row. */
+.hdr-cap-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.hdr-cap-actions button {
+  min-height: 44px;
+  min-width: 44px;
+  flex: 0 1 auto;
+  padding: 0 12px;
+  border: 1px solid var(--ln);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--fg);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

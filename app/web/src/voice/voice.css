@@ -1,0 +1,121 @@
+.composer-mic,
+.composer-live-voice,
+.composer-format-toggle {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--sub);
+  cursor: pointer;
+}
+
+.composer-mic.recording {
+  color: #ff8f8f;
+  border-color: rgba(255, 143, 143, 0.45);
+  background: rgba(255, 143, 143, 0.12);
+}
+
+.composer-mic.requesting,
+.composer-mic.transcribing {
+  opacity: 0.7;
+}
+
+.composer-format-toggle.on {
+  color: var(--tx);
+  border-color: rgb(var(--ac-rgb) / 45%);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.composer-live-voice.connecting {
+  color: var(--ac2);
+  animation: live-voice-pulse 1.1s ease-in-out infinite;
+}
+
+.composer-live-voice.live {
+  color: #7ee0a6;
+  border-color: rgba(126, 224, 166, 0.45);
+  background: rgba(126, 224, 166, 0.12);
+}
+
+.composer-live-voice.live.speaking {
+  animation: live-voice-pulse 0.9s ease-in-out infinite;
+}
+
+.composer-live-voice.error {
+  color: #ff9b9b;
+  border-color: rgba(255, 106, 106, 0.4);
+}
+
+@keyframes live-voice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.composer-mic svg,
+.composer-live-voice svg,
+.composer-format-toggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.voice-status {
+  margin: 0 0 8px;
+  color: var(--sub);
+  font-size: 13px;
+}
+
+.voice-status.error {
+  color: #ff8f8f;
+}
+
+.live-voice-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--ln2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.live-voice-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sub);
+}
+
+.live-voice-bar.live .live-voice-dot { background: #7ee0a6; }
+.live-voice-bar.connecting .live-voice-dot { background: var(--ac2); }
+.live-voice-bar.error .live-voice-dot { background: #ff6a6a; }
+
+.live-voice-label {
+  color: var(--sub);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.live-voice-act {
+  flex: 1 1 100%;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.live-voice-act b {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
+.live-voice-act.sent b { color: #7ee0a6; opacity: 1; }
+.live-voice-act.refused b { color: #ff9b9b; opacity: 1; }
+.live-voice-act.you b { color: var(--ac2); opacity: 1; }

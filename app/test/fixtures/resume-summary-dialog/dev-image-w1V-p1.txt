@@ -1,0 +1,23 @@
+  each session window's header, and the command
+  bar. Anything without an icon (e.g. a home/~
+  session) still falls back to the colored dot, so
+  there's no regression.
+
+  I kept each window's subtle project-color edge
+  accent (--pj) since that's a tasteful
+  per-project cue, not one of the "generic
+  squares" — say the word if you'd rather I drop
+  that too.
+
+✻ Sautéed for 12m 9s
+
+──────────────────────────────────────────────────
+  This session is 9h 29m old and 546.4k tokens.
+
+  Resuming the full session will consume a
+  substantial portion of your usage limits. We
+  recommend resuming from a summary.
+
+  ❯ 1. Resume from summary (recommended)
+    2. Resume full session as-is
+    3. Don't ask me again

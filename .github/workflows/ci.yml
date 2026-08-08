@@ -1,0 +1,70 @@
+name: CI
+
+# Unit suite only, on ubuntu-latest, so PRs get a green check without the cost
+# and flake risk of the full Electron E2E gate.
+#
+# The E2E suite (`npm run test:e2e`) is deliberately NOT run here. Per
+# CLAUDE.md it is a two-consecutive-runs gate, spawns real Electron
+# windows, and requires both an isolated X server (xvfb-run) and an isolated
+# D-Bus session (dbus-run-session) so a native file-picker dialog can never
+# reach a real desktop (see app/scripts/e2e.js). That combination is not
+# reproducible in a hosted runner without real display/portal infrastructure,
+# so this workflow runs ONLY `npm test` (app/scripts/test.js, Node's built-in
+# test runner over app/test/**/*.test.js), and it is normally run locally per
+# CLAUDE.md.
+#
+# `app/test/herdr/*` is EXCLUDED here (`npm test -- --exclude test/herdr/`).
+# Those suites (bridge, control-latency, pane-size, worker-close, dedupe,
+# settle) spawn a real Herdr daemon in an isolated named session to drive it
+# end to end, which needs the actual Herdr CLI binary pinned to a protocol
+# version this repo allowlists (SUPPORTED_PROTOCOLS = [16, 17] in
+# main/herdr/client.js). Herdr is OPTIONAL for Harbor: Harbor's own session
+# daemon (`src/daemon/`) is the DEFAULT backend (HARBOR_SESSION_BACKEND
+# defaults to sessiond), and Herdr is an alternate backend a user can opt
+# into. This workflow used to `curl -fsSL https://herdr.dev/install.sh | sh`
+# and label the step "pinned 0.7.4", which was false: that installer always
+# fetches the LATEST release, and the first real CI run pulled 0.8.0, which
+# speaks protocol 19 and made every test/herdr/* spec fail with
+# "herdr protocol 19 does not match pinned 16, 17". Beyond being wrong, an
+# unpinned third-party `curl | sh` in CI is its own bad look for a repo about
+# to go public. The honest fix is to not install Herdr here at all, and to
+# not run the one test block that needs it. Every OTHER file that mentions
+# "herdr" (config/backend-selection tests, bin/ launcher tests, etc.) drives
+# it through an injected stub binary or an isolated harness and needs no real
+# install; only app/test/herdr/* itself spawns a live daemon.
+#
+# Reproduce this exact gate locally with:
+#   cd app && npm test -- --exclude test/herdr/
+# The full suite including test/herdr/ (needs a local Herdr install; see
+# setup/linux/README.md) is `npm test`.
+#
+# `npm ci`, not `npm install`: the lockfile is regenerated and committed, so an
+# exact install is both possible and the right choice for CI. It also means a
+# dependency that drifts out of the lockfile fails here loudly instead of being
+# silently resolved to something newer.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      - run: npm test -- --exclude test/herdr/

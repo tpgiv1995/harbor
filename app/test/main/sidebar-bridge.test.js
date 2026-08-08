@@ -1,0 +1,90 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { applyPaneEvent } = require('../../src/main/sidebar-bridge.js');
+
+test('pane agent status events update the sidebar pane state', () => {
+  const state = {
+    workspaces: [],
+    panes: [{ pane_id: 'pane-1', agent_status: 'idle' }],
+  };
+  const next = applyPaneEvent(state, {
+    event: 'pane.agent_status_changed',
+    data: { pane_id: 'pane-1', agent_status: 'working' },
+  });
+  assert.equal(next.panes[0].agent_status, 'working');
+});
+
+test('duplicate pane agent status events do not create new sidebar state', () => {
+  const state = {
+    workspaces: [],
+    panes: [{ pane_id: 'pane-1', agent_status: 'working' }],
+  };
+  const next = applyPaneEvent(state, {
+    event: 'pane.agent_status_changed',
+    data: { pane_id: 'pane-1', agent_status: 'working' },
+  });
+  assert.equal(next, state);
+});
+
+// The 2026-07-22 live incident, model layer: the Claude CLI segfaulted back
+// to a bash prompt at 23:34 and the session stayed GREEN in the rail for 90
+// minutes, because agent facts were only ever added to a pane, never removed.
+// Herdr reports agent_status 'unknown' when no foreground agent owns the pane
+// (schema enum: idle|working|blocked|done|unknown); that is the exit signal.
+test('agent_status unknown drops the pane: a crashed CLI must not stay a live session', () => {
+  const state = {
+    workspaces: [],
+    panes: [{
+      pane_id: 'w2:p3',
+      workspace_id: 'w2',
+      agent: 'claude',
+      agent_session: { kind: 'id', value: 'ebe07764' },
+      agent_status: 'working',
+    }],
+  };
+  const next = applyPaneEvent(state, {
+    event: 'pane.agent_status_changed',
+    data: { pane_id: 'w2:p3', agent_status: 'unknown' },
+  });
+  assert.deepEqual(next.panes, []);
+});
+
+test('pane.updated carrying explicit null agent facts drops the pane', () => {
+  const state = {
+    workspaces: [],
+    panes: [{
+      pane_id: 'w2:p3',
+      workspace_id: 'w2',
+      agent: 'claude',
+      agent_session: { kind: 'id', value: 'ebe07764' },
+      agent_status: 'working',
+    }],
+  };
+  const next = applyPaneEvent(state, {
+    event: 'pane.updated',
+    data: { pane: { pane_id: 'w2:p3', workspace_id: 'w2', agent: null, agent_session: null } },
+  });
+  assert.deepEqual(next.panes, []);
+});
+
+test('pane.updated OMITTING agent facts preserves them (title chatter must not kill a live session)', () => {
+  const state = {
+    workspaces: [],
+    panes: [{
+      pane_id: 'w2:p3',
+      workspace_id: 'w2',
+      agent: 'claude',
+      agent_session: { kind: 'id', value: 'ebe07764' },
+      agent_status: 'working',
+    }],
+  };
+  const next = applyPaneEvent(state, {
+    event: 'pane.updated',
+    data: { pane: { pane_id: 'w2:p3', workspace_id: 'w2', terminal_title: 'new title' } },
+  });
+  assert.equal(next.panes[0].agent, 'claude');
+  assert.equal(next.panes[0].agent_session.value, 'ebe07764');
+  assert.equal(next.panes[0].terminal_title, 'new title');
+});

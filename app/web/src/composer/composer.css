@@ -1,0 +1,323 @@
+/* The composer is the bottom chrome on this layout (there is no bottom nav), so
+   it owns the home-indicator inset ALWAYS. It used to add --safe-bottom only
+   while focused, which meant two bugs at once on a notched device: at rest the
+   input sat in the home-indicator strip, and focusing it jumped the whole
+   composer up by the inset. */
+.composer {
+  flex: 0 0 auto;
+  width: 100%;
+  padding: 8px 10px calc(8px + var(--safe-bottom));
+  border-top: 1px solid var(--ln);
+  background: rgba(11, 12, 15, 0.96);
+  color: var(--tx);
+}
+
+.composer.is-focused {
+  z-index: 25;
+}
+
+
+.composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.composer-attach {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  color: var(--sub);
+  cursor: pointer;
+}
+
+.composer-attach:focus-within {
+  background: rgba(255, 255, 255, 0.08);
+  outline: 1px solid rgb(var(--ac-rgb) / 45%);
+}
+
+.composer-attach input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+}
+
+.composer-attach svg {
+  width: 21px;
+  height: 21px;
+}
+
+.attach-chips {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  overflow-x: auto;
+}
+
+.attach-chip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  max-width: 230px;
+  min-height: 44px;
+  border: 1px solid var(--ln2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.attach-chip img {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+}
+
+.attach-chip > span {
+  min-width: 0;
+  padding: 0 9px;
+  overflow: hidden;
+  color: var(--sub);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-chip button {
+  flex: 0 0 auto;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  font-size: 22px;
+}
+
+/* One row to START, then it grows with what is typed. Reserving a two-line 52px
+   box plus a separate 34px interrupt bar plus the nav underneath was ~190px, a
+   fifth of the screen, spent on chrome before any conversation.
+   The growing half lives in Composer.jsx (a measured effect, because Safari has
+   no `field-sizing: content`). This comment claimed it for a long time while
+   nothing implemented it, so a long message showed one line and scrolled inside
+   itself. max-height here and the cap there must stay in agreement. */
+.composer-field textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  max-height: 40vh;
+  resize: none;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: 20px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--tx);
+  font: inherit;
+  /* 16px exactly: iOS Safari zooms the whole page on focus below this. */
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+/* THE TEXT YOU TYPE MUST BE VISIBLE (live-caught by Pat, 2026-08-07).
+ *
+ * This rule made the textarea `color: transparent` the moment it held any text
+ * at all, so typing on the phone showed nothing but a caret. It is half of a
+ * highlight-overlay pattern: the real field goes transparent and a mirror
+ * element behind it paints the same text with the slash token coloured. THERE
+ * IS NO MIRROR in this client, and there never was. The desktop composer
+ * deliberately deleted its mirror layer, and the rule arrived here in the
+ * sprint that added slash colouring without the layer it depends on.
+ *
+ * Slash validity already had its own signal and still does: the coloured left
+ * bar in slash/slash.css. Nothing is added here, because a second rule for the
+ * same state is the "third copy of a signal" this project keeps deleting, and
+ * mine would have silently overridden the designed one by load order. Do not
+ * reintroduce a transparent field without the element that draws the text.
+ */
+
+.composer-format-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.composer-format-btn {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--ln2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--tx);
+  font-weight: 650;
+}
+
+.composer-field textarea::placeholder {
+  color: var(--fnt);
+}
+
+.composer-field textarea:focus {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 0 0 1px rgb(var(--ac-rgb) / 45%);
+}
+
+.composer-queue-item button {
+  min-height: 34px;
+  border: 1px solid var(--ln2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--tx);
+  font-weight: 650;
+}
+
+/* A round accent button with a stroked arrow, the same signal the desktop
+   command bar uses. It was a 68px slab reading "Send", which is a word the
+   arrow already says and 68px the text field wanted. */
+.composer-send {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--ac), #2f5fd6);
+  color: #fff;
+  cursor: pointer;
+}
+
+.composer-send svg {
+  width: 20px;
+  height: 20px;
+}
+
+.composer-send-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: composer-spin 0.7s linear infinite;
+}
+
+@keyframes composer-spin {
+  to { transform: rotate(360deg); }
+}
+
+.composer button:disabled {
+  opacity: 0.4;
+}
+
+.composer-send:disabled {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--fnt);
+  opacity: 1;
+}
+
+/* Only drawn while a turn is running (see Composer.jsx), so it can afford to
+   be a small centred chip rather than a permanent full-width bar. */
+.composer-interrupt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  margin: 0 auto 8px;
+  padding: 9px 18px;
+  border: 1px solid var(--ln2);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--sub);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.composer-interrupt-glyph {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: #ff8f8f;
+}
+
+.composer-queue {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.composer-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.composer-queue-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-queue-item button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 5px 9px;
+}
+
+.composer-status {
+  margin: 0 0 8px;
+  color: var(--sub);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.composer-status.error {
+  color: #ff8f8f;
+}
+
+/* ── Composer tools behind one plus ────────────────────────────────────────
+   The row is [+] [field] [send] and nothing else. With attach, format, mic and
+   live voice all inline the field measured ~130px on a 430px phone, which is
+   the "I cannot see what I am typing" defect returning by another route. */
+.composer-plus {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--sub);
+  cursor: pointer;
+}
+
+.composer-plus svg { width: 20px; height: 20px; }
+
+.composer-plus.on {
+  background: rgb(var(--ac-rgb) / 18%);
+  color: var(--ac2);
+  transform: rotate(45deg);
+}
+
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding: 6px 2px;
+}
+
+.composer-tools > * { flex: 0 0 auto; }

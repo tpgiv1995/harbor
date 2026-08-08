@@ -1,0 +1,551 @@
+{
+  "batches": [
+    {
+      "constraints": "Sample constraints for batch 1.",
+      "dispatch_count": 0,
+      "done_when": "Sample completion criteria for batch 1.",
+      "files": [
+        "/workspace/src/sample-1-1.js",
+        "/workspace/src/sample-1-2.js",
+        "/workspace/src/sample-1-3.js",
+        "/workspace/src/sample-1-4.js",
+        "/workspace/src/sample-1-5.js"
+      ],
+      "finding_ids": "MOBILE-0",
+      "goal": "Sample goal text for batch 1.",
+      "id": "batch-1",
+      "import_order": 1,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": null,
+      "last_error": null,
+      "last_result_excerpt": null,
+      "last_session_id": null,
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 1.",
+      "snippet": "Sample reference snippet for batch 1.",
+      "source_lines": [
+        "source line 1 for batch 1",
+        "source line 2 for batch 1",
+        "source line 3 for batch 1",
+        "source line 4 for batch 1"
+      ],
+      "sprint": 1,
+      "status": "done",
+      "title": "Batch 1",
+      "why_this_worker": "Sample worker rationale for batch 1.",
+      "worker": "/codex-worker gate",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "codex",
+        "mode": "named-worker",
+        "raw": "/codex-worker gate",
+        "worker_name": "gate"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 2.",
+      "dispatch_count": 0,
+      "done_when": "Sample completion criteria for batch 2.",
+      "files": [
+        "/workspace/src/sample-2-1.js",
+        "/workspace/src/sample-2-2.js",
+        "/workspace/src/sample-2-3.js",
+        "/workspace/src/sample-2-4.js",
+        "/workspace/src/sample-2-5.js"
+      ],
+      "finding_ids": "MOBILE-1",
+      "goal": "Sample goal text for batch 2.",
+      "id": "batch-2",
+      "import_order": 2,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": null,
+      "last_error": null,
+      "last_result_excerpt": null,
+      "last_session_id": null,
+      "orchestrator_effort": "max",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 2.",
+      "snippet": "Sample reference snippet for batch 2.",
+      "source_lines": [
+        "source line 1 for batch 2",
+        "source line 2 for batch 2",
+        "source line 3 for batch 2"
+      ],
+      "sprint": 2,
+      "status": "done",
+      "title": "Batch 2",
+      "why_this_worker": "Sample worker rationale for batch 2.",
+      "worker": "/codex-worker router",
+      "worker_effort": "max",
+      "worker_target": {
+        "engine": "codex",
+        "mode": "named-worker",
+        "raw": "/codex-worker router",
+        "worker_name": "router"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 3.",
+      "dispatch_count": 1,
+      "done_when": "Sample completion criteria for batch 3.",
+      "files": [
+        "/workspace/src/sample-3-1.js",
+        "/workspace/src/sample-3-2.js",
+        "/workspace/src/sample-3-3.js",
+        "/workspace/src/sample-3-4.js",
+        "/workspace/src/sample-3-5.js",
+        "/workspace/src/sample-3-6.js",
+        "/workspace/src/sample-3-7.js",
+        "/workspace/src/sample-3-8.js"
+      ],
+      "finding_ids": "MOBILE-1b",
+      "goal": "Sample goal text for batch 3.",
+      "id": "batch-2b",
+      "import_order": 3,
+      "imported_at": "2026-08-02T04:20:51+00:00",
+      "last_dispatched_at": "2026-08-02T07:05:46+00:00",
+      "last_error": null,
+      "last_result_excerpt": "Sample worker result excerpt for batch 3.",
+      "last_session_id": "00000000-0000-4000-8000-000000000003",
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 3.",
+      "snippet": "Sample reference snippet for batch 3.",
+      "source_lines": [
+        "source line 1 for batch 3",
+        "source line 2 for batch 3",
+        "source line 3 for batch 3"
+      ],
+      "sprint": 2,
+      "status": "done",
+      "title": "Batch 3",
+      "why_this_worker": "Sample worker rationale for batch 3.",
+      "worker": "/codex-worker router2",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "codex",
+        "mode": "named-worker",
+        "raw": "/codex-worker router2",
+        "worker_name": "router2"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 4.",
+      "dispatch_count": 1,
+      "done_when": "Sample completion criteria for batch 4.",
+      "files": [
+        "/workspace/src/sample-4-1.js",
+        "/workspace/src/sample-4-2.js",
+        "/workspace/src/sample-4-3.js",
+        "/workspace/src/sample-4-4.js",
+        "/workspace/src/sample-4-5.js",
+        "/workspace/src/sample-4-6.js",
+        "/workspace/src/sample-4-7.js",
+        "/workspace/src/sample-4-8.js",
+        "/workspace/src/sample-4-9.js"
+      ],
+      "finding_ids": "MOBILE-2",
+      "goal": "Sample goal text for batch 4.",
+      "id": "batch-3",
+      "import_order": 4,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": "2026-08-02T07:27:40+00:00",
+      "last_error": null,
+      "last_result_excerpt": "Sample worker result excerpt for batch 4.",
+      "last_session_id": "00000000-0000-4000-8000-000000000004",
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 4.",
+      "snippet": "Sample reference snippet for batch 4.",
+      "source_lines": [
+        "source line 1 for batch 4",
+        "source line 2 for batch 4",
+        "source line 3 for batch 4",
+        "source line 4 for batch 4"
+      ],
+      "sprint": 3,
+      "status": "done",
+      "title": "Batch 4",
+      "why_this_worker": "Sample worker rationale for batch 4.",
+      "worker": "/codex-worker server",
+      "worker_effort": "max",
+      "worker_target": {
+        "engine": "codex",
+        "mode": "named-worker",
+        "raw": "/codex-worker server",
+        "worker_name": "server"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 5.",
+      "dispatch_count": 1,
+      "done_when": "Sample completion criteria for batch 5.",
+      "files": [
+        "/workspace/src/sample-5-1.js",
+        "/workspace/src/sample-5-2.js"
+      ],
+      "finding_ids": "MOBILE-3",
+      "goal": "Sample goal text for batch 5.",
+      "id": "batch-4",
+      "import_order": 5,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": "2026-08-02T07:49:18+00:00",
+      "last_error": null,
+      "last_result_excerpt": "Sample worker result excerpt for batch 5.",
+      "last_session_id": "00000000-0000-4000-8000-000000000005",
+      "orchestrator_effort": "high",
+      "priority": "P1",
+      "report_back_with": "Sample report-back instruction for batch 5.",
+      "snippet": "Sample reference snippet for batch 5.",
+      "source_lines": [
+        "source line 1 for batch 5",
+        "source line 2 for batch 5",
+        "source line 3 for batch 5"
+      ],
+      "sprint": 3,
+      "status": "done",
+      "title": "Batch 5",
+      "why_this_worker": "Sample worker rationale for batch 5.",
+      "worker": "/claude-worker sonnet-transcript",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "claude",
+        "mode": "named-worker",
+        "raw": "/claude-worker sonnet-transcript",
+        "worker_name": "sonnet-transcript"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 6.",
+      "dispatch_count": 1,
+      "done_when": "Sample completion criteria for batch 6.",
+      "files": [
+        "/workspace/src/sample-6-1.js",
+        "/workspace/src/sample-6-2.js"
+      ],
+      "finding_ids": "MOBILE-2b",
+      "goal": "Sample goal text for batch 6.",
+      "id": "batch-3b",
+      "import_order": 6,
+      "imported_at": "2026-08-02T07:59:22+00:00",
+      "last_dispatched_at": "2026-08-02T08:06:54+00:00",
+      "last_error": null,
+      "last_result_excerpt": "Sample worker result excerpt for batch 6.",
+      "last_session_id": "00000000-0000-4000-8000-000000000006",
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 6.",
+      "snippet": "Sample reference snippet for batch 6.",
+      "source_lines": [
+        "source line 1 for batch 6",
+        "source line 2 for batch 6",
+        "source line 3 for batch 6",
+        "source line 4 for batch 6"
+      ],
+      "sprint": 3,
+      "status": "done",
+      "title": "Batch 6",
+      "why_this_worker": "Sample worker rationale for batch 6.",
+      "worker": "/codex-worker server2",
+      "worker_effort": "max",
+      "worker_target": {
+        "engine": "codex",
+        "mode": "named-worker",
+        "raw": "/codex-worker server2",
+        "worker_name": "server2"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 7.",
+      "dispatch_count": 0,
+      "done_when": "Sample completion criteria for batch 7.",
+      "files": [
+        "/workspace/src/sample-7-1.js",
+        "/workspace/src/sample-7-2.js",
+        "/workspace/src/sample-7-3.js"
+      ],
+      "finding_ids": "MOBILE-4",
+      "goal": "Sample goal text for batch 7.",
+      "id": "batch-5",
+      "import_order": 7,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": null,
+      "last_error": "Sample worker error for batch 7.",
+      "last_result_excerpt": null,
+      "last_session_id": null,
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 7.",
+      "snippet": "Sample reference snippet for batch 7.",
+      "source_lines": [
+        "source line 1 for batch 7",
+        "source line 2 for batch 7",
+        "source line 3 for batch 7",
+        "source line 4 for batch 7"
+      ],
+      "sprint": 4,
+      "status": "done",
+      "title": "Batch 7",
+      "why_this_worker": "Sample worker rationale for batch 7.",
+      "worker": "/cursor-worker webshell",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "cursor",
+        "mode": "named-worker",
+        "raw": "/cursor-worker webshell",
+        "worker_name": "webshell"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 8.",
+      "dispatch_count": 1,
+      "done_when": "Sample completion criteria for batch 8.",
+      "files": [
+        "/workspace/src/sample-8-1.js",
+        "/workspace/src/sample-8-2.js",
+        "/workspace/src/sample-8-3.js"
+      ],
+      "finding_ids": "MOBILE-5",
+      "goal": "Sample goal text for batch 8.",
+      "id": "batch-6",
+      "import_order": 8,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": "2026-08-02T09:17:57+00:00",
+      "last_error": null,
+      "last_result_excerpt": "Sample worker result excerpt for batch 8.",
+      "last_session_id": "00000000-0000-4000-8000-000000000008",
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 8.",
+      "snippet": "Sample reference snippet for batch 8.",
+      "source_lines": [
+        "source line 1 for batch 8",
+        "source line 2 for batch 8",
+        "source line 3 for batch 8",
+        "source line 4 for batch 8"
+      ],
+      "sprint": 5,
+      "status": "done",
+      "title": "Batch 8",
+      "why_this_worker": "Sample worker rationale for batch 8.",
+      "worker": "/claude-worker sonnet-askcard",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "claude",
+        "mode": "named-worker",
+        "raw": "/claude-worker sonnet-askcard",
+        "worker_name": "sonnet-askcard"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 9.",
+      "dispatch_count": 1,
+      "done_when": "Sample completion criteria for batch 9.",
+      "files": [
+        "/workspace/src/sample-9-1.js",
+        "/workspace/src/sample-9-2.js",
+        "/workspace/src/sample-9-3.js",
+        "/workspace/src/sample-9-4.js",
+        "/workspace/src/sample-9-5.js",
+        "/workspace/src/sample-9-6.js",
+        "/workspace/src/sample-9-7.js",
+        "/workspace/src/sample-9-8.js",
+        "/workspace/src/sample-9-9.js"
+      ],
+      "finding_ids": "MOBILE-6b",
+      "goal": "Sample goal text for batch 9.",
+      "id": "batch-7b",
+      "import_order": 9,
+      "imported_at": "2026-08-02T09:19:38+00:00",
+      "last_dispatched_at": "2026-08-02T09:37:56+00:00",
+      "last_error": null,
+      "last_result_excerpt": "Sample worker result excerpt for batch 9.",
+      "last_session_id": "00000000-0000-4000-8000-000000000009",
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 9.",
+      "snippet": "Sample reference snippet for batch 9.",
+      "source_lines": [
+        "source line 1 for batch 9",
+        "source line 2 for batch 9",
+        "source line 3 for batch 9",
+        "source line 4 for batch 9"
+      ],
+      "sprint": 5,
+      "status": "done",
+      "title": "Batch 9",
+      "why_this_worker": "Sample worker rationale for batch 9.",
+      "worker": "/codex-worker integrate",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "codex",
+        "mode": "named-worker",
+        "raw": "/codex-worker integrate",
+        "worker_name": "integrate"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 10.",
+      "dispatch_count": 0,
+      "done_when": "Sample completion criteria for batch 10.",
+      "files": [
+        "/workspace/src/sample-10-1.js",
+        "/workspace/src/sample-10-2.js",
+        "/workspace/src/sample-10-3.js"
+      ],
+      "finding_ids": "MOBILE-7",
+      "goal": "Sample goal text for batch 10.",
+      "id": "batch-8",
+      "import_order": 10,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": null,
+      "last_error": null,
+      "last_result_excerpt": null,
+      "last_session_id": null,
+      "orchestrator_effort": "high",
+      "priority": "P1",
+      "report_back_with": "Sample report-back instruction for batch 10.",
+      "snippet": "Sample reference snippet for batch 10.",
+      "source_lines": [
+        "source line 1 for batch 10",
+        "source line 2 for batch 10",
+        "source line 3 for batch 10",
+        "source line 4 for batch 10",
+        "source line 5 for batch 10"
+      ],
+      "sprint": 6,
+      "status": "pending",
+      "title": "Batch 10",
+      "why_this_worker": "Sample worker rationale for batch 10.",
+      "worker": "/cursor-worker wsl2host",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "cursor",
+        "mode": "named-worker",
+        "raw": "/cursor-worker wsl2host",
+        "worker_name": "wsl2host"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 11.",
+      "dispatch_count": 0,
+      "done_when": "Sample completion criteria for batch 11.",
+      "files": [
+        "/workspace/src/sample-11-1.js",
+        "/workspace/src/sample-11-2.js",
+        "/workspace/src/sample-11-3.js",
+        "/workspace/src/sample-11-4.js",
+        "/workspace/src/sample-11-5.js",
+        "/workspace/src/sample-11-6.js",
+        "/workspace/src/sample-11-7.js"
+      ],
+      "finding_ids": "MOBILE-8",
+      "goal": "Sample goal text for batch 11.",
+      "id": "batch-9",
+      "import_order": 11,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": null,
+      "last_error": null,
+      "last_result_excerpt": null,
+      "last_session_id": null,
+      "orchestrator_effort": "high",
+      "priority": "P1",
+      "report_back_with": "Sample report-back instruction for batch 11.",
+      "snippet": "Sample reference snippet for batch 11.",
+      "source_lines": [
+        "source line 1 for batch 11",
+        "source line 2 for batch 11",
+        "source line 3 for batch 11"
+      ],
+      "sprint": 6,
+      "status": "pending",
+      "title": "Batch 11",
+      "why_this_worker": "Sample worker rationale for batch 11.",
+      "worker": "/claude-worker sonnet-multihost",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "claude",
+        "mode": "named-worker",
+        "raw": "/claude-worker sonnet-multihost",
+        "worker_name": "sonnet-multihost"
+      }
+    },
+    {
+      "constraints": "Sample constraints for batch 12.",
+      "dispatch_count": 1,
+      "done_when": "Sample completion criteria for batch 12.",
+      "files": [
+        "/workspace/src/sample-12-1.js",
+        "/workspace/src/sample-12-2.js",
+        "/workspace/src/sample-12-3.js"
+      ],
+      "finding_ids": "MOBILE-9",
+      "goal": "Sample goal text for batch 12.",
+      "id": "batch-10",
+      "import_order": 12,
+      "imported_at": "2026-08-02T06:47:17+00:00",
+      "last_dispatched_at": "2026-08-02T09:52:07+00:00",
+      "last_error": null,
+      "last_result_excerpt": "Sample worker result excerpt for batch 12.",
+      "last_session_id": "00000000-0000-4000-8000-000000000012",
+      "orchestrator_effort": "high",
+      "priority": "P0",
+      "report_back_with": "Sample report-back instruction for batch 12.",
+      "snippet": "Sample reference snippet for batch 12.",
+      "source_lines": [
+        "source line 1 for batch 12",
+        "source line 2 for batch 12",
+        "source line 3 for batch 12"
+      ],
+      "sprint": 7,
+      "status": "active",
+      "title": "Batch 12",
+      "why_this_worker": "Sample worker rationale for batch 12.",
+      "worker": "/cursor-worker security",
+      "worker_effort": "high",
+      "worker_target": {
+        "engine": "cursor",
+        "mode": "named-worker",
+        "raw": "/cursor-worker security",
+        "worker_name": "security"
+      }
+    }
+  ],
+  "imported_at": "2026-08-02T09:47:20+00:00",
+  "queue_id": "f351768de124",
+  "source_label": "sample orchestration run",
+  "source_note": "Neutralised capture: real batch shape, sample prose.",
+  "sprint_plan": {
+    "1": {
+      "label": "Unblock the gate",
+      "orchestrator_effort": "high"
+    },
+    "2": {
+      "label": "The transport seam",
+      "orchestrator_effort": "max"
+    },
+    "3": {
+      "label": "Headless server and mobile-shaped data",
+      "orchestrator_effort": "high"
+    },
+    "4": {
+      "label": "Web client shell",
+      "orchestrator_effort": "high"
+    },
+    "5": {
+      "label": "Mobile views",
+      "orchestrator_effort": "high"
+    },
+    "6": {
+      "label": "Always-on host and multi-host",
+      "orchestrator_effort": "high"
+    },
+    "7": {
+      "label": "Security and the mobile gate",
+      "orchestrator_effort": "high"
+    }
+  },
+  "updated_at": "2026-08-03T10:09:12+00:00",
+  "workspace": "/home/you/dev/harbor"
+}

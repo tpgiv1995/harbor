@@ -1,0 +1,152 @@
+{
+  "name": "harbor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop app for running and monitoring several Claude Code sessions at once, plus Codex and Cursor CLI sessions, as designed conversation windows rendered from each session's own transcript.",
+  "license": "MIT",
+  "author": "Pat Gordon",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tpgiv1995/harbor.git"
+  },
+  "homepage": "https://github.com/tpgiv1995/harbor#readme",
+  "bugs": {
+    "url": "https://github.com/tpgiv1995/harbor/issues"
+  },
+  "main": "src/main/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "build": "vite build",
+    "build:web": "vite build --config vite.web.config.js",
+    "dev:web": "vite --config vite.web.config.js",
+    "start:server": "node src/server/index.js",
+    "start": "electron .",
+    "postinstall": "npm run pack:daemon-deps",
+    "test": "node scripts/test.js",
+    "test:e2e": "node scripts/e2e.js",
+    "test:e2e:sessiond": "npm run build && env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SESSION_BUS_PID dbus-run-session -- xvfb-run -a playwright test -c test/e2e/sessiond.playwright.config.js",
+    "test:e2e:mobile": "node scripts/e2e-mobile.js",
+    "pack:daemon-deps": "node -e \"const fs=require('fs'),cp=require('child_process');const dir='src/daemon';const lock=dir+'/package-lock.json';const cmd=fs.existsSync(lock)?'ci':'install';cp.execSync('npm --prefix '+dir+' '+cmd+' --no-audit --no-fund',{stdio:'inherit'});require('assert')(fs.existsSync(dir+'/node_modules/node-pty'),'node-pty missing after install; the daemon cannot spawn a pty without it')\"",
+    "pack": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder --dir",
+    "dist": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder",
+    "dist:linux": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder --linux",
+    "dist:win": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder --win",
+    "dist:mac": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder --mac"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^25.1.8",
+    "vite": "^7.0.6"
+  },
+  "build": {
+    "appId": "com.harbor.desktop",
+    "productName": "Harbor",
+    "copyright": "Copyright \u00a9 2026 Pat Gordon",
+    "npmRebuild": false,
+    "asar": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "package.json",
+      "dist/**/*",
+      "dist-web/**/*",
+      "src/**/*",
+      "node_modules/ws/**/*",
+      "!**/*.test.js",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.markdown",
+      "!**/.claude/**",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/fixtures/**",
+      "!**/docs/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../bin",
+        "to": "bin"
+      }
+    ],
+    "asarUnpack": [
+      "src/daemon/node_modules/node-pty/**/*"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "build/icon.png",
+      "maintainer": "Harbor maintainers <maintainers@harbor.invalid>",
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1"
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Harbor"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
+  }
+}

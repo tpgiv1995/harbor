@@ -1,0 +1,23 @@
+     own run in the tool (which is what it's
+     for), and gets the tool's own validated
+     output. Avoids handing them a hand-built file
+     that could differ subtly from what the tool
+     produces.
+  2. Hand-build it now
+     I build the 113-column export by hand from
+     the attached files per the request (blank
+     the id column, keep the archived rows, pull
+     the child records from the audit report),
+     validate it, and attach it to the reply.
+     Higher effort; I would flag the archived-row
+     judgment call for review.
+  3. Re-run it in the tool
+     With your OK I trigger a fresh managed-agents
+     run on the three attached files to produce
+     the tool's own output. Note: this costs
+     money and appears in the session list.
+  4. Type something.
+──────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

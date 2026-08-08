@@ -1,0 +1,11 @@
+{
+  "name": "harbor-sessiond-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "System Node runtime dependencies for Harbor's standalone PTY daemon",
+  "license": "MIT",
+  "dependencies": {
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0"
+  }
+}

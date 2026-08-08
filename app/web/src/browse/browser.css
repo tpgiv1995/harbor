@@ -1,0 +1,332 @@
+.session-browser {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  padding:
+    var(--safe-top)
+    var(--safe-right)
+    var(--safe-bottom)
+    var(--safe-left);
+}
+
+.session-browser-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ln);
+  background: var(--glass-panel);
+  backdrop-filter: var(--glass-blur);
+}
+
+.session-browser-title {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.session-browser-close,
+.session-browser-add {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--sub);
+  cursor: pointer;
+}
+
+.session-browser-close svg,
+.session-browser-add svg {
+  width: 18px;
+  height: 18px;
+}
+
+.session-browser-close:active,
+.session-browser-add:active {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.session-browser-add {
+  color: var(--ac2);
+}
+
+.session-browser-search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+}
+
+.session-browser-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 6px;
+}
+
+.sb-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  width: 16px;
+  height: 16px;
+  color: var(--fnt);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.session-browser-search input {
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 12px 9px 36px;
+  border: 0;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--tx);
+  font-size: 15px;
+  outline: none;
+}
+
+.session-browser-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.session-browser-search input:focus {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.session-browser-list {
+  flex: 1 1 auto;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 2px 0 calc(16px + var(--safe-bottom));
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.session-browser-list::-webkit-scrollbar {
+  display: none;
+}
+
+.session-browser-pinned {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--ln);
+  background: var(--bg);
+}
+
+.browser-filter-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--ln);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--sub);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.browser-filter-toggle.open,
+.browser-filter-toggle:active {
+  background: rgba(var(--ac-rgb) / 12%);
+  border-color: rgba(var(--ac-rgb) / 28%);
+  color: var(--ac2);
+}
+
+.browser-filter-sep {
+  opacity: 0.55;
+}
+
+.browser-filter-panel {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 16px 10px;
+  border-bottom: 1px solid var(--ln);
+}
+
+.browser-filter-chips {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.browser-filter-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.browser-filter-chip,
+.browser-grouping-toggle button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--ln);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--sub);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.browser-filter-chip.active,
+.browser-grouping-toggle button.active {
+  background: rgba(var(--ac-rgb) / 14%);
+  border-color: rgba(var(--ac-rgb) / 30%);
+  color: var(--ac2);
+}
+
+.browser-grouping-toggle {
+  display: flex;
+  gap: 6px;
+}
+
+.browser-grouping-toggle button {
+  flex: 1 1 0;
+}
+
+.session-browser .project-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  padding: 10px 16px 6px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  background: rgba(11, 12, 15, 0.96);
+  backdrop-filter: var(--glass-blur);
+  color: var(--sub);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.session-browser .project-header:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.session-browser .project-chevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--fnt);
+}
+
+.session-browser .project-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-browser .project-count {
+  flex: 0 0 auto;
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fnt);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.session-browser .older-row {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 16px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fnt);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-browser .older-row:active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Sessions that want an answer are the reason to pick up the phone at all, so
+   the section reads as a heading with a count, not as a warning banner. The
+   bordered amber slab it used to be looked like an error state for a list of
+   perfectly healthy sessions. */
+.answer-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 2px;
+  padding: 4px 16px;
+}
+
+.answer-section-label {
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.answer-section-count {
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(212, 165, 55, 0.18);
+  color: var(--warn);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.session-browser .session-row.pinned,
+.session-browser .session-row.needs-answer {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.session-browser .session-row {
+  min-height: 44px;
+}
+
+.session-browser .session-status.needs-answer {
+  color: #f0d48a;
+  font-weight: 600;
+}
+
+.session-browser .session-status.working {
+  color: #8ce8c0;
+  font-weight: 600;
+}
+

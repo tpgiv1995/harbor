@@ -1,0 +1,23 @@
+
+  One loose end that is yours, not the repo's: the
+  top-right agent's glob-count hook dialog was
+  still waiting on your No as of my last look.
+
+✻ Churned for 2m 38s
+
+※ recap: Harbor Q&A, context gauge, and
+  message-clipping fixes are all committed,
+  pushed, and live in your running app, with every
+  test gate green. Only next action: answer the
+  top-right agent's hook dialog with No.
+
+──────────────────────────────────────────────────
+  This session is 10h 57m old and 559.1k tokens.
+
+  Resuming the full session will consume a
+  substantial portion of your usage limits. We
+  recommend resuming from a summary.
+
+  ❯ 1. Resume from summary (recommended)
+    2. Resume full session as-is
+    3. Don't ask me again

@@ -1,0 +1,12 @@
+#!/bin/sh
+':' //; exec node "$0" "$@"
+'use strict';
+
+const { hydrate } = require('./harbor-bin.cjs');
+
+hydrate().then((code) => {
+  process.exitCode = code;
+}).catch((error) => {
+  process.stderr.write(`harbor-hydrate: ${error.message}\n`);
+  process.exitCode = 1;
+});

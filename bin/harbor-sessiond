@@ -1,0 +1,231 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn, spawnSync } = require('node:child_process');
+
+const appRoot = path.resolve(__dirname, '../app');
+const daemonPath = path.join(appRoot, 'src/daemon/daemon.js');
+const { SessionClient } = require(path.join(appRoot, 'src/daemon/client.js'));
+const { resolvePaths } = require(path.join(appRoot, 'src/daemon/paths.js'));
+const { readLogTail } = require(path.join(appRoot, 'src/daemon/log-file.js'));
+
+function fail(message, code = 1) {
+  process.stderr.write(`${message}\n`);
+  process.exit(code);
+}
+
+function option(args, name, fallback) {
+  const index = args.indexOf(name);
+  if (index < 0) return fallback;
+  if (index + 1 >= args.length) fail(`${name} requires a value`, 2);
+  return args[index + 1];
+}
+
+function output(value, json) {
+  if (json) process.stdout.write(`${JSON.stringify(value)}\n`);
+  else if (typeof value === 'string') process.stdout.write(value.endsWith('\n') ? value : `${value}\n`);
+  else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function cleanDaemonEnv() {
+  // The allowlist is deliberately small: a daemon started with a session's
+  // environment leaks that session's ids into every pane it spawns.
+  //
+  // WINDOWS BRANCH, added 2026-08-06 after running this on a real Windows
+  // machine. `process.getuid` does not exist there, so the unconditional
+  // `/run/user/${process.getuid()}` threw "process.getuid is not a function"
+  // and `harbor-sessiond start` died before doing anything at all: no daemon,
+  // therefore no session, on the DEFAULT backend. bin/harbor-bin.cjs already
+  // had exactly this branch (its getuid sits safely inside the POSIX else),
+  // and this file never got it, so it is the sibling that was missed rather
+  // than a new problem.
+  const env = {
+    HOME: os.homedir(),
+    USER: process.env.USER || process.env.USERNAME || '',
+    LOGNAME: process.env.LOGNAME || process.env.USER || process.env.USERNAME || '',
+    LANG: process.env.LANG || 'en_US.UTF-8',
+    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+  };
+  if (process.platform === 'win32') {
+    // A pty needs a shell, and cmd.exe is the one Windows guarantees. The
+    // SystemRoot/PATHEXT group is what makes a spawned process able to resolve
+    // anything at all there.
+    env.COMSPEC = process.env.COMSPEC || 'C:\\Windows\\System32\\cmd.exe';
+    for (const key of ['SystemRoot', 'PATHEXT', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE']) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
+  } else {
+    env.SHELL = process.env.SHELL || '/bin/bash';
+    env.XDG_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR
+      || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '');
+    if (!env.XDG_RUNTIME_DIR) delete env.XDG_RUNTIME_DIR;
+  }
+  for (const name of ['HARBOR_SESSIOND_DIR', 'HARBOR_SESSIOND_SOCKET', 'HARBOR_SESSIOND_LOG', 'HARBOR_SESSIOND_REQUEST_TIMEOUT_MS', 'HARBOR_SESSIOND_KEEPER_REQUEST_TIMEOUT_MS', 'HARBOR_SESSIOND_EXIT_RETENTION_MS', 'HARBOR_SESSIOND_MAX_RECENT_EXITS', 'HARBOR_SESSIOND_KEEPER_EXIT_DELAY_MS', 'HARBOR_SESSIOND_LOG_MAX_BYTES']) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
+  return env;
+}
+
+// Is a daemon on this store USABLE? Decided by a real request with a deadline,
+// never by the socket file existing and never by a reply a dead process could
+// still produce. Same rule, and the same reason, as `herdr_daemon_healthy`.
+async function daemonHealthy(socketPath, timeoutMs = 2000) {
+  const client = new SessionClient({ socketPath, requestTimeoutMs: timeoutMs });
+  try {
+    await client.request('health');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { client.close(); } catch {}
+  }
+}
+
+async function waitForHealthy(socketPath, deadlineMs) {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    if (await daemonHealthy(socketPath)) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function startDaemon(json) {
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.root, { recursive: true, mode: 0o700 });
+
+  // ALREADY-RUNNING GATE (2026-08-06). This function used to start a daemon
+  // unconditionally, and the daemon it started deleted the live socket and
+  // rebound it. Twenty-eight daemons deep on Pat's machine, twenty-seven of them
+  // orphaned with their sessions stranded. Starting a second daemon on a store
+  // that already has a healthy one is never the right answer.
+  if (await daemonHealthy(paths.socket)) {
+    output({ started: false, alreadyRunning: true, socket: paths.socket }, json);
+    return;
+  }
+
+  const relocated = Boolean(process.env.HARBOR_SESSIOND_DIR || process.env.HARBOR_SESSIOND_SOCKET);
+  const explicitUnit = process.env.HARBOR_SESSIOND_UNIT;
+  const unit = explicitUnit || 'harbor-sessiond.service';
+  const mayUseSystemd = !relocated || Boolean(explicitUnit);
+  const env = cleanDaemonEnv();
+  // A deliberate start is never a harness abort, so the daemon's harness watch
+  // (src/daemon/harness-watch.js) is switched off outright: a detached start on
+  // a relocated store MEANS to outlive this process, and the systemd path's
+  // spawner is systemd itself.
+  env.HARBOR_SESSIOND_PARENT_PID = '0';
+  const readyTimeoutMs = Number(process.env.HARBOR_SESSIOND_READY_TIMEOUT_MS) || 10000;
+
+  if (mayUseSystemd) {
+    // A unit name is a shared namespace. `systemd-run` refuses a name that is
+    // already taken, and that refusal used to fall straight through to the
+    // detached spawn below, which is how a daemon got started OUTSIDE the unit
+    // that was supposed to be the one stable name for it. A taken name means
+    // somebody else is starting or running this daemon: wait for THEIRS to answer
+    // rather than racing it with one of our own.
+    const stale = spawnSync('systemctl', ['--user', 'is-failed', '--quiet', unit], { encoding: 'utf8' });
+    if (stale.status === 0) spawnSync('systemctl', ['--user', 'reset-failed', unit], { encoding: 'utf8' });
+
+    const envArgs = Object.entries(env).map(([name, value]) => `--setenv=${name}=${value}`);
+    const result = spawnSync('systemd-run', [
+      '--user', `--unit=${unit}`, '--collect', '--quiet',
+      '--property=KillMode=process',
+      `--property=StandardOutput=append:${paths.log}`,
+      `--property=StandardError=append:${paths.log}`,
+      ...envArgs, '--', process.execPath, daemonPath,
+    ], { encoding: 'utf8' });
+
+    if (result.status === 0) {
+      // "Started" means it ANSWERED A REAL REQUEST, not that systemd forked it:
+      // the caller's very next act is a real request, so a premature success only
+      // relocates the failure.
+      const ready = await waitForHealthy(paths.socket, readyTimeoutMs);
+      output({ started: ready, mode: 'systemd', unit, socket: paths.socket, healthy: ready }, json);
+      if (!ready) process.exitCode = 1;
+      return;
+    }
+
+    const message = `${result.stderr || ''}`.trim();
+    const nameTaken = /already exists|Unit .* already|exists and is (not )?(started|running)/i.test(message);
+    if (nameTaken) {
+      const ready = await waitForHealthy(paths.socket, readyTimeoutMs);
+      output({ started: ready, mode: 'systemd', unit, socket: paths.socket, healthy: ready, note: 'unit already present' }, json);
+      if (!ready) process.exitCode = 1;
+      return;
+    }
+    // A real systemd failure (no systemd-run, no user manager) is the documented
+    // fallback case, and only that case reaches the detached spawn now.
+    if (message) process.stderr.write(`systemd-run unavailable (${message}); falling back to a detached daemon\n`);
+  }
+
+  const logFd = fs.openSync(paths.log, 'a');
+  const child = spawn(process.execPath, [daemonPath], {
+    detached: true,
+    env,
+    stdio: ['ignore', logFd, logFd],
+  });
+  child.unref();
+  fs.closeSync(logFd);
+  const ready = await waitForHealthy(paths.socket, readyTimeoutMs);
+  output({ started: ready, mode: 'detached', pid: child.pid, socket: paths.socket, healthy: ready }, json);
+  if (!ready) process.exitCode = 1;
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const command = args[0];
+  const json = args.includes('--json');
+  if (command === 'start') {
+    await startDaemon(json);
+    return;
+  }
+  if (command === 'serve') {
+    require(daemonPath);
+    return;
+  }
+  const client = new SessionClient({ socketPath: resolvePaths().socket });
+  try {
+    if (command === 'status') {
+      const result = await client.request('health');
+      output(result, json);
+    } else if (command === 'list') {
+      const result = await client.request('list');
+      output(result, json);
+    } else if (command === 'kill') {
+      const id = args[1];
+      if (!id || id.startsWith('--')) fail('usage: harbor-sessiond kill <id> [--json]', 2);
+      output(await client.request('terminate', { id }), json);
+    } else if (command === 'logs') {
+      const lines = Number(option(args, '--lines', '100'));
+      try {
+        const result = await client.request('logs', { lines });
+        output(json ? result : result.text, json);
+      } catch (error) {
+        const paths = resolvePaths();
+        process.stderr.write(`daemon logs request failed: ${error.message}; reading ${paths.log} directly\n`);
+        const text = readLogTail(paths.log, lines);
+        output(json ? { log: paths.log, text } : text, json);
+      }
+    } else if (command === 'spawn') {
+      const separator = args.indexOf('--');
+      if (separator < 0 || separator === args.length - 1) fail('usage: harbor-sessiond spawn --cwd PATH [--cols N --rows N] -- COMMAND [ARG...]', 2);
+      const result = await client.request('spawn', {
+        argv: args.slice(separator + 1),
+        cwd: path.resolve(option(args.slice(0, separator), '--cwd', process.cwd())),
+        env: {},
+        cols: Number(option(args.slice(0, separator), '--cols', '120')),
+        rows: Number(option(args.slice(0, separator), '--rows', '60')),
+      });
+      output(result, json);
+    } else {
+      fail('usage: harbor-sessiond <start|status|list|kill|logs|spawn> [options]', 2);
+    }
+  } finally {
+    client.close();
+  }
+}
+
+main().catch((error) => fail(error.message));

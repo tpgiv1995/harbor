@@ -1,0 +1,50 @@
+node_modules/
+app/dist/
+app/verify/*
+!app/verify/.keep
+__pycache__/
+*.pyc
+
+# .claude/ carries personal session content in these subpaths; .claude/commands/
+# (and anything else under .claude/) stays tracked so a clone gets the shipped
+# workflow commands.
+.claude/handoffs/
+.claude/queue-backups/
+.claude/tools/
+.claude/RUN-*.md
+
+# churny test artifacts
+app/test/e2e/results.json
+app/test/e2e/sessiond-results.json
+app/test/e2e/mobile-results.json
+app/test-results/
+app/.e2e-home/
+
+# lane worktrees symlink node_modules in; the trailing-slash rule above
+# matches directories only, so a symlink slips past it and gets committed.
+node_modules
+app/dist-web/
+.harbor-mobile-fixtures/
+
+# electron-builder output. Installers are large binaries and are published as
+# release assets, never committed; docs/PACKAGING.md flagged this gap before a
+# build had ever been run locally, which is the only reason it never bit.
+app/release/
+
+# Browser-automation debug artifacts
+.playwright-mcp/
+
+# The publish-time identifier scrub. Kept locally, never committed: its rule
+# table IS the list of personal identifiers, so shipping it would publish exactly
+# what it exists to remove (the same mistake as a security audit that enumerates
+# its own findings).
+app/scripts/sanitize-for-publish.js
+
+# The commit-time gate that refuses identifying content, for the same reason and
+# discovered the same way: the scrub rewrote this file's own rule table on the
+# way out, turning the employer's real name into its replacement and quietly
+# disarming the check. A public contributor does not need the list to avoid
+# adding to it, and the tree this guards is the private one, which is where such
+# a name would enter. Run it locally with:
+#   node --test app/test/repo/no-third-parties.test.js
+app/test/repo/no-third-parties.test.js

@@ -1,0 +1,12 @@
+#!/bin/sh
+':' //; exec node "$0" "$@"
+'use strict';
+
+const { startClean } = require('./harbor-bin.cjs');
+
+startClean().then((code) => {
+  process.exitCode = code;
+}).catch((error) => {
+  process.stderr.write(`herdr-server-clean: ${error.message}\n`);
+  process.exitCode = 1;
+});

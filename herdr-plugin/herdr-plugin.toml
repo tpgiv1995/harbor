@@ -1,0 +1,30 @@
+id = "harbor"
+name = "Harbor"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Project/session tree: browse every Claude session, resume, or start new"
+platforms = ["linux"]
+
+[[panes]]
+id = "tree"
+title = "Session tree"
+placement = "popup"
+width = "88%"
+height = "88%"
+# Invoked by NAME, resolved through a normal PATH lookup, never an absolute
+# path tied to one machine or username. This is Harbor's own bin/claude-sessions
+# and it must be on your PATH for this pane to launch:
+#
+#   ln -s "$PWD/bin/claude-sessions" ~/.local/bin/claude-sessions
+#
+# It used to read `hist`, which is the author's own preferred alias for the same
+# script and exists on no other machine, so this pane could never launch for
+# anybody else. If you prefer `hist`, symlink it under that name and change this
+# line to match.
+command = ["claude-sessions"]
+
+[[actions]]
+id = "tree"
+title = "Session tree"
+contexts = ["workspace", "pane"]
+command = ["sh", "-c", "exec \"$HERDR_BIN_PATH\" plugin pane open --plugin harbor --entrypoint tree"]
