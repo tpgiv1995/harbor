@@ -90,6 +90,10 @@
         "filter": [
           "*-OFL.txt"
         ]
+      },
+      {
+        "from": "src/daemon/node_modules",
+        "to": "app/src/daemon/node_modules"
       }
     ],
     "asarUnpack": [
