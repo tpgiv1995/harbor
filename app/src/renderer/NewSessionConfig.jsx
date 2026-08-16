@@ -320,7 +320,17 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
               a decision. Launch keeps provider, account, model and effort, which
               are the four things a launch actually sets. */}
           {provider === 'claude' && reconfiguring ? <>
-            <section className="cap-sec"><div className="cap-sec-h">Permission mode</div><div className="cap-status"><span className="cap-status-lbl">current</span><span className="cap-status-val">{permMode === undefined ? 'reading…' : permMode === null ? 'unreadable' : (MODE_LABEL[permMode] || permMode)}</span></div><button type="button" className="cap-action" onClick={cycleMode} disabled={!canCyclePermission}>Cycle mode (⇧Tab)</button></section>
+            {/* `null` has TWO causes and they are not the same news, which is why
+                this reads the pane rather than printing one word for both. With a
+                pane, null means the scrape genuinely failed. With NO pane (line
+                141 sets null unconditionally there) the mode was never readable
+                in the first place, because it is scraped off a pty and typed into
+                with shift+tab: an OUTSIDE session renders from its transcript and
+                Harbor is not driving it. Reporting that as "unreadable" over a
+                dead button is what makes a working app look broken, and it sent a
+                macOS user hunting a bug on 2026-08-16. CommandBar.jsx has always
+                drawn the distinction; this popover is the one that did not. */}
+            <section className="cap-sec"><div className="cap-sec-h">Permission mode</div><div className="cap-status"><span className="cap-status-lbl">current</span><span className="cap-status-val">{permMode === undefined ? 'reading…' : permMode === null ? (request.pane?.paneId ? 'unreadable' : 'not controlled') : (MODE_LABEL[permMode] || permMode)}</span></div><button type="button" className="cap-action" onClick={cycleMode} disabled={!canCyclePermission} title={request.pane?.paneId ? 'Cycle this session’s permission mode' : 'Harbor is not driving this session: launch it from the rail, or send a message to adopt it'}>Cycle mode (⇧Tab)</button></section>
             <section className="cap-sec"><div className="cap-sec-h">Fast mode</div><div className="cap-row disabled"><span className="cap-row-lbl">Unavailable</span><span className="cap-row-reason">{caps?.fastMode?.reason || 'Fast mode: unavailable on subscription auth'}</span></div></section>
             <section className="cap-sec"><div className="cap-sec-h">Workflow</div><button type="button" className="cap-action" onClick={() => insert(`${caps?.dynamicWorkflow?.keyword || 'ultracode'} `)}>Insert “{caps?.dynamicWorkflow?.keyword || 'ultracode'}” keyword</button></section>
             <section className="cap-sec"><div className="cap-sec-h">Plugins &amp; connectors</div>{caps?.plugins?.length ? <div className="cap-plugins">{caps.plugins.map((plugin) => <div key={`${plugin.name}@${plugin.marketplace}`} className={`cap-plugin${plugin.enabled ? '' : ' off'}`}><span className="cap-plugin-dot" /><span className="cap-plugin-name">{plugin.name}</span><span className="cap-plugin-state">{plugin.enabled ? 'on' : 'off'}</span></div>)}</div> : <div className="cap-note">no plugins installed</div>}{caps?.mcpServers?.length ? <div className="cap-mcp"><span className="cap-mcp-lbl">MCP</span><span className="cap-mcp-names">{caps.mcpServers.join(', ')}</span></div> : null}</section>
