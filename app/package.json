@@ -32,7 +32,7 @@
     "test:e2e:mobile": "node scripts/e2e-mobile.js",
     "drive:mobile-win": "node scripts/drive-mobile-win.js",
     "drive:mobile-newsession-win": "node scripts/drive-mobile-newsession-win.js",
-    "pack:daemon-deps": "node -e \"const fs=require('fs'),cp=require('child_process');const dir='src/daemon';const lock=dir+'/package-lock.json';const cmd=fs.existsSync(lock)?'ci':'install';cp.execSync('npm --prefix '+dir+' '+cmd+' --no-audit --no-fund',{stdio:'inherit'});require('assert')(fs.existsSync(dir+'/node_modules/node-pty'),'node-pty missing after install; the daemon cannot spawn a pty without it')\"",
+    "pack:daemon-deps": "node scripts/pack-daemon-deps.js",
     "pack": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder --dir --publish never",
     "dist": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder --publish never",
     "dist:linux": "npm run build && npm run build:web && npm run pack:daemon-deps && electron-builder --linux --publish never",
