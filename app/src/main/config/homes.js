@@ -43,7 +43,7 @@ function homeId(dir) {
 // A directory listing, sorted so the answer is deterministic across platforms
 // (readdir order is filesystem-defined, and an unstable profile order would
 // reshuffle the rail's badges between launches).
-function listHomeDirs(homedir, readdir) {
+function listHomeDirs(homedir, readdir, exists = fs.existsSync) {
   let entries;
   try {
     entries = readdir(homedir, { withFileTypes: true });
@@ -58,6 +58,22 @@ function listHomeDirs(homedir, readdir) {
     if (entry.isFile()) continue;
     const name = entry.name;
     if (name !== PRIMARY_HOME && !SUFFIXED_HOME.test(name)) continue;
+    // The name is not enough. This file opens by defining a config home as "a
+    // directory holding an account's `.claude.json`", and matching on the name
+    // alone contradicted that: `~/.claude-*` is a perfectly ordinary namespace
+    // for things that are not Claude accounts at all. Live-caught 2026-08-16 on
+    // macOS, where the Desktop Commander MCP's `~/.claude-server-commander`
+    // was offered by the setup wizard as a second Claude account and drew its
+    // own `S` badge in the rail. A phantom account is not cosmetic: it is
+    // selectable, and a launch against it would hand the CLI a
+    // CLAUDE_CONFIG_DIR with no credentials in it.
+    //
+    // PRIMARY_HOME is exempt on purpose. `~/.claude` is the bare-launch
+    // convention every bin/ script already follows, and a first run that has
+    // created the directory but not yet signed in must still see itself; the
+    // wizard's whole job is to set that up. A SUFFIXED home has no such
+    // convention behind it, so it must prove it is real.
+    if (name !== PRIMARY_HOME && !exists(path.join(homedir, name, '.claude.json'))) continue;
     found.push(name);
   }
   found.sort((a, b) => {
@@ -92,7 +108,8 @@ function labelFor(id) {
 // needs a row to start editing from.
 function discoverProfiles(homedir, overrides = {}) {
   const readdir = overrides.readdir || fs.readdirSync;
-  const dirs = listHomeDirs(homedir, readdir);
+  const exists = overrides.exists || fs.existsSync;
+  const dirs = listHomeDirs(homedir, readdir, exists);
   const paths = dirs.length ? dirs : [path.join(homedir, PRIMARY_HOME)];
   const taken = new Set();
   const profiles = paths.map((dir, index) => {

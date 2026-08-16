@@ -31,6 +31,19 @@ fsSync.writeFileSync(path.join(PRIOR_INSTALL_CACHE, 'artifacts-index.json'), '{}
 
 const HOMES = ['.claude', '.claude-team', '.claude-lab'];
 const listing = (...names) => () => names.map((name) => ({ name, isFile: () => false }));
+// Discovery consults the filesystem for each suffixed home's `.claude.json`,
+// because a `.claude-*` directory is not automatically a Claude account (see
+// the phantom-home spec in config-migrate-fidelity.test.js). These HOMES are
+// all meant to be real, so the stand-in says so.
+// `exists` is the config layer's ONE filesystem stand-in and hasPriorInstall
+// uses it too, so this must answer every path, not just the new question.
+// Anything that is not a `.claude.json` lookup defers to the real fs, where
+// this file's prior-install marker genuinely lives.
+const claudeJsonIn = (...names) => (p) => (
+  p.endsWith('/.claude.json')
+    ? names.some((n) => p.endsWith(`/${n}/.claude.json`))
+    : fsSync.existsSync(p)
+);
 
 const runtime = {
   homedir: HOME,
@@ -39,6 +52,7 @@ const runtime = {
   findBinary: (name) => name,
   cacheDir: PRIOR_INSTALL_CACHE,
   readdir: listing(...HOMES),
+  exists: claudeJsonIn(...HOMES),
 };
 
 async function missingFile() {
