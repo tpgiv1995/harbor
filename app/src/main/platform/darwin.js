@@ -78,11 +78,37 @@ function createDarwinPlatform(deps = {}) {
     return { available: false, reason };
   }
 
+  // A DETACHED SPAWN, not `launchctl submit` (2026-08-28, after Harbor opened
+  // on a packaged macOS build showing "Terminal daemon unreachable" and could
+  // not recover on its own for the rest of the boot).
+  //
+  // `launchctl submit -l <label> -- <script> start` was wrong in three ways at
+  // once, and every one of them was invisible because the submit's own stdio is
+  // ignored and its exit status was never read:
+  //
+  //   1. A SUBMITTED JOB RUNS IN LAUNCHD'S ENVIRONMENT, NOT THE CALLER'S, so
+  //      `options.env` was discarded before it could reach the daemon — and
+  //      that is exactly what carries ELECTRON_RUN_AS_NODE for a packaged app
+  //      (see script-exec.js). No fix at the caller can survive while submit is
+  //      in the path.
+  //   2. THE LABEL IS NEVER CLEARED. On the failing machine `launchctl list`
+  //      showed the submitted job parked at exit status 127 — `/usr/bin/env
+  //      node` finding no node on launchd's `/usr/bin:/bin:/usr/sbin:/sbin`,
+  //      because macOS ships none and Homebrew's is off that PATH. launchctl
+  //      refuses a label that is already taken, so that ONE failed start wedged
+  //      auto-start for the rest of the boot: restarting the app could not fix
+  //      it, and nothing anywhere said why.
+  //   3. The pid returned was `launchctl`'s, never the daemon's, so a caller
+  //      that trusted it was watching a process that had already exited.
+  //
+  // linux.js and win32.js have always used a plain detached spawn and neither
+  // has ever had this failure mode; darwin was the odd one out. Nothing is lost
+  // by dropping launchd here, because `bin/harbor-sessiond start` already owns
+  // every lifecycle decision it was standing in for: the already-running gate,
+  // the detached spawn, and the health wait that decides "started" by a real
+  // request rather than by a fork having happened.
   function startDaemon(command, args = [], options = {}) {
-    const label = options.label || 'com.harbor.session-daemon';
-    const child = spawnProcess('launchctl', ['submit', '-l', label, '--', command, ...args], {
-      detached: true, stdio: 'ignore',
-    });
+    const child = spawnProcess(command, args, { detached: true, stdio: 'ignore', ...options });
     child.unref();
     return child.pid;
   }

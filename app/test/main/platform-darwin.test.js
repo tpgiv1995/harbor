@@ -37,3 +37,32 @@ test('darwin focus guard reports unavailable rather than pretending success', ()
   assert.equal(platform.focusGuard().available, false);
   assert.match(logs[0], /unavailable/);
 });
+
+
+test('darwin starts a daemon by spawning it directly, not through launchctl submit', () => {
+  // REGRESSION GUARD, 2026-08-28. `launchctl submit` ran the daemon in
+  // LAUNCHD's environment, which silently discarded the caller's env — the very
+  // thing that carries ELECTRON_RUN_AS_NODE for a packaged .app. Its label was
+  // also never cleared, so a job parked at exit 127 made every later submit
+  // fail and wedged auto-start for the rest of the boot. linux.js and win32.js
+  // never had either problem, because they spawn directly.
+  const calls = [];
+  const platform = createDarwinPlatform({
+    spawn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { pid: 4242, unref() { this.unrefd = true; } };
+    },
+  });
+  const pid = platform.startDaemon('/Harbor.app/Contents/MacOS/Harbor',
+    ['/Harbor.app/Contents/Resources/bin/harbor-sessiond', 'start'],
+    { env: { PATH: '/usr/bin', ELECTRON_RUN_AS_NODE: '1' } });
+
+  assert.equal(calls.length, 1);
+  assert.notEqual(calls[0].command, 'launchctl', 'launchctl submit cannot carry the caller env');
+  assert.equal(calls[0].command, '/Harbor.app/Contents/MacOS/Harbor');
+  assert.deepEqual(calls[0].args, ['/Harbor.app/Contents/Resources/bin/harbor-sessiond', 'start']);
+  assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1', 'the interpreter selector must reach the daemon');
+  assert.equal(calls[0].options.detached, true, 'the daemon must outlive the app that started it');
+  assert.equal(calls[0].options.stdio, 'ignore');
+  assert.equal(pid, 4242, 'the pid must be the daemon, not a launchctl wrapper that has already exited');
+});

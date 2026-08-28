@@ -14,7 +14,14 @@
 // The proof is deliberately TWO-SIDED. A test that only checked "win32 uses an
 // interpreter" would pass just as well if the POSIX path had also been changed
 // to route through Electron, which would risk the one platform that is proven
-// today. So the POSIX case asserts the command is still the script itself.
+// today. So the LINUX case asserts the command is still the script itself.
+//
+// DARWIN LEFT THE POSIX GROUP ON 2026-08-27 — but only under Electron, and for a
+// reason that is not Windows'. The shebang works fine there; what fails is
+// RESOLVING `node` from it, because a packaged .app gets launchd's PATH. The
+// tests below assert both halves of that split (darwin+Electron takes the
+// interpreter, darwin without Electron does not), so the narrowness is checked
+// rather than assumed.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -37,16 +44,48 @@ test('on win32 a bin/ script is run by naming the interpreter, with the script a
   assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
 });
 
-test('on linux and darwin the script path stays the command, so the proven path is untouched', () => {
-  for (const platform of ['linux', 'darwin']) {
+test('on linux the script path stays the command, so the proven path is untouched', () => {
+  // Still the two-sided half of the Windows proof: if this ever flips to the
+  // interpreter, the one platform Harbor is actually developed on has changed
+  // behaviour for no reason. darwin left this group on 2026-08-27 (below) and
+  // linux deliberately did not follow it.
+  for (const electron of [true, false]) {
     const { command, args, env } = scriptInvocation('/repo/bin/ai', ['--team'], {
-      platform,
+      platform: 'linux',
       execPath: '/usr/bin/electron',
+      electron,
     });
-    assert.equal(command, '/repo/bin/ai', `${platform} must still exec the script directly`);
+    assert.equal(command, '/repo/bin/ai', 'linux must still exec the script directly');
     assert.deepEqual(args, ['--team']);
-    assert.deepEqual(env, {}, `${platform} needs no extra environment`);
+    assert.deepEqual(env, {}, 'linux needs no extra environment');
   }
+});
+
+test('on darwin UNDER ELECTRON the interpreter is named, because a packaged .app has no node on PATH', () => {
+  // A .app launched from Finder/Dock inherits launchd's
+  // `/usr/bin:/bin:/usr/sbin:/sbin`. There is no /usr/bin/node on macOS, so
+  // `#!/usr/bin/env node` exits 127 and the daemon auto-start silently never
+  // happens — observed as a `launchctl list` job parked at 127 while the app
+  // showed "Terminal daemon unreachable" (2026-08-27).
+  const { command, args, env } = scriptInvocation('/Harbor.app/Contents/Resources/bin/harbor-sessiond', ['start'], {
+    platform: 'darwin',
+    execPath: '/Harbor.app/Contents/MacOS/Harbor',
+    electron: true,
+  });
+  assert.equal(command, '/Harbor.app/Contents/MacOS/Harbor');
+  assert.deepEqual(args, ['/Harbor.app/Contents/Resources/bin/harbor-sessiond', 'start']);
+  assert.equal(env.ELECTRON_RUN_AS_NODE, '1', 'the Electron binary only behaves as node when told to');
+});
+
+test('on darwin OUTSIDE Electron the shebang is trusted, so the CLI and this suite are unaffected', () => {
+  const { command, args, env } = scriptInvocation('/repo/bin/harbor-sessiond', ['status'], {
+    platform: 'darwin',
+    execPath: '/opt/homebrew/bin/node',
+    electron: false,
+  });
+  assert.equal(command, '/repo/bin/harbor-sessiond');
+  assert.deepEqual(args, ['status']);
+  assert.deepEqual(env, {}, 'a real node on PATH needs no interpreter override');
 });
 
 test('scriptExecArgs merges the interpreter environment without discarding the caller`s', () => {

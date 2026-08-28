@@ -21,17 +21,38 @@
 // The fix is to name the interpreter rather than rely on the OS to infer one.
 // Under Electron `process.execPath` is the Electron binary, which runs as plain
 // Node when ELECTRON_RUN_AS_NODE is set; under the test runner it is already
-// node and the variable is harmless. Linux and macOS keep the exact behaviour
-// they have today (the script path as the command, the system `node` from the
-// shebang), because that path is proven and this change must not risk it.
+// node and the variable is harmless.
+//
+// MACOS JOINED THE INTERPRETER BRANCH ON 2026-08-27, for a different reason than
+// Windows. macOS honours the shebang perfectly well — but `#!/usr/bin/env node`
+// still has to FIND node, and a packaged .app launched from Finder or the Dock
+// inherits launchd's `/usr/bin:/bin:/usr/sbin:/sbin`. macOS ships no
+// `/usr/bin/node`, and Homebrew's lives in `/opt/homebrew/bin`, off that PATH.
+// So the daemon auto-start exec'd, failed to resolve node, and exited 127 —
+// caught live with `launchctl list` showing the job parked at 127 while the app
+// showed "Terminal daemon unreachable". It worked during development only
+// because `npm start` inherits a developer's shell PATH; every packaged launch
+// was broken. Naming Electron as the interpreter also drops the requirement
+// that the user have Node installed at all, which is the right answer for a
+// packaged app that already ships a Node runtime.
+//
+// LINUX IS DELIBERATELY UNCHANGED. It is the proven path, it is not broken, and
+// the two-sided test below is what keeps it that way.
 
 const IS_WIN32 = process.platform === 'win32';
 
 // Returns { command, args, env } ready for execFile/spawn. `env` is only the
 // ADDITIONS the invocation needs; callers merge it into whatever they already
 // pass so an explicit env is never clobbered.
-function scriptInvocation(scriptPath, argv = [], { platform = process.platform, execPath = process.execPath } = {}) {
-  if (platform === 'win32') {
+function scriptInvocation(scriptPath, argv = [], {
+  platform = process.platform,
+  execPath = process.execPath,
+  // `process.versions.electron` is absent under plain Node, so the test runner
+  // and any CLI use of these helpers keep the bare-script POSIX path. The
+  // interpreter is taken ONLY where the shebang genuinely cannot be trusted.
+  electron = Boolean(process.versions.electron),
+} = {}) {
+  if (platform === 'win32' || (platform === 'darwin' && electron)) {
     return {
       command: execPath,
       args: [scriptPath, ...argv],
