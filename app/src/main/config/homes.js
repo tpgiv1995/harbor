@@ -73,7 +73,18 @@ function listHomeDirs(homedir, readdir, exists = fs.existsSync) {
     // created the directory but not yet signed in must still see itself; the
     // wizard's whole job is to set that up. A SUFFIXED home has no such
     // convention behind it, so it must prove it is real.
-    if (name !== PRIMARY_HOME && !exists(path.join(homedir, name, '.claude.json'))) continue;
+    // Two proofs are accepted, either one sufficient. `.claude.json` is the
+    // definition; `projects/` is the transcript store, and it covers the home
+    // this gate must not hide: one whose `.claude.json` was deleted to re-auth
+    // (or is mid-first-write) while sessions worth showing still live under it.
+    // Without the second proof, this filter rode the `exists` DEFAULT parameter
+    // into transcript beacon scanning (providers/transcript.js) and the history
+    // index (providers/history-index.js) and made that account's entire session
+    // history vanish from the rail with no signal. A phantom like
+    // `.claude-server-commander` has neither file and stays excluded.
+    if (name !== PRIMARY_HOME
+      && !exists(path.join(homedir, name, '.claude.json'))
+      && !exists(path.join(homedir, name, 'projects'))) continue;
     found.push(name);
   }
   found.sort((a, b) => {

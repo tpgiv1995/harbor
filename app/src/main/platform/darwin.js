@@ -100,6 +100,12 @@ function createDarwinPlatform(deps = {}) {
   //      it, and nothing anywhere said why.
   //   3. The pid returned was `launchctl`'s, never the daemon's, so a caller
   //      that trusted it was watching a process that had already exited.
+  //      The detached spawn does not fully fix this: the child below is
+  //      `harbor-sessiond start`, a wrapper that health-waits and then
+  //      EXITS, so the returned pid is a spawn-succeeded signal that dies
+  //      within seconds — never a handle on the daemon. Nobody consumes it
+  //      today (lifecycle.js discards it); a caller that wants the daemon's
+  //      real pid must ask the daemon's health endpoint, which reports it.
   //
   // linux.js and win32.js have always used a plain detached spawn and neither
   // has ever had this failure mode; darwin was the odd one out. Nothing is lost
@@ -126,7 +132,7 @@ function createDarwinPlatform(deps = {}) {
       killProcess: available('POSIX signals'),
       clipboardImage: available('Electron clipboard'),
       notify: available('Electron Notification'),
-      daemon: available('detached launch; launchd validation pending'),
+      daemon: available('detached spawn; validated live on macOS 2026-08-28'),
       focusGuard: unavailable('focus guard is not implemented on darwin'),
       thumbnailer: {
         pdf: which('pdftoppm') ? available() : unavailable('pdftoppm is not installed'),

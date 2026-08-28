@@ -20,6 +20,30 @@ const { createDelegateProvider, queuePath } = require('../../src/main/providers/
 // Helpers
 // ---------------------------------------------------------------------------
 
+// The pane runs these as shell strings with an empty env, so under Electron the
+// shipped launcher must be named through the Electron binary as node — the
+// packaged-mac 127 fix's missing lane. Two-sided: a user-supplied launcher and
+// a plain-node caller keep the exact string they always got.
+test('under Electron the shipped launcher is run through the Electron binary as node', () => {
+  const cmd = buildResearchCommand(LAUNCHER, '/home/u/.claude', '/orchestrate-research', 'goal', {
+    electron: true, execPath: '/Harbor.app/Contents/MacOS/Harbor', platform: 'darwin',
+  });
+  assert.ok(cmd.startsWith(`ELECTRON_RUN_AS_NODE=1 '/Harbor.app/Contents/MacOS/Harbor' '${LAUNCHER}' --here `),
+    `interpreter head missing: ${cmd}`);
+});
+
+test('outside Electron, and for a foreign launcher, the command string is unchanged', () => {
+  const plain = buildResearchCommand(LAUNCHER, '/home/u/.claude', '/orchestrate-research', 'goal', {
+    electron: false, execPath: '/usr/bin/node', platform: 'darwin',
+  });
+  assert.ok(plain.startsWith(`${LAUNCHER} --here `), plain);
+  const foreign = buildExecuteCommand('/home/u/bin/my-ai', '/home/u/.claude', '/orchestrate-execution', {
+    electron: true, execPath: '/Harbor.app/Contents/MacOS/Harbor', platform: 'darwin',
+  });
+  assert.ok(foreign.startsWith('/home/u/bin/my-ai '), 'a launcher that is not ours is not reinterpreted');
+  assert.ok(!foreign.includes('ELECTRON_RUN_AS_NODE'), foreign);
+});
+
 const SANDBOX_ROOT = path.resolve(__dirname, '../fixtures/orch-sandbox');
 const SANDBOX_STATE_DIR = path.resolve(__dirname, '../fixtures/orch-state');
 const SANDBOX_QUEUE_PATH = queuePath(SANDBOX_ROOT, SANDBOX_STATE_DIR);

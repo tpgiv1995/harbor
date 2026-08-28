@@ -41,15 +41,35 @@ function launcherFlags(launcher) {
   return [];
 }
 
-function buildResearchCommand(launcher, home, researchCommand, goal) {
-  const escaped = sanitizeGoal(goal).replace(/'/g, "'\\''");
-  const flags = launcherFlags(launcher).map((flag) => `${flag} `).join('');
-  return `${launcher} ${flags}--home ${shellQuote(home)} '${researchCommand} ${escaped}'`;
+// The pane runs this as a SHELL STRING (`$SHELL -lc`, session-daemon/client.js)
+// with none of the caller's env, so `bin/ai`'s `#!/bin/sh` → `exec node`
+// polyglot has to resolve `node` from the login shell's own PATH. That is the
+// exact packaged-app 127 the daemon start was cured of (script-exec.js) — and
+// this lane kept it, invisibly, because the static exec guard only matches
+// execFile call sites. Under Electron the SHIPPED launcher is therefore run
+// through the Electron binary as node, inline in the string; a user-supplied
+// launcher is not ours to reinterpret and keeps the bare form, as does every
+// non-Electron caller (CLI, tests). win32 panes do not take this path at all.
+function launcherCommand(launcher, {
+  electron = Boolean(process.versions.electron),
+  execPath = process.execPath,
+  platform = process.platform,
+} = {}) {
+  const flags = launcherFlags(launcher);
+  const interpret = flags.length > 0 && electron && platform !== 'win32';
+  const head = interpret
+    ? `ELECTRON_RUN_AS_NODE=1 ${shellQuote(execPath)} ${shellQuote(launcher)}`
+    : `${launcher}`;
+  return `${head} ${flags.map((flag) => `${flag} `).join('')}`;
 }
 
-function buildExecuteCommand(launcher, home, executionCommand) {
-  const flags = launcherFlags(launcher).map((flag) => `${flag} `).join('');
-  return `${launcher} ${flags}--home ${shellQuote(home)} ${shellQuote(executionCommand)}`;
+function buildResearchCommand(launcher, home, researchCommand, goal, overrides = {}) {
+  const escaped = sanitizeGoal(goal).replace(/'/g, "'\\''");
+  return `${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} '${researchCommand} ${escaped}'`;
+}
+
+function buildExecuteCommand(launcher, home, executionCommand, overrides = {}) {
+  return `${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} ${shellQuote(executionCommand)}`;
 }
 
 function checkExecuteMutex({ projectLabel, terminalState, queue }) {

@@ -425,9 +425,14 @@ uses headless Chromium; the wizard wrapper has a hidden Windows lane.
 2026-08-10, so "validated on Linux" describes history rather than a machine
 anyone still runs.
 
-**macOS** has never been run. `setup/macos/README.md` is a first-run checklist,
-not a support statement. Known risk: daemon startup uses `launchctl submit`, a
-legacy subcommand, with no exit check.
+**macOS** ran for the first time on 2026-08-28: a packaged `Harbor.app` on an
+M4 Pro completed `setup/macos/README.md`'s validation front matter — daemon
+healthy, an end-to-end pty spawn exiting 0, the unit suite green outside
+environment-bound cases. The former known risk (daemon startup via `launchctl
+submit`, whose env-discarding and never-cleared label wedged auto-start at
+exit 127) is GONE: darwin now uses the same detached spawn as the other
+platforms and names the Electron binary as the interpreter
+(`app/src/main/script-exec.js`).
 
 ---
 

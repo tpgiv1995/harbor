@@ -47,29 +47,18 @@ function listing(...names) {
   return () => names.map((name) => ({ name, isFile: () => false }));
 }
 
-// A stand-in for fs.existsSync, which discovery now consults because a config
-// home is a directory holding an account's `.claude.json` and NOT merely a
-// directory whose name starts with `.claude-`. These specs are about which
-// homes become profiles, so by default every `.claude-*` in the listing is a
-// real one; `bare` names the directories that only LOOK like homes, which is
-// its own spec below.
-function claudeJsonIn(names, bare = []) {
-  const real = new Set(names.filter((n) => !bare.includes(n)));
-  return (p) => {
-    if (!p.endsWith('/.claude.json')) return fs.existsSync(p);
-    const match = /(?:^|\/)(\.claude(?:-[^/]+)?)\/\.claude\.json$/.exec(p);
-    return Boolean(match) && real.has(match[1]);
-  };
-}
+// The shared, separator-agnostic stand-in for discovery's `exists` probe —
+// see test/support/claude-json-in.js for why it must not assume '/'.
+const { claudeJsonIn } = require('../support/claude-json-in.js');
 
 function configFor(names, extra = {}) {
-  const { bare, ...rest } = extra;
+  const { bare, projectsOnly, ...rest } = extra;
   return legacyConfig({
     homedir: HOME,
     platform: 'linux',
     env: { HOME, PATH: '' },
     readdir: listing(...names),
-    exists: claudeJsonIn(names, bare),
+    exists: claudeJsonIn(names, { bare, projectsOnly }),
     ...rest,
   });
 }
@@ -133,6 +122,19 @@ test('the primary home counts even before it has a .claude.json', () => {
   assert.deepEqual(config.profiles.map((p) => p.id), ['personal']);
   assert.equal(config.profiles[0].configHome, path.join(HOME, '.claude'));
   assert.equal(config.profiles[0].isDefault, true);
+});
+
+// The OTHER side of the phantom gate: a home mid-reauth (`.claude.json`
+// deleted to sign in again) still holds its `projects/` transcript store and
+// must stay visible — hiding it made that account's whole session history
+// disappear from the rail. Two proofs, either sufficient; this spec pins the
+// second one.
+test('a suffixed home with transcripts but no .claude.json is still an account', () => {
+  const config = configFor(
+    ['.claude', '.claude-work'],
+    { projectsOnly: ['.claude-work'] },
+  );
+  assert.deepEqual(config.profiles.map((p) => p.id), ['personal', 'work']);
 });
 
 test('a machine with no Claude home at all still gets one usable personal seed', () => {

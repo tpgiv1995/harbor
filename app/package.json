@@ -90,10 +90,6 @@
         "filter": [
           "*-OFL.txt"
         ]
-      },
-      {
-        "from": "src/daemon/node_modules",
-        "to": "app/src/daemon/node_modules"
       }
     ],
     "asarUnpack": [
@@ -107,7 +103,23 @@
       "category": "Development",
       "icon": "build/icon.png",
       "maintainer": "Harbor maintainers <maintainers@harbor.invalid>",
-      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "src/daemon/node_modules",
+          "to": "app/src/daemon/node_modules",
+          "filter": [
+            "**/*",
+            "!**/*.pdb",
+            "!**/*.md",
+            "!**/*.markdown",
+            "!**/*.map",
+            "!**/prebuilds/win32-*/**",
+            "!**/prebuilds/darwin-*/**",
+            "!**/deps/**"
+          ]
+        }
+      ]
     },
     "deb": {
       "depends": [
@@ -131,7 +143,22 @@
         }
       ],
       "icon": "build/icon.ico",
-      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "src/daemon/node_modules",
+          "to": "app/src/daemon/node_modules",
+          "filter": [
+            "**/*",
+            "!**/*.pdb",
+            "!**/*.md",
+            "!**/*.markdown",
+            "!**/*.map",
+            "!**/prebuilds/darwin-*/**",
+            "!**/prebuilds/linux-*/**"
+          ]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -161,7 +188,24 @@
       "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
-    }
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "src/daemon/node_modules",
+          "to": "app/src/daemon/node_modules",
+          "filter": [
+            "**/*",
+            "!**/*.pdb",
+            "!**/*.md",
+            "!**/*.markdown",
+            "!**/*.map",
+            "!**/prebuilds/win32-*/**",
+            "!**/prebuilds/linux-*/**",
+            "!**/deps/**"
+          ]
+        }
+      ]
+    },
+    "afterPack": "scripts/after-pack.js"
   }
 }

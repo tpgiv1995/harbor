@@ -286,6 +286,13 @@ function cleanDaemonEnv() {
       : [
         path.join(home, '.local', 'bin'),
         path.join(home, '.npm-global', 'bin'),
+        // Apple Silicon Homebrew. Without it, a Mac whose node/git/npm are
+        // Homebrew-installed gets panes where `claude` launches (from
+        // ~/.local/bin) but the statusline command and `harbor-tasks` — both
+        // `#!/usr/bin/env node` — die of `env: node: No such file or
+        // directory`. Harmless elsewhere: a PATH entry that does not exist is
+        // simply never matched.
+        '/opt/homebrew/bin',
         '/usr/local/bin',
         '/usr/bin',
         '/bin',

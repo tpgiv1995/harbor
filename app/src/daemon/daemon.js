@@ -1071,9 +1071,63 @@ function startPeriodicReconcile() {
   timer.unref();
 }
 
+// The probe→unlink→bind sequence below is a CLASSIC TOCTOU, and until
+// 2026-08-28 it was unguarded: two starters whose probes both returned "dead"
+// in the same instant would each unlink and bind, and the loser's unlink could
+// take out the winner's JUST-BOUND socket — two live daemons, one orphaned
+// with its keepers, no EADDRINUSE anywhere. launchd's label used to serialize
+// app-initiated starts on macOS as a side effect; the detached-spawn change
+// removed that accident, and concurrent starters are real (app boot, the
+// daemon:retry IPC, the wedge watchdog, a CLI `start`). An O_EXCL lockfile
+// beside the socket makes the whole check-and-claim section single-entry: the
+// loser waits briefly for the winner to answer a health probe and exits 3, the
+// normal "already running" path. Stale locks (a starter that died mid-claim)
+// are broken after 15s by mtime, not by pid — pids recycle.
+const START_LOCK_STALE_MS = 15_000;
+
+function acquireStartLock(lockPath) {
+  try {
+    const fd = fs.openSync(lockPath, 'wx');
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+    return true;
+  } catch {
+    try {
+      if (Date.now() - fs.statSync(lockPath).mtimeMs > START_LOCK_STALE_MS) {
+        fs.unlinkSync(lockPath);
+        return acquireStartLock(lockPath);
+      }
+    } catch {}
+    return false;
+  }
+}
+
 async function start() {
+  const lockPath = `${paths.socket}.start-lock`;
+  if (process.platform !== 'win32' && !acquireStartLock(lockPath)) {
+    // Another starter holds the claim. Give it a moment to finish binding,
+    // then report whatever the truth turned out to be.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (await probeStoreOwner(paths.socket) === 'ok') break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    log(`another starter holds ${lockPath}; deferring to it`);
+    process.stderr.write(`harbor sessiond: another start is in progress on ${paths.socket}\n`);
+    process.exit(3);
+  }
+  let lockHeld = process.platform !== 'win32';
+  const releaseLock = () => {
+    if (!lockHeld) return;
+    lockHeld = false;
+    try { fs.unlinkSync(lockPath); } catch {}
+  };
+  // A starter that dies between claim and bind (a HUP'd shell, a crash in
+  // reconciliation) must not wedge the next one for the stale window; exit is
+  // catchable for everything but SIGKILL, and SIGKILL still ages out in 15s.
+  process.on('exit', releaseLock);
   const owner = await probeStoreOwner(paths.socket);
   if (owner === 'ok') {
+    releaseLock();
     log(`daemon already listening on ${paths.socket}; refusing to start a second one`);
     process.stderr.write(`harbor sessiond: already running on ${paths.socket}\n`);
     process.exit(3);
@@ -1082,11 +1136,13 @@ async function start() {
     // The mute lane never unlinks and never binds: something holds the pipe,
     // and only recover (identity-verified) may put it down. Exit 4 is a
     // DISTINCT answer so callers stop conflating healthy and wedged owners.
+    releaseLock();
     log(`store owner on ${paths.socket} accepts connections but does not answer health; a wedged daemon holds this pipe. Run: harbor-sessiond recover`);
     process.stderr.write(`harbor sessiond: a mute owner holds ${paths.socket}; run: harbor-sessiond recover\n`);
     process.exit(4);
   }
-  // Proven dead, so the file is a leftover and clearing it is safe.
+  // Proven dead, so the file is a leftover and clearing it is safe — and the
+  // lock above is what makes "proven" stick until we bind.
   // On Windows the address is a named pipe, so there is no file to remove and
   // no mode to set; both calls would throw ENOENT on a path that never existed.
   if (process.platform !== 'win32') { try { fs.unlinkSync(paths.socket); } catch {} }
@@ -1143,6 +1199,10 @@ async function start() {
     bound = true;
     if (process.platform !== 'win32') fs.chmodSync(paths.socket, 0o600);
     writeOwnerRecord();
+    // Bound and serving: the claim has done its job. Released HERE, not on
+    // exit, so a daemon that later dies leaves no lock for its replacement to
+    // wait out.
+    releaseLock();
     log(`daemon listening ${paths.socket}`);
   });
 }

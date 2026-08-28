@@ -34,7 +34,14 @@ const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
 
-const daemonDir = 'src/daemon';
+// Anchored to THIS FILE, not the process cwd. As an npm lifecycle script the
+// cwd happens to be app/, but a standalone rerun (`node app/scripts/...` from
+// the repo root, say, to re-repair the exec bit) used to make `npm --prefix`
+// CREATE a junk <cwd>/src/daemon with a stray lockfile — which then flipped
+// the ci/install branch on the next run — before dying on an assert that
+// blamed node-pty instead of the cwd.
+const appRoot = path.resolve(__dirname, '..');
+const daemonDir = path.join(appRoot, 'src/daemon');
 
 function installDaemonDeps() {
   const lock = path.join(daemonDir, 'package-lock.json');
@@ -51,7 +58,7 @@ function installDaemonDeps() {
 function nodePtyRoots() {
   return [
     path.join(daemonDir, 'node_modules/node-pty'),
-    'node_modules/node-pty',
+    path.join(appRoot, 'node_modules/node-pty'),
   ].filter((p) => fs.existsSync(p));
 }
 

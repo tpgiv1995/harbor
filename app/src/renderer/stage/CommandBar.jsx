@@ -10,7 +10,6 @@ import slashTokens from './slash-tokens.cjs';
 import handoffChainLib from './handoff-chain.cjs';
 import { ComposeEditor } from './ComposeEditor.jsx';
 import { ImagePreview } from './ImagePreview.jsx';
-import { MODE_LABEL } from '../../shared/permission-modes.cjs';
 
 const {
   appendTranscription, attachmentsAfterSend, attachmentKind, fileAttachmentsFromPaths, imageAttachment,
@@ -39,6 +38,10 @@ const SOURCE_LABEL = {
   plugin: 'plugin',
   skill: 'skill',
 };
+
+// Permission-mode display copy lives in shared/perm-mode.cjs so this bar and
+// the config popover cannot disagree about it again.
+import { permModeStatus } from '../../shared/perm-mode.cjs';
 
 const PlusIcon = ({ children, ...props }) => (
   <svg className="plus-action-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
@@ -1377,9 +1380,7 @@ export function CommandBar({
                   <div className="cap-status">
                     <span className="cap-status-lbl">current</span>
                     <span className="cap-status-val">
-                      {permMode === undefined ? 'reading…'
-                        : permMode === null ? (pane ? 'unreadable' : 'not controlled')
-                          : (MODE_LABEL[permMode] || permMode)}
+                      {permModeStatus(permMode, Boolean(pane))}
                     </span>
                   </div>
                   <button type="button" className="cap-action" onClick={cycleMode} disabled={!pane?.paneId || cycling}>

@@ -64,5 +64,9 @@ test('darwin starts a daemon by spawning it directly, not through launchctl subm
   assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1', 'the interpreter selector must reach the daemon');
   assert.equal(calls[0].options.detached, true, 'the daemon must outlive the app that started it');
   assert.equal(calls[0].options.stdio, 'ignore');
-  assert.equal(pid, 4242, 'the pid must be the daemon, not a launchctl wrapper that has already exited');
+  // The pid is the SPAWNED CHILD's — `harbor-sessiond start`, a wrapper that
+  // health-waits and exits — not the daemon's. What launchctl got wrong was
+  // returning a pid for a process it did not even spawn; the contract now is
+  // "the pid of the process startDaemon started", nothing more.
+  assert.equal(pid, 4242, 'the pid must be the spawned starter, not a launchctl wrapper it never ran');
 });
