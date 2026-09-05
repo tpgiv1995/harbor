@@ -1,0 +1,129 @@
+name: Build installers
+
+# Produces per-platform Harbor installers via electron-builder. Runs on a
+# version tag push (release intent) and on manual dispatch (so a maintainer
+# can produce installers to inspect without cutting a tag).
+#
+# Deliberately absent, on purpose: code signing and notarization. This repo has
+# no signing certificates or Apple notarization credentials configured as
+# secrets, and a step that requires a secret that does not exist fails on every
+# single run, which is worse than not having the step. See docs/PACKAGING.md for
+# the reasoning and for what it would take to add signing later. The practical
+# consequence for anyone downloading a build is in the release notes below and
+# in setup/macos/README.md and setup/windows/README.md: the OS will warn, and
+# the steps to accept it are written down rather than left to be guessed.
+#
+# A TAGGED BUILD IS PUBLISHED AS A RELEASE. Until 2026-08-07 the artifacts
+# landed only in the workflow run's own "Actions" tab, which means a download
+# required knowing that a tag had been pushed, finding the run, and being signed
+# in to GitHub. That is not a distribution channel, and "installers exist" is
+# not the same claim as "somebody can install this". A manual `workflow_dispatch`
+# still publishes nothing; only a `v*` tag does.
+#
+# `npm ci`, not `npm install`: the lockfile is regenerated and committed, so an
+# exact install is both possible and the right choice for CI. It also means a
+# dependency that drifts out of the lockfile fails here loudly instead of being
+# silently resolved to something newer.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # required to create the Release on a tag; read for everything else
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `artifacts` is per-platform ON PURPOSE, and it is what the release
+          # step below attaches. Listing all four globs on every runner made
+          # every tagged build fail: `fail_on_unmatched_files: true` is defined
+          # by the action as "fail if ANY of the files globs match nothing", and
+          # the linux runner never produces a .exe or a .dmg. Never caught
+          # because no tag had been pushed.
+          - os: ubuntu-latest
+            name: linux
+            script: dist:linux
+            artifacts: |
+              app/release/*.AppImage
+              app/release/*.deb
+          - os: windows-latest
+            name: windows
+            script: dist:win
+            artifacts: |
+              app/release/*.exe
+          - os: macos-latest
+            name: macos
+            script: dist:mac
+            artifacts: |
+              app/release/*.dmg
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Installs both app/'s own devDependencies (electron, electron-builder,
+      # vite) and, via the dist:* script below, app/src/daemon's node-pty.
+      - run: npm ci
+
+      # Runs the renderer build (vite -> app/dist/), the phone-client web
+      # build (vite -> app/dist-web/), installs app/src/daemon's own
+      # dependencies (node-pty) so the sessiond backend's native module is
+      # present, then invokes electron-builder for this platform. See
+      # app/package.json's "pack:daemon-deps"/"dist:*" scripts.
+      - run: npm run ${{ matrix.script }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: harbor-${{ matrix.name }}
+          if-no-files-found: warn
+          path: |
+            app/release/*.AppImage
+            app/release/*.deb
+            app/release/*.exe
+            app/release/*.dmg
+            app/release/*.blockmap
+            app/release/latest*.yml
+
+      # Only on a tag. `if-no-files-found: warn` above is deliberate (a platform
+      # whose build produced nothing should not fail the other two), so this step
+      # uses `fail_on_unmatched_files: true`: a RELEASE that silently contains no
+      # installer for a platform is worse than a red run, because the red run is
+      # visible and the empty release is not.
+      - name: Attach installers to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            Built from `${{ github.ref_name }}` by GitHub Actions.
+
+            **These installers are not code-signed.** Nobody has paid for a
+            Windows Authenticode certificate or an Apple Developer ID for this
+            project, so the OS will warn before it runs an unsigned build:
+
+            - **Windows**: SmartScreen shows "Windows protected your PC". Choose
+              "More info", then "Run anyway".
+            - **macOS**: Gatekeeper refuses an unsigned, un-notarized app. Either
+              right-click the app and choose Open, or run
+              `xattr -dr com.apple.quarantine /Applications/Harbor.app`.
+            - **Linux**: the AppImage needs `chmod +x` before it will run.
+
+            Platform status is in `setup/README.md`, and it is deliberately
+            blunt about what has and has not been validated on real hardware.
+            Building from source is documented in `README.md` and is the path
+            with the most coverage behind it.
+          files: ${{ matrix.artifacts }}

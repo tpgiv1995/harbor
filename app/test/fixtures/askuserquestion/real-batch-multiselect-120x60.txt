@@ -1,0 +1,14 @@
+←  ☐ Alpha  ☒ Beta  ☐ Gamma  ✔ Submit  →
+
+Which beta option?
+
+  1. [✔] Beta one
+  This is the first beta option that can be selected alongside others.
+❯ 2. [✔] Beta two
+  This is the second beta option that can be selected alongside others.
+  3. [ ] Type something
+     Next
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

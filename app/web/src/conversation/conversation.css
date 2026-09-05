@@ -1,0 +1,423 @@
+/* min-height:0 is load bearing. A flex item defaults to min-height:auto, so
+   this column refused to shrink below its own content: with a long transcript
+   the scroller grew past the screen and pushed the composer out of the
+   viewport entirely, which is why a phone could show a conversation with no
+   way to reply to it. */
+.conv {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  /* A short conversation used to sit at the TOP of a 694px scroller holding
+     512px of content, leaving 170px of nothing between the newest message and
+     the composer: measured at 430x873. Every chat surface people know puts the
+     newest message next to where they type, so the body is pushed to the
+     bottom instead. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* Spacing carries the structure: a real gap BETWEEN turns, a tight one inside
+   one. Everything used to sit on a uniform 12px rhythm, so a screen of five
+   assistant blocks and three tool rows read as one undifferentiated column and
+   the only cue that a new turn had started was the repeated CLAUDE label. */
+.conv-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* `margin-top: auto` rather than `justify-content: flex-end` on the scroller:
+     flex-end on an overflowing scroll container pushes content out through the
+     TOP, where it cannot be scrolled back to. With auto margin, an overflowing
+     body resolves the margin to 0 and scrolls normally, while a short one is
+     pushed down. Both cases are measured in the mobile UI gate. */
+  margin-top: auto;
+}
+
+.conv-body > .conv-user {
+  margin-top: var(--space-6);
+}
+
+.conv-body > .conv-user:first-child {
+  margin-top: 0;
+}
+
+.conv-body > .conv-assistant.leads-turn {
+  margin-top: var(--space-1);
+}
+
+.conv-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+  padding: var(--space-4);
+  border: 1px solid var(--ln);
+  border-radius: 14px;
+  color: var(--sub);
+  font-size: 14px;
+}
+
+.conv-empty-act {
+  padding: 10px 14px;
+  min-height: var(--touch-min);
+  border: 1px solid var(--ln2);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--tx);
+}
+
+.conv-user {
+  align-self: flex-end;
+  max-width: 92%;
+  padding: 10px var(--space-4);
+  border-radius: var(--radius-bubble) var(--radius-bubble) var(--space-1) var(--radius-bubble);
+  background: linear-gradient(135deg, var(--ac), #2f5fd6);
+  color: #fff;
+  font-size: 15px;
+  word-break: break-word;
+}
+
+.conv-user.command {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--sub);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.conv-user-text p {
+  margin: 0;
+}
+
+.conv-assistant {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0 var(--space-1);
+  font-size: 15px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.conv-assistant-who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.conv-sig {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+.conv-provider {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.conv-assistant .md-p {
+  margin: 0 0 var(--space-2);
+}
+
+.conv-assistant .md-p:last-child {
+  margin-bottom: 0;
+}
+
+.conv-assistant .md-h {
+  margin: var(--space-3) 0 var(--space-1);
+  font-weight: 700;
+}
+
+.conv-assistant .md-list {
+  margin: 0 0 var(--space-2);
+  padding-left: 22px;
+}
+
+.conv-assistant .md-code,
+.conv-user .md-code {
+  margin: 6px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  white-space: pre;
+}
+
+.conv-assistant code,
+.conv-user code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.12);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.conv-note {
+  align-self: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--sub);
+  font-size: 12px;
+  text-align: center;
+}
+
+.conv-note.warn {
+  background: rgba(212, 165, 55, 0.16);
+  color: #f0d48a;
+}
+
+.conv-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.conv-img-btn {
+  padding: 0;
+  border: 1px solid var(--ln2);
+  border-radius: 10px;
+  overflow: hidden;
+  background: none;
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+}
+
+.conv-img {
+  display: block;
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+}
+
+.conv-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.86);
+}
+
+.conv-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+}
+
+/* Tool-action rows: a single Edit/Read/Bash etc. Grouped runs collapse
+   behind a caret (below) so a long tool run does not push the actual
+   question or reply off the bottom of a small screen. */
+.conv-act {
+  position: relative;
+  align-self: stretch;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 13px;
+}
+
+.conv-act::before {
+  content: '';
+  position: absolute;
+  inset: var(--space-2) auto var(--space-2) 0;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--fnt);
+}
+
+.conv-act.status-ok::before { background: var(--live); }
+.conv-act.status-err::before { background: var(--err); }
+.conv-act.status-run::before { background: var(--ac2); }
+
+.conv-act-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 20px;
+}
+
+.conv-act-k {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fnt);
+}
+
+.conv-act-k.ok {
+  background: var(--live);
+}
+
+.conv-act-k.err {
+  background: var(--err);
+}
+
+.conv-act-k.run {
+  background: var(--ac2);
+}
+
+.conv-act-verb {
+  flex: 0 0 auto;
+  color: var(--sub);
+}
+
+.conv-act-chip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--tx);
+}
+
+.conv-act-pill,
+.conv-act-cv {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--sub);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.conv-act-pill.tone-ok {
+  color: #8ce8c0;
+  background: rgba(36, 178, 124, 0.14);
+}
+
+.conv-act-pill.tone-err {
+  color: #f0b0b0;
+  background: rgba(217, 138, 138, 0.16);
+}
+
+.conv-act-code {
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-x: auto;
+}
+
+.diff-del {
+  color: #f0b0b0;
+}
+
+.diff-add {
+  color: #8ce8c0;
+}
+
+.diff-ctx {
+  color: var(--fnt);
+}
+
+.conv-act-group {
+  align-self: stretch;
+}
+
+.conv-act-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--sub);
+  font-size: 13px;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.conv-act-group-toggle:active {
+  background: rgb(var(--ac-rgb) / 10%);
+  border-color: rgb(var(--ac-rgb) / 22%);
+}
+
+.conv-act-group-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-left: 5px solid var(--fnt);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.conv-act-group.expanded .conv-act-group-caret {
+  transform: rotate(90deg);
+}
+
+.conv-act-group-caret.run {
+  border-left-color: var(--ac2);
+}
+
+.conv-act-group-summary {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tx);
+}
+
+.conv-act-group-count {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+}
+
+.conv-act-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding-left: var(--space-2);
+  border-left: 2px solid var(--ln);
+}
+
+.conv-working {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--sub);
+  font-size: 13px;
+}
+
+.conv-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--ac2);
+  animation: conv-spin 0.8s linear infinite;
+}
+
+@keyframes conv-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conv-spinner { animation: none; border-color: var(--ac2); }
+}

@@ -1,0 +1,217 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const APP = path.join(path.dirname(__dirname), 'app');
+const model = require(path.join(APP, 'src/shared/notes-model.cjs'));
+const notesFile = require(path.join(APP, 'src/shared/tasks-file.cjs'));
+const { createNoteStore } = require(path.join(APP, 'src/main/providers/notes.js'));
+
+const QUIET = { error() {}, warn() {}, log() {} };
+
+function readConfiguredFile() {
+  try {
+    const configFile = notesFile.defaultConfigFile();
+    return JSON.parse(fs.readFileSync(configFile, 'utf8')).paths?.notesFile || null;
+  } catch { return null; }
+}
+
+function parseArgs(argv) {
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) {
+      positional.push(arg);
+      continue;
+    }
+    const [name, inlineValue] = arg.slice(2).split(/=(.*)/s);
+    let value;
+    if (inlineValue !== undefined) value = inlineValue;
+    else if (['json', 'help'].includes(name)) value = true;
+    else {
+      i += 1;
+      value = argv[i];
+    }
+    if (name === 'tag') (flags.tag ||= []).push(value);
+    else flags[name] = value;
+  }
+  return { flags, positional };
+}
+
+function readStdin() {
+  if (process.stdin.isTTY) return '';
+  return fs.readFileSync(0, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function resolveNote(doc, needle) {
+  if (!needle) throw new Error('which note? pass an id or part of its title');
+  const exact = doc.notes.find((note) => note.id === needle);
+  if (exact) return exact;
+  const query = String(needle).toLowerCase();
+  const matches = doc.notes.filter((note) => note.title.toLowerCase().includes(query));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) throw new Error(`no note matches "${needle}"`);
+  const candidates = matches.slice(0, 10).map((note) => `  ${note.id}  ${note.title || '(untitled)'}`).join('\n');
+  throw new Error(`"${needle}" matches ${matches.length} notes; use an id or a longer phrase:\n${candidates}`);
+}
+
+function noteJson(note) {
+  return {
+    ...note,
+    createdAt: new Date(note.createdAt).toISOString(),
+    updatedAt: new Date(note.updatedAt).toISOString(),
+  };
+}
+
+const USAGE = `harbor-notes: read and edit Harbor's notes scratchpad.
+
+  harbor-notes list [--json]
+  harbor-notes show <id|title-fragment> [--json]
+  harbor-notes add [--title TEXT] [--body TEXT] [BODY...] [--tag TAG]... [--json]
+  harbor-notes update <id> [--title TEXT] [--body TEXT] [--append TEXT] [--json]
+  harbor-notes rm <id> [--json]
+  harbor-notes pin <id> [--json]
+  harbor-notes unpin <id> [--json]
+  harbor-notes file [--json]
+
+When add has no --body or BODY arguments, piped standard input becomes the body.
+Show accepts an id or a unique title fragment. Mutating commands require an id.`;
+
+async function main(argv) {
+  const { flags, positional } = parseArgs(argv);
+  const command = positional[0] || (flags.help ? 'help' : 'list');
+  if (command === 'help' || flags.help) {
+    console.log(USAGE);
+    return 0;
+  }
+
+  const store = createNoteStore({
+    file: notesFile.resolveNotesFile({ configuredFile: readConfiguredFile() }),
+    logger: QUIET,
+  });
+  const json = Boolean(flags.json);
+  const out = (payload, text) => {
+    if (json) console.log(JSON.stringify(payload, null, 2));
+    else if (text !== undefined) console.log(text);
+  };
+  const apply = async (op) => {
+    const result = await store.mutate(op);
+    if (!result.ok) throw new Error(result.reason || 'that change did not save');
+    return result;
+  };
+
+  if (command === 'file') {
+    out({ ok: true, file: store.file }, store.file);
+    return 0;
+  }
+
+  const { doc } = await store.read();
+  switch (command) {
+    case 'list': {
+      const notes = model.selectNotes(doc, { query: flags.search || '' });
+      if (json) {
+        out({ ok: true, file: store.file, count: notes.length, notes: notes.map(noteJson) });
+        return 0;
+      }
+      if (!notes.length) {
+        console.log('(no notes)');
+        return 0;
+      }
+      for (const note of notes) {
+        console.log(`${note.pinned ? '* ' : ''}${note.title || '(untitled)'}  [${note.id}]`);
+      }
+      return 0;
+    }
+    case 'show': {
+      const note = resolveNote(doc, positional.slice(1).join(' '));
+      if (json) {
+        out({ ok: true, note: noteJson(note) });
+        return 0;
+      }
+      console.log(`${note.title || '(untitled)'}  [${note.id}]`);
+      if (note.tags.length) console.log(`tags: ${note.tags.join(', ')}`);
+      if (note.body) console.log(`\n${note.body}`);
+      return 0;
+    }
+    case 'add': {
+      const positionalBody = positional.slice(1).join(' ');
+      const body = flags.body !== undefined ? flags.body : (positionalBody || readStdin());
+      const result = await apply({
+        type: 'note.add',
+        title: flags.title || '',
+        body,
+        tags: flags.tag || [],
+      });
+      const note = result.doc.notes.find((item) => item.id === result.noteId);
+      out({ ok: true, note: noteJson(note) }, `added: ${note.title || '(untitled)'}  [${note.id}]`);
+      return 0;
+    }
+    case 'update': {
+      const id = positional[1];
+      const note = doc.notes.find((item) => item.id === id);
+      if (!note) throw new Error(`no note has id "${id || ''}"`);
+      const patch = {};
+      if (flags.title !== undefined) patch.title = flags.title;
+      if (flags.body !== undefined) patch.body = flags.body;
+      if (Object.keys(patch).length === 0 && flags.append === undefined) {
+        throw new Error('nothing to change; pass --title, --body or --append');
+      }
+      // --append rides its own reducer op so the read-modify-write happens
+      // under the store's lock; composing body+append from the read taken up
+      // here would erase an app flush that landed in between. Two ops means
+      // partial application is possible, so a failed second op reports what
+      // DID land rather than claiming nothing changed.
+      let result = null;
+      if (Object.keys(patch).length) result = await apply({ type: 'note.update', noteId: id, patch });
+      if (flags.append !== undefined) {
+        try {
+          result = await apply({ type: 'note.append', noteId: id, text: flags.append });
+        } catch (error) {
+          if (result) {
+            const landed = result.doc.notes.find((item) => item.id === id);
+            out(
+              { ok: false, partial: true, note: noteJson(landed), error: String(error.message || error) },
+              `title/body updated, but the append did NOT land: ${error.message || error}`,
+            );
+            return 1;
+          }
+          throw error;
+        }
+      }
+      const updated = result.doc.notes.find((item) => item.id === id);
+      out({ ok: true, note: noteJson(updated) }, `updated: ${updated.title || '(untitled)'}  [${id}]`);
+      return 0;
+    }
+    case 'rm': {
+      const id = positional[1];
+      const note = doc.notes.find((item) => item.id === id);
+      if (!note) throw new Error(`no note has id "${id || ''}"`);
+      await apply({ type: 'note.remove', noteId: id });
+      out({ ok: true, removed: 1, id, title: note.title }, `deleted: ${note.title || '(untitled)'}`);
+      return 0;
+    }
+    case 'pin':
+    case 'unpin': {
+      const id = positional[1];
+      if (!doc.notes.some((item) => item.id === id)) throw new Error(`no note has id "${id || ''}"`);
+      const result = await apply({ type: 'note.pin', noteId: id, pinned: command === 'pin' });
+      const note = result.doc.notes.find((item) => item.id === id);
+      out({ ok: true, note: noteJson(note) }, `${command === 'pin' ? 'pinned' : 'unpinned'}: ${note.title || '(untitled)'}`);
+      return 0;
+    }
+    default:
+      throw new Error(`unknown command "${command}"\n\n${USAGE}`);
+  }
+}
+
+main(process.argv.slice(2))
+  .then((code) => process.exit(code || 0))
+  .catch((error) => {
+    const message = String(error?.message || error);
+    if (process.argv.includes('--json')) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+    console.error(`harbor-notes: ${message}`);
+    process.exit(1);
+  });

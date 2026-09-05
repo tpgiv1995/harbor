@@ -1,0 +1,22 @@
+     own run in the tool (w
+hich is what it's
+     for), and gets the too
+l's own validated
+     output.
+  2. Hand-build it now
+     I build the census by
+hand from her files
+     and validate it before
+ attaching.
+  3. Re-run it in the tool
+     With your OK I trigger
+ a fresh run on her
+     files to produce the t
+ool's own output.
+  4. Type something.
+───────────────────────────
+───────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to na
+vigate · Esc to cancel

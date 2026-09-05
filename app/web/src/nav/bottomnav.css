@@ -1,0 +1,14 @@
+.bottom-nav {
+  position: fixed; right: var(--safe-right); bottom: 0; left: var(--safe-left); z-index: 50;
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  height: calc(var(--bottomnav-h) + var(--safe-bottom));
+  padding: 0 var(--space-2) var(--safe-bottom);
+  border-top: 1px solid var(--ln); background: rgba(11, 12, 15, .94); backdrop-filter: var(--glass-blur);
+}
+.bottom-nav-item {
+  min-width: var(--touch-min); min-height: var(--touch-min); padding: var(--space-1) var(--space-2);
+  border: 0; background: transparent; color: var(--fnt); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: var(--space-1); font-size: 12px; font-weight: 600;
+}
+.bottom-nav-item svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.bottom-nav-item.active { color: var(--ac); }

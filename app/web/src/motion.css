@@ -1,0 +1,54 @@
+/* Shared motion primitives for harbor-web. Imported once via tokens.css so
+   every surface can animate consistently. Durations/eases are tokens (see
+   tokens.css); keep new animation here, not scattered per component.
+
+   Usage:
+     - Bottom sheets:   add class "motion-sheet"    to the sheet panel
+     - Backdrops:       add class "motion-backdrop"  to the dimming layer
+     - Enter fade/rise: add class "motion-fade-up"   to a block appearing in place
+
+   All of it is disabled under prefers-reduced-motion (guard at the bottom):
+   the element still renders in its final position, it just does not travel. */
+
+@keyframes motion-sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+@keyframes motion-backdrop-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes motion-sheet-down { to { transform: translateY(100%); } }
+@keyframes motion-backdrop-out { to { opacity: 0; } }
+
+@keyframes motion-fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.motion-sheet {
+  animation: motion-sheet-up var(--dur-slow) var(--ease-out) both;
+  will-change: transform;
+}
+
+.motion-backdrop {
+  animation: motion-backdrop-in var(--dur-base) var(--ease-in-out) both;
+}
+
+.motion-sheet.is-closing { animation-name: motion-sheet-down; animation-duration: var(--dur-slow); }
+.motion-backdrop.is-closing { animation-name: motion-backdrop-out; animation-duration: var(--dur-slow); }
+
+.motion-fade-up {
+  animation: motion-fade-up var(--dur-base) var(--ease-out) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-sheet,
+  .motion-backdrop,
+  .motion-fade-up {
+    animation-duration: 0.01ms;
+    animation-delay: 0ms;
+  }
+}
