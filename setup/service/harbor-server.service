@@ -1,0 +1,46 @@
+# Harbor phone server, as a systemd USER unit.
+#
+# EDIT THE TWO PATHS BELOW before installing: WorkingDirectory must be your
+# checkout's `app/` directory, and ExecStart must name the node you actually
+# have (`command -v node`).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp harbor-server.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now harbor-server
+#   journalctl --user -u harbor-server -f
+#
+# A user unit stops when you log out unless lingering is on:
+#   loginctl enable-linger "$USER"
+#
+# This is a template with the right shape, not a validated artifact. It has been
+# run on one Linux machine and nowhere else.
+
+[Unit]
+Description=Harbor phone server
+Documentation=https://github.com/tpgiv1995/harbor-desktop/blob/main/setup/mobile.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/harbor/app
+ExecStart=/usr/bin/node src/server/index.js
+
+# Loopback by default. To reach it from a phone, either set this to the
+# machine's own Tailscale address (`tailscale ip -4`) or leave it and put
+# `tailscale serve` in front. Anything that is neither loopback nor
+# 100.64.0.0/10 is refused at startup, on purpose.
+Environment=HARBOR_SERVER_HOST=127.0.0.1
+Environment=HARBOR_SERVER_PORT=8787
+
+Restart=on-failure
+RestartSec=5
+# The server drives agent sessions, so it must not be killed for being idle or
+# for using memory; it is the thing the phone is talking to.
+KillMode=mixed
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

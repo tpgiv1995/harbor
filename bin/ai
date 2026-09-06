@@ -1,0 +1,12 @@
+#!/bin/sh
+':' //; exec node "$0" "$@"
+'use strict';
+
+const { ai } = require('./harbor-bin.cjs');
+
+ai(process.argv.slice(2)).then((code) => {
+  process.exitCode = code;
+}).catch((error) => {
+  process.stderr.write(`ai: ${error.message}\n`);
+  process.exitCode = 1;
+});

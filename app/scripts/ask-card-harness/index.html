@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Answer sheet harness</title>
+  <style>
+    body { margin: 0; background: #0b0c0f; color: #f6f7ff; font-family: 'Schibsted Grotesk', Inter, system-ui, sans-serif; }
+    .harness { display: flex; flex-wrap: wrap; gap: 24px; padding: 24px; align-items: flex-start; }
+    .harness-win { display: flex; flex-direction: column; justify-content: flex-end; height: 560px; border: 1px solid rgba(255,255,255,.14); border-radius: 16px; background: linear-gradient(150deg, rgba(48,51,62,.5), rgba(26,28,34,.5)); overflow: hidden; }
+    .harness-title { padding: 8px 14px; font: 600 10.5px/1.4 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; color: #a4abbd; border-bottom: 1px solid rgba(255,255,255,.08); }
+    .harness-conv { flex: 1 1 auto; padding: 14px; color: #666d7c; font-size: 12px; }
+    .harness-log { width: 100%; padding: 12px; background: #111; color: #9ad; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="./main.jsx"></script>
+</body>
+</html>

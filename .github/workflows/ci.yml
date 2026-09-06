@@ -1,0 +1,57 @@
+name: CI
+
+# Unit suite on windows-latest, because Windows is the platform Harbor actually
+# runs on (the Legion is the de-facto gate machine; the Linux install was
+# retired 2026-08-10). Flipped from ubuntu-latest on 2026-08-14 after the 49
+# Windows-only unit failures were cleared and the gate ran green twice
+# consecutively on the real machine (1185 tests / 1175 pass / 10 reasoned
+# skips).
+#
+# The E2E suite (`npm run test:e2e`) is deliberately NOT run here. It is a
+# two-consecutive-runs gate that spawns real Electron windows and is being
+# ported from its xvfb/dbus Linux harness to an offscreen-window Windows
+# harness; until that port lands it runs locally only.
+#
+# Exclusions, each with its reason:
+# - `daemon`, `bin`: real-pty/polyglot harness families whose Windows ports
+#   are tracked separately (three one-line fixes, a SHELL fixture, and two
+#   unhandled-listen guards; see the 2026-08-14 remediation record). They run
+#   locally on the gate machine; excluding them here keeps CI honest about
+#   what it proves rather than red about what it cannot yet run.
+# autocrlf is forced off before checkout: several specs assert byte-exact
+# fixtures, and the windows image's default conversion would rewrite them.
+#
+# Reproduce this exact gate locally with:
+#   cd app && npm test -- --exclude daemon --exclude bin
+#
+# `npm ci`, not `npm install`: the lockfile is regenerated and committed, so an
+# exact install is both possible and the right choice for CI.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request: {}
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - run: git config --global core.autocrlf false
+        working-directory: ${{ github.workspace }}
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: npm ci
+
+      - run: npm test -- --exclude daemon --exclude bin

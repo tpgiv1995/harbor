@@ -1,0 +1,23 @@
+
+  Ready to dig in, or do you want me to dive deeper on
+  anything?
+
+✻ Worked for 3m 16s
+
+※ recap: Goal is getting the imported branch codes
+  clean and safe in the login manager. The
+  branch-code shape guard is built and passing 47
+  tests but unpushed. Next: pull the nightly commit,
+  then commit and push the guard. (disable recaps in
+  /config)
+
+──────────────────────────────────────────────────────
+  Rewind
+
+  Restore the code and/or conversation to the point
+  before…
+
+    /acclimate - get up to speed on all work done
+    No code changes
+
+  ❯ (current)

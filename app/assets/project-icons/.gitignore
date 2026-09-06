@@ -1,0 +1,15 @@
+# Project icons are USER data, not repo content: an icon set is named for
+# someone's real projects. They live in <userData>/project-icons/ instead
+# (~/.config/harbor/project-icons on Linux); see setup/README.md.
+#
+# This folder stays empty in the repo and is still read at build time, so a fork
+# can bundle a generic set on purpose. Ignoring images here keeps a personal set
+# from being committed by accident, which is how 53 icons became a privacy
+# finding (P-04) and then, when they were removed, took the whole feature with
+# them because an icon had nowhere else it could live.
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.svg

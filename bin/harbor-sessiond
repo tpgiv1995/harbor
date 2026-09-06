@@ -1,0 +1,568 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const net = require('node:net');
+const os = require('node:os');
+const path = require('node:path');
+const { spawn, spawnSync } = require('node:child_process');
+
+const appRoot = path.resolve(__dirname, '../app');
+const daemonPath = path.join(appRoot, 'src/daemon/daemon.js');
+const watcherPath = path.join(appRoot, 'src/daemon/daemon-watch.js');
+const { SessionClient } = require(path.join(appRoot, 'src/daemon/client.js'));
+const { resolvePaths, listenAddress } = require(path.join(appRoot, 'src/daemon/paths.js'));
+const { readLogTail } = require(path.join(appRoot, 'src/daemon/log-file.js'));
+const { snapshotProcessTable } = require(path.join(appRoot, 'src/daemon/orphan-sweep.js'));
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function nonnegativeEnv(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function fail(message, code = 1) {
+  process.stderr.write(`${message}\n`);
+  process.exit(code);
+}
+
+function option(args, name, fallback) {
+  const index = args.indexOf(name);
+  if (index < 0) return fallback;
+  if (index + 1 >= args.length) fail(`${name} requires a value`, 2);
+  return args[index + 1];
+}
+
+function output(value, json) {
+  if (json) process.stdout.write(`${JSON.stringify(value)}\n`);
+  else if (typeof value === 'string') process.stdout.write(value.endsWith('\n') ? value : `${value}\n`);
+  else process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function cleanDaemonEnv() {
+  // The allowlist is deliberately small: a daemon started with a session's
+  // environment leaks that session's ids into every pane it spawns.
+  //
+  // WINDOWS BRANCH, added 2026-08-06 after running this on a real Windows
+  // machine. `process.getuid` does not exist there, so the unconditional
+  // `/run/user/${process.getuid()}` threw "process.getuid is not a function"
+  // and `harbor-sessiond start` died before doing anything at all: no daemon,
+  // therefore no session, on the DEFAULT backend. bin/harbor-bin.cjs already
+  // had exactly this branch (its getuid sits safely inside the POSIX else),
+  // and this file never got it, so it is the sibling that was missed rather
+  // than a new problem.
+  const env = {
+    HOME: os.homedir(),
+    USER: process.env.USER || process.env.USERNAME || '',
+    LOGNAME: process.env.LOGNAME || process.env.USER || process.env.USERNAME || '',
+    LANG: process.env.LANG || 'en_US.UTF-8',
+    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+  };
+  if (process.platform === 'win32') {
+    // A pty needs a shell, and cmd.exe is the one Windows guarantees. The
+    // SystemRoot/PATHEXT group is what makes a spawned process able to resolve
+    // anything at all there.
+    env.COMSPEC = process.env.COMSPEC || 'C:\\Windows\\System32\\cmd.exe';
+    for (const key of ['SystemRoot', 'PATHEXT', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE']) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
+  }
+  // The daemon (and the keepers it forks, which inherit its env) must run as
+  // PLAIN NODE when process.execPath is Electron. Dropping this flag ran both
+  // as full Electron apps: a GPU process and a network service per daemon
+  // (their crash spam filled sessiond.log), and — the expensive half — an
+  // uncaught keeper exception raised Electron's MODAL ERROR DIALOG instead of
+  // writing stderr and exiting, so a failed pty spawn looked like "keeper never
+  // came up within 7000ms" with an empty log while a dialog sat over the
+  // desktop (live-caught 2026-08-12). Forwarded only when the caller set it:
+  // under the system node (Linux shebang path) it is absent and nothing changes.
+  if (process.env.ELECTRON_RUN_AS_NODE) env.ELECTRON_RUN_AS_NODE = process.env.ELECTRON_RUN_AS_NODE;
+  if (process.platform !== 'win32') {
+    env.SHELL = process.env.SHELL || '/bin/bash';
+    env.XDG_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR
+      || (typeof process.getuid === 'function' ? `/run/user/${process.getuid()}` : '');
+    if (!env.XDG_RUNTIME_DIR) delete env.XDG_RUNTIME_DIR;
+  }
+  // The self-heal knobs travel too (daemon-watch reads them from its own env,
+  // which is exactly this allowlist on the CLI start path). Deliberately NOT
+  // forwarded: HARBOR_SESSIOND_TEST_WEDGE (a harness-only seam; no CLI-started
+  // daemon may ever be wedgeable) and HARBOR_SESSIOND_LAG_LOG_MS (forensic
+  // default is right everywhere; harnesses spawn the daemon directly).
+  for (const name of ['HARBOR_SESSIOND_DIR', 'HARBOR_SESSIOND_SOCKET', 'HARBOR_SESSIOND_LOG', 'HARBOR_SESSIOND_REQUEST_TIMEOUT_MS', 'HARBOR_SESSIOND_KEEPER_REQUEST_TIMEOUT_MS', 'HARBOR_SESSIOND_EXIT_RETENTION_MS', 'HARBOR_SESSIOND_MAX_RECENT_EXITS', 'HARBOR_SESSIOND_KEEPER_EXIT_DELAY_MS', 'HARBOR_SESSIOND_LOG_MAX_BYTES', 'HARBOR_SESSIOND_RSS_INTERVAL_MS', 'HARBOR_SESSIOND_ORPHAN_INTERVAL_MS', 'HARBOR_SESSIOND_ORPHAN_PATTERNS', 'HARBOR_SESSIOND_CHILD_WATCH_MS', 'HARBOR_SESSIOND_JOB_NAMESPACE', 'HARBOR_SESSIOND_WATCH_INTERVAL_MS', 'HARBOR_SESSIOND_WATCH_TIMEOUT_MS', 'HARBOR_SESSIOND_WATCH_FAILURES', 'HARBOR_SESSIOND_PIPE_RELEASE_TIMEOUT_MS', 'HARBOR_SESSIOND_RESPAWN_MAX', 'HARBOR_SESSIOND_YIELD_DRAIN_MS', 'HARBOR_SESSIOND_RECOVER_CONFIRM_MS']) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
+  return env;
+}
+
+// Is a daemon on this store USABLE? Decided by a real request with a deadline,
+// never by the socket file existing and never by a reply a dead process could
+// still produce. Same rule, and the same reason, as `herdr_daemon_healthy`.
+async function daemonHealthy(socketPath, timeoutMs = 2000) {
+  const client = new SessionClient({ socketPath, requestTimeoutMs: timeoutMs });
+  try {
+    await client.request('health');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { client.close(); } catch {}
+  }
+}
+
+async function waitForHealthy(socketPath, deadlineMs) {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    if (await daemonHealthy(socketPath)) return true;
+    if (Date.now() >= until) return false;
+    await sleep(100);
+  }
+}
+
+// Does ANYTHING accept a connection on this store's address? Identity of the
+// accepter is unknown; pair with daemonHealthy for the verdict.
+function canConnect(socketPath) {
+  return new Promise((resolve) => {
+    const probe = net.connect(listenAddress(socketPath));
+    probe.once('connect', () => { probe.destroy(); resolve(true); });
+    probe.once('error', () => resolve(false));
+  });
+}
+
+// The CLI twin of the daemon gate's verdict split: 'ok' (health answered),
+// 'mute' (accepts but never answers: a wedge), 'dead' (nothing accepting).
+async function ownerVerdict(socketPath, timeoutMs = 2000) {
+  if (!(await canConnect(socketPath))) return 'dead';
+  return (await daemonHealthy(socketPath, timeoutMs)) ? 'ok' : 'mute';
+}
+
+// Handle release after a process death is asynchronous on Windows; released
+// means a bare connect FAILS, the same probe the daemon's own gate trusts.
+async function waitForRelease(socketPath, deadlineMs) {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    if (!(await canConnect(socketPath))) return true;
+    if (Date.now() >= until) return false;
+    await sleep(100);
+  }
+}
+
+// {id -> {pid, keeper_pid}} for every non-exited state file. This is an
+// IDENTITY snapshot for handover parity, not liveness: liveness stays a real
+// request, and the whole point is comparing pids across a daemon swap.
+function snapshotSessionMap(paths) {
+  const map = {};
+  let names = [];
+  try { names = fs.readdirSync(paths.sessions); } catch { return map; }
+  for (const name of names) {
+    if (!name.endsWith('.json') || name.endsWith('.config.json')) continue;
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(paths.sessions, name), 'utf8'));
+      if (state && state.id && !state.exit) map[state.id] = { pid: state.pid ?? null, keeper_pid: state.keeper_pid ?? null };
+    } catch { /* a torn write is not part of the parity check */ }
+  }
+  return map;
+}
+
+// owner.json identity check for `recover`: pid + creation time (10s tolerance)
+// + exec name against the live process table, the orphan-sweep discipline. A
+// mismatch means a recycled pid and a refusal; an unreadable table refuses too,
+// because an unreadable fact is not evidence.
+async function verifyOwnerIdentity(owner) {
+  if (process.platform !== 'win32') {
+    const readCmdline = (pid) => {
+      try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim(); } catch { return null; }
+    };
+    const daemonCmd = Number.isInteger(owner.pid) ? readCmdline(owner.pid) : null;
+    const watcherCmd = Number.isInteger(owner.watcher_pid) ? readCmdline(owner.watcher_pid) : null;
+    return {
+      daemon: Boolean(daemonCmd && daemonCmd.includes('daemon.js')),
+      watcher: Boolean(watcherCmd && watcherCmd.includes('daemon-watch')),
+      found: { daemon_cmdline: daemonCmd },
+    };
+  }
+  const table = await snapshotProcessTable();
+  if (!table) return { daemon: false, watcher: false, found: { error: 'process table snapshot failed; refusing to kill unverified pids' } };
+  const FILETIME_EPOCH_DIFF_MS = 11644473600000;
+  const createdMs = (row) => (row && row.created ? row.created / 10000 - FILETIME_EPOCH_DIFF_MS : null);
+  const execName = String(owner.exec || '').toLowerCase();
+  const execMatches = (row) => Boolean(row && row.command && execName && row.command.toLowerCase().includes(execName));
+  const row = table.get(owner.pid);
+  const daemonCreated = createdMs(row);
+  const started = Number(owner.started_at_epoch_ms);
+  const daemon = execMatches(row) && Number.isFinite(started) && daemonCreated !== null
+    && Math.abs(daemonCreated - started) <= 10000;
+  let watcher = false;
+  if (Number.isInteger(owner.watcher_pid) && owner.watcher_pid > 0) {
+    const watcherRow = table.get(owner.watcher_pid);
+    const watcherCreated = createdMs(watcherRow);
+    // The exec name alone is NOT identity for the watcher (f8 finding H1):
+    // every keeper and Harbor itself is the same electron/node exec, so a
+    // recycled watcher pid could aim this kill at a LIVE KEEPER, and with
+    // jobs armed that reaps the whole session. The command line must name
+    // daemon-watch, the same discriminator the POSIX branch has always
+    // required, and the age check stays as the second fence.
+    const watcherCommandMatches = Boolean(watcherRow && watcherRow.command
+      && /daemon-watch/i.test(watcherRow.command));
+    watcher = execMatches(watcherRow) && watcherCommandMatches
+      && watcherCreated !== null && daemonCreated !== null
+      && watcherCreated <= daemonCreated + 10000;
+  }
+  return {
+    daemon,
+    watcher,
+    found: { daemon: row ? { command: row.command, created_epoch_ms: daemonCreated } : 'pid not in the process table' },
+  };
+}
+
+// Returns the start verdict object; prints it unless the caller (handover,
+// recover) owns the report. `started: false, wedgedOwner: true` is the daemon's
+// exit-4 lane surfaced: a MUTE owner holds the pipe, and only `recover` (with
+// identity verification) may put it down.
+async function startDaemon(json, { print = true } = {}) {
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.root, { recursive: true, mode: 0o700 });
+  const report = (result) => {
+    if (print) {
+      output(result, json);
+      if (result.started === false && !result.alreadyRunning) process.exitCode = 1;
+    }
+    return result;
+  };
+  const enrichUnready = async (result) => {
+    if ((await ownerVerdict(paths.socket)) === 'mute') {
+      result.wedgedOwner = true;
+      result.hint = 'a mute owner holds this store\'s pipe (the daemon exits 4 on it); run: harbor-sessiond recover';
+    }
+    return result;
+  };
+
+  // ALREADY-RUNNING GATE (2026-08-06). This function used to start a daemon
+  // unconditionally, and the daemon it started deleted the live socket and
+  // rebound it. Twenty-eight daemons deep on Pat's machine, twenty-seven of them
+  // orphaned with their sessions stranded. Starting a second daemon on a store
+  // that already has a healthy one is never the right answer.
+  if (await daemonHealthy(paths.socket)) {
+    return report({ started: false, alreadyRunning: true, healthy: true, socket: paths.socket });
+  }
+
+  const relocated = Boolean(process.env.HARBOR_SESSIOND_DIR || process.env.HARBOR_SESSIOND_SOCKET);
+  const explicitUnit = process.env.HARBOR_SESSIOND_UNIT;
+  const unit = explicitUnit || 'harbor-sessiond.service';
+  const mayUseSystemd = !relocated || Boolean(explicitUnit);
+  const env = cleanDaemonEnv();
+  // A deliberate start is never a harness abort, so the daemon's harness watch
+  // (src/daemon/harness-watch.js) is switched off outright: a detached start on
+  // a relocated store MEANS to outlive this process, and the systemd path's
+  // spawner is systemd itself. EXCEPT when the caller explicitly named a
+  // harness pid (2026-08-30): a suite driving `handover`/`recover`/`start`
+  // spawns real successor daemons through this function, and an interrupted
+  // run must not leak a self-respawning chain. Explicit wins, exactly the
+  // resolveHarnessWatchPid contract; production callers never set the var, so
+  // the opt-out default is unchanged.
+  env.HARBOR_SESSIOND_PARENT_PID = process.env.HARBOR_SESSIOND_PARENT_PID || '0';
+  const readyTimeoutMs = Number(process.env.HARBOR_SESSIOND_READY_TIMEOUT_MS) || 10000;
+
+  if (mayUseSystemd) {
+    // A unit name is a shared namespace. `systemd-run` refuses a name that is
+    // already taken, and that refusal used to fall straight through to the
+    // detached spawn below, which is how a daemon got started OUTSIDE the unit
+    // that was supposed to be the one stable name for it. A taken name means
+    // somebody else is starting or running this daemon: wait for THEIRS to answer
+    // rather than racing it with one of our own.
+    const stale = spawnSync('systemctl', ['--user', 'is-failed', '--quiet', unit], { encoding: 'utf8' });
+    if (stale.status === 0) spawnSync('systemctl', ['--user', 'reset-failed', unit], { encoding: 'utf8' });
+
+    const envArgs = Object.entries(env).map(([name, value]) => `--setenv=${name}=${value}`);
+    const result = spawnSync('systemd-run', [
+      '--user', `--unit=${unit}`, '--collect', '--quiet',
+      '--property=KillMode=process',
+      `--property=StandardOutput=append:${paths.log}`,
+      `--property=StandardError=append:${paths.log}`,
+      ...envArgs, '--', process.execPath, daemonPath,
+    ], { encoding: 'utf8' });
+
+    if (result.status === 0) {
+      // "Started" means it ANSWERED A REAL REQUEST, not that systemd forked it:
+      // the caller's very next act is a real request, so a premature success only
+      // relocates the failure.
+      const ready = await waitForHealthy(paths.socket, readyTimeoutMs);
+      const verdict = { started: ready, mode: 'systemd', unit, socket: paths.socket, healthy: ready };
+      return report(ready ? verdict : await enrichUnready(verdict));
+    }
+
+    const message = `${result.stderr || ''}`.trim();
+    const nameTaken = /already exists|Unit .* already|exists and is (not )?(started|running)/i.test(message);
+    if (nameTaken) {
+      const ready = await waitForHealthy(paths.socket, readyTimeoutMs);
+      const verdict = { started: ready, mode: 'systemd', unit, socket: paths.socket, healthy: ready, note: 'unit already present' };
+      return report(ready ? verdict : await enrichUnready(verdict));
+    }
+    // A real systemd failure (no systemd-run, no user manager) is the documented
+    // fallback case, and only that case reaches the detached spawn now.
+    if (message) process.stderr.write(`systemd-run unavailable (${message}); falling back to a detached daemon\n`);
+  }
+
+  const logFd = fs.openSync(paths.log, 'a');
+  // Two silent daemon deaths on 2026-08-14 took 15 and then 8 ConPTY trees.
+  // The detached process must be the daemon's parent or Windows discards the
+  // only exit code and signal available to Node when the daemon disappears.
+  const child = spawn(process.execPath, [watcherPath, daemonPath], {
+    detached: true,
+    env,
+    stdio: ['ignore', logFd, logFd],
+    // Without this, a detached console child gets a NEW console, which
+    // Windows 11's default terminal host materializes as a VISIBLE Windows
+    // Terminal window over whatever Pat is doing, and closing that window
+    // sends CTRL_CLOSE to everything attached: watcher, daemon, and any
+    // keeper that inherited the console. One stray click = the 2026-08-14
+    // massacre again. Live-caught 2026-08-20, three restarts deep.
+    windowsHide: true,
+  });
+  child.unref();
+  fs.closeSync(logFd);
+  const ready = await waitForHealthy(paths.socket, readyTimeoutMs);
+  let daemonPid = null;
+  if (ready) {
+    const client = new SessionClient({ socketPath: paths.socket, requestTimeoutMs: 2000 });
+    try { daemonPid = (await client.request('health')).pid || null; }
+    finally { client.close(); }
+  }
+  const verdict = { started: ready, mode: 'detached', pid: daemonPid, watcherPid: child.pid, socket: paths.socket, healthy: ready };
+  return report(ready ? verdict : await enrichUnready(verdict));
+}
+
+// Verbs, never signals (a win32 signal is TerminateProcess; no handler runs).
+// The daemon finishes what it was doing, closes, and releases the pipe.
+async function stopDaemon(json) {
+  const paths = resolvePaths();
+  const releaseMs = nonnegativeEnv('HARBOR_SESSIOND_PIPE_RELEASE_TIMEOUT_MS', 5000);
+  const client = new SessionClient({ socketPath: paths.socket, requestTimeoutMs: 5000 });
+  try {
+    await client.request('shutdown');
+  } catch (error) {
+    client.close();
+    fail(`stop failed: ${error.message}`);
+  }
+  client.close();
+  const released = await waitForRelease(paths.socket, releaseMs);
+  output({ stopped: true, released, socket: paths.socket }, json);
+  if (!released) process.exitCode = 1;
+}
+
+// The DELIBERATE lane for rolling a new daemon binary under live sessions:
+// ask the incumbent to yield (it drains, releases the pipe, exits clean so its
+// watcher retires), start the successor, and verify by identity parity: same
+// session ids, same pid and keeper_pid per id, plus a real health answer.
+// Every step that cannot verify refuses, and refusal before yield leaves the
+// incumbent untouched and serving.
+async function handoverDaemon(json) {
+  const paths = resolvePaths();
+  const releaseMs = nonnegativeEnv('HARBOR_SESSIOND_PIPE_RELEASE_TIMEOUT_MS', 5000);
+  const drainMs = nonnegativeEnv('HARBOR_SESSIOND_YIELD_DRAIN_MS', 2000);
+  const refuse = (reason, extra = {}) => {
+    output({ handover: false, reason, ...extra }, json);
+    process.exitCode = 1;
+  };
+  const verdict = await ownerVerdict(paths.socket);
+  if (verdict === 'dead') { refuse('no daemon is serving this store; nothing to hand over. Run: harbor-sessiond start'); return; }
+  if (verdict === 'mute') { refuse('the store owner accepts connections but does not answer health (a wedged daemon); handover needs a healthy incumbent. Run: harbor-sessiond recover'); return; }
+  // Identity snapshot BEFORE, from the state files: `list` strips keeper_pid
+  // on purpose, and parity is a pid comparison, not a liveness question.
+  const before = snapshotSessionMap(paths);
+  const client = new SessionClient({ socketPath: paths.socket, requestTimeoutMs: 5000 });
+  let oldPid = null;
+  let yielded = true;
+  try {
+    oldPid = (await client.request('health')).pid ?? null;
+    try {
+      await client.request('yield');
+    } catch (error) {
+      // The FIRST rollout's incumbent predates the yield verb, and the whole
+      // point of handover is replacing old code: an incumbent that answers
+      // "unsupported verb" gets the stop it does understand, and the same
+      // release-wait / start / parity verification proves the swap. Any other
+      // yield failure stays a refusal.
+      if (!/unsupported verb/i.test(error.message)) throw error;
+      yielded = false;
+      await client.request('shutdown');
+    }
+  } catch (error) {
+    client.close();
+    // A lost yield ACKNOWLEDGEMENT is not a failed yield (f8 finding M2): the
+    // incumbent may have released and exited while our socket died with it,
+    // and refusing here would leave the store daemonless while CLAIMING the
+    // incumbent still runs. One re-probe decides: a dead owner means the
+    // yield landed, so continue to start and verify; anything still alive
+    // (or mute) is the honest refusal.
+    const after = await ownerVerdict(paths.socket);
+    if (after !== 'dead') {
+      refuse(`yield failed (${error.message}); the incumbent daemon was left running (owner verdict: ${after})`);
+      return;
+    }
+    // Dead: the yield landed and only the acknowledgement was lost. Fall
+    // through to the release wait, start, and parity verification.
+  }
+  // Our own connection is a pipe instance on the same name; the successor
+  // cannot bind FIRST_PIPE_INSTANCE while it lives.
+  client.close();
+  if (oldPid) {
+    const goneDeadline = Date.now() + drainMs + 3000;
+    while (Date.now() < goneDeadline) {
+      try { process.kill(oldPid, 0); } catch { break; }
+      await sleep(50);
+    }
+  }
+  if (!(await waitForRelease(paths.socket, releaseMs + drainMs))) {
+    refuse('the incumbent never released the pipe after yield; sessions are safe (keepers are independent), but the store needs a manual look before retrying');
+    return;
+  }
+  const started = await startDaemon(json, { print: false });
+  if (!started.started) {
+    refuse('the successor daemon never became healthy after yield; sessions are safe (keepers are independent). Investigate the log, then: harbor-sessiond start', { start: started });
+    return;
+  }
+  const after = snapshotSessionMap(paths);
+  const mismatches = [];
+  for (const [id, expected] of Object.entries(before)) {
+    const got = after[id];
+    if (!got) { mismatches.push({ id, expected, got: 'missing-or-exited' }); continue; }
+    if (got.pid !== expected.pid || got.keeper_pid !== expected.keeper_pid) mismatches.push({ id, expected, got });
+  }
+  const identical = mismatches.length === 0;
+  output({
+    handover: identical, oldPid, newPid: started.pid ?? null, watcherPid: started.watcherPid ?? null,
+    sessions: Object.keys(before).length, identical, mismatches,
+    healthy: Boolean(started.healthy), yielded, socket: paths.socket,
+  }, json);
+  if (!identical) process.exitCode = 1;
+}
+
+// The WEDGE lane, for when the watcher is gone or predates the supervisor: an
+// identity-verified put-down of a mute owner, then an ordinary start. Never
+// kills a healthy owner, never kills an unverified pid, never kills a tree
+// (the tree is exactly what zero-drop protects).
+async function recoverDaemon(json) {
+  const paths = resolvePaths();
+  const confirmMs = nonnegativeEnv('HARBOR_SESSIOND_RECOVER_CONFIRM_MS', 10000);
+  const releaseMs = nonnegativeEnv('HARBOR_SESSIOND_PIPE_RELEASE_TIMEOUT_MS', 5000);
+  const refuse = (reason, extra = {}) => {
+    output({ recovered: false, reason, ...extra }, json);
+    process.exitCode = 1;
+  };
+  const verdict = await ownerVerdict(paths.socket);
+  if (verdict === 'ok') {
+    output({ recovered: false, healthy: true, note: 'daemon is healthy; nothing to recover' }, json);
+    return;
+  }
+  if (verdict === 'mute') {
+    // Two strikes, spaced: a daemon that is merely busy must never be shot for
+    // one slow answer (the keeper-mute rule, applied to the daemon itself).
+    await sleep(confirmMs);
+    const second = await ownerVerdict(paths.socket);
+    if (second === 'ok') {
+      output({ recovered: false, healthy: true, note: 'the owner answered on the second probe (busy, not wedged); nothing to recover' }, json);
+      return;
+    }
+    if (second === 'mute') {
+      let owner = null;
+      try { owner = JSON.parse(fs.readFileSync(path.join(paths.root, 'owner.json'), 'utf8')); } catch { /* refused below */ }
+      if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) {
+        refuse('a mute owner holds the pipe but owner.json is missing or unreadable; refusing to kill anything. Find and stop the wedged process by hand, then run: harbor-sessiond start', { owner: owner ?? null });
+        return;
+      }
+      const identity = await verifyOwnerIdentity(owner);
+      if (!identity.daemon) {
+        refuse('owner.json does not match the live process table (a recycled pid, or a stale record); refusing to kill anything', { owner, found: identity.found });
+        return;
+      }
+      // Watcher first: an alive, identity-plausible watcher would respawn the
+      // daemon mid-recover (and a watcher that let its child wedge this long
+      // is not doing its job). Then the daemon pid only.
+      if (Number.isInteger(owner.watcher_pid) && owner.watcher_pid > 0 && identity.watcher) {
+        try { process.kill(owner.watcher_pid, 'SIGKILL'); } catch {}
+      }
+      try { process.kill(owner.pid, 'SIGKILL'); } catch {}
+    }
+    // second === 'dead': the owner died between the probes; fall through.
+  }
+  if (!(await waitForRelease(paths.socket, releaseMs))) {
+    refuse('the pipe never released; something still holds it. Refusing to start over a held pipe');
+    return;
+  }
+  const started = await startDaemon(json, { print: false });
+  output({
+    recovered: Boolean(started.started), healthy: Boolean(started.healthy),
+    pid: started.pid ?? null, watcherPid: started.watcherPid ?? null, socket: paths.socket,
+    ...(started.started ? {} : { start: started }),
+  }, json);
+  if (!started.started) process.exitCode = 1;
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const command = args[0];
+  const json = args.includes('--json');
+  if (command === 'start') {
+    await startDaemon(json);
+    return;
+  }
+  if (command === 'stop') {
+    await stopDaemon(json);
+    return;
+  }
+  if (command === 'handover') {
+    await handoverDaemon(json);
+    return;
+  }
+  if (command === 'recover') {
+    await recoverDaemon(json);
+    return;
+  }
+  if (command === 'serve') {
+    require(daemonPath);
+    return;
+  }
+  const client = new SessionClient({ socketPath: resolvePaths().socket });
+  try {
+    if (command === 'status') {
+      const result = await client.request('health');
+      output(result, json);
+    } else if (command === 'list') {
+      const result = await client.request('list');
+      output(result, json);
+    } else if (command === 'kill') {
+      const id = args[1];
+      if (!id || id.startsWith('--')) fail('usage: harbor-sessiond kill <id> [--json]', 2);
+      output(await client.request('terminate', { id }), json);
+    } else if (command === 'logs') {
+      const lines = Number(option(args, '--lines', '100'));
+      try {
+        const result = await client.request('logs', { lines });
+        output(json ? result : result.text, json);
+      } catch (error) {
+        const paths = resolvePaths();
+        process.stderr.write(`daemon logs request failed: ${error.message}; reading ${paths.log} directly\n`);
+        const text = readLogTail(paths.log, lines);
+        output(json ? { log: paths.log, text } : text, json);
+      }
+    } else if (command === 'spawn') {
+      const separator = args.indexOf('--');
+      if (separator < 0 || separator === args.length - 1) fail('usage: harbor-sessiond spawn --cwd PATH [--cols N --rows N] -- COMMAND [ARG...]', 2);
+      const result = await client.request('spawn', {
+        argv: args.slice(separator + 1),
+        cwd: path.resolve(option(args.slice(0, separator), '--cwd', process.cwd())),
+        env: {},
+        cols: Number(option(args.slice(0, separator), '--cols', '120')),
+        rows: Number(option(args.slice(0, separator), '--rows', '60')),
+      });
+      output(result, json);
+    } else {
+      fail('usage: harbor-sessiond <start|stop|handover|recover|status|list|kill|logs|spawn> [options]', 2);
+    }
+  } finally {
+    client.close();
+  }
+}
+
+main().catch((error) => fail(error.message));

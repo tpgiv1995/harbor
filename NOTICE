@@ -1,0 +1,109 @@
+Harbor
+Copyright (c) 2026 Pat Gordon
+
+Harbor is licensed under the MIT License. See LICENSE for the full text.
+
+This NOTICE file describes third-party material bundled in this repository
+that is not covered by the MIT License above: trademarks used for
+interoperability, and assets whose origin could not be confirmed from
+repository records. It also points to docs/THIRD-PARTY.md for the licenses
+of the npm packages Harbor depends on at runtime.
+
+================================================================================
+Third-party trademarks (interoperability UI)
+================================================================================
+
+Harbor is a desktop client for driving and monitoring AI coding agents from
+several vendors. To let a user identify which tool a given session or
+provider option belongs to, the interface displays the following third-party
+names and marks:
+
+  - "Claude" / the Claude mark  (app/assets/logo-claude.svg)
+    Claude and Anthropic are trademarks of Anthropic, PBC.
+
+  - "OpenAI" / the OpenAI mark  (app/assets/logo-openai.svg)
+    OpenAI is a trademark of OpenAI OpCo, LLC. Harbor also reuses this mark
+    to label the "Codex" provider option, which runs OpenAI's Codex CLI.
+
+  - "Cursor" / the Cursor mark  (app/assets/logo-cursor.svg)
+    Cursor is a trademark of Anysphere, Inc.
+
+These names and marks are the property of their respective owners. They are
+used here solely to identify the corresponding third-party tool that a
+given Harbor session or provider option is driving (nominative use), in the
+same way a browser's address bar shows a site's own favicon. Their use here
+does not imply any affiliation with, sponsorship by, or endorsement from
+Anthropic, PBC, OpenAI OpCo, LLC, or Anysphere, Inc., and none is claimed.
+
+Harbor could formerly drive a fourth third-party tool, herdr
+(https://herdr.dev), as an OPTIONAL terminal/pane backend. That backend was
+retired on 2026-08-14 and the integration was removed: Harbor's own session
+daemon is the only backend and needs no separate install (see README.md and
+docs/SESSION-DAEMON-CUTOVER.md). "herdr" survives in running text of this
+repository (README, CLAUDE.md, docs/) only as history naming that former
+optional dependency; no herdr logo or mark is bundled as an asset.
+
+================================================================================
+Unverified provenance
+================================================================================
+
+The following bundled files carry no license, attribution, or source
+reference in this repository's history or on disk, so their exact origin
+and licensing status could not be confirmed. They are listed here rather
+than assigned a license, because doing so would mean inventing one.
+
+  - app/assets/logo-claude.svg
+    Unlike app/assets/logo-openai.svg and app/assets/logo-cursor.svg
+    (which follow the standard export format of the Simple Icons project,
+    https://simpleicons.org, whose SVG markup is released under CC0 1.0,
+    separate from the trademark status of the marks they depict), this
+    file does not match that or any other identifiable source format, and
+    carries no attribution comment or reference. Where its path data was
+    drawn from could not be confirmed from repository records. The
+    trademark notice above applies to it regardless.
+
+Recommendation before publishing: either establish and record a license
+for this file, or replace/remove it.
+
+A second entry used to sit here, app/assets/lighthouse-bg.jpg, a 3840x2160
+photographic background of unverified provenance. It was referenced by no
+code, so it has been DELETED rather than licensed, which is the other half
+of the recommendation above. The README banner that now exists
+(docs/hero.png) uses app/assets/hero-backdrop.jpg in its place: an abstract
+texture with no subject, no place and no person in it, generated for this
+project by an image model from the prompt recorded in
+app/scripts/make-hero.js, which also composes the banner from that texture,
+the app icon and the marks listed above. No third-party rights are claimed
+in it and none are known.
+
+Additionally, app/assets/fonts/ bundles two type families (IBM Plex Mono and
+Schibsted Grotesk) with no OFL.txt, LICENSE, or other license file shipped
+alongside them in this repository, and no such file exists anywhere else in
+the repository either. These are widely known open-source families commonly
+distributed under the SIL Open Font License, but that could not be confirmed
+from this repository's own records, so it is noted here rather than asserted
+as fact. THIS GAP IS STILL OPEN: bundling an OFL family requires shipping the
+license text with it, so each family's own OFL.txt should be fetched from its
+upstream project and committed next to the font files before publishing.
+
+================================================================================
+Third-party documentation mirror
+================================================================================
+
+This repository previously carried docs/upstream-herdr-docs/, a verbatim
+mirror of documentation and Rust source files taken from the herdr project
+(https://herdr.dev, https://github.com/ogulcancelik/herdr). herdr's own
+README states it is licensed under AGPL-3.0, which this MIT-licensed
+repository cannot redistribute on those terms, so that directory was
+REMOVED rather than relicensed. No herdr material is bundled here now.
+
+Harbor formerly drove herdr, when it was selected as the optional session
+backend, as a separate program over its own documented interface. That
+backend was retired on 2026-08-14 and the integration was removed.
+
+================================================================================
+Runtime dependencies
+================================================================================
+
+See docs/THIRD-PARTY.md for the licenses of the npm packages under
+app/node_modules that Harbor depends on at runtime.

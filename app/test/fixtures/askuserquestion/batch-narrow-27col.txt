@@ -1,0 +1,33 @@
+  code path, so a custom ra
+nge flows into the PDF
+  automatically once the da
+te filter understands
+  it. Three design forks ma
+tter before I build:
+
+───────────────────────────
+←  ☐ Control  ☐ Chart  ☐ Pe
+riod  ✔ Submit  →
+
+How should the custom range
+ appear in the filter?
+
+❯ 1. Custom segment + inlin
+e pickers (Recommended)
+     Adds a Custom chip
+     beside the presets,
+     with Start and End
+     pickers.
+  2. Always-visible Start /
+ End boxes
+     Two date boxes sit in
+     the filter bar at all
+     times.
+
+───────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to na
+vigate · n to add notes
+Tab to switch questions · E
+sc to cancel

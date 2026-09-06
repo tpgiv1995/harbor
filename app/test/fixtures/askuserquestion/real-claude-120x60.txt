@@ -1,0 +1,48 @@
+
+╭─ Claude Code ──────────────────────────────────────╮
+│                                                    │
+│                 Welcome back Dev!                  │
+│                                                    │
+│                       ▐▛███▜▌                      │
+│                      ▝▜█████▛▘                     │
+│                        ▘▘ ▝▝                       │
+│                                                    │
+│                     Haiku 4.5                      │
+│                     Claude Max                     │
+│                   /tmp/dlgprobe                    │
+│                                                    │
+╰────────────────────────────────────────────────────╯
+
+ ⚠ 2 MCP servers need authentication · run /mcp
+
+❯ Call the AskUserQuestion tool right now, exactly once, with one question: "Where should the per-office PDFs get
+  generated each quarter?" and three options whose labels are "In the publish workflow (Recommended)", "Local RUNBOOK
+  step only", "Both: CI, plus a one-command local script", each with a two-sentence description of at least 200
+  characters. Do nothing else first.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Planning: /home/test-user/.claude/plans/call-the-askuserquestion-tool-dreamy-turtle.md
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ PDF Generation
+
+Where should the per-office PDFs get generated each quarter?
+
+❯ 1. In the publish workflow (Recommended)
+     Generate the PDFs as an automated step inside the CI/CD publish pipeline that already runs each quarter, so the
+     artifacts are produced consistently every time without anyone needing to remember a manual step. This keeps the
+     process auditable in pipeline logs, reproducible across environments, and immune to a person forgetting to run a
+     local script before the deadline.
+  2. Local RUNBOOK step only
+     Keep PDF generation as a documented manual step in the team's local RUNBOOK, run by hand on someone's machine each
+     quarter using existing local tooling. This avoids any changes to CI/CD infrastructure and keeps full manual control
+     and visibility over each run, but it depends on a person remembering to follow the runbook and having the right
+     local environment set up.
+  3. Both: CI, plus a one-command local script
+     Wire the PDF generation into the CI publish workflow for the automatic quarterly run, and also ship a standalone
+     one-command local script that wraps the same logic for ad-hoc regeneration, debugging, or previewing changes before
+     they hit CI. This gives redundancy and flexibility but means maintaining two invocation paths that must be kept in
+     sync over time.
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

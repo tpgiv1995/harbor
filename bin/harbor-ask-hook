@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+'use strict';
+
+// harbor-ask-hook: Claude Code PreToolUse hook (matcher AskUserQuestion).
+//
+// Hands the question to Harbor as JSON and returns the user's answer as the
+// tool's own `answers`/`annotations` input, so the CLI never draws its TUI
+// dialog for a session Harbor is showing. Steps aside (no output, exit 0) in
+// every case where Harbor is not there to answer: no fresh heartbeat, no claim
+// within CLAIM_WAIT_MS, Harbor gone while waiting. Stepping aside means the
+// CLI draws its dialog exactly as before, so a session outside Harbor, or one
+// Harbor is not showing, loses at most a few hundred milliseconds.
+//
+// Installed by app/scripts/install-ask-hook.js into the master settings
+// (all three config homes via sync-plans) with a 12 hour timeout; the CLI
+// treats a timed-out hook as no decision, which is the same step-aside.
+//
+// Protocol and file shapes: app/src/shared/ask-protocol.cjs. The proof this
+// works against the real CLI: app/scripts/probe-ask-hook-win.js.
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const proto = require(path.join(path.dirname(__dirname), 'app', 'src', 'shared', 'ask-protocol.cjs'));
+
+const dir = proto.defaultAskDir(process.env);
+const now = () => Date.now();
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function log(line) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, 'hook.log'), `${new Date().toISOString()} pid=${process.pid} ${line}\n`);
+  } catch { /* logging never blocks a question */ }
+}
+
+function stepAside(why, files) {
+  log(`step aside: ${why}`);
+  if (files) for (const file of [files.request, files.claim, files.answer, files.pass]) { try { fs.unlinkSync(file); } catch { /* absent */ } }
+  process.exit(0);
+}
+
+async function main() {
+  let raw = '';
+  process.stdin.setEncoding('utf8');
+  for await (const chunk of process.stdin) raw += chunk;
+  let input;
+  try { input = JSON.parse(raw); } catch { return stepAside('unreadable stdin'); }
+  if (input.tool_name !== 'AskUserQuestion' || !input.tool_input || !Array.isArray(input.tool_input.questions)) {
+    return stepAside(`not an AskUserQuestion (${input.tool_name})`);
+  }
+  if (!proto.heartbeatFresh(dir, now())) return stepAside('no fresh Harbor heartbeat');
+
+  const id = proto.safeId(input.tool_use_id || `${input.session_id}-${now()}`);
+  const files = proto.filesFor(dir, id);
+  const request = {
+    v: 1,
+    id,
+    at: now(),
+    hookPid: process.pid,
+    sessionId: input.session_id || null,
+    transcriptPath: input.transcript_path || null,
+    cwd: input.cwd || null,
+    toolUseId: input.tool_use_id || null,
+    toolInput: input.tool_input,
+  };
+  try { proto.writeJsonAtomic(files.request, request); } catch (error) { return stepAside(`could not write request: ${error.message}`); }
+  log(`request ${id} session=${request.sessionId} questions=${input.tool_input.questions.length}`);
+
+  // Harbor claims a session it is showing within CLAIM_WAIT_MS; silence means
+  // this session is not Harbor's to answer.
+  const claimDeadline = now() + proto.CLAIM_WAIT_MS;
+  let claimed = false;
+  while (now() < claimDeadline) {
+    if (fs.existsSync(files.claim)) { claimed = true; break; }
+    if (fs.existsSync(files.pass)) return stepAside('Harbor passed (not a session it shows)', files);
+    await sleep(100);
+  }
+  if (!claimed) return stepAside(`no claim within ${proto.CLAIM_WAIT_MS}ms`, files);
+  log(`claimed ${id}`);
+
+  // Wait for the answer as long as Harbor stays alive.
+  for (;;) {
+    const answer = proto.readJson(files.answer);
+    if (answer) {
+      const output = proto.hookOutputFor(input.tool_input, answer);
+      process.stdout.write(JSON.stringify(output));
+      log(`answered ${id}: ${answer.decline ? 'declined' : `${Object.keys(answer.answers || {}).length} answer(s)`}`);
+      for (const file of [files.request, files.claim, files.answer, files.pass]) { try { fs.unlinkSync(file); } catch { /* absent */ } }
+      return process.exit(0);
+    }
+    if (!proto.heartbeatFresh(dir, now())) return stepAside('Harbor went away while waiting', files);
+    await sleep(proto.ANSWER_POLL_MS);
+  }
+}
+
+main().catch((error) => stepAside(`error: ${error && error.message}`));

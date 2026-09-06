@@ -1,0 +1,12 @@
+#!/bin/sh
+':' //; exec node "$0" "$@"
+'use strict';
+
+const { claudeSessions } = require('./harbor-bin.cjs');
+
+claudeSessions(process.argv.slice(2)).then((code) => {
+  process.exitCode = code;
+}).catch((error) => {
+  process.stderr.write(`claude-sessions: ${error.message}\n`);
+  process.exitCode = 1;
+});

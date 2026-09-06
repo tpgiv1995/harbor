@@ -1,0 +1,329 @@
+#!/usr/bin/env node
+'use strict';
+
+// Read side of Harbor's Board (whiteboard) for a Claude session. Same store the
+// app uses, so an agent reads exactly what Pat sees. This is the surface that
+// lets Pat leave sticky notes and pasted screenshots on a board and have Claude
+// review them (the Miro workflow). Write/annotate lands as a separate command
+// set once its Excalidraw element authoring is render-validated in the app.
+//
+// Windows invocation (bin scripts are not on PATH and must run under node):
+//   node C:\dev\harbor\bin\harbor-board <args>
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const APP = path.join(path.dirname(__dirname), 'app');
+const pathsLib = require(path.join(APP, 'src/shared/tasks-file.cjs'));
+const view = require(path.join(APP, 'src/shared/board-view.cjs'));
+const boardModel = require(path.join(APP, 'src/shared/board-model.cjs'));
+const { composeBoard } = require(path.join(APP, 'src/shared/board-compose.cjs'));
+const { createWhiteboardStore } = require(path.join(APP, 'src/main/providers/whiteboard.js'));
+const boardExport = require(path.join(APP, 'src/main/providers/board-export.js'));
+
+const QUIET = { error() {}, warn() {}, log() {} };
+
+function readConfiguredBoardsDir() {
+  try {
+    const configFile = pathsLib.defaultConfigFile();
+    return JSON.parse(fs.readFileSync(configFile, 'utf8')).paths?.boardsDir || null;
+  } catch { return null; }
+}
+
+// env -> config paths.boardsDir -> <userData>/boards, computed Electron-free so
+// the CLI never touches whiteboard.js's electron default branch. On Pat's box
+// config pins this under ~/.harbor, the shared non-virtualized home.
+function resolveBoardsDir() {
+  if (process.env.HARBOR_BOARDS_DIR) return path.resolve(process.env.HARBOR_BOARDS_DIR);
+  const configured = readConfiguredBoardsDir();
+  if (configured) return path.resolve(configured);
+  return path.join(pathsLib.defaultUserDataDir(), 'boards');
+}
+
+function parseArgs(argv) {
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) { positional.push(arg); continue; }
+    const [name, inlineValue] = arg.slice(2).split(/=(.*)/s);
+    let value;
+    if (inlineValue !== undefined) value = inlineValue;
+    else if (['json', 'help', 'full'].includes(name)) value = true;
+    else { i += 1; value = argv[i]; }
+    if (name === 'section' && flags[name] !== undefined) {
+      flags[name] = Array.isArray(flags[name]) ? [...flags[name], value] : [flags[name], value];
+    } else flags[name] = value;
+  }
+  return { flags, positional };
+}
+
+async function resolveBoard(store, needle) {
+  if (!needle) throw new Error('which board? pass an id or part of its name');
+  let direct = { ok: false };
+  try { direct = await store.read({ id: needle }); } catch (error) {
+    if (!/invalid board id/.test(String(error?.message || error))) throw error;
+  }
+  if (direct.ok) return direct.board;
+  const listed = await store.list();
+  const boards = listed.boards || [];
+  const query = String(needle).toLowerCase();
+  const matches = boards.filter((b) => b.name.toLowerCase().includes(query) || b.id.includes(query));
+  if (matches.length === 1) {
+    const found = await store.read({ id: matches[0].id });
+    if (found.ok) return found.board;
+    throw new Error(found.reason || 'could not read that board');
+  }
+  if (matches.length === 0) throw new Error(`no board matches "${needle}"`);
+  const candidates = matches.slice(0, 10).map((b) => `  ${b.id}  ${b.name}`).join('\n');
+  throw new Error(`"${needle}" matches ${matches.length} boards; use an id or a longer phrase:\n${candidates}`);
+}
+
+const USAGE = `harbor-board: read and write Harbor's whiteboards.
+
+  harbor-board list [--json]
+  harbor-board show <id|name-fragment> [--json] [--full]
+  harbor-board export-images <id|name-fragment> [--out DIR] [--json]
+  harbor-board dir [--json]
+  harbor-board add-sticky <board> --text T [--color KEY] [--x N --y N] [--json]
+  harbor-board add-shape <board> --shape KIND [--text T] [--x N --y N --width N --height N] [--fill C --stroke C] [--json]
+  harbor-board add-template <board> --template NAME [--x N --y N] [--json]
+  harbor-board add-table <board> --rows N --cols N [--x N --y N] [--json]
+  harbor-board add-text <board> --text T [--x N --y N --font-size N] [--json]
+  harbor-board add-image <board> --file PATH [--x N --y N] [--width N] [--height N] [--json]
+  harbor-board connect <board> --from ID --to ID [--label T] [--json]
+  harbor-board move <board> --id ID --x N --y N [--json]
+  harbor-board set-text <board> --id ID --text T [--json]
+  harbor-board set-color <board> --id ID [--fill C] [--stroke C] [--json]
+  harbor-board rm <board> --id ID [--json]
+  harbor-board compose <board> --topic T [--diagram NAME] [--section S]... [--json]
+  harbor-board export <board> --format png|pdf [--frame NAME] [--out PATH] [--json]
+
+show flattens a board into stickies / texts / images / shapes / connectors.
+Every text and every image is listed, so nothing Pat wrote or pasted is hidden.
+export-images decodes each pasted screenshot to a real file you can then open
+with the Read tool. Boards are addressed by id or a unique piece of the name.`;
+
+async function main(argv, dependencies = {}) {
+  const { flags, positional } = parseArgs(argv);
+  const command = positional[0] || (flags.help ? 'help' : 'list');
+  if (command === 'help' || flags.help) { console.log(USAGE); return 0; }
+
+  const dir = resolveBoardsDir();
+  const store = createWhiteboardStore({ dir, logger: QUIET });
+  const json = Boolean(flags.json);
+  const out = (payload, text) => {
+    if (json) console.log(JSON.stringify(payload, null, 2));
+    else if (text !== undefined) console.log(text);
+  };
+  const required = (name) => {
+    if (flags[name] === undefined || flags[name] === '') throw new Error(`--${name} is required`);
+    return flags[name];
+  };
+  const number = (name, fallback) => {
+    if (flags[name] === undefined) return fallback;
+    const value = Number(flags[name]);
+    if (!Number.isFinite(value)) throw new Error(`--${name} must be a number`);
+    return value;
+  };
+  const boardNeedle = () => positional.slice(1).join(' ');
+  const findElement = (scene, id) => {
+    const element = scene.elements.find((item) => item.id === id && !item.isDeleted);
+    if (!element) throw new Error(`unknown element id "${id}"`);
+    return element;
+  };
+  // M3: every write runs validateScene first. An op that would INTRODUCE a
+  // violation is refused and the file stays byte-identical; a board that
+  // already carried violations (an outside editor's leavings) still accepts a
+  // harmless change, with the pre-existing issues named on stderr so nothing
+  // is silently blessed. Comparing before/after message sets is what keeps the
+  // gate from bricking every write to an imperfect board.
+  const writeChecked = async (board, scene) => {
+    const preExisting = new Set(boardModel.validateScene(board));
+    const introduced = boardModel.validateScene(scene).filter((message) => !preExisting.has(message));
+    if (introduced.length) {
+      throw new Error(`refusing to write: this change would corrupt the board:\n  ${introduced.join('\n  ')}`);
+    }
+    if (preExisting.size) {
+      console.error(`harbor-board: warning: board carries pre-existing issues (left as found):\n  ${[...preExisting].join('\n  ')}`);
+    }
+    const saved = await store.write({ id: board.id, scene });
+    if (!saved.ok) throw new Error(saved.reason || 'could not save board');
+    return saved;
+  };
+  const mutate = async (opOrOps, primary = (added) => added[0]) => {
+    const board = await resolveBoard(store, boardNeedle());
+    const ops = Array.isArray(opOrOps) ? opOrOps : [opOrOps];
+    let scene = board;
+    const before = new Set(scene.elements.map((element) => element.id));
+    for (const op of ops) scene = boardModel.applyOp(scene, op);
+    const saved = await writeChecked(board, scene);
+    const added = saved.board.elements.filter((element) => !before.has(element.id) && !element.isDeleted);
+    const selected = primary(added, saved.board);
+    const ids = added.map((element) => element.id);
+    out({ ok: true, boardId: board.id, id: selected?.id || null, ids }, selected?.id || board.id);
+    return 0;
+  };
+
+  switch (command) {
+    case 'dir': {
+      out({ ok: true, dir }, dir);
+      return 0;
+    }
+    case 'list': {
+      const listed = await store.list();
+      const boards = listed.boards || [];
+      if (json) { out({ ok: true, dir, count: boards.length, boards }); return 0; }
+      if (!boards.length) { console.log('(no boards)'); return 0; }
+      for (const b of boards) console.log(`${b.name}  [${b.id}]  ${b.updatedAt}`);
+      return 0;
+    }
+    case 'show': {
+      const board = await resolveBoard(store, positional.slice(1).join(' '));
+      const flat = view.flattenScene(board);
+      if (json) {
+        out({ ok: true, id: board.id, name: board.name, updatedAt: board.updatedAt, ...flat });
+        return 0;
+      }
+      console.log(`${board.name}  [${board.id}]  updated ${board.updatedAt}`);
+      const line = (label, arr) => console.log(`  ${label}: ${arr.length}`);
+      line('stickies', flat.stickies); line('texts', flat.texts); line('images', flat.images);
+      line('shapes', flat.shapes); line('connectors', flat.connectors);
+      if (flat.stickies.length) {
+        console.log('\nStickies:');
+        for (const s of flat.stickies) console.log(`  - ${JSON.stringify(s.text)} (${s.color || 'default'}) @ ${s.x},${s.y}`);
+      }
+      const loose = flat.texts.filter((t) => !t.boundTo);
+      if (loose.length) {
+        console.log('\nText annotations:');
+        for (const t of loose) console.log(`  - ${JSON.stringify(t.text)} @ ${t.x},${t.y}`);
+      }
+      if (flat.images.length) {
+        console.log('\nImages (run: harbor-board export-images to view):');
+        for (const im of flat.images) console.log(`  - ${im.mimeType || 'image'} ${im.w}x${im.h} @ ${im.x},${im.y}`);
+      }
+      return 0;
+    }
+    case 'export-images': {
+      const board = await resolveBoard(store, positional.slice(1).join(' '));
+      const outDir = flags.out
+        ? path.resolve(flags.out)
+        : path.join(require('node:os').tmpdir(), 'harbor-board-images', board.id);
+      const images = view.sceneImages(board);
+      fs.mkdirSync(outDir, { recursive: true });
+      const written = [];
+      for (let i = 0; i < images.length; i += 1) {
+        const im = images[i];
+        if (!im.isBase64) continue; // only decodable base64 payloads become files
+        const ext = view.extForMime(im.mimeType);
+        const file = path.join(outDir, `${board.id}-${String(i + 1).padStart(2, '0')}-${im.fileId.slice(0, 8)}.${ext}`);
+        fs.writeFileSync(file, Buffer.from(im.data, 'base64'));
+        written.push({ file, mimeType: im.mimeType, placed: im.placed });
+      }
+      if (json) { out({ ok: true, id: board.id, outDir, count: written.length, images: written }); return 0; }
+      if (!written.length) { console.log(`no embedded images on "${board.name}"`); return 0; }
+      console.log(`exported ${written.length} image(s) to ${outDir}:`);
+      for (const w of written) console.log(`  ${w.file}`);
+      return 0;
+    }
+    case 'add-sticky':
+      return mutate({ type: 'board.addSticky', text: required('text'), color: flags.color, x: number('x', 0), y: number('y', 0) },
+        (added) => added.find((element) => element.type === 'rectangle' && !element.customData?.stickyShadow));
+    case 'add-shape':
+      return mutate({ type: 'board.addShape', shape: required('shape'), text: flags.text, x: number('x', 0), y: number('y', 0), width: number('width', undefined), height: number('height', undefined), backgroundColor: flags.fill, strokeColor: flags.stroke },
+        (added) => {
+          const element = added.find((item) => item.type !== 'text');
+          if (!element) throw new Error(`unknown shape "${flags.shape}"`);
+          return element;
+        });
+    case 'add-template': {
+      const name = required('template');
+      if (!['kanban', 'matrix', 'flowchart', 'mindmap'].includes(name)) throw new Error(`unknown template "${name}"`);
+      return mutate({ type: 'board.addTemplate', template: name, x: number('x', 0), y: number('y', 0) });
+    }
+    case 'add-table': {
+      required('rows'); required('cols');
+      const rows = number('rows'); const cols = number('cols');
+      // L4: a table is cells-as-elements; unbounded dimensions write a scene
+      // every later read, save, and open of the board pays for.
+      if (rows < 1 || cols < 1 || rows > 50 || cols > 50 || rows * cols > 1000) {
+        throw new Error('--rows and --cols must each be 1-50, and rows x cols at most 1000');
+      }
+      return mutate({ type: 'board.addTable', rows, cols, x: number('x', 0), y: number('y', 0) });
+    }
+    case 'add-text':
+      return mutate({ type: 'board.addText', text: required('text'), x: number('x', 0), y: number('y', 0), fontSize: number('font-size', undefined) });
+    case 'add-image': { // Local files only, embedded so the board remains portable.
+      const file = path.resolve(required('file'));
+      let bytes;
+      try { bytes = fs.readFileSync(file); } catch (error) { throw new Error(`could not read image file "${file}": ${error.message || error}`); }
+      const mime = ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml' })[path.extname(file).toLowerCase()];
+      if (!mime) throw new Error(`unsupported image file "${file}"`);
+      // M5: with no flags the model reads the intrinsic PNG/JPEG/GIF size from
+      // the bytes; a lone --width or --height scales the other proportionally.
+      return mutate({ type: 'board.addImage', bytes, mimeType: mime, x: number('x', 0), y: number('y', 0), width: number('width', undefined), height: number('height', undefined) });
+    }
+    case 'connect': {
+      const board = await resolveBoard(store, boardNeedle());
+      findElement(board, required('from')); findElement(board, required('to'));
+      let scene = boardModel.applyOp(board, { type: 'board.connect', sourceId: flags.from, targetId: flags.to });
+      let added = scene.elements.filter((element) => !board.elements.some((old) => old.id === element.id));
+      const connector = added.find((element) => element.type === 'arrow');
+      if (flags.label) {
+        scene = boardModel.applyOp(scene, { type: 'board.addText', text: flags.label, container: connector });
+        added = scene.elements.filter((element) => !board.elements.some((old) => old.id === element.id));
+      }
+      await writeChecked(board, scene);
+      out({ ok: true, boardId: board.id, id: connector.id }, connector.id);
+      return 0;
+    }
+    case 'move':
+    case 'set-text':
+    case 'set-color':
+    case 'rm': {
+      const board = await resolveBoard(store, boardNeedle());
+      const elementId = required('id'); findElement(board, elementId);
+      const types = { move: 'board.moveElement', 'set-text': 'board.setText', 'set-color': 'board.setColor', rm: 'board.removeElement' };
+      const op = { type: types[command], elementId };
+      if (command === 'move') { required('x'); required('y'); op.x = number('x'); op.y = number('y'); }
+      if (command === 'set-text') op.text = required('text');
+      if (command === 'set-color') {
+        if (flags.fill === undefined && flags.stroke === undefined) throw new Error('pass --fill, --stroke, or both');
+        op.backgroundColor = flags.fill; op.strokeColor = flags.stroke;
+      }
+      await writeChecked(board, boardModel.applyOp(board, op));
+      out({ ok: true, boardId: board.id, id: elementId }, elementId);
+      return 0;
+    }
+    case 'compose': {
+      const sections = flags.section === undefined ? undefined : (Array.isArray(flags.section) ? flags.section : [flags.section]);
+      return mutate(composeBoard({ topic: required('topic'), diagram: flags.diagram, sections }));
+    }
+    case 'export': {
+      // Works under plain node: the capture spawns its own hidden-window
+      // Electron runner (board-export-runner.cjs), so this process never needs
+      // a BrowserWindow of its own.
+      const board = await resolveBoard(store, boardNeedle());
+      const exportBoard = dependencies.exportBoard || boardExport.exportBoard;
+      const result = await exportBoard({ id: board.id, frame: flags.frame, format: required('format'), outFile: flags.out }, { store });
+      if (!result.ok) throw new Error(result.reason || 'board export failed');
+      out(result, result.outFile);
+      return 0;
+    }
+    default:
+      throw new Error(`unknown command "${command}"\n\n${USAGE}`);
+  }
+}
+
+if (require.main === module) {
+  main(process.argv.slice(2))
+    .then((code) => process.exit(code || 0))
+    .catch((error) => {
+      const message = String(error?.message || error);
+      if (process.argv.includes('--json')) console.log(JSON.stringify({ ok: false, error: message }, null, 2));
+      console.error(`harbor-board: ${message}`);
+      process.exit(1);
+    });
+}
+
+module.exports = { main, parseArgs, resolveBoard, resolveBoardsDir };

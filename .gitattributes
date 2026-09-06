@@ -1,0 +1,42 @@
+# LINE ENDINGS ARE PART OF THIS REPO'S CORRECTNESS, so they are pinned here
+# rather than left to each clone's git configuration (2026-08-06).
+#
+# Git for Windows ships with `core.autocrlf=true` by default. Without this file
+# a Windows clone rewrites every text file to CRLF on checkout, which is not a
+# cosmetic difference here: several specs compare EXACT BYTES. The shared
+# `.js`/`.cjs` twins are checked for identical logic bodies, the Node history
+# index is proven byte-identical against a recorded oracle, and the terminal
+# fixtures are captured pty output that a parser matches against character by
+# character. All of those fail on a CRLF checkout, and they fail in a way that
+# looks like broken code rather than like a checkout setting.
+#
+# Measured on a real Windows machine: a fresh clone of the published repo failed
+# 112 of 1004 unit tests, and a large share of those were this.
+
+# Normalize everything to LF in the working tree, on every platform. The project
+# is developed and gated on Linux, and the daemon, the bin/ scripts and the
+# pty layer all assume LF.
+* text=auto eol=lf
+
+# CAPTURED BYTES. These are recordings of real terminal output, real transcripts
+# and real queue state, and a spec pages through some of them by byte offset.
+# Marking them binary means git will not touch them under any configuration,
+# which is stronger than eol=lf and is what they actually need.
+app/test/fixtures/** -text
+reference/** -text
+*.jsonl -text
+
+# Binary assets, so git never attempts a diff or a conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.node binary
+*.wasm binary

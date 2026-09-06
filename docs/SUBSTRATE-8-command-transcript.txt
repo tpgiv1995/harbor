@@ -1,0 +1,115 @@
+SUBSTRATE-8 command transcript (2026-08-04)
+All commands run from sandbox; isolated /tmp dirs for sessiond; no live session store writes except read-only environ probe on Harbor pid 1493080.
+
+=== Default backend (unset) ===
+$ node -e "const {resolveSessionBackend}=require('/home/you/dev/harbor/app/src/main/session-daemon/factory.js'); console.log('backend:', resolveSessionBackend({}));"
+backend: herdr
+
+=== sessiond opt-in ===
+$ HARBOR_SESSION_BACKEND=sessiond node -e "const {resolveSessionBackend}=require('/home/you/dev/harbor/app/src/main/session-daemon/factory.js'); console.log('backend:', resolveSessionBackend(process.env));"
+backend: sessiond
+
+=== Invalid backend ===
+$ HARBOR_SESSION_BACKEND=other node -e "..." 
+HARBOR_SESSION_BACKEND must be herdr or sessiond, got other
+
+=== Rollback ===
+$ unset HARBOR_SESSION_BACKEND
+$ node -e "..." 
+herdr
+$ HARBOR_SESSION_BACKEND=sessiond node -e "..."
+sessiond
+$ unset HARBOR_SESSION_BACKEND
+$ node -e "..."
+rolled back: herdr
+
+=== Isolated sessiond (HARBOR_SESSIOND_DIR=/tmp/harbor-doc-sessiond-1785830260) ===
+$ HARBOR_SESSIOND_DIR=... HARBOR_SESSIOND_SOCKET=... node /home/you/dev/harbor/app/src/daemon/daemon.js &
+$ HARBOR_SESSIOND_DIR=... harbor-sessiond status
+{
+  "ok": true,
+  "request": "2ad053ad-8070-40fc-bc78-526110ca9552",
+  "sessions": 0
+}
+
+$ harbor-sessiond list
+{
+  "sessions": []
+}
+
+$ harbor-sessiond spawn --cwd /tmp --cols 80 --rows 40 -- /bin/sleep 300
+{
+  "id": "a400481e-c085-4d1c-a983-812023939dbd"
+}
+
+$ harbor-sessiond list
+{ "sessions": [ { "id": "a400481e-c085-4d1c-a983-812023939dbd", "argv": ["/bin/sleep", "300"], ... } ] }
+
+$ harbor-sessiond kill a400481e-c085-4d1c-a983-812023939dbd
+{
+  "signaled": true,
+  "signal": "SIGTERM"
+}
+
+$ harbor-sessiond logs --lines 5
+2026-08-04T07:57:40.277Z daemon listening /tmp/harbor-doc-sessiond-1785830260/daemon.sock
+...
+
+=== Wedge (HARBOR_SESSIOND_REQUEST_TIMEOUT_MS=150) ===
+$ harbor-sessiond status
+health request timed out after 150ms
+exit: 1
+
+$ harbor-sessiond list
+list request timed out after 150ms
+exit: 1
+
+$ harbor-sessiond logs --lines 5
+daemon logs request failed: logs request timed out after 150ms; reading /tmp/harbor-doc-wedge2-1785830288/sessiond.log directly
+RECOVERY_LOG_LINE
+exit: 0
+
+=== Wedge 500ms ===
+health request timed out after 500ms
+exit: 1
+
+=== herdr-health.sh (default paths, HERDR_SOCKET_PATH unset) ===
+$ /home/you/dev/harbor/bin/herdr-health.sh
+exit: 0
+
+=== herdr status ===
+server:
+  status: running
+  version: 0.7.4
+  protocol: 16
+  compatible: yes
+
+=== Live Harbor environ (pid 1493080, read-only) ===
+$ tr '\0' '\n' < /proc/1493080/environ | grep HARBOR_SESSION
+(unset: default backend is herdr)
+
+=== Isolated harbor-sessiond start ===
+$ HARBOR_SESSIOND_DIR=/tmp/harbor-doc-start-1785830418 harbor-sessiond start --json
+{"started":true,"mode":"detached","pid":2269354,"socket":"/tmp/harbor-doc-start-1785830418/daemon.sock"}
+
+$ harbor-sessiond status --json
+{"ok":true,"request":"5c6ed69a-4cd6-4a3b-af85-055f6fe947ee","sessions":0}
+
+=== npm test (/home/you/dev/harbor/app) ===
+Parallel block:
+ℹ tests 1020
+ℹ pass 1006
+ℹ fail 1
+ℹ skipped 13
+ℹ duration_ms 33698.298514
+
+Serial herdr block:
+ℹ tests 37
+ℹ pass 37
+ℹ fail 0
+ℹ duration_ms 27471.905708
+
+Failure (pre-existing, not introduced by this batch):
+test/daemon/sessiond.test.js: seven session verbs drive a real pty and preserve its screen across resize
+
+NOT RUN: npm run test:e2e (sandbox cannot run E2E gate)
