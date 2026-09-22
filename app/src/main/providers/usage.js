@@ -7,8 +7,8 @@ const { fetchCodexUsage } = require('./codex-usage.js');
 const { deriveDefaults } = require('../config/defaults.js');
 
 const MISSING_FIELDS_REASON = 'Claude statusline payload did not include 5-hour usage, weekly usage, and cost';
-const NO_SAMPLE_REASON = 'No live Claude statusline payload has been observed for this account; Claude Code supplies usage only on statusline stdin';
-const NOT_CLAUDE_REASON = 'Not a Claude account: codex and cursor plans report in the title-bar usage menu';
+const NO_SAMPLE_REASON = 'Claude usage is unavailable. Check Claude CLI sign-in or its statusline usage feed.';
+const NOT_CLAUDE_REASON = 'Not a Claude account: its plan usage reports in the title-bar usage menu';
 
 function finiteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
