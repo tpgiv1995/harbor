@@ -70,7 +70,7 @@ test('provider keeps samples separate per account and reads each account email',
   const personal = await usage.getUsage('personal');
   assert.equal(personal.unavailable, true);
   assert.equal(personal.email, 'personal@example.com');
-  assert.match(personal.reason, /live Claude statusline payload/);
+  assert.match(personal.reason, /Claude is not signed in/);
 });
 
 test('a codex profile is answered as not-Claude without touching its home or the endpoint', async () => {

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { createUsageProvider, NO_SAMPLE_REASON } = require('../../src/main/providers/usage.js');
+const { createUsageProvider } = require('../../src/main/providers/usage.js');
 
 function makeTeeDir(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-usage-tee-'));
@@ -74,7 +74,7 @@ test('missing tee file still reports the honest unavailable state', async () => 
   });
   const usage = await provider.getUsage('team');
   assert.equal(usage.unavailable, true);
-  assert.equal(usage.reason, NO_SAMPLE_REASON);
+  assert.match(usage.reason, /Claude is not signed in/);
 });
 
 test('corrupt tee file degrades to unavailable, never throws', async () => {

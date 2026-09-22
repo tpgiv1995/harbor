@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { profilesToHomes } = require('./accounts.js');
+const { fetchCodexUsage } = require('./codex-usage.js');
 const { deriveDefaults } = require('../config/defaults.js');
 
 const MISSING_FIELDS_REASON = 'Claude statusline payload did not include 5-hour usage, weekly usage, and cost';
@@ -87,16 +88,29 @@ const REMOTE_COOLDOWN_MS = 60 * 1000; // per-account floor between endpoint hits
 // Read-only: the CLI owns token refresh, so an expired access token means
 // skip, never a call that would 401. Any failure returns null and the caller
 // keeps serving the stale statusline sample honestly.
-async function fetchOauthUsage(home, { readFile = fs.promises.readFile, now = () => new Date(), fetchImpl = fetch } = {}) {
+async function readClaudeCredentials(home, readFile) {
+  try { return JSON.parse(await readFile(path.join(home, '.credentials.json'), 'utf8')); } catch {}
+  // Claude Code itself owns this macOS Keychain entry. Never fall back to
+  // the default account for a custom profile or an injected test reader.
+  if (process.platform !== 'darwin' || readFile !== fs.promises.readFile
+    || path.resolve(home) !== path.join(require('node:os').homedir(), '.claude')) return null;
+  try {
+    const execFile = require('node:util').promisify(require('node:child_process').execFile);
+    const { stdout } = await execFile('/usr/bin/security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { timeout: 5000, maxBuffer: 1024 * 1024 });
+    return JSON.parse(stdout);
+  } catch { return null; }
+}
+
+async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCredentials, reportUnavailable = false, now = () => new Date(), fetchImpl = fetch } = {}) {
   let creds;
   try {
-    creds = JSON.parse(await readFile(path.join(home, '.credentials.json'), 'utf8'));
+    creds = await (readCredentials ? readCredentials(home) : readClaudeCredentials(home, readFile));
   } catch {
     return null;
   }
   const oauth = creds?.claudeAiOauth;
-  if (!oauth?.accessToken) return null;
-  if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return null;
+  if (!oauth?.accessToken) return reportUnavailable ? { unavailable: true, reason: 'Claude is not signed in for usage access. Sign in with the Claude CLI, then refresh Harbor.' } : null;
+  if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return reportUnavailable ? { unavailable: true, reason: 'Claude credentials have expired. Open the Claude CLI to renew the session, then refresh Harbor.' } : null;
   let res;
   try {
     res = await fetchImpl('https://api.anthropic.com/api/oauth/usage', {
@@ -149,11 +163,16 @@ function createUsageProvider(options = {}) {
   // Pass fetchRemoteUsage: null to disable the direct endpoint fallback
   // (tests, E2E; real accounts must never be hit from a harness).
   const fetchRemoteUsage = options.fetchRemoteUsage === undefined
-    ? (home) => fetchOauthUsage(home, { readFile, now })
+    ? (home) => fetchOauthUsage(home, { readFile, now, reportUnavailable: true })
     : options.fetchRemoteUsage;
+  const providers = new Map((options.profiles || []).map(p => [p.id, p.provider || 'claude']));
+  const codexReader = options.fetchCodexUsage || ((home) => fetchCodexUsage(home, { bin: options.providers?.codex?.bin || 'codex' }));
+  const codexCache = new Map();
+  const codexPending = new Map();
   const samples = new Map();
   const remoteSamples = new Map();
   const lastRemoteAttempt = new Map();
+  const remoteUnavailable = new Map();
 
   const stampMs = (sample) => {
     const parsed = sample?.updatedAt ? Date.parse(sample.updatedAt) : NaN;
@@ -183,6 +202,20 @@ function createUsageProvider(options = {}) {
 
     async getUsage(account) {
       assertAccount(account);
+      if (providers.get(account) === 'codex') {
+        const unavailable = { unavailable: true, reason: 'Codex account usage is unavailable; check the signed-in Codex CLI account' };
+        if (options.fetchRemoteUsage === null) return unavailable;
+        if (codexPending.has(account)) return codexPending.get(account);
+        const cached = codexCache.get(account);
+        if (cached && now().getTime() - cached.at < remoteCooldownMs) return cached.result;
+        const pending = Promise.resolve().then(() => codexReader(homes[account])).catch(() => null).then(value => {
+          const result = value || unavailable;
+          codexCache.set(account, { at: now().getTime(), result });
+          return result;
+        }).finally(() => codexPending.delete(account));
+        codexPending.set(account, pending);
+        return pending;
+      }
       if (notClaude.has(account)) return { unavailable: true, notClaude: true, reason: NOT_CLAUDE_REASON, email: null };
       const email = await readEmail(homes[account], readFile);
       const nowMs = now().getTime();
@@ -207,13 +240,15 @@ function createUsageProvider(options = {}) {
         && nowMs - (lastRemoteAttempt.get(account) || 0) >= remoteCooldownMs) {
         lastRemoteAttempt.set(account, nowMs);
         const fetched = await Promise.resolve(fetchRemoteUsage(homes[account])).catch(() => null);
+        if (fetched?.unavailable) remoteUnavailable.set(account, fetched);
         if (fetched?.payload) {
+          remoteUnavailable.delete(account);
           remoteSamples.set(account, fetched);
           chosen = { payload: fetched.payload, updatedAt: fetched.updatedAt, email };
         }
       }
 
-      if (!chosen) return { unavailable: true, reason: NO_SAMPLE_REASON, email };
+      if (!chosen) return { ...(remoteUnavailable.get(account) || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
       return usageFromStatuslinePayload(chosen.payload, {
         email: chosen.email || email,
         updatedAt: chosen.updatedAt,

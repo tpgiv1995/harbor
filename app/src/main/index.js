@@ -2341,8 +2341,8 @@ app.whenReady().then(async () => {
   // that, so it is off under E2E and behind an env kill switch.
   usageProvider = createUsageProvider(
     (e2eMode || process.env.HARBOR_NO_USAGE_FETCH === '1')
-      ? { fetchRemoteUsage: null, profiles: harborConfig.profiles, cacheDir: harborConfig.paths.cacheDir }
-      : { profiles: harborConfig.profiles, cacheDir: harborConfig.paths.cacheDir },
+      ? { fetchRemoteUsage: null, profiles: harborConfig.profiles, providers: harborConfig.providers, cacheDir: harborConfig.paths.cacheDir }
+      : { profiles: harborConfig.profiles, providers: harborConfig.providers, cacheDir: harborConfig.paths.cacheDir },
   );
   planUsageProvider = createPlanUsageProvider({ usageProvider, profiles: harborConfig.profiles });
   // One decision, made once, for every path that can touch state belonging to
