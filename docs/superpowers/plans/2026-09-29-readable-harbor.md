@@ -42,3 +42,11 @@ Ruling: The requested native system font takes precedence over the generic
 frontend skill's preference for unusual fonts. No behavior tests were added for
 this reversible stylesheet change; existing renderer tests and rendered checks
 cover the intended validation. No push or publication was performed.
+
+## Width correction
+
+User found the 760px cap too narrow. Removed it so conversation content fills
+the available pane width. Rebuilt and installed; rendered checks measured
+1,090px at the same preview size with zero overflow. Narrow-pane code/table
+scrolling still passed. Verified the wider layout in the installed app.
+Rollback: /Applications/.Harbor-before-width-20260929.app.

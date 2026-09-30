@@ -35,7 +35,7 @@
 .rail-find { font-size: 13px; }
 
 .conv { padding: 28px 32px 36px; }
-.conv-body { width: 100%; max-width: 760px; margin-inline: auto; gap: 24px; }
+.conv-body { width: 100%; max-width: none; gap: 24px; }
 .conv-body > * { min-width: 0; }
 .conv-assistant { max-width: 100%; font-size: 15px; line-height: 1.7; }
 .conv-assistant-who { margin-bottom: 12px; font-size: 11px; letter-spacing: 0; text-transform: none; }

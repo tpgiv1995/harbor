@@ -2,7 +2,7 @@
 
 Approved direction: Codex-inspired reading and surrounding UI, with white text.
 Use native system typography, near-white #f5f5f5 text, neutral charcoal surfaces,
-15px conversation prose at 1.7 line height, a centered 760px reading column,
+15px conversation prose at 1.7 line height, a reading column filling the pane with modest side padding,
 clear paragraphs and lists, and 13px code. Sidebar labels should be brighter;
 metadata remains secondary. Preserve semantic status colors and all existing
 session, multi-window, composer, and provider behavior. Resting windows must
