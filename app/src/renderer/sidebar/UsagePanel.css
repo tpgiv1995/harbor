@@ -1,0 +1,26 @@
+/* Labelled usage rows replace the compressed two-ring footer. Reset dates may
+   wrap, but never disappear or ellipsize at the rail's 190px minimum width. */
+.usage-panel {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 14px 16px;
+  border-top: 1px solid var(--ln);
+  background: var(--glass-rail);
+  color: var(--tx);
+}
+.usage-panel-heading { margin-bottom: 12px; color: var(--sub); font-size: 11px; font-weight: 600; }
+.usage-account + .usage-account { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--ln); }
+.usage-account-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; min-width: 0; }
+.usage-account-badge { flex: 0 0 20px; height: 20px; display: grid; place-items: center; border-radius: 5px; font-size: 11px; font-weight: 600; }
+.usage-account-name { min-width: 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
+.usage-window + .usage-window { margin-top: 10px; }
+.usage-window-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 8px; font-size: 12px; }
+.usage-window-heading > span { color: var(--sub); }
+.usage-window-heading > strong { color: var(--tx); font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage-track { height: 3px; margin-top: 5px; border-radius: 3px; overflow: hidden; background: rgba(255,255,255,.12); }
+.usage-track > span { display: block; height: 100%; border-radius: inherit; background: var(--profile-color, var(--ac)); }
+.usage-window-warn .usage-track > span { background: var(--warn); }
+.usage-reset { margin-top: 4px; color: var(--fnt); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }

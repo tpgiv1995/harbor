@@ -10,7 +10,7 @@ import { ProjectIcon } from '../stage/ProjectIcon.jsx';
 import { providerIdentity, ProfileBadge, useProfiles } from '../providers.js';
 import { resumeCommandForProfile, railWidthForProfileCount, profileStyle } from '../profiles.cjs';
 import { ViewSwitch } from '../ViewSwitch.jsx';
-import { resetBadge, resetTooltip } from './usage-reset.cjs';
+import { UsagePanel } from './UsagePanel.jsx';
 import { collapseForView, planCollapseAll } from './collapse-policy.cjs';
 import {
   SORT_MODES, SORT_LABELS, normalizeRailSort, sortHint, sortLabel, sortSidebarModel,
@@ -142,44 +142,7 @@ function AccountBadge({ home, profiles }) {
   return <ProfileBadge profileId={normalizeHome(home, profiles)} profiles={profiles} className="sr-b" />;
 }
 
-// `short` marks the 5-hour group: it is the one that gives up its inline reset
-// badge first when the rail is dragged narrow, because a 5-hour window resets
-// again within the day while the weekly one is the planning number.
-function MeterDonut({ pct, reset, title, short = false }) {
-  const has = typeof pct === 'number' && Number.isFinite(pct);
-  const shown = has ? Math.round(pct) : null;
-  const fill = has ? Math.max(2, Math.min(100, pct)) : 0;
-  const color = !has ? 'var(--fnt)' : pct >= 75 ? 'var(--warn)' : 'currentColor';
-  return (
-    <span className={`rm-g${short ? ' rm-g-5h' : ''}`} title={title}>
-      <span
-        className="rm-donut"
-        style={{ background: `conic-gradient(${color} ${fill}%, rgba(255,255,255,.12) 0)` }}
-        aria-hidden="true"
-      >
-        <span />
-      </span>
-      <b>{has ? `${shown}%` : '--'}</b>
-      {reset ? <em>{reset}</em> : null}
-    </span>
-  );
-}
-
-// The per-account usage breakdown, pinned at the rail's bottom: 5-hour and
-// weekly windows per plan, each with the INSTANT it resets. The weekly badge
-// showed a bare date until 2026-07-27 ("7/31"), which told Pat the day but not
-// the hour, so a reset that lands at 8pm was indistinguishable from one at
-// 6am; the timestamp always carried the time, only the renderer dropped it.
-// Every badge's own tooltip spells the same instant out in full, from one
-// formatter, so the two can never disagree. The title-bar rings stay as the
-// at-a-glance version.
-// The machine's commit meter lives in the TITLE BAR (renderer/MemoryChip.jsx)
-// since 2026-09-05; it sat here for one evening and Pat moved it up.
-// Claude profiles only (2026-09-28): these donuts read the Claude statusline
-// and OAuth usage, which a codex home does not have, so a codex profile's row
-// could only ever read "--". Codex and cursor plans live in the title-bar menu.
-function RailMeters({ profiles: allProfiles }) {
-  const profiles = allProfiles.filter((profile) => (profile.provider || 'claude') === 'claude');
+function RailMeters({ profiles }) {
   const [usage, setUsage] = useState({});
   const refresh = React.useCallback(async () => {
     try { setUsage(await window.harbor.usage.getAll()); } catch { /* keep previous */ }
@@ -192,56 +155,7 @@ function RailMeters({ profiles: allProfiles }) {
     return () => { unsubscribe(); window.removeEventListener('focus', onFocus); };
   }, [refresh]);
 
-  if (!profiles.length) return null;
-
-  return (
-    <div className="rail-meters" aria-label="Plan usage" data-profile-count={profiles.length}>
-      {profiles.map((profile) => {
-        const account = profile.id;
-        const data = usage[account];
-        const tooltip = [
-          `${profile.label}${data?.email ? `: ${data.email}` : ''}`,
-          typeof data?.cost === 'number' ? `last session $${data.cost.toFixed(2)}` : null,
-          data?.updatedAt ? `updated ${formatRelative(data.updatedAt)}` : null,
-          data?.unavailable ? (data?.reason || 'no data yet') : null,
-        ].filter(Boolean).join(' · ') || undefined;
-        const fiveHourBadge = resetBadge(data?.fiveHourResetsAt, { window: 'fiveHour' });
-        const weeklyBadge = resetBadge(data?.weeklyResetsAt, { window: 'weekly' });
-        return (
-          <div
-            className="rm-row"
-            key={account}
-            title={tooltip}
-            data-account={account}
-            style={profileStyle(profile)}
-          >
-            <ProfileBadge profileId={account} profiles={profiles} className="rm-b" title={profile.label} />
-            <MeterDonut
-              pct={data?.fiveHourPct}
-              title={resetTooltip({
-                window: 'fiveHour',
-                pct: data?.fiveHourPct,
-                resetsAt: data?.fiveHourResetsAt,
-                rolled: data?.fiveHourRolled,
-              })}
-              reset={fiveHourBadge ? `↻${fiveHourBadge}` : ''}
-              short
-            />
-            <MeterDonut
-              pct={data?.weeklyPct}
-              title={resetTooltip({
-                window: 'weekly',
-                pct: data?.weeklyPct,
-                resetsAt: data?.weeklyResetsAt,
-                rolled: data?.weeklyRolled,
-              })}
-              reset={weeklyBadge ? `↻${weeklyBadge}` : ''}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
+  return <UsagePanel profiles={profiles} usage={usage} />;
 }
 
 // Stroked SVG rather than glyphs, for the reason the send button was redrawn

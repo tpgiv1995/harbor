@@ -50,3 +50,16 @@ the available pane width. Rebuilt and installed; rendered checks measured
 1,090px at the same preview size with zero overflow. Narrow-pane code/table
 scrolling still passed. Verified the wider layout in the installed app.
 Rollback: /Applications/.Harbor-before-width-20260929.app.
+
+## Usage panel correction
+
+Replaced the clipped, unlabeled donut rows with a separate UsagePanel component:
+full account names, labeled 5-hour/weekly usage, thin progress bars, explicit
+missing data, and complete reset times. Refresh/subscription behavior and the
+existing timestamp formatters are preserved. Panel scrolling keeps all accounts
+reachable without taking over the session rail.
+
+Validation: production build and 573 renderer tests pass. Rendered checks pass
+at 190, 268, 292, and 420px; reset times do not truncate, five accounts remain
+reachable, unknown usage remains distinct from zero, and 0/100% fill is exact.
+Rollback: /Applications/.Harbor-before-usage-panel-20260929.app.
