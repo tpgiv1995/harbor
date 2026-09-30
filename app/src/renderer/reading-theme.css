@@ -1,0 +1,98 @@
+/* Desktop reading theme. Structural layout and semantic status colors stay in
+   styles.css; keep this import last so the same palette reaches every view. */
+:root {
+  color-scheme: dark;
+  --bg: #1b1b1b;
+  --tx: #f5f5f5;
+  --sub: #c2c2c2;
+  --fnt: #a0a0a0;
+  --text-soft: #dedede;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --glass-win: #212121;
+  --glass-panel: #1b1b1b;
+  --glass-rail: #181818;
+  --glass-1: #242424;
+  --glass-2: #292929;
+  --wb-panel: #292929;
+  --glass-sheen: none;
+}
+
+.titlebar,
+.rail { box-shadow: none; }
+
+.grid4 { gap: 12px; padding: 12px; }
+
+.win2 { box-shadow: none; border-radius: 12px; }
+.win2::before { display: none; }
+/* Selection is a border cue, never a filter over the words being read. */
+.win2.rest { filter: none; box-shadow: none; }
+.win2.sel { box-shadow: 0 0 0 1px rgb(var(--sel-rgb) / 18%); }
+
+.pg { font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.sr { font-size: 13px; }
+.sr-t { color: var(--tx); }
+.rail-find { font-size: 13px; }
+
+.conv { padding: 28px 32px 36px; }
+.conv-body { width: 100%; max-width: 760px; margin-inline: auto; gap: 24px; }
+.conv-body > * { min-width: 0; }
+.conv-assistant { max-width: 100%; font-size: 15px; line-height: 1.7; }
+.conv-assistant-who { margin-bottom: 12px; font-size: 11px; letter-spacing: 0; text-transform: none; }
+.conv-user {
+  max-width: 88%;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 18px;
+  background: #303030;
+  box-shadow: none;
+  font-size: 15px;
+  line-height: 1.65;
+}
+.conv-user.command { font-size: 13px; }
+.md-p { margin-bottom: 16px; }
+.md-h { margin: 24px 0 12px; font-size: 1.12em; line-height: 1.4; font-weight: 650; }
+.md-list { margin-bottom: 16px; padding-left: 24px; }
+.md-list li { margin-bottom: 7px; padding-left: 2px; }
+.md-list .md-list { margin-top: 7px; margin-bottom: 0; }
+.conv-assistant strong,
+.conv-user strong { font-weight: 650; color: #fff; }
+.conv-assistant a,
+.conv-user a { color: #b8d8ff; text-decoration: underline; text-underline-offset: 3px; }
+.conv-assistant code,
+.conv-user code { font-size: 13px; font-weight: 400; padding: 2px 5px; background: #343434; }
+.md-code {
+  padding: 38px 16px 16px;
+  background: #181818;
+  color: var(--tx);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.65;
+  border-color: var(--ln);
+}
+.md-code-wrap { margin-bottom: 18px; }
+.md-code-copy { background: #303030; color: var(--tx); font-size: 11px; opacity: 1; }
+.md-table-wrap { margin: 8px 0 18px; }
+.md-table { font-size: 14px; line-height: 1.6; }
+.md-table th,
+.md-table td { padding: 10px 14px; }
+.md-table th { color: var(--tx); background: #2a2a2a; }
+
+.conv-act,
+.conv-act-group-toggle { background: #242424; border-color: rgba(255, 255, 255, 0.06); }
+.conv-act-group-toggle:hover { background: #2b2b2b; }
+.conv-act-code { font-size: 12px; background: #181818; }
+
+.ubar-input { font-size: 15px; line-height: 24px; max-height: min(40vh, 218px); }
+
+/* Keep dense multi-window layouts legible without spending their width on gutters. */
+@container win (max-width: 600px) {
+  .conv { padding: 20px 18px 24px; }
+  .conv-body { gap: 20px; }
+  .conv-user { max-width: 94%; padding: 10px 14px; }
+}
+@container win (max-width: 360px) {
+  .conv { padding-inline: 12px; }
+  .conv-assistant,
+  .conv-user { font-size: 14px; }
+}

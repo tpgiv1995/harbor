@@ -46,6 +46,7 @@ import taskbarBadge from './stage/taskbar-badge.cjs';
 import handoffChainLib from './stage/handoff-chain.cjs';
 import * as sidebarModelShared from '../shared/sidebar-model.js';
 import './styles.css';
+import './reading-theme.css';
 
 const {
   loadSeenStore, seedSeenStore, markSeen, attentionFor, badgeCounts,
