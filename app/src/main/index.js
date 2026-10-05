@@ -2919,6 +2919,7 @@ app.whenReady().then(async () => {
   const accountsProvider = createAccountsProvider({
     history: { sessionMeta: (id) => sidebarBridge.getSessionMeta(id) },
     profiles: harborConfig.profiles,
+    launchedHome: (id) => sidebarBridge?.getLaunchedHome?.(id) ?? null,
   });
   capabilitiesProvider = createCapabilitiesProvider({ accounts: accountsProvider });
 

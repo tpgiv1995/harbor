@@ -26,3 +26,43 @@ test('resolveSession keeps unknown attribution explicit', async () => {
     meta: { id: 's2', home: null },
   });
 });
+
+test('a session the index has not seen yet uses the launched profile', async () => {
+  const accounts = createAccountsProvider({
+    history: { sessionMeta: async () => { throw new Error('harbor-index: session s3 not found'); } },
+    homes: { max: '/m', personal: '/p' },
+    defaultAccount: 'max',
+    launchedHome: (id) => (id === 's3' ? 'personal' : null),
+  });
+  const r = await accounts.resolveSession('s3');
+  assert.equal(r.account, 'personal');
+  assert.equal(r.home, '/p');
+});
+
+test('a brand-new session with no launch record falls back to the default profile', async () => {
+  const accounts = createAccountsProvider({
+    history: { sessionMeta: async () => { throw new Error('not found'); } },
+    profiles: [{ id: 'max', configHome: '/m', isDefault: true }, { id: 'personal', configHome: '/p' }],
+  });
+  const r = await accounts.resolveSession('pane:abc');
+  assert.deepEqual(r, { account: 'max', home: '/m', meta: { id: 'pane:abc', home: null } });
+});
+
+test('an indexed but unattributed session uses the launch record, never the default', async () => {
+  const history = { sessionMeta: async (id) => ({ id, home: null }) };
+  const homes = { max: '/m', personal: '/p' };
+  const withLaunch = createAccountsProvider({ history, homes, defaultAccount: 'max', launchedHome: () => 'personal' });
+  assert.equal((await withLaunch.resolveSession('s4')).account, 'personal');
+  const without = createAccountsProvider({ history, homes, defaultAccount: 'max' });
+  assert.equal((await without.resolveSession('s4')).account, null);
+});
+
+test('an unknown or throwing launch lookup is ignored', async () => {
+  const accounts = createAccountsProvider({
+    history: { sessionMeta: async () => { throw new Error('not found'); } },
+    homes: { max: '/m' },
+    defaultAccount: 'max',
+    launchedHome: () => { throw new Error('bridge gone'); },
+  });
+  assert.equal((await accounts.resolveSession('s5')).account, 'max');
+});

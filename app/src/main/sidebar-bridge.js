@@ -516,6 +516,8 @@ function createSidebarBridge(options = {}) {
       launchedHomes.set(sessionId, profileId);
       publish();
     },
+    // The profile a pane was launched with, until the index learns the session.
+    getLaunchedHome: (sessionId) => launchedHomes.get(sessionId) || null,
     onPaneAgentStatus,
     focusLivePane,
     close,

@@ -7,15 +7,31 @@ function profilesToHomes(profiles = []) {
   return Object.fromEntries(profiles.map((profile) => [profile.id, profile.configHome]));
 }
 
-function createAccountsProvider({ history, homes, profiles = [] } = {}) {
+// A brand-new session has no transcript yet, so the indexer cannot find it and
+// sessionMeta throws. Without a home the command bar's slash menu fell back to
+// built-ins only (2026-10-05). Fall back to the profile the launch flow passed
+// as `--home`, then, for a session the index has never seen, to the default
+// profile. An indexed session the index could not attribute stays null.
+function createAccountsProvider({ history, homes, profiles = [], launchedHome = null, defaultAccount = null } = {}) {
   if (!history || typeof history.sessionMeta !== 'function') {
     throw new TypeError('history provider with sessionMeta(id) is required');
   }
   const resolvedHomes = homes || profilesToHomes(profiles);
+  const fallbackDefault = defaultAccount ?? profiles.find((profile) => profile?.isDefault)?.id ?? null;
+  const known = (account) => (account && Object.hasOwn(resolvedHomes, account) ? account : null);
+  const launched = (id) => {
+    try { return known(launchedHome ? launchedHome(id) : null); } catch { return null; }
+  };
   return {
     async resolveSession(id) {
-      const meta = await history.sessionMeta(id);
-      const account = Object.hasOwn(resolvedHomes, meta.home) ? meta.home : null;
+      let meta;
+      try {
+        meta = await history.sessionMeta(id);
+      } catch {
+        const account = launched(id) || known(fallbackDefault);
+        return { account, home: account ? resolvedHomes[account] : null, meta: { id, home: null } };
+      }
+      const account = known(meta?.home) || launched(id);
       return { account, home: account ? resolvedHomes[account] : null, meta };
     },
   };
