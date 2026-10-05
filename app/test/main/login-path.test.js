@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { resolveLoginPath, parseShellPath, mergePaths, MARK } = require('../../src/main/login-path.js');
+const { resolveLoginPath, resolveSshAuthSock, applyLoginPath, parseShellPath, mergePaths, MARK } = require('../../src/main/login-path.js');
 
 const BARE = '/usr/bin:/bin:/usr/sbin:/sbin';
 
@@ -35,4 +35,28 @@ test('parse and merge helpers', () => {
   assert.equal(parseShellPath(`x${MARK}/a:/b${MARK}y`), '/a:/b');
   assert.equal(parseShellPath(`${MARK}${MARK}`), null);
   assert.equal(mergePaths('/a:/b', '/b:/c', ''), '/a:/b:/c');
+});
+
+test('a launch without SSH_AUTH_SOCK adopts the launchd agent socket', () => {
+  const sock = '/private/var/run/com.apple.launchd.abc/Listeners';
+  const r = resolveSshAuthSock({ env: {}, platform: 'darwin', exec: () => `${sock}\n`, isSocket: (p) => p === sock });
+  assert.deepEqual(r, { sock, source: 'launchd agent' });
+});
+
+test('an existing SSH_AUTH_SOCK is kept and launchctl never runs', () => {
+  const r = resolveSshAuthSock({ env: { SSH_AUTH_SOCK: '/tmp/mine' }, platform: 'darwin', exec: () => { throw new Error('must not run'); } });
+  assert.equal(r.sock, '/tmp/mine');
+});
+
+test('a missing, stale or failing launchd socket leaves it unset', () => {
+  for (const [exec, isSocket] of [[() => '', () => true], [() => '/gone', () => false], [() => { throw new Error('x'); }, () => true]]) {
+    assert.equal(resolveSshAuthSock({ env: {}, platform: 'darwin', exec, isSocket }).sock, null);
+  }
+});
+
+test('applyLoginPath sets SSH_AUTH_SOCK on the env it was given', () => {
+  const env = { PATH: `/opt/homebrew/bin:${BARE}` };
+  const r = applyLoginPath({ env, platform: 'darwin', sshExec: () => '/nonexistent-sock' });
+  assert.equal(env.SSH_AUTH_SOCK, undefined, 'not a socket, so not adopted');
+  assert.equal(r.sshAuthSock, 'none found');
 });

@@ -8,6 +8,7 @@ const os = require('node:os');
 // which cannot find claude, codex or anything Homebrew installed (login-path.js).
 const loginPath = require('./login-path.js').applyLoginPath();
 console.log(`PATH: ${loginPath.source}`);
+console.log(`SSH_AUTH_SOCK: ${loginPath.sshAuthSock}`);
 const { createSidebarBridge } = require('./sidebar-bridge.js');
 const { projectLabelForCwd: sharedProjectLabelForCwd } = require('../shared/project-label.cjs');
 const {

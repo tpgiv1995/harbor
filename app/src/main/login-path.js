@@ -57,12 +57,35 @@ function resolveLoginPath({ env = process.env, platform = process.platform, exec
   return { path: mergePaths(current, FALLBACK_DIRS.join(path.delimiter)), source: 'fallback dirs' };
 }
 
-// Mutates process.env.PATH once; returns what it did so the caller can log it.
+// The same launch drops SSH_AUTH_SOCK, so every session's `ssh`/`git` push
+// fails with "Permission denied (publickey)" while launchd's agent sits there
+// holding the key (2026-10-05). launchd exports its agent socket; adopt it when
+// none is set. Bounded, never throws, and an existing socket is left alone.
+function resolveSshAuthSock({ env = process.env, platform = process.platform, exec = execFileSync, isSocket = defaultIsSocket, timeoutMs = 2000 } = {}) {
+  if (env.SSH_AUTH_SOCK) return { sock: env.SSH_AUTH_SOCK, source: 'unchanged (already set)' };
+  if (platform !== 'darwin') return { sock: null, source: 'unchanged (not macOS)' };
+  try {
+    const sock = String(exec('launchctl', ['getenv', 'SSH_AUTH_SOCK'], {
+      encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'ignore'],
+    }) || '').trim();
+    if (sock && isSocket(sock)) return { sock, source: 'launchd agent' };
+  } catch { /* no launchd agent: leave it unset */ }
+  return { sock: null, source: 'none found' };
+}
+
+function defaultIsSocket(p) {
+  try { return require('node:fs').statSync(p).isSocket(); } catch { return false; }
+}
+
+// Mutates process.env.PATH (and SSH_AUTH_SOCK when missing) once; returns what
+// it did so the caller can log it.
 function applyLoginPath(options = {}) {
   const env = options.env || process.env;
   const result = resolveLoginPath({ ...options, env });
   env.PATH = result.path;
-  return result;
+  const ssh = resolveSshAuthSock({ ...options, env, exec: options.sshExec || execFileSync });
+  if (ssh.sock && !env.SSH_AUTH_SOCK) env.SSH_AUTH_SOCK = ssh.sock;
+  return { ...result, sshAuthSock: ssh.source };
 }
 
-module.exports = { applyLoginPath, resolveLoginPath, parseShellPath, mergePaths, MARK };
+module.exports = { applyLoginPath, resolveLoginPath, resolveSshAuthSock, parseShellPath, mergePaths, MARK };
