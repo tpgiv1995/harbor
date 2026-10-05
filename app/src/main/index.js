@@ -4,6 +4,10 @@ const { app, crashReporter, BrowserWindow, Menu, ipcMain: electronIpcMain, dialo
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+// Before anything can spawn: a Finder/Dock launch carries launchd's bare PATH,
+// which cannot find claude, codex or anything Homebrew installed (login-path.js).
+const loginPath = require('./login-path.js').applyLoginPath();
+console.log(`PATH: ${loginPath.source}`);
 const { createSidebarBridge } = require('./sidebar-bridge.js');
 const { projectLabelForCwd: sharedProjectLabelForCwd } = require('../shared/project-label.cjs');
 const {
