@@ -88,22 +88,53 @@ const REMOTE_COOLDOWN_MS = 60 * 1000; // per-account floor between endpoint hits
 // Read-only: the CLI owns token refresh, so an expired access token means
 // skip, never a call that would 401. Any failure returns null and the caller
 // keeps serving the stale statusline sample honestly.
+// WHICH KEYCHAIN ITEM HOLDS A CONFIG HOME'S LOGIN. Claude Code names it per
+// home (read from the installed CLI, 2026-10-05): the bare
+// `Claude Code-credentials` when CLAUDE_CONFIG_DIR is unset, otherwise
+// `Claude Code-credentials-<first 8 hex of sha256(CLAUDE_CONFIG_DIR)>`, where
+// the hashed string is the variable exactly as given, NFC-normalized and not
+// path-resolved. Harbor exports a profile's configHome verbatim as
+// CLAUDE_CONFIG_DIR, so hashing that same string names the item its sessions
+// signed in to. Reading only the bare item for `~/.claude` is what made a
+// second account (`~/.claude-max`) read "not signed in" while it was. The
+// default home tries the bare item first (a plain `claude` login), then its
+// hashed twin (a login made with CLAUDE_CONFIG_DIR pointed at ~/.claude).
+// Never another home's item: that would show one account's usage under
+// another account's name.
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+function keychainServicesFor(home, homedir = require('node:os').homedir()) {
+  const hashed = `${KEYCHAIN_SERVICE}-${require('node:crypto').createHash('sha256').update(String(home).normalize('NFC')).digest('hex').slice(0, 8)}`;
+  return path.resolve(home) === path.join(homedir, '.claude') ? [KEYCHAIN_SERVICE, hashed] : [hashed];
+}
+
 async function readClaudeCredentials(home, readFile) {
   try { return JSON.parse(await readFile(path.join(home, '.credentials.json'), 'utf8')); } catch {}
-  // Claude Code itself owns this macOS Keychain entry. Never fall back to
-  // the default account for a custom profile or an injected test reader.
-  if (process.platform !== 'darwin' || readFile !== fs.promises.readFile
-    || path.resolve(home) !== path.join(require('node:os').homedir(), '.claude')) return null;
-  try {
-    const execFile = require('node:util').promisify(require('node:child_process').execFile);
-    const { stdout } = await execFile('/usr/bin/security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { timeout: 5000, maxBuffer: 1024 * 1024 });
-    return JSON.parse(stdout);
-  } catch (error) {
-    // Say WHY instead of reading as "not signed in": a denied or timed-out
-    // Keychain prompt is a different fix from a missing login.
-    const why = error?.killed ? 'the Keychain prompt timed out' : error?.code === 44 ? 'no Claude Code entry in the Keychain' : `security exited ${error?.code ?? 'abnormally'}`;
-    return { keychainError: why };
+  // Claude Code itself owns these macOS Keychain entries. Never read them for
+  // an injected test reader, and never for a folder that is not a real config
+  // home: a custom home must hold its own `.claude.json` (the definition in
+  // config/homes.js), so a test's made-up home or a stray path never reaches
+  // the Keychain at all. The default home is exempt because its `.claude.json`
+  // lives beside it (~/.claude.json), not inside it.
+  if (process.platform !== 'darwin' || readFile !== fs.promises.readFile) return null;
+  const isDefaultHome = path.resolve(home) === path.join(require('node:os').homedir(), '.claude');
+  if (!isDefaultHome && !fs.existsSync(path.join(home, '.claude.json'))) return null;
+  const execFile = require('node:util').promisify(require('node:child_process').execFile);
+  let lastError = null;
+  for (const service of keychainServicesFor(home)) {
+    try {
+      const { stdout } = await execFile('/usr/bin/security', ['find-generic-password', '-s', service, '-w'], { timeout: 5000, maxBuffer: 1024 * 1024 });
+      return JSON.parse(stdout);
+    } catch (error) {
+      lastError = error;
+      // 44 = no such item: try the next name. Anything else (a denied or
+      // timed-out prompt) is an answer, not a reason to keep asking.
+      if (error?.code !== 44) break;
+    }
   }
+  // Say WHY instead of reading as "not signed in": a denied or timed-out
+  // Keychain prompt is a different fix from a missing login.
+  const why = lastError?.killed ? 'the Keychain prompt timed out' : lastError?.code === 44 ? 'no Claude Code entry in the Keychain' : `security exited ${lastError?.code ?? 'abnormally'}`;
+  return { keychainError: why };
 }
 
 async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCredentials, reportUnavailable = false, now = () => new Date(), fetchImpl = fetch } = {}) {
@@ -278,5 +309,6 @@ module.exports = {
   REMOTE_COOLDOWN_MS,
   createUsageProvider,
   fetchOauthUsage,
+  keychainServicesFor,
   usageFromStatuslinePayload,
 };

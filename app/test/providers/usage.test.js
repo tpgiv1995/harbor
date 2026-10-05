@@ -263,3 +263,17 @@ test('a Keychain read failure is reported as such, not as "not signed in"', asyn
   assert.equal(r.unavailable, true);
   assert.match(r.reason, /macOS Keychain: the Keychain prompt timed out/);
 });
+
+test('keychainServicesFor names each config home its own Claude Code credential item', () => {
+  const { keychainServicesFor } = require('../../src/main/providers/usage.js');
+  const sha8 = (s) => require('node:crypto').createHash('sha256').update(s).digest('hex').slice(0, 8);
+  // A custom home reads ONLY its own hashed item, never the default account's.
+  assert.deepEqual(keychainServicesFor('/Users/x/.claude-max', '/Users/x'),
+    [`Claude Code-credentials-${sha8('/Users/x/.claude-max')}`]);
+  // The real 20x on the M5 Max, pinned so a naming change is caught here.
+  assert.deepEqual(keychainServicesFor('/Users/higg/.claude-max', '/Users/higg'),
+    ['Claude Code-credentials-491a74e7']);
+  // The default home: the bare item first, then its hashed twin.
+  assert.deepEqual(keychainServicesFor('/Users/x/.claude', '/Users/x'),
+    ['Claude Code-credentials', `Claude Code-credentials-${sha8('/Users/x/.claude')}`]);
+});
