@@ -26,6 +26,40 @@
 
 const fs = require('fs');
 const path = require('path');
+const cp = require('child_process');
+
+// WHICH COMMIT IS THIS? package.json's version stays 0.1.0 across every build,
+// so two installed apps built a month apart were indistinguishable without
+// diffing their sources. The short commit (plus `-dirty` when the tree had
+// uncommitted changes) goes into build-info.json for every platform and, on
+// macOS, into CFBundleVersion, where Finder's Get Info shows it as
+// "0.1.0 (8e412e6)". Not being in a git checkout is not a build failure: the
+// stamp is a convenience, so it degrades to "unknown" with a warning.
+function gitBuildInfo(repoDir) {
+  const git = (...args) => cp.execFileSync('git', ['-C', repoDir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  try {
+    const commit = git('rev-parse', '--short', 'HEAD');
+    const dirty = git('status', '--porcelain', '--untracked-files=no') !== '';
+    return { commit: dirty ? `${commit}-dirty` : commit, branch: git('rev-parse', '--abbrev-ref', 'HEAD') };
+  } catch {
+    return { commit: 'unknown', branch: 'unknown' };
+  }
+}
+
+function stampBuild(context, platform, resources) {
+  const info = {
+    ...gitBuildInfo(path.resolve(context.packager.projectDir, '..')),
+    version: context.packager.appInfo.version,
+    builtAt: new Date().toISOString(),
+  };
+  if (info.commit === 'unknown') console.warn('after-pack: not a git checkout; build stamped "unknown"');
+  fs.writeFileSync(path.join(resources, 'app', 'build-info.json'), `${JSON.stringify(info, null, 2)}\n`);
+  if (platform === 'darwin') {
+    const plist = path.join(resources, '..', 'Info.plist');
+    cp.execFileSync('plutil', ['-replace', 'CFBundleVersion', '-string', info.commit, plist]);
+  }
+  console.log(`after-pack: stamped ${info.version} (${info.commit})`);
+}
 
 module.exports = async function afterPack(context) {
   const platform = context.electronPlatformName; // 'darwin' | 'win32' | 'linux'
@@ -69,4 +103,8 @@ module.exports = async function afterPack(context) {
   } else {
     console.log('after-pack: verified win32 pty binary');
   }
+
+  stampBuild(context, platform, resources);
 };
+
+module.exports.gitBuildInfo = gitBuildInfo;
