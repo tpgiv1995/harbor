@@ -119,3 +119,25 @@ test('plan-usage reads independent Claude accounts together and marks missing fr
   const plan = (await result).plans[0];
   assert.equal(plan.stale, true); assert.equal(plan.reason, 'Usage sample has no timestamp.');
 });
+
+test('plan-usage never samples a sessions store that two Codex homes share', async (t) => {
+  const { root, put } = fixture(t);
+  put('.codex/auth.json', { tokens: { id_token: jwt({ email: 'one@example.com' }) } });
+  put('.codex/sessions/2026/10/01/rollout-a.jsonl', event(limits));
+  put('.codex-work/auth.json', { tokens: { id_token: jwt({ email: 'two@example.com' }) } });
+  fs.symlinkSync(path.join(root, '.codex/sessions'), path.join(root, '.codex-work/sessions'));
+  put('.codex-solo/auth.json', { tokens: { id_token: jwt({ email: 'solo@example.com' }) } });
+  put('.codex-solo/sessions/2026/10/01/rollout-b.jsonl', event(limits));
+  const provider = createPlanUsageProvider({ home: root, env: { HARBOR_E2E: '1' }, io, now: () => NOW,
+    usageProvider: { getUsage: async () => ({ unavailable: true }) } });
+  const codex = (await provider.getPlans()).plans.filter((p) => p.provider === 'codex');
+  const byEmail = Object.fromEntries(codex.map((p) => [p.email, p]));
+  // Both sharers skip the mixed store, so neither shows the other account's numbers.
+  for (const email of ['one@example.com', 'two@example.com']) {
+    assert.equal(byEmail[email].source, null, `${email} must not read the shared store`);
+    assert.deepEqual(byEmail[email].windows, []);
+  }
+  // A home with its own store still samples it.
+  assert.equal(byEmail['solo@example.com'].source, 'rollout');
+  assert.equal(byEmail['solo@example.com'].windows[0].usedPct, 53);
+});

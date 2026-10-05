@@ -300,14 +300,19 @@ function createPlanUsageProvider({
     };
   }
 
-  async function codexPlan(dir, time) {
+  async function codexPlan(dir, time, sharedStore = false) {
     const name = path.basename(dir);
     const derivedLabel = name === '.codex' ? 'Default' : name.replace(/^\.codex-/, '');
     const auth = await readJson(path.join(dir, 'auth.json'));
     const claims = jwtClaims(auth?.tokens?.id_token);
     const token = auth?.tokens?.access_token;
     const accountId = typeof auth?.tokens?.account_id === 'string' ? auth.tokens.account_id : null;
-    let sample = await readRolloutSample(dir, io, time);
+    // A sessions store shared by two Codex homes (one account's `sessions` linked to
+    // another's, so the rail shows every account's history) holds rollouts from BOTH
+    // logins, and a rollout's rate_limits name no account. Sampling it would show
+    // whichever account ran last under every plan, so a shared store is never sampled:
+    // each plan asks the usage endpoint with its own token instead.
+    let sample = sharedStore ? null : await readRolloutSample(dir, io, time);
     const needsUsage = !sample || time - stamp(sample.updatedAt) > STALE_MS;
     const [usage, credits] = await Promise.all([
       needsUsage ? remote(`${dir}:usage`, CODEX_USAGE_URL, token, accountId, endpointSample) : null,
@@ -430,9 +435,18 @@ function createPlanUsageProvider({
       };
     }));
     const homes = await discoverCodexHomes({ io, home, env, profiles, platform });
+    const stores = await Promise.all(homes.map(async (dir) => {
+      try {
+        const store = await io.realpath(path.join(dir, 'sessions'));
+        return platform === 'win32' ? store.toLowerCase() : store;
+      } catch {
+        return null;
+      }
+    }));
+    const shared = (store) => !!store && stores.filter((other) => other === store).length > 1;
     const [claudePlans, codexPlans, cursor] = await Promise.all([
       plans,
-      Promise.all(homes.map((dir) => codexPlan(dir, time))),
+      Promise.all(homes.map((dir, index) => codexPlan(dir, time, shared(stores[index])))),
       cursorPlan(),
     ]);
     return { generatedAt: new Date(now()).toISOString(), plans: [...claudePlans, ...codexPlans, cursor] };
