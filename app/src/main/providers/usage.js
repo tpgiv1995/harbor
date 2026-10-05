@@ -98,7 +98,12 @@ async function readClaudeCredentials(home, readFile) {
     const execFile = require('node:util').promisify(require('node:child_process').execFile);
     const { stdout } = await execFile('/usr/bin/security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { timeout: 5000, maxBuffer: 1024 * 1024 });
     return JSON.parse(stdout);
-  } catch { return null; }
+  } catch (error) {
+    // Say WHY instead of reading as "not signed in": a denied or timed-out
+    // Keychain prompt is a different fix from a missing login.
+    const why = error?.killed ? 'the Keychain prompt timed out' : error?.code === 44 ? 'no Claude Code entry in the Keychain' : `security exited ${error?.code ?? 'abnormally'}`;
+    return { keychainError: why };
+  }
 }
 
 async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCredentials, reportUnavailable = false, now = () => new Date(), fetchImpl = fetch } = {}) {
@@ -108,9 +113,16 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   } catch {
     return null;
   }
+  if (creds?.keychainError) return reportUnavailable ? { unavailable: true, reason: `Could not read Claude credentials from the macOS Keychain: ${creds.keychainError}` } : null;
   const oauth = creds?.claudeAiOauth;
   if (!oauth?.accessToken) return reportUnavailable ? { unavailable: true, reason: 'Claude is not signed in for usage access. Sign in with the Claude CLI, then refresh Harbor.' } : null;
   if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return reportUnavailable ? { unavailable: true, reason: 'Claude credentials have expired. Open the Claude CLI to renew the session, then refresh Harbor.' } : null;
+  // Each failure below used to collapse to `null`, which the panel rendered as
+  // the generic "usage is unavailable" line: a network error, a 401/429 and a
+  // body with no numbers all looked identical (2026-10-05, a live account
+  // whose endpoint answered 200 from a shell read "unavailable" in the app).
+  // When the caller asks for reasons, say which one it was.
+  const failed = (reason) => (reportUnavailable ? { unavailable: true, reason } : null);
   let res;
   try {
     res = await fetchImpl('https://api.anthropic.com/api/oauth/usage', {
@@ -120,15 +132,15 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
       },
       signal: AbortSignal.timeout(10_000),
     });
-  } catch {
-    return null;
+  } catch (error) {
+    return failed(`Claude usage request failed: ${error?.name === 'TimeoutError' ? 'timed out after 10s' : (error?.cause?.code || error?.message || 'network error')}`);
   }
-  if (!res.ok) return null;
+  if (!res.ok) return failed(`Claude usage request failed: HTTP ${res.status}${res.status === 429 ? ' (rate limited; retrying shortly)' : ''}`);
   let body;
   try {
     body = await res.json();
   } catch {
-    return null;
+    return failed('Claude usage response was not JSON');
   }
   const mapWindow = (w) => {
     const out = {};
@@ -141,7 +153,7 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   if (body?.five_hour) rateLimits.five_hour = mapWindow(body.five_hour);
   if (body?.seven_day) rateLimits.seven_day = mapWindow(body.seven_day);
   if (!finiteNumber(rateLimits.five_hour?.used_percentage)
-    && !finiteNumber(rateLimits.seven_day?.used_percentage)) return null;
+    && !finiteNumber(rateLimits.seven_day?.used_percentage)) return failed('Claude usage response carried no 5-hour or weekly numbers');
   return { payload: { rate_limits: rateLimits }, updatedAt: now().toISOString() };
 }
 
