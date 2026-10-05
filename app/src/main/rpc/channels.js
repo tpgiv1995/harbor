@@ -4,6 +4,8 @@ const LOCAL_ONLY = new Set([
   // Claude's composer suggestion for the desktop command bar's Tab-to-accept.
   // The phone has no use for it, so it never leaves this machine.
   'session:suggestion',
+  // The window header's live working meter, read off the pane like the above.
+  'session:work-meter',
   // Account usage is shown only in the desktop title bar.
   'usage:get-plans',
   'window:minimize',
@@ -257,6 +259,7 @@ const METHOD_NAMES = [
   'session:send',
   'session:menu-state',
   'session:suggestion',
+  'session:work-meter',
   'session:menu-answer',
   'session:send-queue',
   'session:cancel-send',

@@ -80,13 +80,13 @@ test('router emits named pushes without a transport dependency', () => {
 });
 
 // Claude's composer suggestion, read for the desktop command bar (2026-10-05).
-LIVE_METHODS.push('session:suggestion');
+LIVE_METHODS.push('session:suggestion', 'session:work-meter');
 LIVE_METHODS.sort();
-test('channel metadata covers exactly the captured 125 methods and 26 pushes', () => {
+test('channel metadata covers exactly the captured 126 methods and 26 pushes', () => {
   const { METHOD_CHANNELS, PUSH_CHANNELS } = require('../../src/main/rpc/channels.js');
   assert.deepEqual([...METHOD_CHANNELS.map(({ method }) => method)].sort(), LIVE_METHODS);
   assert.deepEqual([...PUSH_CHANNELS].sort(), LIVE_PUSH_CHANNELS);
-  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 125);
+  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 126);
   assert.equal(new Set(PUSH_CHANNELS).size, 26);
   assert.ok(METHOD_CHANNELS.every(({ capability }) => (
     ['local-only', 'remote-safe', 'mutating'].includes(capability)
@@ -96,12 +96,12 @@ test('channel metadata covers exactly the captured 125 methods and 26 pushes', (
       capability,
       METHOD_CHANNELS.filter((entry) => entry.capability === capability).length,
     ])),
-    { 'local-only': 40, 'remote-safe': 42, mutating: 43 },
+    { 'local-only': 41, 'remote-safe': 42, mutating: 43 },
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'local-only')
       .map(({ method }) => method).sort(),
-    [...LOCAL_ONLY_METHODS, 'usage:get-plans', 'session:suggestion'].sort(),
+    [...LOCAL_ONLY_METHODS, 'usage:get-plans', 'session:suggestion', 'session:work-meter'].sort(),
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'mutating')

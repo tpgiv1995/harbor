@@ -1,9 +1,12 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Markdown } from './md.jsx';
+import turnMeta from './turn-meta.cjs';
 import { providerIdentity, ProfileBadge } from '../providers.js';
 import { clipboardImageDataURL } from '../image-clipboard.js';
 import './conversation-image-copy.css';
+
+const { turnMetaLabel } = turnMeta;
 
 // The designed conversation surface (Slate): user bubbles, assistant prose,
 // tool-action rows, and the working shimmer. Pure presentation; blocks arrive
@@ -236,7 +239,9 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
     return <div className="conv-progress">{block.text}</div>;
   }
   if (block.kind === 'user') {
+    const meta = turnMetaLabel(block.turnMeta);
     return (
+      <>
       <div className={`conv-user${block.command ? ' command' : ''}`}>
         {/* Composed formatting reads back formatted (2026-07-26). A command
             block stays verbatim: `/compact` is a literal string the CLI parses,
@@ -248,6 +253,10 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
         ) : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
       </div>
+      {/* What this task spent: output tokens across every reply it produced and
+          the time from the prompt to the latest reply, growing while it runs. */}
+      {meta ? <div className="conv-turn-meta" title="Output tokens and time this task has used so far">{meta}</div> : null}
+      </>
     );
   }
   if (block.kind === 'assistant') {

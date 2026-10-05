@@ -1266,6 +1266,10 @@ function registerIpc() {
       return null;
     }
   });
+  // Claude's live working meter for a window header (elapsed + tokens so far).
+  ipcMain.handle('session:work-meter', async (_event, payload) => {
+    try { return await sessionSend.getWorkMeter(payload); } catch { return null; }
+  });
   ipcMain.handle('session:menu-answer', async (_event, payload) => {
     try {
       if (sidebarBridge.isDelegated(payload?.sessionId)) throw new Error('Delegated agents are read-only.');

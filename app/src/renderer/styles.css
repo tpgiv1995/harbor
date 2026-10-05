@@ -2359,6 +2359,24 @@ button { font-family: inherit; }
   display: block;
 }
 
+/* The live work meter beside a working window's run state. */
+.work-meter {
+  font: 500 10px var(--font-mono);
+  color: var(--sub);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* What a task spent (output tokens + elapsed), tucked under its prompt. */
+.conv-turn-meta {
+  align-self: flex-end;
+  margin-top: -4px;
+  padding-right: 4px;
+  font: 500 10.5px var(--font-mono);
+  color: var(--fnt);
+  font-variant-numeric: tabular-nums;
+}
+
 .conv-images {
   display: flex;
   flex-direction: column;

@@ -54,6 +54,7 @@ const api = {
     send: (payload) => ipcRenderer.invoke('session:send', payload),
     menuState: (payload) => ipcRenderer.invoke('session:menu-state', payload),
     suggestion: (payload) => ipcRenderer.invoke('session:suggestion', payload),
+    workMeter: (payload) => ipcRenderer.invoke('session:work-meter', payload),
     answerMenu: (payload) => ipcRenderer.invoke('session:menu-answer', payload),
     getSendQueue: (payload) => ipcRenderer.invoke('session:send-queue', payload),
     cancelSend: (payload) => ipcRenderer.invoke('session:cancel-send', payload),

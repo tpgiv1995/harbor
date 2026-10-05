@@ -543,6 +543,9 @@ class TranscriptParser {
     this.provider = provider;
     this.blocks = [];
     this.pendingTools = new Map(); // tool_use id -> action block
+    // The task in flight: the user prompt that opened it and the output tokens
+    // each API message spent on it. See noteTurnUsage.
+    this.turn = null;
     // The live AskUserQuestion used to be tracked here as well, for the
     // in-window question card. It is not any more: a value produced as a side
     // effect of this tail is only as current as the last read that landed, and
@@ -627,6 +630,36 @@ class TranscriptParser {
     return block;
   }
 
+  // PER-TASK TOKENS (2026-10-05, Ryan: "token usage per task like you get while
+  // its thinking in the normal claude app"). A task runs from a user prompt to
+  // the next one. Each assistant line carries its API message's usage, and one
+  // message is written as SEVERAL lines (one per content block) repeating the
+  // same message id, so output tokens are kept per id (max, never summed twice)
+  // and the turn total is the sum across ids. The total and the elapsed time
+  // ride on the prompt block as `turnMeta`, re-rendered in place as they grow.
+  // Sidechain (subagent) lines are skipped upstream, so this is the main
+  // conversation's own spend.
+  startTurn(block, ts) {
+    const startMs = Date.parse(ts);
+    this.turn = { block, startMs: Number.isFinite(startMs) ? startMs : null, outputs: new Map() };
+  }
+
+  noteTurnUsage(message, ts, changed) {
+    const turn = this.turn;
+    const out = message?.usage?.output_tokens;
+    if (!turn || !Number.isFinite(out)) return;
+    const id = message.id || `line-${this.seq}`;
+    turn.outputs.set(id, Math.max(turn.outputs.get(id) || 0, out));
+    let outputTokens = 0;
+    for (const value of turn.outputs.values()) outputTokens += value;
+    const endMs = Date.parse(ts);
+    turn.block.turnMeta = {
+      outputTokens,
+      durationMs: turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null,
+    };
+    if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+  }
+
   // Returns the keys of blocks that CHANGED in place (tool results resolving
   // an earlier action row) so the renderer can re-render them.
   applyLine(obj) {
@@ -676,7 +709,7 @@ class TranscriptParser {
         }
         const user = userTextFor(content);
         if (user) {
-          this.push({ kind: 'user', text: user.text, command: user.command, ts });
+          this.startTurn(this.push({ kind: 'user', text: user.text, command: user.command, ts }), ts);
           this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
         }
         return changed;
@@ -695,6 +728,7 @@ class TranscriptParser {
             const user = userTextFor(part.text);
             if (user) {
               lastUserInLine = this.push({ kind: 'user', text: user.text, command: user.command, ts });
+              this.startTurn(lastUserInLine, ts);
               this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
             }
           } else if (part.type === 'image') {
@@ -789,6 +823,7 @@ class TranscriptParser {
         const touched = ts ? Date.parse(ts) : NaN;
         this.header.cacheTouchedMs = Number.isFinite(touched) ? touched : Date.now();
       }
+      this.noteTurnUsage(message, ts, changed);
       const tokens = usageTokens(message.usage);
       if (tokens) {
         this.header.contextTokens = tokens;
