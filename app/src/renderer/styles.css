@@ -1560,6 +1560,13 @@ button { font-family: inherit; }
   padding: 18px;
 }
 
+/* Columns layout: one row of full-height windows. Columns keep a readable
+   minimum width (Stage.jsx COLUMN_MIN_PX) and the stage scrolls sideways past
+   that. The 3/4-col ask-card squeeze below is excluded: a column is tall, so it
+   has room for the conversation AND the card. Header density still follows the
+   measured width via the .win2 container queries. */
+.grid4.columns { overflow-x: auto; overflow-y: hidden; }
+
 .stage-empty {
   flex: 1;
   display: grid;
@@ -3509,12 +3516,12 @@ button { font-family: inherit; }
    the full sheet. Measured against the real token sheet in a 4-up cell: header
    84->61, ask body 6->63, the first option fully visible, the footer and the
    focus/expand control both reachable, nothing clipped. */
-.grid4[data-grid-cols="3"] .win2:has(.ask) .conv,
-.grid4[data-grid-cols="4"] .win2:has(.ask) .conv { display: none; }
-.grid4[data-grid-cols="3"] .win2:has(.ask) .wh-meta,
-.grid4[data-grid-cols="4"] .win2:has(.ask) .wh-meta { display: none; }
-.grid4[data-grid-cols="3"] .win2:has(.ask) .ask,
-.grid4[data-grid-cols="4"] .win2:has(.ask) .ask {
+.grid4:not(.columns)[data-grid-cols="3"] .win2:has(.ask) .conv,
+.grid4:not(.columns)[data-grid-cols="4"] .win2:has(.ask) .conv { display: none; }
+.grid4:not(.columns)[data-grid-cols="3"] .win2:has(.ask) .wh-meta,
+.grid4:not(.columns)[data-grid-cols="4"] .win2:has(.ask) .wh-meta { display: none; }
+.grid4:not(.columns)[data-grid-cols="3"] .win2:has(.ask) .ask,
+.grid4:not(.columns)[data-grid-cols="4"] .win2:has(.ask) .ask {
   flex: 1 1 auto;
   max-height: none;
   margin: 2px 8px 8px;

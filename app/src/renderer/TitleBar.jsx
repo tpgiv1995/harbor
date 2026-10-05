@@ -724,7 +724,41 @@ function RailToggle() {
   );
 }
 
-export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenWorker, profiles }) {
+// Flips the stage between the adaptive tile grid and one row of full-height
+// columns. The glyph shows the layout a click switches TO.
+function StageLayoutToggle({ layout, onToggle }) {
+  if (!onToggle) return null;
+  const columns = layout === 'columns';
+  return (
+    <button
+      type="button"
+      className={`rail-toggle-btn layout-toggle-btn${columns ? ' columns' : ''}`}
+      title={columns ? 'Stage layout: columns (click for tiles)' : 'Stage layout: tiles (click for columns)'}
+      aria-label={columns ? 'Switch the stage to tiles' : 'Switch the stage to columns'}
+      aria-pressed={columns}
+      onClick={onToggle}
+    >
+      <svg width="14" height="12" viewBox="0 0 14 12" aria-hidden="true">
+        {columns ? (
+          <g fill="none" stroke="currentColor" strokeWidth="1.1">
+            <rect x="0.8" y="0.8" width="5.4" height="4.4" rx="0.8" />
+            <rect x="7.8" y="0.8" width="5.4" height="4.4" rx="0.8" />
+            <rect x="0.8" y="6.8" width="5.4" height="4.4" rx="0.8" />
+            <rect x="7.8" y="6.8" width="5.4" height="4.4" rx="0.8" />
+          </g>
+        ) : (
+          <g fill="none" stroke="currentColor" strokeWidth="1.1">
+            <rect x="0.8" y="0.8" width="3.2" height="10.4" rx="0.8" />
+            <rect x="5.4" y="0.8" width="3.2" height="10.4" rx="0.8" />
+            <rect x="10" y="0.8" width="3.2" height="10.4" rx="0.8" />
+          </g>
+        )}
+      </svg>
+    </button>
+  );
+}
+
+export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenWorker, profiles, stageLayout, onToggleStageLayout }) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -754,6 +788,7 @@ export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenW
       <div className="titlebar-left">
         <AppMenu onOpenHelp={onOpenHelp} onNewSession={onNewSession} profiles={profiles} />
         <RailToggle />
+        <StageLayoutToggle layout={stageLayout} onToggle={onToggleStageLayout} />
       </div>
       <div className="titlebar-brand">
         <img className="titlebar-mark" src={harborIcon} alt="" aria-hidden="true" />

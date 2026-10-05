@@ -95,6 +95,7 @@ const VIEW_STORE_KEY = 'harbor-view';
 const VIEWS = ['agents', 'tasks', 'notes', 'board', 'orch', 'artifacts'];
 const VIEW_NAMES = { agents: 'Agents', tasks: 'Tasks', notes: 'Notes', board: 'Board', orch: 'Orchestration', artifacts: 'Files' };
 const NEW_SESSION_DEFAULT_KEY = 'harbor-new-session-default';
+const STAGE_LAYOUT_KEY = 'harbor-stage-layout';
 const MAX_TILES = 16;
 const VOICE_TOOL_NAMES = voiceToolsModule.TOOL_NAMES;
 
@@ -211,6 +212,15 @@ function restoreTiles() {
   }
 }
 
+function readStoredStageLayout() {
+  try {
+    const stored = localStorage.getItem(STAGE_LAYOUT_KEY);
+    return gridNav.STAGE_LAYOUTS.includes(stored) ? stored : 'tiles';
+  } catch {
+    return 'tiles';
+  }
+}
+
 function readStoredView() {
   try {
     const stored = localStorage.getItem(VIEW_STORE_KEY);
@@ -225,6 +235,14 @@ function App() {
   const [sidebarModel, setSidebarModel] = useState({ projects: [], liveProjects: [] });
   const [sidebarModelLoaded, setSidebarModelLoaded] = useState(false);
   const [view, setViewState] = useState(readStoredView);
+  const [stageLayout, setStageLayout] = useState(readStoredStageLayout);
+  const toggleStageLayout = useCallback(() => {
+    setStageLayout((prev) => {
+      const next = prev === 'columns' ? 'tiles' : 'columns';
+      try { localStorage.setItem(STAGE_LAYOUT_KEY, next); } catch { /* layout just won't restore */ }
+      return next;
+    });
+  }, []);
   // Defaults TRUE so the tab never flickers away for the overwhelming majority
   // who have orchestration on; only an explicit false from config removes it.
   const [orchEnabled, setOrchEnabled] = useState(true);
@@ -1509,7 +1527,7 @@ function App() {
           if (first) selectTile(first.sessionId);
           return;
         }
-        const { cols, rows } = gridNav.gridDimensions(Math.max(tiles.length, Math.max(...slots) + 1));
+        const { cols, rows } = gridNav.gridDimensions(Math.max(tiles.length, Math.max(...slots) + 1), stageLayout);
         const target = gridNav.navigateSlot({
           slots,
           fromSlot: Number.isInteger(selectedTile.slot) ? selectedTile.slot : 0,
@@ -1539,7 +1557,7 @@ function App() {
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [tiles, selectTile, view, selectedId]);
+  }, [tiles, selectTile, view, selectedId, stageLayout]);
 
   // ---- title bar data ----
   const liveSessions = useMemo(() => {
@@ -1606,6 +1624,8 @@ function App() {
         onNewSession={openNewSession}
         profiles={profiles}
         liveCount={liveCount}
+        stageLayout={stageLayout}
+        onToggleStageLayout={toggleStageLayout}
         workers={workers}
         onOpenWorker={openSession}
       />
@@ -1679,6 +1699,7 @@ function App() {
                 focusedId={focusedId}
                 onSelect={selectTile}
                 onPlace={placeTile}
+                layout={stageLayout}
                 onClose={closeTile}
                 onToggleTty={toggleTty}
                 onToggleFocus={toggleFocus}
