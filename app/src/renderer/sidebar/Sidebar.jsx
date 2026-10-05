@@ -767,7 +767,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
               ? 'Session from a previous machine: its folder does not exist on this one'
               : isChild
                 ? 'Orchestration worker. Click to open read-only. Right-click for options.'
-                : 'Click to open on the stage. Right-click for options.'}
+                : `${displayTitle || 'Session'}\nClick to open. Right-click for options.`}
             disabled={disabled}
           >
             <span className={`sr-d${session.isLive ? ' on' : ''} ${runState?.kind || ''}`} title={runState?.tooltip || runState?.label} aria-label={runState?.ariaLabel} />

@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import model from '../wizard-model.cjs';
 import { Field, Segmented, errorFor } from './controls.jsx';
+import { watchProviderOptions } from '../../provider-options.cjs';
+import { sessionModelOptions, sessionEffortOptions } from '../../session-model-options.cjs';
 
 // Step 7. New-session defaults, then the review.
 //
@@ -25,15 +27,11 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
   const enabled = model.enabledProviders(state);
 
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const result = await window.harbor.session.newOptions();
-        if (alive) setOptions(result);
-      } catch { if (alive) setOptions({ providers: {} }); }
-    })();
-    return () => { alive = false; };
-  }, []);
+    return watchProviderOptions({ api: window.harbor, onOptions: result => {
+      setOptions(result);
+      patch(prev => ({ ...prev, modelRegistry: result.providers }));
+    } });
+  }, [patch]);
 
   // The SAME base Finish merges onto. Previewing against an empty base would
   // render a different config than the one that gets written, which is exactly
@@ -65,10 +63,17 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
   }, [JSON.stringify(config), onPreview, checkCount]);
 
   const registry = options?.providers || {};
-  const models = registry[state.defaults.provider]?.models || [];
-  const efforts = state.defaults.provider === 'codex'
-    ? ['low', 'medium', 'high', 'xhigh']
-    : (state.defaults.provider === 'cursor' ? [] : ['default', ...model.EFFORT_LEVELS]);
+  const providerOptions = registry[state.defaults.provider];
+  const models = sessionModelOptions({ providerOptions, provider: state.defaults.provider,
+    model: state.defaults.model, showVersions: false });
+  const choice = sessionEffortOptions({ providerOptions, model: state.defaults.model, effort: state.defaults.effort });
+  const efforts = providerOptions?.efforts?.includes('default') ? ['default', ...choice.levels] : choice.levels;
+
+  useEffect(() => {
+    if (providerOptions && choice.effort !== state.defaults.effort) {
+      patch(prev => ({ ...prev, defaults: { ...prev.defaults, effort: choice.effort } }));
+    }
+  }, [providerOptions, choice.effort, state.defaults.effort, patch]);
 
   const set = (patchObj) => patch((prev) => ({ ...prev, defaults: { ...prev.defaults, ...patchObj } }));
 
@@ -109,7 +114,9 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
               name="Default model"
               options={models}
               value={state.defaults.model}
-              onChange={(value) => set({ model: value })}
+              onChange={(value) => set({ model: value, effort: sessionEffortOptions({
+                providerOptions, model: value, effort: state.defaults.effort,
+              }).effort })}
             />
           ) : (
             <span className="setup-note-fine">
@@ -128,9 +135,9 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
               onChange={(value) => set({ effort: value })}
             />
           </Field>
-        ) : (
+        ) : state.defaults.provider === 'cursor' ? (
           <p className="setup-note-fine">Cursor does not expose effort levels, so there is nothing to set.</p>
-        )}
+        ) : null}
       </div>
 
       <div className="setup-card setup-review">

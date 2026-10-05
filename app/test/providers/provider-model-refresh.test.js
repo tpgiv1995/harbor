@@ -68,3 +68,13 @@ test('a configured CLI catalog is discovered even when stock install metadata is
   await refresh({ provider: 'cursor', installed: null });
   assert.equal(calls, 1);
 });
+
+test('returning to an open model menu rereads an externally updated catalog', async () => {
+  const {watchProviderOptions}=require('../../src/renderer/provider-options.cjs');
+  const focusTarget=new EventTarget();let revision=1;const seen=[];
+  const stop=watchProviderOptions({focusTarget,api:{session:{newOptions:async()=>revision}},onOptions:r=>seen.push(r)});
+  await new Promise(r=>setImmediate(r));revision=2;focusTarget.dispatchEvent(new Event('focus'));
+  await new Promise(r=>setImmediate(r));assert.deepEqual(seen,[1,2]);
+  stop();revision=3;focusTarget.dispatchEvent(new Event('focus'));
+  await new Promise(r=>setImmediate(r));assert.deepEqual(seen,[1,2]);
+});

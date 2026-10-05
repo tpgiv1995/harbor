@@ -51,3 +51,20 @@ test('switching away from configured defaults uses the enabled registry, not a n
     provider: 'claude', model: 'default', effort: 'default', account: 'personal',
   });
 });
+
+test('a Codex account-only launch cannot inherit the saved Claude provider', () => {
+  const result = resolve({options, stored:{provider:'claude',model:'opus',effort:'xhigh'}, request:{account:'codex'}});
+  assert.equal(result.provider,'codex');
+  assert.equal(result.account,'codex');
+  assert.equal(result.model,'default');
+});
+
+test('a sibling of an unprofiled Codex session carries its provider through launch argv', () => {
+  const { siblingSessionRequest } = require('../../src/renderer/new-session-defaults.cjs');
+  const { buildNewArgv } = require('../../src/main/actions/launch.js');
+  const request=siblingSessionRequest({provider:'codex',id:'session',cwd:'/project'});
+  const result=resolve({options,stored:{provider:'claude',model:'opus'},request});
+  const argv=buildNewArgv({...result,profiles:[{id:'codex',provider:'codex',configHome:'/codex'}]});
+  assert.equal(argv[argv.indexOf('--provider')+1],'codex');
+  assert.equal(request.folder,'/project');
+});

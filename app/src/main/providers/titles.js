@@ -278,6 +278,7 @@ function createTitlesProvider(options = {}) {
     const candidates = [];
     for (const [id, entry] of newest) {
       if (entry.delegatedBy || options.isDelegated?.(id)) continue;
+      if (entry.native_title || entry.native_summary) continue;
       const prompt = entry.first_prompt;
       const command = entry.command;
       if (prompt && prompt.trimStart().startsWith(CHILD_TASK_PREFIX)) continue;

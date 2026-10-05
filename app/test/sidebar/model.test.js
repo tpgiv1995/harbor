@@ -739,3 +739,14 @@ test('under date grouping the rule hides the scratch session, not the whole day'
   assert.equal(filtered.projects.length, 1, 'the day group survives');
   assert.deepEqual(filtered.projects[0].sessions.map((s) => s.id), ['real']);
 });
+
+test('internal approval reviews stay indexed but appear in the rail only when searched', () => {
+  const sessions = [
+    { id: 'human', title: 'Fix the sidebar', project: 'widget', lastActiveMs: 1 },
+    { id: 'review', title: 'Action review: Fix the sidebar', project: 'widget', isInternalSession: true, lastActiveMs: 2 },
+  ];
+  const model = { projects: [{ label: 'widget', sessions }] };
+  assert.deepEqual(filterProjects(model, { filter: { kind: 'all' } }).projects[0].sessions.map(s => s.id), ['human']);
+  assert.equal(filterProjects(model, { filter: { kind: 'all' }, query: 'Action review' }).projects[0].sessions[0].id, 'review');
+  assert.equal(model.projects[0].sessions.length, 2);
+});

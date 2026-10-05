@@ -43,7 +43,8 @@ export function UsagePanel({ profiles, usage }) {
               <ProfileBadge profileId={profile.id} profiles={profiles} className="usage-account-badge" title={profile.label} />
               <span className="usage-account-name">{profile.label}</span>
             </div>
-            <UsageWindow label="5 hours" window="fiveHour" pct={data?.fiveHourPct} resetsAt={data?.fiveHourResetsAt} rolled={data?.fiveHourRolled} />
+            {data?.unavailable && data.reason ? <div className="usage-account-status" role="status">{data.reason}</div> : null}
+            {profile.provider !== 'codex' ? <UsageWindow label="5 hours" window="fiveHour" pct={data?.fiveHourPct} resetsAt={data?.fiveHourResetsAt} rolled={data?.fiveHourRolled} /> : null}
             <UsageWindow label="Weekly" window="weekly" pct={data?.weeklyPct} resetsAt={data?.weeklyResetsAt} rolled={data?.weeklyRolled} />
           </div>
         );

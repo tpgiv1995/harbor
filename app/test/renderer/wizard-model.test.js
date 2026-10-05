@@ -557,3 +557,13 @@ test('a saved profile whose folder has since been deleted is shown as missing, n
   assert.equal(profile.authed, false);
   assert.match(profile.reason || '', /does not exist/);
 });
+
+test('setup accepts discovered Codex Ultra and rejects it for a model without it', () => {
+  const state=model.initialState(detectedLinux());
+  state.codex.enabled=true;
+  state.defaults={provider:'codex',model:'astra',effort:'ultra'};
+  state.modelRegistry={codex:{effortsByModel:{astra:['low','medium','high','xhigh','max','ultra'],older:['low','medium','high','xhigh']}}};
+  assert.equal(model.stepValidation('defaults',state).ok,true);
+  state.defaults.model='older';
+  assert.equal(model.stepValidation('defaults',state).ok,false);
+});

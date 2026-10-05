@@ -96,3 +96,5 @@
   .conv-assistant,
   .conv-user { font-size: 14px; }
 }
+
+.sr-wrap:focus-within .sr-x { opacity: 1; pointer-events: auto; }

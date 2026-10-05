@@ -10,7 +10,9 @@ function resolveNewSessionDefaults({ request = {}, stored, options = {} } = {}) 
   const enabled = (id) => Boolean(providers[id]) && providers[id].enabled !== false;
   const configured = options.defaults || {};
   const saved = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
-  const provider = [request.provider, saved.provider, configured.provider, FALLBACK.provider,
+  const accountProvider = Object.keys(providers).find(id =>
+    (providers[id].profiles || options.profilesByProvider?.[id] || []).some(profile => profile.id === request.account));
+  const provider = [request.provider, accountProvider, saved.provider, configured.provider, FALLBACK.provider,
     ...Object.keys(providers)].find(enabled);
   if (!provider) return { provider: null, unavailable: 'Enable a provider in Setup before starting a session.' };
 
@@ -35,4 +37,9 @@ function resolveNewSessionDefaults({ request = {}, stored, options = {} } = {}) 
   return result;
 }
 
-module.exports = { resolveNewSessionDefaults };
+function siblingSessionRequest(session) {
+  return { account: session.home, provider: session.provider || 'claude',
+    folder: session.cwd, sessionId: session.id, immediate: true };
+}
+
+module.exports = { resolveNewSessionDefaults, siblingSessionRequest };

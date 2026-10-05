@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 
 const { revealNewSessionWindow } = require('../../src/main/new-session-window.cjs');
 
-function fixture(provider, sessionId) {
+function fixture(provider, sessionId, stageSlot) {
   const emitted = [];
   const links = [];
   const transcriptCalls = [];
@@ -22,6 +22,7 @@ function fixture(provider, sessionId) {
       account: 'team',
       model: provider === 'codex' ? 'gpt-5.6-sol' : 'opus',
       effort: 'xhigh',
+      stageSlot,
       preIds: new Set(['old-pane']),
       knownIds: new Set(['old-session']),
       sinceMs: 1234,
@@ -98,4 +99,22 @@ test('codex still opens provisionally and upgrades when its transcript materiali
   assert.equal(fx.transcriptCalls.length, 1, 'codex keeps transcript discovery live');
   assert.equal(fx.transcriptCalls[0].provider, 'codex');
   assert.equal(fx.transcriptCalls[0].timeoutMs, 10 * 60_000);
+});
+
+
+test('a launch carries its requested cell once; the Codex id upgrade cannot move it again', async () => {
+  for (const provider of ['claude', 'codex']) {
+    const fx = fixture(provider, 'minted', 3);
+    await fx.run();
+    assert.equal(fx.emitted[0].stageSlot, 3);
+    if (provider === 'codex') assert.equal(fx.emitted[1].stageSlot, undefined);
+  }
+});
+
+test('out-of-range launch cells are discarded', async () => {
+  for (const slot of [-1, 16, '2']) {
+    const fx = fixture('claude', 'minted', slot);
+    await fx.run();
+    assert.equal(fx.emitted[0].stageSlot, undefined);
+  }
 });

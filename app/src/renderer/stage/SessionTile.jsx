@@ -180,10 +180,11 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   // launch itself resolves it: a session with no home of its own (a codex or
   // cursor window, a provisional pane) falls back to the default profile, so
   // the tooltip and the outcome cannot disagree.
-  const newSiblingProfile = resolveProfile(profiles, session.home);
+  const newSiblingProvider = session.provider || 'claude';
+  const newSiblingProfile = resolveProfile(profiles.filter(p => (p.provider || 'claude') === newSiblingProvider), session.home);
   const newSiblingTitle = newSiblingProfile
-    ? `New ${newSiblingProfile.label} session in ${projectLabel}`
-    : `New session in ${projectLabel}`;
+    ? `New ${providerIdentity(newSiblingProvider).label} session (${newSiblingProfile.label}) in ${projectLabel}`
+    : `New ${providerIdentity(newSiblingProvider).label} session in ${projectLabel}`;
   const noTranscript = !data || data.missing;
   // A codex/cursor window is a DESIGNED window, same as claude's: the raw
   // terminal is what the >_ toggle is for. The one exception is a pane Harbor
@@ -239,7 +240,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
               type="button"
               className="ico tile-new"
               title={newSiblingTitle}
-              aria-label={`New session in ${projectLabel}`}
+              aria-label={newSiblingTitle}
               onClick={(e) => { e.stopPropagation(); onNewSibling?.(); }}
             >
               +

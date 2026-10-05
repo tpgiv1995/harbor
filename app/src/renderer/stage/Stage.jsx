@@ -4,6 +4,7 @@ import { ErrorBoundary } from '../ErrorBoundary.jsx';
 import { CommandBar } from './CommandBar.jsx';
 import { useProfiles, profileStyle } from '../providers.js';
 import gridNav from './grid-nav.cjs';
+import { siblingSessionRequest } from '../new-session-defaults.cjs';
 
 const { gridDimensions } = gridNav;
 
@@ -25,7 +26,7 @@ function ProfileLaunchButtons({ profiles, onLaunch, suffix = '' }) {
           className="slot-btn"
           style={profileStyle(profile)}
           title={profile.email || profile.label}
-          onClick={() => onLaunch(profile.id)}
+          onClick={() => onLaunch({ account: profile.id, provider: profile.provider || 'claude' })}
         >
           {`+ ${profile.label}${suffix}`}
         </button>
@@ -333,12 +334,7 @@ export function Stage({
                 onClose={() => onClose(session.id)}
                 onToggleTty={() => onToggleTty(session.id)}
                 onToggleFocus={() => onToggleFocus(session.id)}
-                onNewSibling={() => onNewSession({
-                  account: session.home,
-                  folder: session.cwd,
-                  sessionId: session.id,
-                  immediate: true,
-                })}
+                onNewSibling={() => onNewSession(siblingSessionRequest(session))}
                 onOpenConfig={() => onOpenConfig({
                   session,
                   header: transcripts.get(session.id)?.header || null,
@@ -373,7 +369,7 @@ export function Stage({
           {holes.map((cell) => (
             <NewSessionSlot
               key={`hole-${cell}`}
-              onNew={onNewSession}
+              onNew={(request) => onNewSession({ ...request, stageSlot: cell })}
               style={{ gridColumn: (cell % cols) + 1, gridRow: Math.floor(cell / cols) + 1 }}
             />
           ))}

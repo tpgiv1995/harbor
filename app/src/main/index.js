@@ -342,7 +342,7 @@ function setAppBadgeCount(count) {
 // caller-minted id at launch, so its fresh pane opens on that real id. Codex
 // cannot receive an id at launch, so it still opens on a provisional pane key
 // and upgrades when the first message materializes its rollout.
-async function launchNewSession({ account, cwd, provider = 'claude', model, effort = 'default', command = null, prompt = null }) {
+async function launchNewSession({ account, cwd, provider = 'claude', model, effort = 'default', command = null, prompt = null, stageSlot }) {
   const [preIds, knownIds] = await Promise.all([
     sessionSend.paneIdSet(),
     provider === 'claude'
@@ -358,6 +358,7 @@ async function launchNewSession({ account, cwd, provider = 'claude', model, effo
     account,
     model,
     effort,
+    stageSlot,
     preIds,
     knownIds,
     sinceMs,
@@ -1142,7 +1143,7 @@ function registerIpc() {
     return { text };
   });
 
-  ipcMain.handle('new-session', async (_event, { account, folder, sessionId, provider, model, effort, prompt }) => {
+  ipcMain.handle('new-session', async (_event, { account, folder, sessionId, provider, model, effort, prompt, stageSlot }) => {
     let cwd;
     if (folder) {
       cwd = folder;
@@ -1161,7 +1162,7 @@ function registerIpc() {
     if (!stat?.isDirectory()) {
       throw new Error(`cannot start a session in ${cwd}: the folder does not exist on this machine — pick a folder`);
     }
-    return launchNewSession({ account, cwd, provider, model, effort, prompt });
+    return launchNewSession({ account, cwd, provider, model, effort, prompt, stageSlot });
   });
   ipcMain.handle('workflow:run', async (_event, { id, current = {} }) => {
     const launch = resolveWorkflowLaunch(id, current, harborConfig);

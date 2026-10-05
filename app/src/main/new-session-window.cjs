@@ -11,6 +11,7 @@ async function revealNewSessionWindow({
   account,
   model,
   effort,
+  stageSlot,
   preIds,
   knownIds,
   sinceMs,
@@ -40,6 +41,7 @@ async function revealNewSessionWindow({
     provider,
     model,
     effort,
+    ...(Number.isInteger(stageSlot) && stageSlot >= 0 && stageSlot < 16 ? { stageSlot } : {}),
     ...(mintedId ? {} : { provisional: true }),
   });
 

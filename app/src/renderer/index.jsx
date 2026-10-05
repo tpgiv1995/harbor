@@ -34,7 +34,7 @@ import { createStallContext, installPerfWatch } from './perf-watch.js';
 import { planProvisionalUpgrades } from './stage/provisional-upgrade.cjs';
 import { terminalView } from './stage/terminal-view.cjs';
 import { mergeLaunchMeta, withLaunchFacts } from './stage/launch-meta.cjs';
-import { resolveStage, pickEviction } from './stage/stage-resolve.cjs';
+import { resolveStage, pickEviction, placeNewTile } from './stage/stage-resolve.cjs';
 import { externalLiveFromHeader } from '../shared/session-liveness.js';
 import { ProfilesProvider, useProfiles, normalizeProfileHome } from './providers.js';
 import { SetupGate } from './setup/SetupWizard.jsx';
@@ -527,7 +527,7 @@ function App() {
     });
   };
 
-  const openSession = useCallback((session) => {
+  const openSession = useCallback((session, preferredSlot) => {
     if (!session?.id || session.isWindowsEra) return;
     // Opening a window from any view lands on the stage; a window opened into
     // a hidden view would read as a dead click.
@@ -546,9 +546,13 @@ function App() {
         const evict = pickEviction({ tiles, selectedId: prev.selectedId, isResolvable: isTileResolvableRef.current });
         tiles = tiles.filter((t) => t !== evict);
       }
-      const usedSlots = new Set(tiles.map((t) => t.slot));
-      let slot = 0; while (usedSlots.has(slot)) slot += 1;
-      tiles.push({ sessionId: session.id, tty: false, lastSel: Date.now(), slot });
+      tiles = placeNewTile({
+        tiles,
+        tile: { sessionId: session.id, tty: false, lastSel: Date.now() },
+        preferredSlot,
+        isResolvable: isTileResolvableRef.current,
+        maxTiles: MAX_TILES,
+      });
       return { ...prev, tiles, selectedId: session.id };
     });
   }, [setView]);
@@ -835,7 +839,7 @@ function App() {
       });
       return;
     }
-    openSession({ id: info.sessionId, provider: info.provider });
+    openSession({ id: info.sessionId, provider: info.provider }, info.stageSlot);
   }), [openSession, renameDraft]);
 
   // openSession needs real session facts once the model catches up; a launched
@@ -1438,6 +1442,7 @@ function App() {
         ...defaults,
         folder,
         sessionId,
+        stageSlot: request.stageSlot,
       }).catch((error) => {
         // A refused one-click launch (dead folder, bin/ai failure) must say so
         // where sends already do, not die as an unhandled rejection.
@@ -1452,7 +1457,7 @@ function App() {
         return null;
       });
     }
-    setConfigRequest({ ...defaults, folder });
+    setConfigRequest({ ...defaults, folder, stageSlot: request.stageSlot });
   }, [selectedId, sessionsWithSynthetic]);
 
   // Opening a window's config SELECTS that window first, so the modal's live
@@ -1611,7 +1616,7 @@ function App() {
         <NewSessionConfig
           request={configRequest}
           onClose={() => setConfigRequest(null)}
-          onStart={(payload) => window.harbor.session.newInProject(payload)}
+          onStart={(payload) => window.harbor.session.newInProject({ ...payload, stageSlot: configRequest.stageSlot })}
           onReconfigure={reconfigureSelected}
         />
       ) : null}

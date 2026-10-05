@@ -71,4 +71,22 @@ function pickEviction({ tiles = [], selectedId = null, isResolvable } = {}) {
   return others[0] || tiles[0];
 }
 
-module.exports = { resolveStage, pickEviction };
+// Called only for an explicit open, never during a model refresh. Hidden
+// windows retain their identity but yield their cell to a visible new window.
+function placeNewTile({ tiles = [], tile, preferredSlot, isResolvable = () => true, maxTiles = 16 }) {
+  const visibleSlots = new Set(tiles.filter(t => isResolvable(String(t.sessionId))).map(t => t.slot));
+  let slot = Number.isInteger(preferredSlot) && preferredSlot >= 0 && preferredSlot < maxTiles
+    && !visibleSlots.has(preferredSlot) ? preferredSlot : 0;
+  while (visibleSlots.has(slot)) slot += 1;
+  const used = new Set([...tiles.map(t => t.slot), slot]);
+  const placed = tiles.map(t => {
+    if (t.slot !== slot) return t;
+    let replacement = 0;
+    while (used.has(replacement)) replacement += 1;
+    used.add(replacement);
+    return { ...t, slot: replacement };
+  });
+  return [...placed, { ...tile, slot }];
+}
+
+module.exports = { resolveStage, pickEviction, placeNewTile };
