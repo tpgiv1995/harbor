@@ -286,6 +286,35 @@ export function CommandBar({
           : null;
   const canType = session && !disabledReason;
 
+  // CLAUDE'S PROMPT SUGGESTION (2026-10-05). After a turn Claude draws a
+  // predicted next prompt, dim, in its own composer; the keeper reads it off
+  // the modeled cells. While the draft is empty it shows here as the
+  // placeholder, Tab fills it in and Enter sends it like any other draft.
+  // Polled only for a live Claude pane with an empty draft, so typing stops it.
+  const paneId = pane?.paneId || null;
+  const wantsSuggestion = Boolean(
+    canType && paneId && !text && !questionReply && !dead && !externalLive
+    && (session?.provider || 'claude') === 'claude',
+  );
+  const [suggestion, setSuggestion] = useState(null);
+  useEffect(() => {
+    setSuggestion(null);
+    if (!wantsSuggestion) return undefined;
+    let alive = true;
+    let timer = null;
+    const tick = async () => {
+      const next = await window.harbor?.session?.suggestion?.({ pane, sessionId: session?.id }).catch(() => null);
+      if (!alive) return;
+      setSuggestion(typeof next === 'string' && next.trim() ? next.trim() : null);
+      timer = setTimeout(tick, 1500);
+    };
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+    // pane is read through paneId; a new pane object for the same id is the same pane.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsSuggestion, paneId, session?.id]);
+  const shownSuggestion = wantsSuggestion ? suggestion : null;
+
   // Selecting a window ARMS the composer: rail click, tile click, Ctrl+digit
   // and Alt+arrows all land ready to type (Pat, 2026-07-25: "i dont want to
   // have to click into the text box every time"). Once per selected session,
@@ -315,7 +344,9 @@ export function CommandBar({
         ? 'Message this session (Enter ends its outside terminal and continues here)…'
         : dead
           ? 'Message this session (Enter resumes it first)…'
-          : 'Message the selected session…';
+          : shownSuggestion
+            ? `${shownSuggestion}   ⇥ Tab`
+            : 'Message the selected session…';
 
   const submit = async () => {
     if (window.__harborUiDebug) console.log('[ui] submit', JSON.stringify({ canType, pending, phase: sendState?.phase, text, dead }));
@@ -842,6 +873,13 @@ export function CommandBar({
                   formatOpen={formatOpen}
                   knownCommandNames={knownCommandNames}
                   onKeyDown={(e) => {
+                    // Tab on an empty draft takes Claude's suggestion, the same
+                    // key the CLI and the desktop app use; Enter then sends it.
+                    if (!slashOpen && e.key === 'Tab' && !e.shiftKey && shownSuggestion && !text) {
+                      e.preventDefault();
+                      setText(shownSuggestion);
+                      return;
+                    }
                     // The slash popup gets first refusal on these keys; the
                     // editor checks defaultPrevented before doing anything of
                     // its own, so Enter still submits when no popup is open.

@@ -178,6 +178,18 @@ function trustKeysFor(cwd) {
   return keys;
 }
 
+// PROMPT SUGGESTIONS ON (2026-10-05). Claude Code predicts the next prompt
+// after a turn and draws it dim in its composer (the keeper reads it, see
+// src/daemon/screen.js composerSuggestion, and the command bar offers it on
+// Tab). Interactive CLIs only do so when a server-side flag is on for the
+// account, or when this variable is true; Harbor sets it so every Claude
+// session it starts behaves the same. An explicit value already in the
+// environment (e.g. 0 to turn them off) is left alone.
+function withPromptSuggestions(env) {
+  if (env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION === undefined) env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = '1';
+  return env;
+}
+
 function preacceptFolderTrust(configHome, cwd) {
   if (process.env.HARBOR_NO_TRUST_PREACCEPT === '1') return false;
   if (process.env.HARBOR_E2E === '1') return false;
@@ -321,6 +333,11 @@ function sessiondChildEnv(sourceEnv = process.env) {
   const env = cleanDaemonEnv();
   if (sourceEnv.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = sourceEnv.CLAUDE_CONFIG_DIR;
   if (sourceEnv.CODEX_HOME) env.CODEX_HOME = sourceEnv.CODEX_HOME;
+  // Set by withPromptSuggestions on the Claude launch and resume paths; the
+  // daemon only ever sees this cleaned env, so it has to be carried explicitly.
+  if (sourceEnv.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION !== undefined) {
+    env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = sourceEnv.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION;
+  }
   return env;
 }
 
@@ -729,6 +746,7 @@ async function ai(args) {
   }
   // Against the home the CHILD will read, which is the one just decided above.
   if (parsed.provider === 'claude') preacceptFolderTrust(childEnv.CLAUDE_CONFIG_DIR || null, process.cwd());
+  if (parsed.provider === 'claude') withPromptSuggestions(childEnv);
   const launchArgv = resolveWindowsLaunch(parsed.argv, { env: childEnv });
   if (parsed.here) {
     const result = spawnSync(launchArgv[0], launchArgv.slice(1), { stdio: 'inherit', env: childEnv, cwd: process.cwd() });
@@ -873,6 +891,7 @@ async function claudeSessions(args) {
       throw new Error(`project directory is gone or unknown for ${resumeId}`);
     }
     preacceptFolderTrust(resumeEnv.CLAUDE_CONFIG_DIR || null, meta.cwd);
+    withPromptSuggestions(resumeEnv);
     if (!meta.path || !fs.existsSync(meta.path)) throw new Error(`transcript no longer exists (pruned?): ${meta.path || ''}`);
     const age = Math.floor(Date.now() / 1000 - fs.statSync(meta.path).mtimeMs / 1000);
     if (!liveOk && age < 90) throw new Error(`session ${resumeId} looks LIVE right now (its transcript was written ${age}s ago). Resuming would attach a second Claude to the same conversation file. Close the original first, or re-run with --live-ok if you are sure.`);
@@ -915,7 +934,7 @@ async function claudeSessions(args) {
 module.exports = {
   ROOT, ai, parseAi, claudeSessions, claudeBin, claudeConfigFile, cleanDaemonEnv, commandString,
   preacceptFolderTrust, runtime, resolveUnitPolicy,
-  trustKeysFor,
+  trustKeysFor, withPromptSuggestions,
   resolveSessionBackend, sessiondChildEnv, spawnSessiond,
   resolveWindowsLaunch, codexCliVersion, codexMigrationAcks, codexPaneControls, withCodexPaneControls,
 };

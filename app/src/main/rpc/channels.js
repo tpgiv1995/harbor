@@ -1,6 +1,9 @@
 'use strict';
 
 const LOCAL_ONLY = new Set([
+  // Claude's composer suggestion for the desktop command bar's Tab-to-accept.
+  // The phone has no use for it, so it never leaves this machine.
+  'session:suggestion',
   // Account usage is shown only in the desktop title bar.
   'usage:get-plans',
   'window:minimize',
@@ -253,6 +256,7 @@ const METHOD_NAMES = [
   'transcript:close',
   'session:send',
   'session:menu-state',
+  'session:suggestion',
   'session:menu-answer',
   'session:send-queue',
   'session:cancel-send',

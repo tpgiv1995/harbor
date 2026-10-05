@@ -53,6 +53,7 @@ const api = {
     preview: (payload) => ipcRenderer.invoke('session:preview', payload),
     send: (payload) => ipcRenderer.invoke('session:send', payload),
     menuState: (payload) => ipcRenderer.invoke('session:menu-state', payload),
+    suggestion: (payload) => ipcRenderer.invoke('session:suggestion', payload),
     answerMenu: (payload) => ipcRenderer.invoke('session:menu-answer', payload),
     getSendQueue: (payload) => ipcRenderer.invoke('session:send-queue', payload),
     cancelSend: (payload) => ipcRenderer.invoke('session:cancel-send', payload),

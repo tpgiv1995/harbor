@@ -264,6 +264,10 @@ function createSessionSend(deps) {
   const {
     snapshot, // async () => normalized { panes: [], workspaces: [] }
     readPane, // async (paneId) => text
+    // async (paneId) => Claude's dim composer suggestion, or null. Read from the
+    // keeper's modeled cells (src/daemon/screen.js); a stripped scrape cannot
+    // tell it from a typed draft.
+    readSuggestion = async () => null,
     terminalBridge,
     launchActions,
     getSessionMeta,
@@ -2194,6 +2198,13 @@ function createSessionSend(deps) {
     return answerMenu(pane.paneId, pane.workspaceId, action, ask || discoveredFor(pane.paneId));
   };
 
+  // The command bar offers this on Tab. Null whenever the pane is not sitting
+  // on an idle composer that shows one; a read failure is simply no suggestion.
+  const getSuggestion = async ({ pane } = {}) => {
+    if (!pane?.paneId) return null;
+    try { return (await readSuggestion(pane.paneId)) || null; } catch { return null; }
+  };
+
   return {
     emitter,
     // The ADOPT path lives in actions/takeover.js and emits its own statuses, so
@@ -2205,6 +2216,7 @@ function createSessionSend(deps) {
     send,
     moveIdleSession,
     getMenu,
+    getSuggestion,
     answerMenu: answerMenuFor,
     findFreshPane,
     findFreshTranscript,

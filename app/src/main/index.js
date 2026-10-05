@@ -1256,6 +1256,16 @@ function registerIpc() {
       return null;
     }
   });
+  // Claude's predicted next prompt for the selected pane (dim in its composer);
+  // the command bar shows it as ghost text and Tab fills it in.
+  ipcMain.handle('session:suggestion', async (_event, payload) => {
+    try {
+      if (sidebarBridge.isDelegated(payload?.sessionId)) return null;
+      return await sessionSend.getSuggestion(payload);
+    } catch {
+      return null;
+    }
+  });
   ipcMain.handle('session:menu-answer', async (_event, payload) => {
     try {
       if (sidebarBridge.isDelegated(payload?.sessionId)) throw new Error('Delegated agents are read-only.');
@@ -2588,6 +2598,10 @@ app.whenReady().then(async () => {
     readPane: async (paneId, lines = 16, source = 'recent') => {
       const res = await sendClient.readPane(paneId, { source, lines, strip_ansi: true });
       return res?.read?.text || '';
+    },
+    readSuggestion: async (paneId) => {
+      const res = await sendClient.readPane(paneId, { source: 'visible', lines: 1 });
+      return res?.screen?.suggestion || null;
     },
     terminalBridge,
     launchActions: {
