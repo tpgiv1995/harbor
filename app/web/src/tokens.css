@@ -1,0 +1,97 @@
+/* Slate design tokens for harbor-web. Font files and :root values match
+   app/src/renderer/styles.css; layout lives in web.css. */
+
+@import './motion.css';
+
+@font-face {
+  font-family: 'Schibsted Grotesk';
+  font-weight: 400;
+  src: url('../../assets/fonts/SchibstedGrotesk-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Schibsted Grotesk';
+  font-weight: 600;
+  src: url('../../assets/fonts/SchibstedGrotesk-SemiBold.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Schibsted Grotesk';
+  font-weight: 700;
+  src: url('../../assets/fonts/SchibstedGrotesk-Bold.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-weight: 400;
+  src: url('../../assets/fonts/IBMPlexMono-400.woff2') format('woff2');
+  font-display: swap;
+}
+
+:root {
+  --bg: #0b0c0f;
+  --tx: #f6f7ff;
+  --sub: #a4abbd;
+  /* AA-compliant against every surface in this sheet (worst case 4.66:1 on
+     --bg #0b0c0f). It was #666d7c, which measured 3.60:1 behind .hdr-project
+     and failed the contrast sweep rel-5 asked for. Chosen by walking lightness
+     up the same hue until the DARKEST surface cleared 4.5, so no caller has to
+     know which surface it lands on. */
+  --fnt: #7e8594;
+  --ac: #437ffe;
+  --ac2: #79a6ff;
+  --ac-rgb: 67 127 254;
+  --sel: #e8973f;
+  --sel-rgb: 232 151 63;
+  --live: #24b27c;
+  --warn: #d4a537;
+  --err: #d98a8a;
+  --ln: rgba(255, 255, 255, 0.1);
+  --ln2: rgba(255, 255, 255, 0.18);
+  --font-ui: 'Schibsted Grotesk', Inter, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --glass-panel: rgba(17, 18, 23, 0.55);
+  --glass-blur: blur(24px) saturate(1.1);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+
+  /* Spacing scale (rel-mobile redesign). Prefer these over ad-hoc px so the
+     redesigned surfaces share one rhythm. 4px base step. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-9: 36px;
+  --space-10: 40px;
+
+  /* Corner radii. --radius-bubble keeps the existing chat-bubble curve. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-bubble: 16px;
+  --radius-pill: 999px;
+
+  /* Minimum touch target, enforced across interactive elements. */
+  --touch-min: 44px;
+
+  /* Bottom tab bar height (excludes the safe-area inset, added where used). */
+  --bottomnav-h: 56px;
+
+  /* Motion. Consumed by motion.css and any component transition. */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 280ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Elevation. Sheets rise from the bottom; popovers hover. */
+  --shadow-sheet: 0 -8px 32px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.4);
+}

@@ -1,0 +1,22 @@
+ ▐▛███▛█   Claude Code v2.1.286
+▝▜██████▀  Haiku 4.5 · Claude Max
+ ▝▝   ▝▝   ~\AppData\Local\Temp\harbor-perm-cwd-AbC123
+
+
+❯ Use the Bash tool to run exactly this command and nothing else: mkdir harbor-perm-probe-dir                           
+
+● Bash(mkdir harbor-perm-probe-dir)                                                                                     
+  ⎿  Waiting…
+ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Create a directory named harbor-perm-probe-dir
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ mkdir harbor-perm-probe-dir
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to C:\Users\you\AppData\Local\Temp\harbor-perm-cwd-AbC123 from this project
+   3. No
+
+ Esc to cancel · Tab to amend

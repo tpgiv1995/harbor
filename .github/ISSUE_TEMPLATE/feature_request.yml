@@ -1,0 +1,15 @@
+name: Feature request
+description: Describe a workflow Harbor could support better
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the concrete workflow and where Harbor gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed outcome
+      description: Explain the resulting behavior and any alternatives you use today.

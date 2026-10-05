@@ -1,0 +1,13 @@
+ ☐ Solo
+
+Which solo option?
+
+  1. Solo one
+     First solo option.
+  2. Solo two
+     Second solo option.
+❯ 3. my typed answer
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in VS Code · Esc to cancel

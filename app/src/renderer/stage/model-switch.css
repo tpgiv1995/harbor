@@ -1,0 +1,18 @@
+.model-switch-card { display: flex; flex-direction: column; gap: 10px; margin: 12px; padding: 12px 14px; border: 1px solid rgb(var(--sel-rgb) / 30%); border-left: 3px solid var(--warn); border-radius: 12px; background: rgb(var(--sel-rgb) / 5%); color: var(--tx); min-height: 0; max-height: 72%; flex: 0 1 auto; font: 400 13px/1.45 var(--font-ui); }
+.model-switch-card .prompt-eyebrow { flex: 0 0 auto; color: var(--warn); font: 600 10px var(--font-ui); text-transform: uppercase; letter-spacing: .12em; }
+.model-switch-detail { min-height: 30px; overflow: auto; }
+.model-switch-card h3 { margin: 0 0 8px; font-size: 15px; line-height: 1.4; }
+.model-switch-prose { overflow-wrap: anywhere; line-height: 1.5; margin: 0 0 8px; }
+.model-switch-options { flex: 0 0 auto; display: grid; gap: 4px; }
+.model-switch-card button { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 8px 10px; border: 1px solid var(--ln); border-radius: 7px; background: rgb(255 255 255 / 3%); color: var(--tx); font: inherit; text-align: left; cursor: pointer; }
+.model-option-label { flex: 1; }
+.model-switch-card button:hover { background: rgb(var(--ac-rgb) / 12%); border-color: var(--ac); }
+.model-switch-card button:focus-visible { outline: 2px solid var(--ac); outline-offset: 2px; }
+.model-switch-card button:disabled { opacity: .55; cursor: wait; }
+.model-switch-footer { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; gap: 8px; color: var(--fnt); font: 400 10px var(--font-mono); }
+.model-switch-card .model-switch-cancel { border-radius: 999px; background: transparent; min-height: 30px; padding: 4px 12px; color: var(--sub); }
+@media (max-width: 600px) {
+  .model-switch-card { max-height: 68vh; margin: 10px; }
+  .model-switch-card button { min-height: 44px; }
+  .model-switch-footer { font-size: 11px; }
+}

@@ -1,0 +1,8 @@
+.question-reply-collapsed { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; margin: 10px 14px; border: 1px solid rgb(var(--ac-rgb) / 30%); border-left: 3px solid var(--ac); border-radius: 8px; color: var(--sub); background: rgb(var(--ac-rgb) / 7%); font: 400 12px var(--font-ui); flex-shrink: 0; }
+.question-reply-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 10px; margin: 0 0 6px; border-left: 2px solid var(--ac); color: var(--ac2, var(--ac)); background: rgb(var(--ac-rgb) / 8%); font: 500 12px/1.4 var(--font-ui); flex-shrink: 0; }
+.question-reply-banner button { border: 0; color: var(--ac2, var(--ac)); background: transparent; padding: 3px 6px; font: inherit; text-decoration: underline; cursor: pointer; }
+.question-reply-collapsed button, .askf-head .askf-chat { border: 1px solid rgb(var(--ac-rgb) / 45%); color: var(--ac2, var(--ac)); background: rgb(var(--ac-rgb) / 12%); padding: 6px 10px; border-radius: 999px; font: 600 11px var(--font-ui); cursor: pointer; }
+.askf-head .askf-chat { margin-left: auto; flex: 0 0 auto; }
+.askf-head { flex-wrap: nowrap; }
+.askf-head .askf-progress { margin-left: 0; }
+.askf-stepper { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; color: var(--sub); font-size: 12px; }

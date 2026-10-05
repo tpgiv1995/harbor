@@ -1,0 +1,313 @@
+/* Mobile Tasks view. Self-contained; foundation tokens only.
+   Imported by TasksView.jsx. Do not reintroduce these rules in styles.css. */
+
+.tasks-mobile {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0;
+  font-family: var(--font-ui);
+  color: var(--tx);
+}
+
+/* The app header already names the view; this row only needs WHICH day. */
+.tasks-mobile-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.tasks-mobile-title { display: none; }
+
+.tasks-mobile-date {
+  color: var(--sub);
+  font-size: 13px;
+}
+
+/* Filter chips scroll sideways; fade at the trailing edge so a cut-off chip
+   reads as "more this way" rather than a rendering fault. */
+.tasks-view-tabs {
+  display: flex;
+  gap: var(--space-2);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: var(--space-3) var(--space-4) var(--space-1);
+  scroll-padding-left: var(--space-4);
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
+}
+
+.tasks-view-tabs > * {
+  scroll-snap-align: start;
+}
+
+.tasks-view-tabs::after {
+  content: '';
+  flex: 0 0 var(--space-1);
+}
+
+.tasks-view-tab {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--touch-min);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--ln);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--sub);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.tasks-view-tab.active {
+  border-color: rgba(var(--ac-rgb) / 0.45);
+  background: rgba(var(--ac-rgb) / 0.12);
+  color: var(--ac2);
+}
+
+.tasks-view-count {
+  min-width: 18px;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+}
+
+.tasks-mobile-search {
+  padding: 0 var(--space-4) var(--space-2);
+}
+
+.tasks-mobile-search input {
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--ln);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--tx);
+  font-size: 16px; /* iOS: avoid focus zoom */
+  font-family: inherit;
+}
+
+.tasks-mobile-add {
+  display: flex;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+.tasks-mobile-add input {
+  flex: 1 1 auto;
+  min-height: var(--touch-min);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--ln);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--tx);
+  font-size: 16px;
+  font-family: inherit;
+}
+
+.tasks-mobile-add-btn {
+  min-width: 64px;
+  min-height: var(--touch-min);
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--ac), #2f5fd6);
+  color: #fff;
+  font-weight: 600;
+  font-family: inherit;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.tasks-mobile-add-btn:disabled {
+  opacity: 0.45;
+}
+
+.tasks-mobile-list {
+  flex: 1 1 auto;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 var(--space-2);
+}
+
+.tasks-mobile-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-10) var(--space-6);
+  color: var(--sub);
+  text-align: center;
+}
+
+.tasks-mobile-empty-title {
+  margin: 0;
+  color: var(--tx);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.tasks-mobile-empty-hint {
+  margin: 0;
+  max-width: 22em;
+  color: var(--fnt);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.mtask-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-height: var(--touch-min);
+  margin: var(--space-1) var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.03);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.mtask-row.done .mtask-title {
+  color: var(--fnt);
+  text-decoration: line-through;
+}
+
+.mtask-check,
+.mtask-star {
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--touch-min);
+  height: var(--touch-min);
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fnt);
+  font-size: 16px;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.mtask-check::before, .mtask-star::before { border: 1px solid var(--ln); border-radius: 50%; content: ''; inset: 7px; position: absolute; }
+
+.mtask-check.on {
+  border-color: var(--live);
+  background: rgba(36, 178, 124, 0.18);
+  color: #8ce8c0;
+}
+
+.mtask-star.on {
+  border-color: rgba(var(--sel-rgb) / 0.55);
+  color: var(--sel);
+}
+
+.mtask-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: var(--space-3);
+}
+
+.mtask-title {
+  display: block;
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mtask-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.mtask-meta-bit.due-overdue {
+  color: var(--err);
+}
+
+.mtask-meta-bit.due-today {
+  color: var(--sel);
+}
+
+.mtask-meta-bit.myday {
+  color: var(--sel);
+}
+
+.tasks-mobile-done {
+  margin: var(--space-3) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--sub);
+}
+
+.tasks-mobile-done summary {
+  min-height: var(--touch-min);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.tasks-mobile-lists {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  overflow-x: auto;
+  padding: var(--space-2) var(--space-4) 0;
+}
+
+.tasks-list-chip {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--tag-color) 18%, transparent);
+  color: var(--sub);
+  font-size: 12px;
+  min-height: var(--touch-min);
+  display: inline-flex;
+  align-items: center;
+}
+
+.app-toast {
+  position: fixed;
+  right: calc(var(--space-4) + var(--safe-right));
+  bottom: calc(var(--bottomnav-h) + var(--space-4) + var(--safe-bottom));
+  left: calc(var(--space-4) + var(--safe-left));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--ln);
+  background: rgba(20, 21, 28, 0.95);
+  color: var(--tx);
+  font-size: 13px;
+  z-index: 30;
+  box-shadow: var(--shadow-pop);
+}
+
+.app-toast button {
+  width: var(--touch-min);
+  height: var(--touch-min);
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  font-size: 20px;
+}

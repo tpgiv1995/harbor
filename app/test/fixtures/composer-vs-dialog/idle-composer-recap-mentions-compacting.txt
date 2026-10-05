@@ -1,0 +1,16 @@
+  neither a group nor P1.
+
+✻ Cooked for 2m 29s
+
+※ recap: You're replacing the demo site's password
+  gate with single sign-on, giving read access to
+  the reviewers and admin to the two owners. The
+  handoff is written; next is compacting and
+  picking it up in a fresh session. (disable
+  recaps in /config)
+
+──────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────
+  opus 5 xhigh │ Example Reporting rollover-and-ui …
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← …

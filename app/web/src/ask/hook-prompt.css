@@ -1,0 +1,37 @@
+.phone-hook-prompt { min-height: 0; flex-shrink: 0; max-height: 68vh; display: flex; flex-direction: column; }
+.phone-hook-prompt .askf { display: flex; flex-direction: column; min-height: 0; max-height: calc(68vh - 20px); margin: 10px; padding: 12px; gap: 8px; border: 1px solid rgb(var(--ac-rgb) / 30%); border-left: 3px solid var(--ac); border-radius: var(--radius-md); background: rgb(var(--ac-rgb) / 7%); color: var(--tx); font: 400 14px var(--font-ui); }
+.phone-hook-prompt .askf-body { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.phone-hook-prompt .askf-head, .phone-hook-prompt .askf-foot { flex-shrink: 0; }
+.phone-hook-prompt .askf-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.phone-hook-prompt .askf-eyebrow { font-size: 12px; font-weight: 600; }
+.phone-hook-prompt .askf-progress { display: none; }
+.phone-hook-prompt .askf-foot { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.phone-hook-prompt .askf-q-head, .phone-hook-prompt .askf-q-foot { display: flex; align-items: center; gap: 8px; }
+.phone-hook-prompt .askf-q { margin: 0 0 16px; padding: 8px 0; border-top: 1px solid var(--ln); }
+.phone-hook-prompt .askf-q-text { font-weight: 600; line-height: 1.5; }
+.phone-hook-prompt .askf-q-n, .phone-hook-prompt .askf-hints, .phone-hook-prompt .askf-opt-desc { color: var(--sub); font-size: 12px; }
+.phone-hook-prompt .askf-chip { color: var(--ac2); font-weight: 600; }
+.phone-hook-prompt .askf-opt-list { display: grid; gap: 6px; }
+.phone-hook-prompt button { min-height: var(--touch-min); border: 1px solid var(--ln2); border-radius: var(--radius-sm); padding: 8px 10px; color: var(--tx); background: rgb(255 255 255 / 3%); font: inherit; text-align: left; }
+.phone-hook-prompt .askf-chat { min-height: var(--touch-min); max-width: 120px; font-size: 12px; color: var(--ac2); border-color: rgb(var(--ac-rgb) / 45%); background: rgb(var(--ac-rgb) / 12%); border-radius: var(--radius-pill); text-align: center; }
+.phone-hook-prompt .askf-opt { display: flex; align-items: center; gap: 10px; }
+.phone-hook-prompt .askf-opt.on { background: rgb(var(--ac-rgb) / 18%); border-color: var(--ac); }
+.phone-hook-prompt .askf-opt-body { display: grid; gap: 4px; }
+.phone-hook-prompt .askf-key { width: 22px; height: 22px; flex: 0 0 22px; display: grid; place-items: center; border-radius: 5px; background: rgb(255 255 255 / 8%); color: var(--sub); font: 600 11px var(--font-mono); }
+.phone-hook-prompt input:not([type=checkbox]), .phone-hook-prompt textarea { box-sizing: border-box; width: 100%; min-height: var(--touch-min); color: var(--tx); background: var(--bg); border: 1px solid var(--ln2); border-radius: 6px; padding: 9px; font: inherit; }
+.phone-hook-prompt .askf-other { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.phone-hook-prompt .askf-preview { margin: 8px 0; }
+.phone-hook-prompt pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.phone-hook-prompt .askf-err { color: var(--err); }
+.phone-hook-prompt .askf-primary { background: var(--ac); border-color: var(--ac); color: white; font-weight: 600; }
+.phone-hook-prompt .askf-hints { font-size: 10px; }
+.phone-hook-prompt .askf-stepper button { font-size: 12px; padding: 6px 8px; }
+.phone-hook-prompt button:disabled { opacity: .45; }
+.phone-hook-prompt .prompt-form { max-height: calc(68vh - 20px); margin: 10px; }
+.phone-hook-prompt .prompt-option, .phone-hook-prompt .prompt-primary, .phone-hook-prompt .prompt-secondary, .phone-hook-prompt .prompt-url a, .phone-hook-prompt .prompt-url button { min-height: var(--touch-min); }
+.phone-hook-prompt .prompt-actions { gap: 6px; }
+.phone-hook-prompt .prompt-actions button { font-size: 12px; padding: 8px 12px; }
+.phone-hook-prompt .prompt-checks label { min-height: var(--touch-min); }
+.phone-hook-prompt .prompt-field select { min-height: var(--touch-min); }
+.phone-hook-prompt .prompt-hints { display: none; }
+.phone-hook-prompt :focus-visible { outline: 2px solid var(--ac); outline-offset: 2px; }

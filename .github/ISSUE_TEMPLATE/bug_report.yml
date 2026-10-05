@@ -1,0 +1,22 @@
+name: Bug report
+description: Report a reproducible Harbor problem
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, Harbor commit or release, and provider CLI versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and observed result
+      description: Include the expected result and a small synthetic example. Remove private transcripts and credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Relevant output
+      description: Paste the exact error or attach a screenshot with private information removed. Do not attach a crash dump (.dmp) file here; it is a snapshot of process memory and can leak secrets, tokens or conversation content that never shows up in a log. Describe the crash (exception code, when it happened) instead, or see SECURITY.md for a private path if you must share one.

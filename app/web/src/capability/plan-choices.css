@@ -1,0 +1,11 @@
+.plan-choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.plan-choices button { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 12px; border: 1px solid var(--ln2); border-radius: 10px; background: var(--well); color: var(--tx); }
+.plan-choices button[aria-pressed="true"] { border-color: var(--plan-color); background: color-mix(in srgb, var(--plan-color) 14%, transparent); }
+.plan-letter { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--plan-color); background: color-mix(in srgb, var(--plan-color) 14%, transparent); font-weight: 700; }
+.plan-choices button:disabled { opacity: .5; }
+.cap-plan { margin: 16px 0; }
+.cap-plan-current { margin: 0 0 8px; color: var(--sub); font-size: 13px; }
+.cap-plan-confirm { padding: 12px; border: 1px solid var(--ln2); border-radius: 12px; margin-top: 12px; }
+.cap-plan-confirm p { margin: 0 0 10px; }
+.cap-plan-confirm button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--ln2); border-radius: 10px; background: var(--well); color: var(--tx); margin-right: 8px; }
+.newsession-summary { margin: 0 0 10px; font-size: 13px; color: var(--sub); }

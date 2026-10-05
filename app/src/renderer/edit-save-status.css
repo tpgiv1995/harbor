@@ -1,0 +1,24 @@
+.edit-save-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--ln2, #925e46);
+  border-radius: 10px;
+  color: var(--tx, var(--text, #f3d7b5));
+  background: var(--bg, var(--surface, #211e1a));
+}
+.edit-save-status span { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; }
+.edit-save-status button {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--ln2, #925e46);
+  border-radius: 8px;
+  background: var(--glass-panel, #211e1a);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.edit-save-status button:focus-visible { outline: 2px solid var(--ac, #437ffe); outline-offset: 2px; }

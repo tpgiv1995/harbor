@@ -1,0 +1,307 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const APP = path.join(path.dirname(__dirname), 'app');
+const model = require(path.join(APP, 'src/shared/notes-model.cjs'));
+const notesFile = require(path.join(APP, 'src/shared/tasks-file.cjs'));
+const { createNoteStore } = require(path.join(APP, 'src/main/providers/notes.js'));
+
+const QUIET = { error() {}, warn() {}, log() {} };
+
+function readConfiguredFile() {
+  try {
+    const configFile = notesFile.defaultConfigFile();
+    return JSON.parse(fs.readFileSync(configFile, 'utf8')).paths?.notesFile || null;
+  } catch { return null; }
+}
+
+function parseArgs(argv) {
+  const flags = {};
+  const positional = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (!arg.startsWith('--')) {
+      positional.push(arg);
+      continue;
+    }
+    const [name, inlineValue] = arg.slice(2).split(/=(.*)/s);
+    let value;
+    if (inlineValue !== undefined) value = inlineValue;
+    else if (['json', 'help'].includes(name)) value = true;
+    else {
+      i += 1;
+      value = argv[i];
+    }
+    if (name === 'tag' || name === 'topic') (flags.tag ||= []).push(value);
+    else flags[name] = value;
+  }
+  return { flags, positional };
+}
+
+function readStdin() {
+  if (process.stdin.isTTY) return '';
+  return fs.readFileSync(0, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function resolveNote(doc, needle) {
+  if (!needle) throw new Error('which note? pass an id or part of its title');
+  const exact = doc.notes.find((note) => note.id === needle);
+  if (exact) return exact;
+  const query = String(needle).toLowerCase();
+  const matches = doc.notes.filter((note) => note.title.toLowerCase().includes(query));
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) throw new Error(`no note matches "${needle}"`);
+  const candidates = matches.slice(0, 10).map((note) => `  ${note.id}  ${note.title || '(untitled)'}`).join('\n');
+  throw new Error(`"${needle}" matches ${matches.length} notes; use an id or a longer phrase:\n${candidates}`);
+}
+
+// A group is addressable by id, then exact (case-insensitive) name, then a
+// unique name substring. An ambiguous phrase is an error listing candidates,
+// never a fuzzy pick: a match that guesses is how the wrong group gets deleted.
+function resolveGroup(doc, needle) {
+  if (!needle) throw new Error('which group? pass an id or its name');
+  const exact = doc.groups.find((group) => group.id === needle);
+  if (exact) return exact;
+  const query = String(needle).toLowerCase();
+  const named = doc.groups.filter((group) => group.name.toLowerCase() === query);
+  if (named.length === 1) return named[0];
+  const partial = doc.groups.filter((group) => group.name.toLowerCase().includes(query));
+  if (partial.length === 1) return partial[0];
+  if (partial.length === 0) throw new Error(`no group matches "${needle}"`);
+  const candidates = partial.map((group) => `  ${group.id}  ${group.name}`).join('\n');
+  throw new Error(`"${needle}" matches ${partial.length} groups; use an id or exact name:\n${candidates}`);
+}
+
+function groupJson(doc, group) {
+  const counts = model.groupCounts(doc);
+  return { ...group, count: counts[group.id] || 0 };
+}
+
+function noteJson(note) {
+  return {
+    ...note,
+    createdAt: new Date(note.createdAt).toISOString(),
+    updatedAt: new Date(note.updatedAt).toISOString(),
+  };
+}
+
+const USAGE = `harbor-notes: read and edit Harbor's notes scratchpad.
+
+  harbor-notes list [--group ID|NAME] [--topic TAG] [--json]
+  harbor-notes show <id|title-fragment> [--json]
+  harbor-notes add [--title TEXT] [--body TEXT] [BODY...] [--group ID|NAME] [--topic TAG]... [--json]
+  harbor-notes update <id> [--title TEXT] [--body TEXT] [--append TEXT] [--group ID|NAME] [--topic TAG]... [--json]
+  harbor-notes rm <id> [--json]
+  harbor-notes pin <id> [--json]
+  harbor-notes unpin <id> [--json]
+  harbor-notes group list [--json]
+  harbor-notes group add <name> [--color HEX] [--json]
+  harbor-notes group rename <id|name> <new name> [--json]
+  harbor-notes group color <id|name> <HEX|clear> [--json]
+  harbor-notes group rm <id|name> [--json]
+  harbor-notes file [--json]
+
+When add has no --body or BODY arguments, piped standard input becomes the body.
+Show accepts an id or a unique title fragment. Mutating a note requires its id.
+--tag is an accepted alias for --topic. On update, --topic REPLACES a note's
+topics. Deleting a group moves its notes to the first remaining group.`;
+
+async function main(argv) {
+  const { flags, positional } = parseArgs(argv);
+  const command = positional[0] || (flags.help ? 'help' : 'list');
+  if (command === 'help' || flags.help) {
+    console.log(USAGE);
+    return 0;
+  }
+
+  const store = createNoteStore({
+    file: notesFile.resolveNotesFile({ configuredFile: readConfiguredFile() }),
+    logger: QUIET,
+  });
+  const json = Boolean(flags.json);
+  let repairDeferred = false;
+  const out = (payload, text) => {
+    if (repairDeferred) payload = { ...payload, repairDeferred: true };
+    if (json) console.log(JSON.stringify(payload, null, 2));
+    else if (text !== undefined) console.log(text);
+  };
+  const apply = async (op) => {
+    const result = await store.mutate(op);
+    if (!result?.ok) throw Object.assign(new Error(result?.reason || 'that change did not save'), { retryable: result?.retryable === true });
+    repairDeferred = false;
+    return result;
+  };
+
+  if (command === 'file') {
+    out({ ok: true, file: store.file }, store.file);
+    return 0;
+  }
+
+  const loaded = await store.read();
+  if (!loaded?.ok || !loaded.doc) {
+    throw Object.assign(new Error(loaded?.reason || 'the notes file could not be read'), { retryable: loaded?.retryable === true });
+  }
+  const { doc } = loaded;
+  repairDeferred = loaded.repairDeferred === true;
+  switch (command) {
+    case 'list': {
+      const groupId = flags.group ? resolveGroup(doc, flags.group).id : null;
+      const topic = flags.tag ? flags.tag[0] : null;
+      const notes = model.selectNotes(doc, { query: flags.search || '', groupId, tag: topic });
+      if (json) {
+        out({ ok: true, file: store.file, count: notes.length, notes: notes.map(noteJson) });
+        return 0;
+      }
+      if (!notes.length) {
+        console.log('(no notes)');
+        return 0;
+      }
+      for (const note of notes) {
+        console.log(`${note.pinned ? '* ' : ''}${note.title || '(untitled)'}  [${note.id}]`);
+      }
+      return 0;
+    }
+    case 'show': {
+      const note = resolveNote(doc, positional.slice(1).join(' '));
+      if (json) {
+        out({ ok: true, note: noteJson(note) });
+        return 0;
+      }
+      console.log(`${note.title || '(untitled)'}  [${note.id}]`);
+      if (note.tags.length) console.log(`tags: ${note.tags.join(', ')}`);
+      if (note.body) console.log(`\n${note.body}`);
+      return 0;
+    }
+    case 'add': {
+      const positionalBody = positional.slice(1).join(' ');
+      const body = flags.body !== undefined ? flags.body : (positionalBody || readStdin());
+      const groupId = flags.group ? resolveGroup(doc, flags.group).id : undefined;
+      const result = await apply({
+        type: 'note.add',
+        title: flags.title || '',
+        body,
+        tags: flags.tag || [],
+        ...(groupId ? { groupId } : {}),
+      });
+      const note = result.doc.notes.find((item) => item.id === result.noteId);
+      out({ ok: true, note: noteJson(note) }, `added: ${note.title || '(untitled)'}  [${note.id}]`);
+      return 0;
+    }
+    case 'update': {
+      const id = positional[1];
+      const note = doc.notes.find((item) => item.id === id);
+      if (!note) throw new Error(`no note has id "${id || ''}"`);
+      const patch = {};
+      if (flags.title !== undefined) patch.title = flags.title;
+      if (flags.body !== undefined) patch.body = flags.body;
+      if (flags.group !== undefined) patch.groupId = resolveGroup(doc, flags.group).id;
+      // --topic on update REPLACES the note's topics (an accumulating set of
+      // --topic flags becomes the whole list); clearing is `--topic ''`.
+      if (flags.tag !== undefined) patch.tags = flags.tag.filter(Boolean);
+      if (Object.keys(patch).length === 0 && flags.append === undefined) {
+        throw new Error('nothing to change; pass --title, --body, --group, --topic or --append');
+      }
+      // --append rides its own reducer op so the read-modify-write happens
+      // under the store's lock; composing body+append from the read taken up
+      // here would erase an app flush that landed in between. Two ops means
+      // partial application is possible, so a failed second op reports what
+      // DID land rather than claiming nothing changed.
+      let result = null;
+      if (Object.keys(patch).length) result = await apply({ type: 'note.update', noteId: id, patch });
+      if (flags.append !== undefined) {
+        try {
+          result = await apply({ type: 'note.append', noteId: id, text: flags.append });
+        } catch (error) {
+          if (result) {
+            const landed = result.doc.notes.find((item) => item.id === id);
+            out(
+              { ok: false, partial: true, retryable: error.retryable === true, note: noteJson(landed), error: String(error.message || error) },
+              `title/body updated, but the append did NOT land: ${error.message || error}`,
+            );
+            return 1;
+          }
+          throw error;
+        }
+      }
+      const updated = result.doc.notes.find((item) => item.id === id);
+      out({ ok: true, note: noteJson(updated) }, `updated: ${updated.title || '(untitled)'}  [${id}]`);
+      return 0;
+    }
+    case 'rm': {
+      const id = positional[1];
+      const note = doc.notes.find((item) => item.id === id);
+      if (!note) throw new Error(`no note has id "${id || ''}"`);
+      await apply({ type: 'note.remove', noteId: id });
+      out({ ok: true, removed: 1, id, title: note.title }, `deleted: ${note.title || '(untitled)'}`);
+      return 0;
+    }
+    case 'pin':
+    case 'unpin': {
+      const id = positional[1];
+      if (!doc.notes.some((item) => item.id === id)) throw new Error(`no note has id "${id || ''}"`);
+      const result = await apply({ type: 'note.pin', noteId: id, pinned: command === 'pin' });
+      const note = result.doc.notes.find((item) => item.id === id);
+      out({ ok: true, note: noteJson(note) }, `${command === 'pin' ? 'pinned' : 'unpinned'}: ${note.title || '(untitled)'}`);
+      return 0;
+    }
+    case 'group': {
+      const sub = positional[1] || 'list';
+      if (sub === 'list') {
+        const rows = doc.groups.map((group) => groupJson(doc, group));
+        if (json) { out({ ok: true, groups: rows }); return 0; }
+        for (const group of rows) console.log(`${group.name}  [${group.id}]  ${group.count}`);
+        return 0;
+      }
+      if (sub === 'add') {
+        const name = flags.name !== undefined ? flags.name : positional.slice(2).join(' ');
+        const result = await apply({ type: 'group.add', name, color: flags.color });
+        const group = result.doc.groups.find((g) => g.id === result.groupId);
+        out({ ok: true, group: groupJson(result.doc, group) }, `added group: ${group.name}  [${group.id}]`);
+        return 0;
+      }
+      if (sub === 'rename') {
+        const group = resolveGroup(doc, positional[2]);
+        const name = flags.name !== undefined ? flags.name : positional.slice(3).join(' ');
+        const result = await apply({ type: 'group.rename', groupId: group.id, name });
+        const renamed = result.doc.groups.find((g) => g.id === group.id);
+        out({ ok: true, group: groupJson(result.doc, renamed) }, `renamed group: ${renamed.name}  [${group.id}]`);
+        return 0;
+      }
+      if (sub === 'color') {
+        const group = resolveGroup(doc, positional[2]);
+        const raw = positional[3] !== undefined ? positional[3] : flags.color;
+        const color = (raw === undefined || raw === 'clear' || raw === 'none' || raw === '') ? null : raw;
+        const result = await apply({ type: 'group.color', groupId: group.id, color });
+        const recoloured = result.doc.groups.find((g) => g.id === group.id);
+        out({ ok: true, group: groupJson(result.doc, recoloured) }, `${color ? 'recoloured' : 'reset colour of'} group: ${recoloured.name}`);
+        return 0;
+      }
+      if (sub === 'rm') {
+        const group = resolveGroup(doc, positional[2]);
+        const result = await apply({ type: 'group.remove', groupId: group.id });
+        const home = result.doc.groups[0];
+        const moved = result.movedNotes || 0;
+        out(
+          { ok: true, removed: group.id, movedNotes: moved, movedTo: home.id },
+          `deleted group: ${group.name} (${moved} note${moved === 1 ? '' : 's'} moved to ${home.name})`,
+        );
+        return 0;
+      }
+      throw new Error(`unknown group command "${sub}"\n\n${USAGE}`);
+    }
+    default:
+      throw new Error(`unknown command "${command}"\n\n${USAGE}`);
+  }
+}
+
+main(process.argv.slice(2))
+  .then((code) => process.exit(code || 0))
+  .catch((error) => {
+    const message = String(error?.message || error);
+    if (process.argv.includes('--json')) console.log(JSON.stringify({ ok: false, error: message, retryable: error?.retryable === true }, null, 2));
+    console.error(`harbor-notes: ${message}`);
+    process.exit(1);
+  });

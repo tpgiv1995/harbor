@@ -1,0 +1,27 @@
+.conv-lightbox-backdrop:has(.conv-lightbox-copy) {
+  padding: 64px 24px 24px;
+}
+
+.conv-lightbox-backdrop .conv-lightbox-img {
+  max-width: min(calc(100vw - 48px), 1600px);
+  max-height: calc(100vh - 112px);
+}
+
+.conv-lightbox-copy {
+  position: absolute;
+  top: 16px;
+  right: 24px;
+  min-width: 94px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--ln2);
+  border-radius: 8px;
+  background: var(--glass-2);
+  color: var(--tx);
+  font: 500 12px var(--font-ui);
+  cursor: pointer;
+}
+
+.conv-lightbox-copy:hover { background: #29313e; }
+.conv-lightbox-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.conv-lightbox-copy:disabled { cursor: wait; }

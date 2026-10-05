@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Harbor phone server, as a macOS LaunchAgent.
+
+  EDIT THE PATHS BELOW before installing: WorkingDirectory must be your
+  checkout's `app/` directory, the first ProgramArguments entry must be the node
+  you actually have (`command -v node`), and USERNAME must be your account.
+
+  Install:
+    cp com.harbor.server.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.harbor.server.plist
+    tail -f /tmp/harbor-server.out /tmp/harbor-server.err
+
+  Uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.harbor.server.plist
+
+  This is a template with the right shape. Harbor has never been run on macOS,
+  so treat it as a starting point and read setup/macos/README.md first.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.harbor.server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>src/server/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/USERNAME/dev/harbor/app</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Loopback by default. To reach it from a phone, either set this to the
+         machine's own Tailscale address (`tailscale ip -4`) or leave it and put
+         `tailscale serve` in front. Anything that is neither loopback nor
+         100.64.0.0/10 is refused at startup, on purpose. -->
+    <key>HARBOR_SERVER_HOST</key>
+    <string>127.0.0.1</string>
+    <key>HARBOR_SERVER_PORT</key>
+    <string>8787</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/harbor-server.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/harbor-server.err</string>
+</dict>
+</plist>

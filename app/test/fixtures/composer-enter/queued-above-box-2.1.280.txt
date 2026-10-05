@@ -1,0 +1,39 @@
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Haiku 4.5 · Claude Max
+  ▝▝ ▝▝    ~\AppData\Local\Temp\harbor-enter-cwd-qaynAs
+
+
+❯ Use the Bash tool to run: sleep 12 ; then reply done.  probe-Q-38113                                                  
+
+  Bash(sleep 12; echo "done")
+  ⎿  Running…
+
+✽ Germinating… (5s · ↓ 253 tokens)
+
+
+❯ queued follow-up 38113                                                                                                
+  ctrl+x ctrl+s to send now
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  personal  ·  Haiku 4.5  ·  harbor-enter-cwd-qaynAs  ·  ctx 33%  ·  5h 6%  ·  wk 62%  ·  $0.08
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

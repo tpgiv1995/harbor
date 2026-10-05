@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Harbor board export</title>
+  </head>
+  <body>
+    <!-- The entry mounts a real Excalidraw App here purely so the content
+         FontFaces register (a bare module import registers none); the export
+         itself still goes through exportToBlob. -->
+    <div id="root" style="position: fixed; inset: 0; width: 100vw; height: 100vh;"></div>
+    <!-- Same trap as index.html (2026-08-26): Excalidraw resolves CONTENT-font
+         urls against normalizeBaseUrl(EXCALIDRAW_ASSET_PATH), and a RELATIVE
+         base resolves against location.origin, which under file:// is the drive
+         root (or "null"), so the local font 404s and Excalidraw silently falls
+         back to its esm.sh CDN the moment any text renders. ABSOLUTE, always,
+         and BEFORE the module loads. The export runner additionally blocks and
+         records every http/https request, so a regression here fails the export
+         loudly instead of leaking to a CDN. -->
+    <script>window.EXCALIDRAW_ASSET_PATH = new URL('./excalidraw-assets/', document.baseURI).href;</script>
+    <script type="module" src="/src/board-export/entry.js"></script>
+  </body>
+</html>

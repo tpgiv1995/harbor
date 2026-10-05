@@ -1,0 +1,9 @@
+{"timestamp":"2026-07-21T01:35:28.639Z","type":"session_meta","payload":{"session_id":"019f8250-fixture","id":"019f8250-fixture","timestamp":"2026-07-21T01:35:28.497Z","cwd":"/tmp/harbor-codex-fixture","originator":"codex_cli_rs","cli_version":"0.144.6","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-07-21T01:35:29.000Z","type":"turn_context","payload":{"turn_id":"turn-fixture","cwd":"/tmp/harbor-codex-fixture","model":"gpt-5.6-sol","approval_policy":"never"}}
+{"timestamp":"2026-07-21T01:35:30.000Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect the fixture.","images":[],"local_images":[]}}
+{"timestamp":"2026-07-21T01:35:31.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the fixture."}]}}
+{"timestamp":"2026-07-21T01:35:32.000Z","type":"response_item","payload":{"type":"custom_tool_call","id":"call-fixture","status":"completed","call_id":"call-fixture","name":"exec_command","input":"{\"cmd\":\"rg --files\",\"workdir\":\"/tmp/harbor-codex-fixture\"}"}}
+{"timestamp":"2026-07-21T01:35:33.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-fixture","output":"Chunk ID: fixture\nProcess exited with code 0\nFinal output:\nREADME.md"}}
+{"timestamp":"2026-07-21T01:35:34.000Z","type":"event_msg","payload":{"type":"agent_message","message":"The fixture is readable.","phase":"final_answer"}}
+{"timestamp":"2026-07-21T01:35:35.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The fixture is readable."}],"phase":"final_answer"}}
+{"timestamp":"2026-07-21T01:35:36.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-fixture"}}

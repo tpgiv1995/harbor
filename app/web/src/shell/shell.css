@@ -1,0 +1,128 @@
+/* One active conversation fills the measured visual viewport. */
+.app-shell .app-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: var(--bottomnav-h);
+}
+
+.shell-screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.shell-screen-sessions {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.shell-drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.shell-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.shell-drawer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(88vw, 380px);
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: 18px 0 48px rgba(0, 0, 0, 0.38);
+  animation: shell-drawer-in var(--dur-base) var(--ease-out);
+}
+
+.hdr-view { flex: 1 1 auto; min-width: 0; padding: 0 var(--space-2); }
+.hdr-view-kicker { color: var(--sub); font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.hdr-view h1 { font-size: 1.25rem; line-height: 1.2; margin: 0; }
+
+.shell-drawer .session-browser {
+  position: absolute;
+  width: 100%;
+}
+
+@keyframes shell-drawer-in {
+  from { translate: -100% 0; }
+  to { translate: 0 0; }
+}
+
+.shell-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shell-browse-btn {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--sub);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* The model chip was capped at max-width:92px while "Opus 5 · xhigh" needs 99,
+   so the one thing Pat has twice said he must be able to see rendered as
+   "Opus 5 · x…". And the plan chip was pinned to a 44px square, which is what
+   forced it to a single letter: the CSS and the JSX slice were enforcing each
+   other. Both now size to their content and share the row. */
+.hdr-cap-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.hdr-cap-actions button {
+  min-height: 44px;
+  min-width: 44px;
+  flex: 0 1 auto;
+  padding: 0 12px;
+  border: 1px solid var(--ln);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.11);
+  color: var(--tx);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hdr-cap-actions .hdr-model-chip {
+  border-color: rgb(var(--ac-rgb) / 38%);
+  background: rgb(var(--ac-rgb) / 14%);
+}
+.hdr-model-chip.tier-low { color: color-mix(in srgb, var(--ac) 58%, var(--sub)); }
+.hdr-model-chip.tier-medium { color: color-mix(in srgb, var(--ac) 82%, white); text-shadow: 0 0 8px rgb(var(--ac-rgb) / 38%); }
+.hdr-model-chip.tier-high { color: #dce7ff; text-shadow: 0 0 5px rgb(var(--ac-rgb) / 80%), 0 0 15px rgb(var(--ac-rgb) / 55%); }
+.hdr-cap-actions .hdr-plan-chip { background: rgba(255, 255, 255, 0.14); }
+
+.warm-empty { padding: var(--space-10) var(--space-5); }
+.conv-empty-eyebrow { margin: 0 0 var(--space-2); color: var(--ac); font-size: 11px; font-weight: 700; letter-spacing: .12em; }
+
+/* Feature-owned sheet markup receives the shared motion primitive behavior. */
+.mobile-sheet, .settings-panel, .newsession-panel { animation: motion-sheet-up var(--dur-slow) var(--ease-out) both; will-change: transform; }
+.mobile-sheet-backdrop, .settings-sheet, .newsession-sheet { animation: motion-backdrop-in var(--dur-base) var(--ease-in-out) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-sheet, .settings-panel, .newsession-panel,
+  .mobile-sheet-backdrop, .settings-sheet, .newsession-sheet { animation-duration: .01ms; }
+  .shell-drawer { animation-duration: .01ms; }
+}

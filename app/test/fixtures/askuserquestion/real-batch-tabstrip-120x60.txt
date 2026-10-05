@@ -1,0 +1,13 @@
+←  ☐ Alpha  ☐ Beta  ☐ Gamma  ✔ Submit  →
+
+Which alpha option?
+
+❯ 1. Alpha one
+     This is the first alpha option available for selection.
+  2. Alpha two
+     This is the second alpha option available for selection.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
