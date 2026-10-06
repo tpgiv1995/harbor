@@ -64,10 +64,23 @@
   height: 21px;
 }
 
-.attach-chips {
+.composer-strip {
   display: flex;
+  align-items: center;
+  justify-content: center;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
+}
+
+.composer-strip.has-chips {
+  justify-content: space-between;
+}
+
+.attach-chips {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: var(--space-2);
   overflow-x: auto;
 }
 
@@ -236,11 +249,12 @@
 /* Only drawn while a turn is running (see Composer.jsx), so it can afford to
    be a small centred chip rather than a permanent full-width bar. */
 .composer-interrupt {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);
   min-height: var(--touch-min);
-  margin: 0 auto var(--space-2);
+  margin: 0;
   padding: 9px 18px;
   border: 1px solid var(--ln2);
   border-radius: 999px;
@@ -312,19 +326,20 @@
   background: rgba(255, 255, 255, 0.07);
   color: var(--sub);
   cursor: pointer;
-  transition: transform var(--dur-base) var(--ease-spring),
-    background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 
 .composer-plus svg { width: 20px; height: 20px; }
 
+/* Open stays a plus, never an x: next to an attachment chip an x reads as
+   "remove the image" (Pat, 2026-10-06). The highlight says the tray is open. */
 .composer-plus.on {
   background: rgb(var(--ac-rgb) / 18%);
   color: var(--ac2);
-  transform: rotate(45deg);
 }
 
 .composer-tools {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);

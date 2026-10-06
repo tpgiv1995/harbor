@@ -5,6 +5,8 @@ import { CONNECTION } from '../rpc/client.js';
 import { sessionEffortOptions } from '../../../src/renderer/session-model-options.cjs';
 import './newsession.css';
 import { providerPlans, selectedPlan } from '../../../src/shared/plan-options.cjs';
+import { folderLabel, groupFolderCandidates } from '../../../src/shared/project-root.cjs';
+import { isOrchestrationCwd } from '../../../src/shared/sidebar-model.js';
 import { PlanChoices } from '../capability/PlanChoices.jsx';
 
 const PROVIDER_LABEL = {
@@ -13,10 +15,25 @@ const PROVIDER_LABEL = {
   cursor: 'Cursor',
 };
 
-function folderLabel(folder) {
-  const parts = String(folder || '').split(/[/\\]/).filter(Boolean);
-  if (!parts.length) return folder || 'Folder';
-  return parts.length > 2 ? parts.slice(-2).join('/') : parts[parts.length - 1];
+function Chevron({ open }) {
+  return (
+    <svg className="newsession-chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path
+        d={open ? 'M4.5 6 8 10l3.5-4' : 'M6 4.5 10 8l-4 3.5'}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+// The group holding `folder` as a sub-folder, so the sheet can open on it.
+function groupKeyHolding(folders, folder) {
+  return groupFolderCandidates(folders, { isOrchestration: isOrchestrationCwd })
+    .find((group) => group.children.some((child) => child.folder === folder))?.key || null;
 }
 
 // WAIT ON THE PUSH, NEVER ON A REFETCH LOOP.
@@ -75,6 +92,8 @@ export function NewSessionSheet({
   const [folders, setFolders] = useState([]);
   const [loadError, setLoadError] = useState(null);
   const [folder, setFolder] = useState('');
+  const [folderQuery, setFolderQuery] = useState('');
+  const [expanded, setExpanded] = useState(() => new Set());
   const [account, setAccount] = useState('');
   const [provider, setProvider] = useState('claude');
   const [model, setModel] = useState('opus');
@@ -92,6 +111,16 @@ export function NewSessionSheet({
   const { levels: effortLevels, effort: selectedEffort } = sessionEffortOptions({ providerOptions, model, effort });
   const profileOptions = providerPlans(options, provider);
   const plan = selectedPlan(options, provider, account);
+  const folderGroups = useMemo(
+    () => groupFolderCandidates(folders, { query: folderQuery, isOrchestration: isOrchestrationCwd }),
+    [folders, folderQuery],
+  );
+  const toggleGroup = (key) => setExpanded((previous) => {
+    const next = new Set(previous);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
 
   useEffect(() => {
     if (!open || !client || !connected) return undefined;
@@ -117,6 +146,9 @@ export function NewSessionSheet({
         setEffort(defaultEffort);
         setAccount(defaultProfile);
         setFolder(candidates[0] || '');
+        setFolderQuery('');
+        const holding = candidates[0] ? groupKeyHolding(candidates, candidates[0]) : null;
+        setExpanded(new Set(holding ? [holding] : []));
       })
       .catch((error) => {
         if (!cancelled) setLoadError(String(error.message || error));
@@ -255,21 +287,98 @@ export function NewSessionSheet({
           <fieldset className="newsession-field">
             <legend>Project folder</legend>
             {folders.length ? (
-              <div className="newsession-folder-list" role="listbox" aria-label="Project folders">
-                {folders.map((candidate) => (
-                  <button
-                    key={candidate}
-                    type="button"
-                    role="option"
-                    aria-selected={candidate === folder}
-                    className={`newsession-folder${candidate === folder ? ' on' : ''}`}
-                    onClick={() => setFolder(candidate)}
-                  >
-                    <span className="newsession-folder-label">{folderLabel(candidate)}</span>
-                    <span className="newsession-folder-path">{candidate}</span>
-                  </button>
-                ))}
-              </div>
+              <>
+                <div className="newsession-search">
+                  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                    <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+                    <path d="m10.2 10.2 3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                  <input
+                    type="search"
+                    placeholder="Search projects"
+                    value={folderQuery}
+                    onChange={(event) => setFolderQuery(event.target.value)}
+                    aria-label="Search project folders"
+                    enterKeyHint="search"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                  />
+                  {folderQuery ? (
+                    <button type="button" className="newsession-search-clear" onClick={() => setFolderQuery('')} aria-label="Clear search">
+                      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                        <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                  ) : null}
+                </div>
+                <div className="newsession-folder-list" role="group" aria-label="Project folders">
+                  {folderGroups.length ? folderGroups.map((group) => {
+                    const open = group.open || expanded.has(group.key);
+                    const count = group.open ? group.children.length : group.total;
+                    const holdsSelection = !open && group.children.some((child) => child.folder === folder);
+                    return (
+                      <div key={group.key} className="newsession-group">
+                        <div className="newsession-group-row">
+                          {group.folder ? (
+                            <button
+                              type="button"
+                              aria-pressed={group.folder === folder}
+                              className={`newsession-folder${group.folder === folder ? ' on' : ''}`}
+                              onClick={() => setFolder(group.folder)}
+                            >
+                              <span className="newsession-folder-label">{group.label}</span>
+                              <span className="newsession-folder-path">{group.folder}</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              aria-expanded={open}
+                              className={`newsession-folder newsession-folder-heading${holdsSelection ? ' holds' : ''}`}
+                              onClick={() => toggleGroup(group.key)}
+                            >
+                              <span className="newsession-folder-label">{group.label}</span>
+                              <span className="newsession-folder-path">{count} {count === 1 ? 'folder' : 'folders'}</span>
+                              <Chevron open={open} />
+                            </button>
+                          )}
+                          {group.folder && group.children.length ? (
+                            <button
+                              type="button"
+                              aria-expanded={open}
+                              aria-label={`${open ? 'Hide' : 'Show'} ${count} ${count === 1 ? 'subfolder' : 'subfolders'} of ${group.label}`}
+                              className={`newsession-group-toggle${holdsSelection ? ' holds' : ''}`}
+                              onClick={() => toggleGroup(group.key)}
+                            >
+                              <span>{count}</span>
+                              <Chevron open={open} />
+                            </button>
+                          ) : null}
+                        </div>
+                        {open && group.children.length ? (
+                          <div className="newsession-subfolders">
+                            {group.children.map((child) => (
+                              <button
+                                key={child.folder}
+                                type="button"
+                                aria-pressed={child.folder === folder}
+                                className={`newsession-folder sub${child.folder === folder ? ' on' : ''}`}
+                                onClick={() => setFolder(child.folder)}
+                              >
+                                <span className="newsession-folder-label">{child.label}</span>
+                                <span className="newsession-folder-path">{child.folder}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  }) : (
+                    <p className="newsession-empty">No project folders match.</p>
+                  )}
+                </div>
+              </>
             ) : (
               <p className="newsession-empty">No candidate folders from the server.</p>
             )}
@@ -278,7 +387,7 @@ export function NewSessionSheet({
         </div>
 
         <footer className="newsession-foot">
-          <p className="newsession-summary">{PROVIDER_LABEL[provider] || provider}{plan && provider !== 'cursor' ? ` · ${plan.label || plan.id}` : ''} · {modelOptions.find(row => row.value === model)?.label || model}</p>
+          <p className="newsession-summary">{PROVIDER_LABEL[provider] || provider}{plan && provider !== 'cursor' ? ` · ${plan.label || plan.id}` : ''} · {modelOptions.find(row => row.value === model)?.label || model}{folder ? ` · ${folderLabel(folder)}` : ''}</p>
           <button
             type="submit"
             className="btn-primary newsession-start"

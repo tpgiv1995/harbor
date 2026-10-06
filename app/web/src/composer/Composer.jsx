@@ -76,7 +76,8 @@ export function Composer({
     const resize = () => {
       const viewport = window.visualViewport?.height || window.innerHeight;
       const style = getComputedStyle(composer);
-      const extras = composer.querySelector('.composer-extras').scrollHeight;
+      const extras = composer.querySelector('.composer-extras').scrollHeight
+        + (composer.querySelector('.composer-tools')?.offsetHeight || 0);
       const chrome = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 1;
       const cap = Math.max(44, Math.min(150, viewport * .4 - extras - chrome));
       node.style.height = 'auto';
@@ -163,12 +164,19 @@ export function Composer({
         <p className={`voice-status ${voiceState.phase === 'error' ? 'error' : ''}`} role="status">{voiceState.message}</p>
       ) : null}
       <LiveVoiceBar liveVoice={liveVoice} />
-      <AttachChips attachments={attachments} onRemove={remove} />
-      {paneId && working ? (
-        <button type="button" className="composer-interrupt" onClick={interrupt}>
-          <span className="composer-interrupt-glyph" aria-hidden="true" />
-          Stop
-        </button>
+      {/* Attachments and Stop share ONE row: stacked, they took two of the
+          composer's rows, and with the keyboard up that left the text box a
+          line and a half (2026-10-06). */}
+      {attachments.length || (paneId && working) ? (
+        <div className={`composer-strip${attachments.length ? ' has-chips' : ''}`}>
+          <AttachChips attachments={attachments} onRemove={remove} />
+          {paneId && working ? (
+            <button type="button" className="composer-interrupt" onClick={interrupt}>
+              <span className="composer-interrupt-glyph" aria-hidden="true" />
+              Stop
+            </button>
+          ) : null}
+        </div>
       ) : null}
       {formatOpen ? (
         <FormatToolbar
@@ -178,7 +186,13 @@ export function Composer({
           disabled={disabled}
         />
       ) : null}
-      {/* Secondary tools share the tray so the typing row stays spacious. */}
+      </div>
+      {/* Secondary tools share the tray so the typing row stays spacious. The
+          tray sits OUTSIDE the scrolling extras (2026-10-06): with the keyboard
+          up the composer gets 40% of what is visible, an attachment chip plus
+          Stop filled that, and the tray scrolled out of sight while the plus
+          still read as open, so Pat had no way back to the paperclip. Picking a
+          file closes the tray, so the attachment's own x is the only x. */}
       {toolsOpen ? (
         <div className="composer-tools" role="group" aria-label="Composer tools">
         <label className="composer-attach" aria-label="Attach images">
@@ -190,6 +204,7 @@ export function Composer({
             onChange={(event) => {
               addFiles(event.target.files);
               event.target.value = '';
+              setToolsOpen(false);
             }}
           />
           <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
@@ -224,7 +239,6 @@ export function Composer({
         {liveVoice ? <button type="button" className={`composer-live-voice ${liveVoice.phase}${liveVoice.speaking ? ' speaking' : ''}`} aria-label={liveVoice.phase === 'live' ? 'End live voice mode' : 'Start live voice mode'} aria-pressed={liveVoice.phase === 'live'} onClick={liveVoice.toggle}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="4" y1="10" x2="4" y2="14" stroke="currentColor" strokeWidth="1.9" /><line x1="8" y1="7" x2="8" y2="17" stroke="currentColor" strokeWidth="1.9" /><line x1="12" y1="4" x2="12" y2="20" stroke="currentColor" strokeWidth="1.9" /><line x1="16" y1="7" x2="16" y2="17" stroke="currentColor" strokeWidth="1.9" /><line x1="20" y1="10" x2="20" y2="14" stroke="currentColor" strokeWidth="1.9" /></svg></button> : null}
         </div>
       ) : null}
-      </div>
       <div className="composer-row">
         <button
           type="button"

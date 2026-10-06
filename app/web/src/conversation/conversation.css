@@ -217,8 +217,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.86);
+  padding:
+    calc(var(--safe-top) + 64px)
+    calc(var(--safe-right) + 16px)
+    calc(var(--safe-bottom) + 24px)
+    calc(var(--safe-left) + 16px);
+  background: rgba(0, 0, 0, 0.92);
+  cursor: pointer;
 }
 
 .conv-lightbox-img {
@@ -226,6 +231,26 @@
   max-height: 100%;
   border-radius: 8px;
 }
+
+/* Above the image, below the notch: the image is inset 64px from the safe top
+   so the button never sits on top of it. */
+.conv-lightbox-close {
+  position: absolute;
+  top: calc(var(--safe-top) + 10px);
+  right: calc(var(--safe-right) + 12px);
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+}
+
+.conv-lightbox-close svg { width: 18px; height: 18px; }
 
 /* Tool-action rows: a single Edit/Read/Bash etc. Grouped runs collapse
    behind a caret (below) so a long tool run does not push the actual

@@ -109,6 +109,7 @@ class ClientQueue {
   enqueue(channel, payload, key = null) {
     const text = JSON.stringify(payload);
     const bytes = Buffer.byteLength(text);
+    this.dropSupersededDeltas(key);
     // The payload is retained so a later item sharing this key can be MERGED
     // into it rather than replacing it.
     if (key) {
@@ -145,6 +146,25 @@ class ClientQueue {
     this.items.push({ channel, text, bytes, key, payload });
     this.bytes += bytes;
     return true;
+  }
+  // A NEWER SNAPSHOT ALSO SUPERSEDES THE DELTAS QUEUED FOR ITS SESSION
+  // (2026-10-06, Pat: "messages appear to be sending and receiving twice").
+  // A replace takes an older replace's POSITION, which is ahead of any append
+  // queued after that older slot. Those appends hold blocks the new replace
+  // already contains, so delivering them after it drew each of those blocks a
+  // second time. The phone opens every chat twice and each open broadcasts a
+  // replace, so a replace overtaking a queued append was routine. Dropping them
+  // is lossless: the replace carries every block and the newest header.
+  dropSupersededDeltas(key) {
+    const prefix = 'transcript:update:';
+    if (!key?.startsWith(prefix) || key.startsWith(`${prefix}append:`)) return;
+    const deltaKey = `${prefix}append:${key.slice(prefix.length)}`;
+    this.items = this.items.filter((item) => {
+      if (item.key !== deltaKey) return true;
+      this.bytes -= item.bytes;
+      this.coalesced += 1;
+      return false;
+    });
   }
   shift() {
     const item = this.items.shift();

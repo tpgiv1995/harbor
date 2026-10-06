@@ -195,3 +195,39 @@ test('byte accounting stays exact when an append merges', () => {
   const actual = queue.items.reduce((sum, item) => sum + item.bytes, 0);
   assert.equal(queue.bytes, actual, 'a merge that mis-accounts bytes leaks the queue toward its cap');
 });
+
+// A NEWER SNAPSHOT OVERTOOK THE APPEND IT ALREADY CONTAINED (2026-10-06, Pat:
+// "messages appear to be sending and receiving twice in harbor").
+//
+// A replace takes its predecessor's position, which is AHEAD of an append queued
+// after that predecessor. The client then received the full list, already
+// holding the new message, and then the append that minted it, and drew the
+// message twice. The phone opens every chat twice and each open broadcasts a
+// replace, so this was routine. The newer replace now drops queued appends for
+// its session: everything they carried is in it.
+test('a newer replace drops the appends queued for its session, so nothing arrives twice', () => {
+  const { applyTranscriptUpdate } = require('../../src/shared/transcript-blocks.cjs');
+  const queue = new ClientQueue({ clientId: 'overtake' });
+  const enqueue = (payload) => queue.enqueue('transcript:update', { args: [payload] }, coalesceKey('transcript:update', [payload]));
+  enqueue({ sessionId: 's1', replace: [{ key: 'b0' }] });
+  enqueue({ sessionId: 's1', append: [{ key: 'b1' }], changed: [] });
+  enqueue({ sessionId: 's2', append: [{ key: 'x1' }], changed: [] });
+  enqueue({ sessionId: 's1', replace: [{ key: 'b0' }, { key: 'b1' }] });
+
+  const delivered = queue.items.map((item) => JSON.parse(item.text).args[0]);
+  assert.deepEqual(delivered.map((p) => `${p.sessionId}:${p.replace ? 'replace' : 'append'}`), ['s1:replace', 's2:append'],
+    'the overtaken s1 append is gone; another session\'s append is untouched');
+  assert.equal(queue.bytes, queue.items.reduce((sum, item) => sum + item.bytes, 0), 'bytes stay exact after the drop');
+
+  let blocks = [];
+  for (const payload of delivered.filter((p) => p.sessionId === 's1')) blocks = applyTranscriptUpdate(blocks, payload);
+  assert.deepEqual(blocks.map((b) => b.key), ['b0', 'b1']);
+});
+
+test('an append queued AFTER the newest replace still arrives after it', () => {
+  const queue = new ClientQueue({ clientId: 'after' });
+  const enqueue = (payload) => queue.enqueue('transcript:update', { args: [payload] }, coalesceKey('transcript:update', [payload]));
+  enqueue({ sessionId: 's1', replace: [{ key: 'b0' }] });
+  enqueue({ sessionId: 's1', append: [{ key: 'b1' }], changed: [] });
+  assert.equal(queue.length, 2, 'a delta newer than every snapshot is never dropped');
+});

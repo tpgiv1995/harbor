@@ -11,6 +11,7 @@ import { ResizeGrips } from './ResizeGrips.jsx';
 import { OrchPanel } from './orchestration/OrchPanel.jsx';
 import { OrchProjectPicker } from './orchestration/OrchProjectPicker.jsx';
 import { backgroundBusy, runStateCue } from '../shared/session-run-state.cjs';
+import { applyTranscriptUpdate } from '../shared/transcript-blocks.cjs';
 import { OrchLiveRuns } from './orchestration/OrchLiveRuns.jsx';
 import { ArtifactsView } from './artifacts/ArtifactsView.jsx';
 import { TasksView } from './tasks/TasksView.jsx';
@@ -740,16 +741,7 @@ function App() {
     setTranscripts((prev) => {
       const next = new Map(prev);
       const current = next.get(update.sessionId) || { blocks: [], header: null };
-      let blocks = current.blocks;
-      if (update.replace) {
-        blocks = update.replace;
-      } else {
-        if (update.append?.length) blocks = [...blocks, ...update.append];
-        if (update.changed?.length) {
-          const byKey = new Map(update.changed.map((b) => [b.key, b]));
-          blocks = blocks.map((b) => byKey.get(b.key) || b);
-        }
-      }
+      const blocks = applyTranscriptUpdate(current.blocks, update);
       next.set(update.sessionId, { blocks, header: update.header || current.header });
       return next;
     });

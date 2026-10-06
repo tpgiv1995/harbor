@@ -145,7 +145,14 @@ async function candidateProjectFolders(sidebar, { sessionId } = {}) {
     .filter((session) => path.isAbsolute(session?.cwd || ''))
     .sort((left, right) => (right.lastActiveMs || 0) - (left.lastActiveMs || 0));
   for (const session of sessions) candidates.push(path.normalize(session.cwd));
-  return [...new Set(candidates)];
+  // A deleted folder is not a candidate (2026-10-06), the rule the desktop's
+  // `new-session:folder` already keeps: offering one only led to a refused
+  // launch. On Pat's machine 147 of 434 session folders were gone (finished
+  // orchestration worktrees, the retired Dropbox tree), all listed on the phone.
+  const unique = [...new Set(candidates)];
+  const alive = await Promise.all(unique.map((folder) => fs.stat(folder)
+    .then((stat) => stat.isDirectory(), () => false)));
+  return unique.filter((_folder, index) => alive[index]);
 }
 
 async function composeServer(options = {}) {

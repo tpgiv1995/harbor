@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { applyTranscriptUpdate } from '../../../src/shared/transcript-blocks.cjs';
 
 // Opens a session's transcript over the RPC client and keeps it in sync with
 // the server's `transcript:update` pushes (replace/append/changed), the same
@@ -80,12 +81,7 @@ export function useTranscript(client, sessionId) {
         if (Array.isArray(payload.replace)) {
           return { blocks: payload.replace, header: payload.header || null, missing: false, loading: false };
         }
-        let blocks = prev.blocks;
-        if (payload.changed?.length) {
-          const byKey = new Map(payload.changed.map((b) => [b.key, b]));
-          blocks = blocks.map((b) => byKey.get(b.key) || b);
-        }
-        if (payload.append?.length) blocks = [...blocks, ...payload.append];
+        const blocks = applyTranscriptUpdate(prev.blocks, payload);
         return { blocks, header: payload.header || prev.header, missing: false, loading: false };
       });
     });

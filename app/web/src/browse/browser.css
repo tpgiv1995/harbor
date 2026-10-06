@@ -218,7 +218,11 @@
   padding: 10px 16px 6px;
   border: 0;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-  background: rgba(11, 12, 15, 0.96);
+  /* OPAQUE on purpose (2026-10-06). Every header is sticky at top:0 inside one
+     list, so all the headers scrolled past stay stacked there, and a 96% fill
+     let the one beneath show through as faint ghost text behind the current
+     project name. */
+  background: var(--bg);
   color: var(--sub);
   font-size: 12px;
   font-weight: 600;
@@ -229,7 +233,7 @@
 }
 
 .session-browser .project-header:active {
-  background: rgba(255, 255, 255, 0.05);
+  background: #17181b; /* --bg under 5% white, kept opaque */
 }
 
 .session-browser .project-chevron {

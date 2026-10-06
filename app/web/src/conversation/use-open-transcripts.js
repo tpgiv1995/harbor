@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { applyTranscriptUpdate } from '../../../src/shared/transcript-blocks.cjs';
 
 // Keep transcript blocks for every open session window so live voice can read
 // any of them, not only the one on screen.
@@ -11,15 +12,7 @@ export function useOpenTranscripts(client, openIds) {
 
     const apply = (sessionId, payload) => {
       const prev = cacheRef.current.get(sessionId) || { blocks: [], header: null };
-      let blocks = prev.blocks;
-      if (Array.isArray(payload.replace)) blocks = payload.replace;
-      else {
-        if (payload.changed?.length) {
-          const byKey = new Map(payload.changed.map((block) => [block.key, block]));
-          blocks = blocks.map((block) => byKey.get(block.key) || block);
-        }
-        if (payload.append?.length) blocks = [...blocks, ...payload.append];
-      }
+      const blocks = applyTranscriptUpdate(prev.blocks, payload);
       cacheRef.current.set(sessionId, { blocks, header: payload.header || prev.header });
     };
 

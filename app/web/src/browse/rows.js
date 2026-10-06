@@ -1,4 +1,5 @@
 import { runStateCue } from '../../../src/shared/session-run-state.cjs';
+import { mergeSubprojects } from '../../../src/shared/project-root.cjs';
 import {
   filterProjects,
   flattenSidebarRows,
@@ -169,7 +170,18 @@ export function buildBrowserRows(model, {
 } = {}) {
   const prioritized = prioritizeSidebarModel(model);
   const regrouped = regroupSidebarModel(prioritized, { grouping });
-  const filtered = filterProjects(regrouped, { filter, query });
+  const searched = filterProjects(regrouped, { filter, query });
+  // Sub-projects fold into their parent AFTER the search and time filter, so a
+  // search still finds a sub-folder by its own name (project-root.cjs).
+  const filtered = regrouped.grouping === 'project'
+    ? {
+      ...searched,
+      projects: mergeSubprojects(
+        searched.projects,
+        (model?.projects || []).flatMap((project) => project.sessions || []),
+      ),
+    }
+    : searched;
   const rows = [];
 
   const blocked = collectBlockedSessions(filtered);

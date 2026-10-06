@@ -35,6 +35,8 @@ export function SessionRow({
         <span className="session-meta">
           {showProject ? (
             <span className="session-project">{row.project?.label || session.project}</span>
+          ) : session.subproject ? (
+            <span className="session-project">{session.subproject}</span>
           ) : null}
           <span className="session-time">{formatRelative(session.lastActiveMs)}</span>
         </span>

@@ -94,10 +94,75 @@
   color: var(--fnt);
 }
 
+/* Same shape as the session browser's search. 16px text, because iOS Safari
+   zooms the whole page into any focused input smaller than that. */
+.newsession-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.newsession-search > svg {
+  position: absolute;
+  left: 12px;
+  width: 16px;
+  height: 16px;
+  color: var(--fnt);
+  pointer-events: none;
+}
+
+.newsession-search input {
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 44px 9px 36px;
+  border: 1px solid var(--ln);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--tx);
+  font-size: 16px;
+  outline: none;
+}
+
+.newsession-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.newsession-search input:focus {
+  border-color: rgb(var(--ac-rgb) / 0.55);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.newsession-search-clear {
+  position: absolute;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  cursor: pointer;
+}
+
+.newsession-search-clear svg { width: 16px; height: 16px; }
+
 .newsession-folder-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.newsession-group-row {
+  display: flex;
+  gap: 6px;
+}
+
+.newsession-group-row > .newsession-folder {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .newsession-folder {
@@ -115,13 +180,85 @@
 }
 
 .newsession-folder.on {
-  border-color: rgba(var(--ac-rgb), 0.65);
-  background: rgba(var(--ac-rgb), 0.12);
+  border-color: rgb(var(--ac-rgb) / 0.65);
+  background: rgb(var(--ac-rgb) / 0.12);
+}
+
+/* A parent no session ever ran in: it only opens its folders. */
+.newsession-folder-heading {
+  position: relative;
+  padding-right: 40px;
+  background: transparent;
+  border-style: dashed;
+}
+
+.newsession-folder-heading .newsession-chevron {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  margin-top: -7px;
+}
+
+.newsession-group-toggle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 56px;
+  padding: 0 10px;
+  border: 1px solid var(--ln);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--sub);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.newsession-group-toggle[aria-expanded="true"] {
+  color: var(--tx);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* The selection is inside this closed group. */
+.newsession-group-toggle.holds,
+.newsession-folder-heading.holds {
+  border-color: rgb(var(--ac-rgb) / 0.65);
+  color: var(--ac2);
+}
+
+.newsession-chevron {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.newsession-subfolders {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 2px 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--ln);
+}
+
+.newsession-folder.sub {
+  min-height: 48px;
+  padding: 8px 12px;
+}
+
+.newsession-folder.sub .newsession-folder-label {
+  font-size: 14px;
 }
 
 .newsession-folder-label {
+  min-width: 0;
   font-size: 15px;
   font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .newsession-folder-path {
@@ -168,8 +305,8 @@
 
 .newsession-provider.on,
 .newsession-effort.on {
-  border-color: rgba(var(--ac-rgb), 0.65);
-  background: rgba(var(--ac-rgb), 0.18);
+  border-color: rgb(var(--ac-rgb) / 0.65);
+  background: rgb(var(--ac-rgb) / 0.18);
   color: var(--ac2);
 }
 
@@ -183,4 +320,15 @@
 .newsession-start {
   width: 100%;
   min-height: 48px;
+}
+
+/* Names the chosen folder, which may sit in a closed group or be filtered out
+   of view by the search. */
+.newsession-summary {
+  margin: 0 0 10px;
+  color: var(--sub);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

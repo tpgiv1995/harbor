@@ -14,6 +14,11 @@ import './conversation.css';
 
 const STICK_THRESHOLD_PX = 56;
 
+// A TAP ANYWHERE CLOSES IT, and there is a real close button (2026-10-06, Pat
+// had to force-quit the app to get out). Closing used to take a tap on the
+// backdrop only, and the image swallowed its own taps; a phone screenshot
+// scaled to fit covers nearly the whole screen, so the only "backdrop" left was
+// a few pixels of margin, and on a phone there is no Escape key.
 function ImageLightbox({ src, alt, onClose }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -29,7 +34,12 @@ function ImageLightbox({ src, alt, onClose }) {
       aria-label="Image preview"
       onClick={onClose}
     >
-      <img className="conv-lightbox-img" src={src} alt={alt} onClick={(e) => e.stopPropagation()} />
+      <img className="conv-lightbox-img" src={src} alt={alt} />
+      <button type="button" className="conv-lightbox-close" aria-label="Close image" onClick={onClose}>
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+        </svg>
+      </button>
     </div>,
     document.body,
   );
