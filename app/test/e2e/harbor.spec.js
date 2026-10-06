@@ -3038,7 +3038,7 @@ test.describe('Harbor Slate E2E', () => {
       await page.waitForTimeout(500);
 
       // Expanded, the rail says WHICH sessions are waiting.
-      const marked = page.locator('.sr:has(.sr-attn)').first();
+      const marked = page.locator('.sr:has(.sr-d:is(.finished, .blocked))').first();
       await expect(marked).toBeVisible({ timeout: 20000 });
       const markedId = await marked.getAttribute('data-session-id');
       expect(markedId).toBeTruthy();
@@ -3047,7 +3047,7 @@ test.describe('Harbor Slate E2E', () => {
       // Opening it selects it, which IS checking it: the rail mark for that
       // session goes away and does not come back on the next model update.
       await marked.click();
-      await expect(page.locator(`.sr[data-session-id="${markedId}"] .sr-attn`)).toHaveCount(0, { timeout: 20000 });
+      await expect(page.locator(`.sr[data-session-id="${markedId}"] .sr-d:is(.finished, .blocked)`)).toHaveCount(0, { timeout: 20000 });
       // Its own window is the selected one, so it carries no header marker
       // either (you are looking straight at it).
       await expect(page.locator('.win2.sel .wh-attn')).toHaveCount(0);
@@ -3063,7 +3063,7 @@ test.describe('Harbor Slate E2E', () => {
 
       // A DIFFERENT session, still unchecked, keeps its marker: clearing one
       // must not clear the lot.
-      const others = await page.locator('.sr-attn').count();
+      const others = await page.locator('.sr-d:is(.finished, .blocked)').count();
       expect(others).toBeGreaterThan(0);
     } finally {
       await closeHarbor(electronApp, page);

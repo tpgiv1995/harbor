@@ -60,6 +60,11 @@
   --sel-rgb: 232 151 63;
   --live: #24b27c;
   --warn: #d4a537;
+  /* Status-light colours that must not collide with working blue (--ac) or a
+     plan colour (2026-10-06): a finished turn you have not looked at, and a
+     session Harbor put to sleep for sitting idle (drawn as a ring). */
+  --finished: #a98bff;
+  --dormant: #8d96b5;
   --err: #d98a8a;
   --team: #d68a5a;
   --team-rgb: 214 138 90;
@@ -1175,7 +1180,7 @@ button { font-family: inherit; }
   background: var(--ln2);
 }
 
-.sr-d.on {
+.sr-d.ready {
   background: var(--live);
   box-shadow: 0 0 8px var(--live);
 }
@@ -3680,22 +3685,22 @@ button { font-family: inherit; }
 }
 
 /* "Ready for you, and you haven't checked it."
-   Two states, deliberately different colours: accent = the turn finished,
+   Two states, deliberately different colours: violet = the turn finished,
    amber = it is waiting on an answer from you. Amber matches the existing
    needs-your-answer language elsewhere in the app rather than inventing a
-   second vocabulary for the same idea. */
-.wh-attn,
-.sr-attn {
+   second vocabulary for the same idea. Violet, not the accent blue, since
+   2026-10-06: blue already means "working", and the rail's single status
+   light (`.sr-d.finished`) uses this same colour for the same state. */
+.wh-attn {
   flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent, #6fa8d8);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #6fa8d8) 22%, transparent);
+  background: var(--finished);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--finished) 22%, transparent);
 }
 
-.wh-attn.blocked,
-.sr-attn.blocked {
+.wh-attn.blocked {
   background: var(--warn, #e0a33a);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn, #e0a33a) 22%, transparent);
 }
@@ -3709,8 +3714,8 @@ button { font-family: inherit; }
   padding: 0 4px;
   margin-left: 6px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent, #6fa8d8) 24%, transparent);
-  color: var(--accent, #6fa8d8);
+  background: color-mix(in srgb, var(--finished) 24%, transparent);
+  color: var(--finished);
   font: 600 10px/16px var(--font-sans);
   text-align: center;
 }
@@ -3718,14 +3723,6 @@ button { font-family: inherit; }
 .pg-attn.blocked {
   background: color-mix(in srgb, var(--warn, #d4a537) 24%, transparent);
   color: var(--warn, #d4a537);
-}
-
-/* Inline with the rail row's title text, so it reads as belonging to the
-   session name rather than to the row's trailing metadata. */
-.sr-attn {
-  display: inline-block;
-  margin-right: 6px;
-  vertical-align: middle;
 }
 
 /* Distinct from the project-icon dot it used to sit beside: a brighter core
@@ -3737,8 +3734,8 @@ button { font-family: inherit; }
   width: 9px;
   height: 9px;
   box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--accent, #6fa8d8) 26%, transparent),
-    0 0 10px 1px color-mix(in srgb, var(--accent, #6fa8d8) 55%, transparent);
+    0 0 0 3px color-mix(in srgb, var(--finished) 26%, transparent),
+    0 0 10px 1px color-mix(in srgb, var(--finished) 55%, transparent);
 }
 
 .wh-attn.blocked {
@@ -10128,6 +10125,12 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .sr-d.background { background: #75b9e8; }
 .sr-d.blocked { background: var(--warn); }
 .sr-d.running { background: var(--ac); }
+/* The rail row's ONE status light (sidebar/rail-status.cjs, 2026-10-06): a
+   finished turn you have not looked at, and a session Harbor put to sleep,
+   which is a ring so it reads as resumable rather than as another solid
+   state. Grey solid (the base rule) is "not running". */
+.sr-d.finished { background: var(--finished); }
+.sr-d.dormant { background: transparent; box-shadow: inset 0 0 0 1.5px var(--dormant); }
 .background-task-tip { position: fixed; z-index: 10000; width: 350px; max-width: calc(100vw - 24px); padding: 12px 14px; border: 1px solid #52647a; border-radius: 8px; background: #171d27; color: #e4e9f1; white-space: pre-line; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; pointer-events: none; }
 .delegations { margin: 24px 0; }
 .delegations h3 { margin: 0 0 12px; font-size: 17px; }

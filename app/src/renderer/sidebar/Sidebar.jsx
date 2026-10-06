@@ -12,6 +12,7 @@ import { resumeCommandForProfile, railWidthForProfileCount, profileStyle } from 
 import { ViewSwitch } from '../ViewSwitch.jsx';
 import { resetBadge, resetTooltip } from './usage-reset.cjs';
 import { collapseForView, planCollapseAll } from './collapse-policy.cjs';
+import { railStatus } from './rail-status.cjs';
 import {
   SORT_MODES, SORT_LABELS, normalizeRailSort, sortHint, sortLabel, sortSidebarModel,
 } from './rail-sort.cjs';
@@ -839,6 +840,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
       const isSelected = selectedSessionId === session.id;
       const isArchived = archived.has(session.id);
       const attentionState = attention?.get?.(session.id) || null;
+      const status = railStatus({ runState, attention: attentionState, dormant: session.dormant });
       return (
         <div
           className={`sr-wrap${isArchived ? ' archived' : ''}`}
@@ -856,24 +858,12 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
                 : `${displayTitle || 'Session'}\nClick to open. Right-click for options.`}
             disabled={disabled}
           >
-            <span className={`sr-d${session.isLive ? ' on' : ''} ${runState?.kind || ''}`} title={runState?.tooltip || runState?.label} aria-label={runState?.ariaLabel} />
+            {/* The row's ONE status light (rail-status.cjs): run state, an
+                answer owed, an unseen finish, asleep, or not running. */}
+            <span className={`sr-d ${status.kind}`} data-status={status.kind} title={status.detail ? `${status.label}\n${status.detail}` : status.label} aria-label={status.label} />
             <img className="sr-provider" src={provider.logo} alt="" aria-hidden="true" />
             <span className="sr-copy">
               <span className="sr-t">
-                {/* Ready for you, and unchecked. Rendered inside the title run
-                    so it sits against the name rather than at the row's edge,
-                    where the time and the account badge already live. */}
-                {attentionState ? (
-                  <span
-                    className={`sr-attn ${attentionState}`}
-                    title={attentionState === 'blocked'
-                      ? 'Waiting on your answer'
-                      : 'Finished since you last looked'}
-                    aria-label={attentionState === 'blocked'
-                      ? 'Waiting on your answer'
-                      : 'Finished since you last looked'}
-                  />
-                ) : null}
                 {copiedSessionId === session.id ? 'Resume command copied' : displayTitle}
               </span>
               {session.model && session.model !== 'default' ? <span className="sr-project">{session.model}</span> : null}

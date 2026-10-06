@@ -235,7 +235,18 @@ function regroupSidebarModel(model, { grouping = 'project', now = new Date() } =
   };
 }
 
-function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = [], homes = {}, grouping = 'project', now = new Date() } = {}) {
+// Harbor put this session to sleep for sitting idle (daemon/dormant-ledger.js,
+// 2026-10-06) and nothing has happened in it since. A later turn in its
+// transcript means it was resumed, so the sleep no longer describes it. The
+// grace covers lastActive's minute precision and a last write at the moment
+// the session was ended.
+const DORMANT_GRACE_MS = 2 * 60 * 1000;
+function sleptSince(entry, lastActiveMs) {
+  const at = Date.parse(entry?.at);
+  return Number.isFinite(at) && at >= lastActiveMs - DORMANT_GRACE_MS;
+}
+
+function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = [], homes = {}, dormantSessions = {}, grouping = 'project', now = new Date() } = {}) {
   const groupMode = grouping === 'date' ? 'date' : 'project';
   const currentTime = new Date(now);
   const workspaceById = new Map((workspaces || []).map((w) => [w.workspace_id, w]));
@@ -294,6 +305,7 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       provider: row.provider || 'claude',
       model: row.model || live?.model || null,
       isLive: Boolean(live),
+      dormant: !live && sleptSince(dormantSessions?.[row.id], lastActiveMs),
       paneId: live?.paneId ?? null,
       workspaceId: live?.workspaceId ?? null,
       agentStatus: live?.agentStatus ?? null,

@@ -190,6 +190,8 @@ function survivedItsBoot(state) {
 // allStates at least once before it can be reaped (the reap IS this function),
 // and the RSS heartbeat drives it every minute even when no client asks.
 const loggedExits = new Map(); // id -> exit.at that has already been logged
+const dormantLedger = require('./dormant-ledger.js');
+const dormantLedgerPath = path.join(paths.root, 'dormant.json');
 function noteExitObserved(state) {
   if (!state.exit || loggedExits.get(state.id) === state.exit.at) return;
   loggedExits.set(state.id, state.exit.at);
@@ -200,6 +202,13 @@ function noteExitObserved(state) {
   // drops) must still print as null — never the word "undefined" from a
   // template string. Real 0 stays 0.
   log(`exit ${state.id} pid=${state.pid} code=${code ?? 'null'} signal=${signal ?? 'null'} at=${at}${extras ? ` ${extras}` : ''}`);
+  // The same once-per-exit moment keeps the sleep ledger (dormant-ledger.js):
+  // the exit record that says `dormant` is reaped five minutes from now, and
+  // the rail needs to tell a session Harbor put to sleep from one that was
+  // closed for as long as it stays that way.
+  try { dormantLedger.noteExit(dormantLedgerPath, state); } catch (error) {
+    log(`dormant ledger write failed for ${state.id} (the rail will show it as not running): ${error.message}`);
+  }
 }
 
 function allStates() {
@@ -481,6 +490,9 @@ async function dispatch(socket, record) {
     return { ok: true, pid: process.pid, request: randomUUID(), sessions: allStates().length, scopes, jobs, dormancy };
   }
   if (record.verb === 'list') return { sessions: allStates().map(({ keeper_socket, keeper_pid, ...state }) => state) };
+  // Sessions this daemon put to sleep, by provider session id. A daemon from
+  // before 2026-10-06 answers "unsupported verb", which the app reads as none.
+  if (record.verb === 'dormant') return { sessions: dormantLedger.readLedger(dormantLedgerPath) };
   if (record.verb === 'proc-info') return processIntel.info(Number(params.pid));
   if (record.verb === 'proc-tree') return processIntel.tree(Number(params.pid));
   if (record.verb === 'proc-find') return processIntel.find(String(params.needle || ''));

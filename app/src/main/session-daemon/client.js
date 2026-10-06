@@ -135,6 +135,10 @@ class SessionDaemonClient {
   get home() { return this.env.HOME || os.homedir(); }
   async snapshot() { return { snapshot: snapshotFromSessions(sessionRecords(await this.request('list')), this.home) }; }
   async assertProtocol() { return this.snapshot(); }
+  // Sessions the daemon put to sleep for sitting idle (daemon/dormant-ledger.js),
+  // keyed by provider session id. A daemon from before 2026-10-06 rejects the
+  // verb; the caller decides what that means.
+  async dormantSessions() { return (await this.request('dormant'))?.sessions || {}; }
   subscribe(_subscriptions, options) { return new SessionSubscription(this, options); }
   subscribeAgentStatus() { return new SessionSubscription(this); }
   async bootstrap(options = {}) {

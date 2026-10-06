@@ -215,6 +215,14 @@ function createSidebarBridge(options = {}) {
   let refreshTimer = null;
   let statusPublishTimer = null;
   let closed = false;
+  // Which sessions the daemon put to sleep (daemon/dormant-ledger.js), so the
+  // rail can tell "Harbor put this to sleep" from "not running" (2026-10-06).
+  // Read on connect and then every 15 s: a sleep is decided on the daemon's
+  // own sweep, minutes apart, so this is one small request on a slow clock.
+  // A daemon that predates the verb stops the polling until the next connect.
+  let dormantSessions = {};
+  let dormantTimer = null;
+  const DORMANT_POLL_MS = 15_000;
 
   // Agent detection names a codex/cursor pane's agent but not its session, so those
   // windows had no transcript and fell back to the raw terminal. The linker
@@ -271,6 +279,7 @@ function createSidebarBridge(options = {}) {
       // index is a real fact about a session on disk and outranks the argv,
       // because a session can be moved or reconfigured after it starts.
       homes: withLaunchedHomes(homes, launchedHomes),
+      dormantSessions,
     });
     emitter.emit('update', {
       model,
@@ -388,8 +397,27 @@ function createSidebarBridge(options = {}) {
     reconnectTimer.unref?.();
   };
 
+  const refreshDormant = async () => {
+    const client = daemonClient;
+    if (closed || !client?.dormantSessions) return;
+    let next;
+    try {
+      next = await client.dormantSessions();
+    } catch (error) {
+      if (/unsupported verb/.test(String(error?.message))) { clearInterval(dormantTimer); dormantTimer = null; }
+      return;
+    }
+    if (closed || client !== daemonClient) return;
+    const fresh = next && typeof next === 'object' ? next : {};
+    if (JSON.stringify(fresh) === JSON.stringify(dormantSessions)) return;
+    dormantSessions = fresh;
+    publish();
+  };
+
   const connectDaemon = async () => {
     subscription?.close?.();
+    clearInterval(dormantTimer);
+    dormantTimer = null;
     daemonClient = makeClient(options.daemonOptions || {});
     try {
       const boot = await daemonClient.bootstrap({
@@ -414,6 +442,11 @@ function createSidebarBridge(options = {}) {
       subscription.on('close', () => { if (!closed) scheduleReconnect(); });
       liveState = extractLiveState(boot.snapshot);
       publish();
+      if (daemonClient?.dormantSessions) {
+        dormantTimer = setInterval(() => { refreshDormant(); }, DORMANT_POLL_MS);
+        dormantTimer.unref?.();
+        refreshDormant();
+      }
     } catch (error) {
       emitter.emit('daemon-error', error);
       publish();
@@ -471,6 +504,8 @@ function createSidebarBridge(options = {}) {
     clearTimeout(reconnectTimer);
     clearTimeout(historyRetryTimer);
     historyRetryTimer = null;
+    clearInterval(dormantTimer);
+    dormantTimer = null;
     history.removeAllListeners('history-changed');
     history.close?.();
     providerHistory?.emitter.removeAllListeners('changed');
@@ -543,6 +578,7 @@ function createSidebarBridge(options = {}) {
         livePanes: providerLinker ? providerLinker.apply(liveState.panes) : liveState.panes,
         workspaces: liveState.workspaces,
         homes,
+        dormantSessions,
       }),
       historyCount: historySessions.length,
       indexerSessionCount: claudeHistoryCount,

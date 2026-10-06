@@ -750,3 +750,31 @@ test('internal approval reviews stay indexed but appear in the rail only when se
   assert.equal(filterProjects(model, { filter: { kind: 'all' }, query: 'Action review' }).projects[0].sessions[0].id, 'review');
   assert.equal(model.projects[0].sessions.length, 2);
 });
+
+// Asleep vs not running (2026-10-06): the daemon's sleep ledger marks a row
+// dormant only while nothing has happened in it since the sleep, and never
+// while it is live.
+test('a row is dormant only when Harbor put it to sleep after its last turn and it is not live', () => {
+  const local = (text) => {
+    const [d, t] = text.split(' ');
+    const [y, mo, da] = d.split('-').map(Number);
+    const [h, mi] = t.split(':').map(Number);
+    return new Date(y, mo - 1, da, h, mi).getTime();
+  };
+  const historySessions = [
+    { id: 'slept', lastActive: '2026-10-06 09:00', project: 'p', title: 'slept' },
+    { id: 'resumed', lastActive: '2026-10-06 12:00', project: 'p', title: 'resumed after the sleep' },
+    { id: 'live', lastActive: '2026-10-06 09:00', project: 'p', title: 'running again' },
+    { id: 'closed', lastActive: '2026-10-06 09:00', project: 'p', title: 'closed by hand' },
+  ];
+  const asleepAt = new Date(local('2026-10-06 10:05')).toISOString();
+  const dormantSessions = { slept: { at: asleepAt }, resumed: { at: asleepAt }, live: { at: asleepAt } };
+  const livePanes = [{ pane_id: 'p1', workspace_id: 'w', agent: 'claude', agent_session: { kind: 'id', value: 'live' } }];
+  const model = mergeSidebarModel({ historySessions, livePanes, workspaces: [{ workspace_id: 'w', label: 'p' }], dormantSessions });
+  const byId = Object.fromEntries(model.projects.flatMap((p) => p.sessions).map((s) => [s.id, s]));
+  assert.equal(byId.slept.dormant, true);
+  assert.equal(byId.resumed.dormant, false, 'a later turn means it was resumed since');
+  assert.equal(byId.live.dormant, false, 'live beats an old sleep');
+  assert.equal(byId.closed.dormant, false, 'not in the ledger');
+  assert.equal(mergeSidebarModel({ historySessions }).projects[0].sessions[0].dormant, false, 'no ledger, no dormant');
+});
