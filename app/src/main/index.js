@@ -1686,6 +1686,20 @@ function installAppMenu() {
       ],
     },
   ];
+  // macOS routes Cmd+C/V/X/A/Z only through menu roles; without an Edit menu
+  // they do nothing anywhere in the app. Cmd never collides with xterm's Ctrl
+  // keys, and xterm handles the native copy/paste events these roles fire.
+  if (process.platform === 'darwin') {
+    template.unshift({
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
+        { role: 'pasteAndMatchStyle' }, { role: 'selectAll' },
+      ],
+    });
+  }
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
