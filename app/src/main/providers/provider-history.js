@@ -197,7 +197,7 @@ function createProviderHistory(options = {}) {
       lastActive: formatLocal(stat.mtimeMs),
       project: (cwd ? projectLabelForCwd(cwd) : projectHint) || projectHint || '',
       isInternalSession: Boolean(facts.isInternalSession),
-      title: facts.lineage?.kind === 'guardian' ? 'approval review'
+      title: facts.lineage?.kind === 'guardian' ? (oneLine(facts.firstUser) || 'approval review')
         : facts.lineage?.parentThreadId ? [facts.lineage.nickname || 'subagent', facts.lineage.agentPath && `(${facts.lineage.agentPath})`].filter(Boolean).join(' ')
           : oneLine(facts.firstUser) || `(${provider} session)`,
       lineage: facts.lineage || null,
