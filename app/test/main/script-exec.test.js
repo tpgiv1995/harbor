@@ -108,7 +108,11 @@ test('scriptExecArgs on darwin under Electron takes the 3-arg shape with a merge
   assert.deepEqual(args, ['/Harbor.app/Contents/Resources/bin/claude-sessions', '--resume', 'abc123']);
   assert.equal(execArgs.length, 3, 'the interpreter env forces the options-bearing execFile arity');
   assert.equal(options.env.ELECTRON_RUN_AS_NODE, '1');
-  assert.equal(options.env.PATH, process.env.PATH, 'the interpreter env merges over process.env, never replaces it');
+  // Look the key up without regard to case: Windows spells it `Path` on hosted
+  // runners, process.env answers either spelling, and the plain object a spread
+  // makes keeps only the original one (public CI, 2026-10-06).
+  const pathKey = Object.keys(options.env).find((key) => key.toUpperCase() === 'PATH');
+  assert.equal(options.env[pathKey], process.env.PATH, 'the interpreter env merges over process.env, never replaces it');
 });
 
 test('scriptExecArgs merges the interpreter environment without discarding the caller`s', () => {
