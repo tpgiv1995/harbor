@@ -6,8 +6,8 @@ const { profilesToHomes } = require('./accounts.js');
 const { deriveDefaults } = require('../config/defaults.js');
 
 const MISSING_FIELDS_REASON = 'Claude statusline payload did not include 5-hour usage, weekly usage, and cost';
-const NO_SAMPLE_REASON = 'No live Claude statusline payload has been observed for this account; Claude Code supplies usage only on statusline stdin';
-const NOT_CLAUDE_REASON = 'Not a Claude account: codex and cursor plans report in the title-bar usage menu';
+const NO_SAMPLE_REASON = 'Claude usage is unavailable. Check Claude CLI sign-in or its statusline usage feed.';
+const NOT_CLAUDE_REASON = 'Not a Claude account: its plan usage reports in the title-bar usage menu';
 
 function finiteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
@@ -87,16 +87,72 @@ const REMOTE_COOLDOWN_MS = 60 * 1000; // per-account floor between endpoint hits
 // Read-only: the CLI owns token refresh, so an expired access token means
 // skip, never a call that would 401. Any failure returns null and the caller
 // keeps serving the stale statusline sample honestly.
-async function fetchOauthUsage(home, { readFile = fs.promises.readFile, now = () => new Date(), fetchImpl = fetch } = {}) {
+// WHICH KEYCHAIN ITEM HOLDS A CONFIG HOME'S LOGIN. Claude Code names it per
+// home (read from the installed CLI, 2026-10-05): the bare
+// `Claude Code-credentials` when CLAUDE_CONFIG_DIR is unset, otherwise
+// `Claude Code-credentials-<first 8 hex of sha256(CLAUDE_CONFIG_DIR)>`, where
+// the hashed string is the variable exactly as given, NFC-normalized and not
+// path-resolved. Harbor exports a profile's configHome verbatim as
+// CLAUDE_CONFIG_DIR, so hashing that same string names the item its sessions
+// signed in to. Reading only the bare item for `~/.claude` is what made a
+// second account (`~/.claude-max`) read "not signed in" while it was. The
+// default home tries the bare item first (a plain `claude` login), then its
+// hashed twin (a login made with CLAUDE_CONFIG_DIR pointed at ~/.claude).
+// Never another home's item: that would show one account's usage under
+// another account's name.
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
+function keychainServicesFor(home, homedir = require('node:os').homedir()) {
+  const hashed = `${KEYCHAIN_SERVICE}-${require('node:crypto').createHash('sha256').update(String(home).normalize('NFC')).digest('hex').slice(0, 8)}`;
+  return path.resolve(home) === path.resolve(homedir, '.claude') ? [KEYCHAIN_SERVICE, hashed] : [hashed];
+}
+
+async function readClaudeCredentials(home, readFile) {
+  try { return JSON.parse(await readFile(path.join(home, '.credentials.json'), 'utf8')); } catch {}
+  // Claude Code itself owns these macOS Keychain entries. Never read them for
+  // an injected test reader, and never for a folder that is not a real config
+  // home: a custom home must hold its own `.claude.json` (the definition in
+  // config/homes.js), so a test's made-up home or a stray path never reaches
+  // the Keychain at all. The default home is exempt because its `.claude.json`
+  // lives beside it (~/.claude.json), not inside it.
+  if (process.platform !== 'darwin' || readFile !== fs.promises.readFile) return null;
+  const isDefaultHome = path.resolve(home) === path.resolve(require('node:os').homedir(), '.claude');
+  if (!isDefaultHome && !fs.existsSync(path.join(home, '.claude.json'))) return null;
+  const execFile = require('node:util').promisify(require('node:child_process').execFile);
+  let lastError = null;
+  for (const service of keychainServicesFor(home)) {
+    try {
+      const { stdout } = await execFile('/usr/bin/security', ['find-generic-password', '-s', service, '-w'], { timeout: 5000, maxBuffer: 1024 * 1024 });
+      return JSON.parse(stdout);
+    } catch (error) {
+      lastError = error;
+      // 44 = no such item: try the next name. Anything else (a denied or
+      // timed-out prompt) is an answer, not a reason to keep asking.
+      if (error?.code !== 44) break;
+    }
+  }
+  // Say WHY instead of reading as "not signed in": a denied or timed-out
+  // Keychain prompt is a different fix from a missing login.
+  const why = lastError?.killed ? 'the Keychain prompt timed out' : lastError?.code === 44 ? 'no Claude Code entry in the Keychain' : `security exited ${lastError?.code ?? 'abnormally'}`;
+  return { keychainError: why };
+}
+
+async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCredentials, reportUnavailable = false, now = () => new Date(), fetchImpl = fetch } = {}) {
   let creds;
   try {
-    creds = JSON.parse(await readFile(path.join(home, '.credentials.json'), 'utf8'));
+    creds = await (readCredentials ? readCredentials(home) : readClaudeCredentials(home, readFile));
   } catch {
     return null;
   }
+  if (creds?.keychainError) return reportUnavailable ? { unavailable: true, reason: `Could not read Claude credentials from the macOS Keychain: ${creds.keychainError}` } : null;
   const oauth = creds?.claudeAiOauth;
-  if (!oauth?.accessToken) return null;
-  if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return null;
+  if (!oauth?.accessToken) return reportUnavailable ? { unavailable: true, reason: 'Claude is not signed in for usage access. Sign in with the Claude CLI, then refresh Harbor.' } : null;
+  if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return reportUnavailable ? { unavailable: true, reason: 'Claude credentials have expired. Open the Claude CLI to renew the session, then refresh Harbor.' } : null;
+  // Each failure below used to collapse to `null`, which the panel rendered as
+  // the generic "usage is unavailable" line: a network error, a 401/429 and a
+  // body with no numbers all looked identical (2026-10-05, a live account
+  // whose endpoint answered 200 from a shell read "unavailable" in the app).
+  // When the caller asks for reasons, say which one it was.
+  const failed = (reason) => (reportUnavailable ? { unavailable: true, reason } : null);
   let res;
   try {
     res = await fetchImpl('https://api.anthropic.com/api/oauth/usage', {
@@ -106,15 +162,15 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, now = ()
       },
       signal: AbortSignal.timeout(10_000),
     });
-  } catch {
-    return null;
+  } catch (error) {
+    return failed(`Claude usage request failed: ${error?.name === 'TimeoutError' ? 'timed out after 10s' : (error?.cause?.code || error?.message || 'network error')}`);
   }
-  if (!res.ok) return null;
+  if (!res.ok) return failed(`Claude usage request failed: HTTP ${res.status}${res.status === 429 ? ' (rate limited; retrying shortly)' : ''}`);
   let body;
   try {
     body = await res.json();
   } catch {
-    return null;
+    return failed('Claude usage response was not JSON');
   }
   const mapWindow = (w) => {
     const out = {};
@@ -127,7 +183,7 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, now = ()
   if (body?.five_hour) rateLimits.five_hour = mapWindow(body.five_hour);
   if (body?.seven_day) rateLimits.seven_day = mapWindow(body.seven_day);
   if (!finiteNumber(rateLimits.five_hour?.used_percentage)
-    && !finiteNumber(rateLimits.seven_day?.used_percentage)) return null;
+    && !finiteNumber(rateLimits.seven_day?.used_percentage)) return failed('Claude usage response carried no 5-hour or weekly numbers');
   return { payload: { rate_limits: rateLimits }, updatedAt: now().toISOString() };
 }
 
@@ -149,11 +205,12 @@ function createUsageProvider(options = {}) {
   // Pass fetchRemoteUsage: null to disable the direct endpoint fallback
   // (tests, E2E; real accounts must never be hit from a harness).
   const fetchRemoteUsage = options.fetchRemoteUsage === undefined
-    ? (home) => fetchOauthUsage(home, { readFile, now })
+    ? (home) => fetchOauthUsage(home, { readFile, now, reportUnavailable: true })
     : options.fetchRemoteUsage;
   const samples = new Map();
   const remoteSamples = new Map();
   const lastRemoteAttempt = new Map();
+  const remoteUnavailable = new Map();
 
   const stampMs = (sample) => {
     const parsed = sample?.updatedAt ? Date.parse(sample.updatedAt) : NaN;
@@ -183,6 +240,13 @@ function createUsageProvider(options = {}) {
 
     async getUsage(account) {
       assertAccount(account);
+      // A codex profile stays in the not-Claude lane on purpose (2026-10-06). A
+      // per-profile `codex app-server` reader was offered for the rail, but it
+      // spawns one CLI process per codex profile per minute, and on Windows a
+      // kill reaches only the shim, so codex.exe and the MCP servers it starts
+      // can outlive it. Codex plan usage already reaches the title-bar menu
+      // through plan-usage.js, which reads rollouts and the usage endpoint
+      // without starting the CLI.
       if (notClaude.has(account)) return { unavailable: true, notClaude: true, reason: NOT_CLAUDE_REASON, email: null };
       const email = await readEmail(homes[account], readFile);
       const nowMs = now().getTime();
@@ -207,13 +271,15 @@ function createUsageProvider(options = {}) {
         && nowMs - (lastRemoteAttempt.get(account) || 0) >= remoteCooldownMs) {
         lastRemoteAttempt.set(account, nowMs);
         const fetched = await Promise.resolve(fetchRemoteUsage(homes[account])).catch(() => null);
+        if (fetched?.unavailable) remoteUnavailable.set(account, fetched);
         if (fetched?.payload) {
+          remoteUnavailable.delete(account);
           remoteSamples.set(account, fetched);
           chosen = { payload: fetched.payload, updatedAt: fetched.updatedAt, email };
         }
       }
 
-      if (!chosen) return { unavailable: true, reason: NO_SAMPLE_REASON, email };
+      if (!chosen) return { ...(remoteUnavailable.get(account) || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
       return usageFromStatuslinePayload(chosen.payload, {
         email: chosen.email || email,
         updatedAt: chosen.updatedAt,
@@ -231,5 +297,6 @@ module.exports = {
   REMOTE_COOLDOWN_MS,
   createUsageProvider,
   fetchOauthUsage,
+  keychainServicesFor,
   usageFromStatuslinePayload,
 };

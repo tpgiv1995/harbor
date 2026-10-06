@@ -296,6 +296,7 @@ export function mergeSidebarModel({ historySessions = [], livePanes = [], worksp
       workspaceId: live?.workspaceId ?? null,
       agentStatus: live?.agentStatus ?? null,
       isWindowsEra: isWindowsEra(row.project),
+      isInternalSession: Boolean(row.isInternalSession),
       isChildTask: isChildTask(row.title),
       childTitle: isChildTask(row.title) ? childTaskTitle(row.title) : null,
       cwd: resolvableCwd(row.cwd),
@@ -349,7 +350,7 @@ export function filterProjects(model, { filter, query, now } = {}) {
       // rather than per project so it behaves the same under date grouping,
       // where a group holds several projects; a project left with no sessions is
       // already dropped below.
-      if (!needle && isScratchSession(session)) return false;
+      if (!needle && (isScratchSession(session) || session.isInternalSession)) return false;
       if (!needle) return true;
       if (projectMatches) return true;
       return `${session.project}\n${session.title}\n${session.firstPrompt || ''}`.toLowerCase().includes(needle);

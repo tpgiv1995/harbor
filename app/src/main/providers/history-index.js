@@ -7,6 +7,8 @@ const { Worker, isMainThread, parentPort, workerData } = require('node:worker_th
 const { discoverProfiles } = require('../config/homes.js');
 const { projectLabelForCwd } = require('../../shared/project-label.cjs');
 
+const { readClaudeTitles } = require('./native-session-titles.cjs');
+
 const CACHE_VERSION = 2;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/;
 const UUID_BARE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
@@ -138,7 +140,7 @@ function readTail(file, size, window) {
   return splitLines(slice.toString('utf8'));
 }
 
-function parseTranscript(file) {
+function parseTranscript(file, previous) {
   let cwd = null;
   let start = null;
   let summary = null;
@@ -194,12 +196,14 @@ function parseTranscript(file) {
     if (last || size <= window) break;
   }
   recent.reverse();
-  const title = summary || firstPrompt || commandName;
+  const native = readClaudeTitles(file, previous);
+  const title = native.native_title || native.native_summary || summary || firstPrompt || commandName;
   return {
     cwd,
     start,
     last,
-    title: title ? cleanText(title, TITLE_MAX) : null,
+    ...native,
+    title: native.native_title || native.native_summary || (title ? cleanText(title, TITLE_MAX) : null),
     first_prompt: firstPrompt ? cleanText(firstPrompt, 1200) : null,
     command: commandName ? cleanText(commandName, TITLE_MAX) : null,
     recent,
@@ -300,7 +304,7 @@ function createHistoryIndex(options = {}) {
     if (appliedTitles && appliedTitles.files === files && appliedTitles.titles === titles) return files;
     for (const entry of Object.values(files)) {
       const generated = titles[entry.id];
-      if (!generated || String(entry.title || '').trimStart().startsWith('BATCH TITLE:')) continue;
+      if (!generated || entry.native_title || entry.native_summary || String(entry.title || '').trimStart().startsWith('BATCH TITLE:')) continue;
       entry.title = cleanText(String(generated), TITLE_MAX);
     }
     appliedTitles = { files, titles };
@@ -414,7 +418,7 @@ function createHistoryIndex(options = {}) {
       }
     }
     for (const [id, file, mt, sz] of pending) {
-      try { fresh[file] = { ...parseTranscript(file), id, mt, sz }; } catch { /* unreadable transcripts are skipped */ }
+      try { fresh[file] = { ...parseTranscript(file, cache[file] && sz > cache[file].sz ? cache[file] : undefined), id, mt, sz }; } catch { /* unreadable transcripts are skipped */ }
     }
     if ((pending.length || Object.keys(fresh).length !== Object.keys(cache).length) && env.HARBOR_INDEX_READ_ONLY !== '1') {
       // The pass is complete whether or not the cache lands. A write that fails

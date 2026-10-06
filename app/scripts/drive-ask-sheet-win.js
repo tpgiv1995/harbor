@@ -25,7 +25,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { SessionClient } = require('../src/daemon/client.js');
-const { createSessionSend, createLinkRegistry } = require('../src/main/session-send.js');
+const { createSessionSend, createLinkRegistry, claudeProjectDir } = require('../src/main/session-send.js');
 const { createPendingAskReader } = require('../src/main/providers/pending-ask.js');
 
 const DAEMON = path.join(__dirname, '../src/daemon/daemon.js');
@@ -101,7 +101,7 @@ async function main() {
   });
   const paneId = spawned.id;
   cleanup.paneId = paneId;
-  const transcript = path.join(os.homedir(), '.claude', 'projects', cwd.replace(/[:\\/]/g, '-'), `${claudeSession}.jsonl`);
+  const transcript = path.join(claudeProjectDir(cwd), `${claudeSession}.jsonl`);
   cleanup.transcriptDir = path.dirname(transcript);
   console.log(`spawned pane ${paneId}, claude session ${claudeSession}`);
 

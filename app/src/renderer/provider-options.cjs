@@ -1,6 +1,6 @@
 'use strict';
 
-function watchProviderOptions({ api, sessionId, onOptions, onCapabilities, onError = () => {} }) {
+function watchProviderOptions({ api, sessionId, onOptions, onCapabilities, onError = () => {}, focusTarget = globalThis.window }) {
   let generation = 0;
   let active = true;
   const refresh = () => {
@@ -15,8 +15,9 @@ function watchProviderOptions({ api, sessionId, onOptions, onCapabilities, onErr
     }
   };
   const off = api.session.onModelsChanged?.(refresh);
+  focusTarget?.addEventListener('focus', refresh);
   refresh();
-  return () => { active = false; off?.(); };
+  return () => { active = false; off?.(); focusTarget?.removeEventListener('focus', refresh); };
 }
 
 module.exports = { watchProviderOptions };

@@ -1,8 +1,17 @@
 'use strict';
 
 const LOCAL_ONLY = new Set([
+  // Claude's composer suggestion for the desktop command bar's Tab-to-accept.
+  // The phone has no use for it, so it never leaves this machine.
+  'session:suggestion',
+  // The window header's live working meter, read off the pane like the above.
+  'session:work-meter',
   // Account usage is shown only in the desktop title bar.
   'usage:get-plans',
+  // The heavy-lifting setting beside it decides whether Claude sessions may
+  // spend GPT seats, so only the desktop reads or changes it.
+  'usage:get-lean',
+  'usage:set-lean',
   'window:minimize',
   'window:toggle-maximize',
   'window:close',
@@ -253,6 +262,8 @@ const METHOD_NAMES = [
   'transcript:close',
   'session:send',
   'session:menu-state',
+  'session:suggestion',
+  'session:work-meter',
   'session:menu-answer',
   'session:send-queue',
   'session:cancel-send',
@@ -274,6 +285,8 @@ const METHOD_NAMES = [
   'pick-files',
   'usage:get-all',
   'usage:get-plans',
+  'usage:get-lean',
+  'usage:set-lean',
   'system-memory:get',
   'ask:list',
   'ask:answer',

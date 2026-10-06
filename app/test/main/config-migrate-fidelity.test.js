@@ -47,13 +47,19 @@ function listing(...names) {
   return () => names.map((name) => ({ name, isFile: () => false }));
 }
 
+// The shared, separator-agnostic stand-in for discovery's `exists` probe —
+// see test/support/claude-json-in.js for why it must not assume '/'.
+const { claudeJsonIn } = require('../support/claude-json-in.js');
+
 function configFor(names, extra = {}) {
+  const { bare, projectsOnly, ...rest } = extra;
   return legacyConfig({
     homedir: HOME,
     platform: 'linux',
     env: { HOME, PATH: '' },
     readdir: listing(...names),
-    ...extra,
+    exists: claudeJsonIn(names, { bare, projectsOnly }),
+    ...rest,
   });
 }
 
@@ -78,6 +84,57 @@ test('a DIFFERENT machine yields different profiles, so no account name is baked
   assert.deepEqual(theirs.profiles.map((p) => p.id), ['acme', 'beta']);
   // The old implementation returned the identical three profiles for both.
   assert.notDeepEqual(mine.profiles.map((p) => p.id), theirs.profiles.map((p) => p.id));
+});
+
+// The regression guard for the bug this pair of assertions exists to prevent.
+// `~/.claude-*` is an ordinary namespace for things that are not Claude
+// accounts, and matching on the NAME alone offered them as accounts. Caught on
+// macOS 2026-08-16: the Desktop Commander MCP's `~/.claude-server-commander`
+// (no `.claude.json`) was listed by the setup wizard as a second Claude account
+// and drew its own badge in the rail. It is not cosmetic — the row is
+// selectable, and launching it hands the CLI a CLAUDE_CONFIG_DIR with no
+// credentials in it.
+//
+// Two-sided on purpose: an exclusion alone would pass just as well if discovery
+// were broken and returned nothing, so the real sibling must still be found.
+test('a directory that only LOOKS like a config home is not an account', () => {
+  const config = configFor(
+    ['.claude', '.claude-work', '.claude-server-commander'],
+    { bare: ['.claude-server-commander'] },
+  );
+  assert.deepEqual(
+    config.profiles.map((p) => p.id),
+    ['personal', 'work'],
+    'a .claude-* directory with no .claude.json is not a Claude account',
+  );
+  assert.ok(
+    !config.profiles.some((p) => p.configHome.endsWith('.claude-server-commander')),
+    'the phantom home must not reach the profile list at all',
+  );
+});
+
+// The primary home is deliberately exempt: `~/.claude` is the bare-launch
+// convention every bin/ script follows, and a first run that has created the
+// directory but not yet signed in must still see itself, since setting that up
+// is the wizard's entire job.
+test('the primary home counts even before it has a .claude.json', () => {
+  const config = configFor(['.claude', '.claude-work'], { bare: ['.claude', '.claude-work'] });
+  assert.deepEqual(config.profiles.map((p) => p.id), ['personal']);
+  assert.equal(config.profiles[0].configHome, path.join(HOME, '.claude'));
+  assert.equal(config.profiles[0].isDefault, true);
+});
+
+// The OTHER side of the phantom gate: a home mid-reauth (`.claude.json`
+// deleted to sign in again) still holds its `projects/` transcript store and
+// must stay visible — hiding it made that account's whole session history
+// disappear from the rail. Two proofs, either sufficient; this spec pins the
+// second one.
+test('a suffixed home with transcripts but no .claude.json is still an account', () => {
+  const config = configFor(
+    ['.claude', '.claude-work'],
+    { projectsOnly: ['.claude-work'] },
+  );
+  assert.deepEqual(config.profiles.map((p) => p.id), ['personal', 'work']);
 });
 
 test('a machine with no Claude home at all still gets one usable personal seed', () => {

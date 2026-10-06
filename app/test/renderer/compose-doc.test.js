@@ -11,7 +11,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const {
-  serializeDoc, markdownToSpec, inlineToSpec, buildNodes,
+  serializeDoc, markdownToSpec, inlineToSpec, buildNodes, MAX_LIST_DEPTH,
 } = require('../../src/renderer/stage/compose-doc.cjs');
 
 // ── fake DOM ────────────────────────────────────────────────────────────────
@@ -472,6 +472,33 @@ test('a non-canonical roman run terminates instead of freezing the parser', () =
     { tag: 'div', children: ['V. five'] },
   ]);
   assert.equal(roundTrip('IIII. four\nV. five'), 'IIII. four\nV. five');
+});
+
+test('a list nested thousands deep is bounded and keeps every item', () => {
+  // Claude Code 2.1.290 fixed "Maximum call stack size exceeded" on replies
+  // nesting lists thousands of levels deep. Harbor renders the same replies
+  // through this parser and md.jsx, both recursive: 5,000 levels threw here
+  // and broke the session window for as long as the reply stayed in view.
+  const depth = (specs) => {
+    let max = 0;
+    const walk = (node, level) => {
+      if (!node || typeof node !== 'object') return;
+      const next = node.tag === 'ul' || node.tag === 'ol' ? level + 1 : level;
+      max = Math.max(max, next);
+      for (const child of node.children || []) walk(child, next);
+    };
+    for (const spec of specs) walk(spec, 0);
+    return max;
+  };
+  const items = (specs) => JSON.stringify(specs).match(/item \d+/g) || [];
+  const lines = [];
+  for (let i = 0; i < 5000; i += 1) lines.push(`${' '.repeat(2 * i)}- item ${i}`);
+  const specs = markdownToSpec(lines.join('\n'));
+  assert.ok(depth(specs) <= MAX_LIST_DEPTH, `depth ${depth(specs)}`);
+  assert.equal(items(specs).length, 5000);
+  assert.equal(items(specs)[4999], 'item 4999');
+  // Ordinary nesting is untouched.
+  assert.equal(depth(markdownToSpec('- a\n  - b\n    - c')), 3);
 });
 
 test('a parenthesized non-digit marker stays prose so its delimiter survives', () => {

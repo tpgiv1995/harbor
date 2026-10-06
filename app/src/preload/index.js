@@ -53,6 +53,8 @@ const api = {
     preview: (payload) => ipcRenderer.invoke('session:preview', payload),
     send: (payload) => ipcRenderer.invoke('session:send', payload),
     menuState: (payload) => ipcRenderer.invoke('session:menu-state', payload),
+    suggestion: (payload) => ipcRenderer.invoke('session:suggestion', payload),
+    workMeter: (payload) => ipcRenderer.invoke('session:work-meter', payload),
     answerMenu: (payload) => ipcRenderer.invoke('session:menu-answer', payload),
     getSendQueue: (payload) => ipcRenderer.invoke('session:send-queue', payload),
     cancelSend: (payload) => ipcRenderer.invoke('session:cancel-send', payload),
@@ -206,6 +208,8 @@ const api = {
   usage: {
     getAll: () => ipcRenderer.invoke('usage:get-all'),
     getPlans: () => ipcRenderer.invoke('usage:get-plans'),
+    getLean: () => ipcRenderer.invoke('usage:get-lean'),
+    setLean: (mode) => ipcRenderer.invoke('usage:set-lean', mode),
     onUpdate: (listener) => {
       const handler = () => listener();
       ipcRenderer.on('usage:update', handler);

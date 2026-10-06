@@ -4,7 +4,6 @@ import { providerIdentity, useProfiles, profileStyle } from './providers.js';
 import { sessionModelOptions, sessionEffortOptions } from './session-model-options.cjs';
 import { watchProviderOptions } from './provider-options.cjs';
 import { folderLabel as labelFolder } from './folder-label.cjs';
-import { MODE_LABEL } from '../shared/permission-modes.cjs';
 import {
   currentEffort, currentModel, isReconfigure, pendingSwitch,
 } from './session-config-mode.cjs';
@@ -13,6 +12,7 @@ const PROVIDER_KEYS = ['claude', 'codex', 'cursor'];
 const DEFAULT_KEY = 'harbor-new-session-default';
 // Retain the existing format on explicit saves; never reseed on read.
 const DEFAULT_VERSION = 3;
+import { permModeStatus } from '../shared/perm-mode.cjs';
 
 // The model list is Harbor's OWN dropdown, portaled to document.body, not a
 // native <select>: this modal sits on a backdrop-filter layer, which traps
@@ -195,10 +195,16 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
     sessionId: request.session?.id,
     paneId: request.pane?.paneId,
   });
+  // Harbor is DRIVING this session only when there is a live pane it may type
+  // into: a read-only worker, an externally-controlled pane, or an external
+  // live session all carry a pane while `drivable` is false. Every surface in
+  // this popover that talks about the permission mode — the status word, the
+  // button's disable, and its tooltip — must key on THIS predicate, not on
+  // pane presence: keying the copy on the pane alone showed "unreadable" plus
+  // an enabled-sounding tooltip over a dead button for exactly those classes.
+  const driving = request.drivable !== false && Boolean(request.pane?.paneId);
   // Cycling the permission mode still needs a live pane Harbor already controls.
-  const canCyclePermission = reconfiguring
-    && request.drivable !== false
-    && Boolean(request.pane?.paneId);
+  const canCyclePermission = reconfiguring && driving;
   const folder = request.folder || request.session?.cwd || null;
   const folderLabel = request.session?.project || labelFolder(folder) || 'session folder';
   const actionLabel = reconfiguring ? 'Apply' : `Start ${providerIdentity(provider).label} session`;
@@ -320,7 +326,14 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
               a decision. Launch keeps provider, account, model and effort, which
               are the four things a launch actually sets. */}
           {provider === 'claude' && reconfiguring ? <>
-            <section className="cap-sec"><div className="cap-sec-h">Permission mode</div><div className="cap-status"><span className="cap-status-lbl">current</span><span className="cap-status-val">{permMode === undefined ? 'reading…' : permMode === null ? 'unreadable' : (MODE_LABEL[permMode] || permMode)}</span></div><button type="button" className="cap-action" onClick={cycleMode} disabled={!canCyclePermission}>Cycle mode (⇧Tab)</button></section>
+            {/* The null-mode split ("unreadable" vs "not controlled") lives in
+                shared/perm-mode.cjs — see there for the 2026-08-16 story. What
+                this popover adds is the PREDICATE: `driving`, not pane
+                presence, because a read-only worker or an externally
+                controlled session has a pane Harbor still may not type into,
+                and both the status word and the tooltip must agree with the
+                button's disable about that. */}
+            <section className="cap-sec"><div className="cap-sec-h">Permission mode</div><div className="cap-status"><span className="cap-status-lbl">current</span><span className="cap-status-val">{permModeStatus(permMode, driving)}</span></div><button type="button" className="cap-action" onClick={cycleMode} disabled={!canCyclePermission} title={driving ? 'Cycle this session’s permission mode' : 'Harbor is not driving this session: launch it from the rail, or send a message to adopt it'}>Cycle mode (⇧Tab)</button></section>
             <section className="cap-sec"><div className="cap-sec-h">Fast mode</div><div className="cap-row disabled"><span className="cap-row-lbl">Unavailable</span><span className="cap-row-reason">{caps?.fastMode?.reason || 'Fast mode: unavailable on subscription auth'}</span></div></section>
             <section className="cap-sec"><div className="cap-sec-h">Workflow</div><button type="button" className="cap-action" onClick={() => insert(`${caps?.dynamicWorkflow?.keyword || 'ultracode'} `)}>Insert “{caps?.dynamicWorkflow?.keyword || 'ultracode'}” keyword</button></section>
             <section className="cap-sec"><div className="cap-sec-h">Plugins &amp; connectors</div>{caps?.plugins?.length ? <div className="cap-plugins">{caps.plugins.map((plugin) => <div key={`${plugin.name}@${plugin.marketplace}`} className={`cap-plugin${plugin.enabled ? '' : ' off'}`}><span className="cap-plugin-dot" /><span className="cap-plugin-name">{plugin.name}</span><span className="cap-plugin-state">{plugin.enabled ? 'on' : 'off'}</span></div>)}</div> : <div className="cap-note">no plugins installed</div>}{caps?.mcpServers?.length ? <div className="cap-mcp"><span className="cap-mcp-lbl">MCP</span><span className="cap-mcp-names">{caps.mcpServers.join(', ')}</span></div> : null}</section>

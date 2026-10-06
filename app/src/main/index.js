@@ -4,6 +4,11 @@ const { app, crashReporter, BrowserWindow, Menu, ipcMain: electronIpcMain, dialo
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
+// Before anything can spawn: a Finder/Dock launch carries launchd's bare PATH,
+// which cannot find claude, codex or anything Homebrew installed (login-path.js).
+const loginPath = require('./login-path.js').applyLoginPath();
+console.log(`PATH: ${loginPath.source}`);
+console.log(`SSH_AUTH_SOCK: ${loginPath.sshAuthSock}`);
 const { createSidebarBridge } = require('./sidebar-bridge.js');
 const { projectLabelForCwd: sharedProjectLabelForCwd } = require('../shared/project-label.cjs');
 const {
@@ -41,6 +46,7 @@ const { createGpuTelemetry } = require('./gpu-telemetry.js');
 const { createCrashCapture } = require('./crash-capture.js');
 const { createUsageProvider } = require('./providers/usage.js');
 const { createPlanUsageProvider } = require('./providers/plan-usage.js');
+const { resolveLeanFile, readLean, writeLean } = require('./providers/provider-lean.js');
 const { createWorkflowRuns } = require('./providers/workflow-runs.js');
 const { readAccountEmails, createAccountsProvider } = require('./providers/accounts.js');
 const { createSingleFlight } = require('./single-flight.js');
@@ -337,7 +343,7 @@ function setAppBadgeCount(count) {
 // caller-minted id at launch, so its fresh pane opens on that real id. Codex
 // cannot receive an id at launch, so it still opens on a provisional pane key
 // and upgrades when the first message materializes its rollout.
-async function launchNewSession({ account, cwd, provider = 'claude', model, effort = 'default', command = null, prompt = null }) {
+async function launchNewSession({ account, cwd, provider = 'claude', model, effort = 'default', command = null, prompt = null, stageSlot }) {
   const [preIds, knownIds] = await Promise.all([
     sessionSend.paneIdSet(),
     provider === 'claude'
@@ -353,6 +359,7 @@ async function launchNewSession({ account, cwd, provider = 'claude', model, effo
     account,
     model,
     effort,
+    stageSlot,
     preIds,
     knownIds,
     sinceMs,
@@ -1137,7 +1144,7 @@ function registerIpc() {
     return { text };
   });
 
-  ipcMain.handle('new-session', async (_event, { account, folder, sessionId, provider, model, effort, prompt }) => {
+  ipcMain.handle('new-session', async (_event, { account, folder, sessionId, provider, model, effort, prompt, stageSlot }) => {
     let cwd;
     if (folder) {
       cwd = folder;
@@ -1156,7 +1163,7 @@ function registerIpc() {
     if (!stat?.isDirectory()) {
       throw new Error(`cannot start a session in ${cwd}: the folder does not exist on this machine — pick a folder`);
     }
-    return launchNewSession({ account, cwd, provider, model, effort, prompt });
+    return launchNewSession({ account, cwd, provider, model, effort, prompt, stageSlot });
   });
   ipcMain.handle('workflow:run', async (_event, { id, current = {} }) => {
     const launch = resolveWorkflowLaunch(id, current, harborConfig);
@@ -1249,6 +1256,20 @@ function registerIpc() {
     } catch {
       return null;
     }
+  });
+  // Claude's predicted next prompt for the selected pane (dim in its composer);
+  // the command bar shows it as ghost text and Tab fills it in.
+  ipcMain.handle('session:suggestion', async (_event, payload) => {
+    try {
+      if (sidebarBridge.isDelegated(payload?.sessionId)) return null;
+      return await sessionSend.getSuggestion(payload);
+    } catch {
+      return null;
+    }
+  });
+  // Claude's live working meter for a window header (elapsed + tokens so far).
+  ipcMain.handle('session:work-meter', async (_event, payload) => {
+    try { return await sessionSend.getWorkMeter(payload); } catch { return null; }
   });
   ipcMain.handle('session:menu-answer', async (_event, payload) => {
     try {
@@ -1383,6 +1404,14 @@ function registerIpc() {
   });
 
   ipcMain.handle('usage:get-plans', () => planUsageProvider.getPlans());
+  // The heavy-lifting setting (shared/provider-lean.cjs). Resolved per call so
+  // a relocated profile keeps its own file (providers/provider-lean.js).
+  const leanFile = () => resolveLeanFile({
+    userDataPath: app.getPath('userData'),
+    defaultUserDataPath: path.join(app.getPath('appData'), app.getName()),
+  });
+  ipcMain.handle('usage:get-lean', () => readLean(leanFile()));
+  ipcMain.handle('usage:set-lean', (_event, mode) => writeLean(leanFile(), mode));
   ipcMain.handle('accounts:read-emails', () => readAccountEmails({ profiles: harborConfig.profiles }));
 
   ipcMain.handle('pick-folder', async () => {
@@ -1681,6 +1710,20 @@ function installAppMenu() {
       ],
     },
   ];
+  // macOS routes Cmd+C/V/X/A/Z only through menu roles; without an Edit menu
+  // they do nothing anywhere in the app. Cmd never collides with xterm's Ctrl
+  // keys, and xterm handles the native copy/paste events these roles fire.
+  if (process.platform === 'darwin') {
+    template.unshift({
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
+        { role: 'pasteAndMatchStyle' }, { role: 'selectAll' },
+      ],
+    });
+  }
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
@@ -2569,6 +2612,10 @@ app.whenReady().then(async () => {
       const res = await sendClient.readPane(paneId, { source, lines, strip_ansi: true });
       return res?.read?.text || '';
     },
+    readSuggestion: async (paneId) => {
+      const res = await sendClient.readPane(paneId, { source: 'visible', lines: 1 });
+      return res?.screen?.suggestion || null;
+    },
     terminalBridge,
     launchActions: {
       ...launchActions,
@@ -2881,6 +2928,7 @@ app.whenReady().then(async () => {
   const accountsProvider = createAccountsProvider({
     history: { sessionMeta: (id) => sidebarBridge.getSessionMeta(id) },
     profiles: harborConfig.profiles,
+    launchedHome: (id) => sidebarBridge?.getLaunchedHome?.(id) ?? null,
   });
   capabilitiesProvider = createCapabilitiesProvider({ accounts: accountsProvider });
 

@@ -13,6 +13,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { parseMenu, menuArrowToward, MENU_KEYS } = require('./menu-parse.js');
+const { parseWorkMeter } = require('./work-meter.js');
 const { isDividerLine } = require('../shared/divider.cjs');
 const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFromStrip, CHAT_ROW_RE } = require('./ask-question.js');
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
@@ -264,6 +265,10 @@ function createSessionSend(deps) {
   const {
     snapshot, // async () => normalized { panes: [], workspaces: [] }
     readPane, // async (paneId) => text
+    // async (paneId) => Claude's dim composer suggestion, or null. Read from the
+    // keeper's modeled cells (src/daemon/screen.js); a stripped scrape cannot
+    // tell it from a typed draft.
+    readSuggestion = async () => null,
     terminalBridge,
     launchActions,
     getSessionMeta,
@@ -2194,6 +2199,20 @@ function createSessionSend(deps) {
     return answerMenu(pane.paneId, pane.workspaceId, action, ask || discoveredFor(pane.paneId));
   };
 
+  // The command bar offers this on Tab. Null whenever the pane is not sitting
+  // on an idle composer that shows one; a read failure is simply no suggestion.
+  // The live meter off Claude's working line ("26s · ↓ 2.4k tokens"); null
+  // when the pane is not mid-turn. See work-meter.js.
+  const getWorkMeter = async ({ pane } = {}) => {
+    if (!pane?.paneId) return null;
+    try { return parseWorkMeter(await readPane(pane.paneId)); } catch { return null; }
+  };
+
+  const getSuggestion = async ({ pane } = {}) => {
+    if (!pane?.paneId) return null;
+    try { return (await readSuggestion(pane.paneId)) || null; } catch { return null; }
+  };
+
   return {
     emitter,
     // The ADOPT path lives in actions/takeover.js and emits its own statuses, so
@@ -2205,6 +2224,8 @@ function createSessionSend(deps) {
     send,
     moveIdleSession,
     getMenu,
+    getSuggestion,
+    getWorkMeter,
     answerMenu: answerMenuFor,
     findFreshPane,
     findFreshTranscript,

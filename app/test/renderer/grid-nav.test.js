@@ -14,6 +14,16 @@ test('gridDimensions matches the stage layout ladder', () => {
   assert.deepEqual(gridDimensions(16), { cols: 4, rows: 4 });
 });
 
+test('columns layout puts every window in one row, and arrows walk it', () => {
+  assert.deepEqual(gridDimensions(1, 'columns'), { cols: 1, rows: 1 });
+  assert.deepEqual(gridDimensions(4, 'columns'), { cols: 4, rows: 1 });
+  assert.deepEqual(gridDimensions(16, 'columns'), { cols: 16, rows: 1 });
+  assert.deepEqual(gridDimensions(4, 'tiles'), { cols: 2, rows: 2 });
+  const { cols, rows } = gridDimensions(4, 'columns');
+  assert.equal(navigateSlot({ slots: [0, 1, 2, 3], fromSlot: 1, direction: 'right', cols, rows }), 2);
+  assert.equal(navigateSlot({ slots: [0, 1, 2, 3], fromSlot: 1, direction: 'down', cols, rows }), null);
+});
+
 test('moves to the adjacent occupied cell in each direction (2x2 full)', () => {
   const grid = { slots: [0, 1, 2, 3], cols: 2, rows: 2 };
   assert.equal(navigateSlot({ ...grid, fromSlot: 0, direction: 'right' }), 1);

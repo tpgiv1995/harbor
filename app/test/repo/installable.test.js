@@ -49,6 +49,33 @@ function bareRequires(file) {
   return found;
 }
 
+// The exec-bit repair (scripts/pack-daemon-deps.js) is procedural: npm-script
+// ordering, npm's tar extraction, a chmod. Nothing asserted its OUTCOME, so a
+// node-pty layout change (a renamed prebuilds/, a rerouted helper) would make
+// the repair silently check nothing while every pty spawn on a fresh clone
+// died of `posix_spawnp failed`. This is the dev-tree half of that assertion;
+// scripts/after-pack.js is the packaged-artifact half.
+test('node-pty spawn-helper in the installed daemon tree is executable', (t) => {
+  if (process.platform === 'win32') { t.skip('win32 loads .node DLLs; there is no spawn-helper'); return; }
+  const prebuilds = path.join(DAEMON, 'node_modules', 'node-pty', 'prebuilds');
+  const built = path.join(DAEMON, 'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper');
+  const helpers = [];
+  if (fs.existsSync(prebuilds)) {
+    for (const entry of fs.readdirSync(prebuilds)) {
+      if (entry.startsWith('win32-')) continue;
+      const helper = path.join(prebuilds, entry, 'spawn-helper');
+      if (fs.existsSync(helper)) helpers.push(helper);
+    }
+  }
+  if (fs.existsSync(built)) helpers.push(built);
+  assert.ok(helpers.length > 0,
+    'no spawn-helper found anywhere in the daemon node-pty — the layout the exec-bit repair scans has moved');
+  for (const helper of helpers) {
+    assert.doesNotThrow(() => fs.accessSync(helper, fs.constants.X_OK),
+      `${helper} is not executable; pty spawns will die of posix_spawnp failed`);
+  }
+});
+
 test('every third-party module the daemon requires is declared as a daemon dependency', () => {
   const declared = new Set(Object.keys(daemonManifest().dependencies || {}));
   const undeclared = [];

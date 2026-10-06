@@ -1,5 +1,9 @@
 'use strict';
 
+const readline = require('node:readline');
+const { readCodexTitles } = require('./native-session-titles.cjs');
+const { sessionTitleText } = require('./session-title.cjs');
+
 const { watchPath } = require('../watch-path.js');
 
 // Provider history: codex and cursor sessions for the rail. The rail is the
@@ -30,7 +34,7 @@ const { readCodexRolloutMeta } = require('./provider-session-link.js');
 
 const CODEX_ID_RE = /([0-9a-f]{8}-[0-9a-f-]{27})\.jsonl$/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const HEAD_BYTES = 256 * 1024;
+const HEAD_BYTES = 4 * 1024 * 1024;
 const HEAD_LINES = 120;
 const TITLE_MAX = 96;
 
@@ -63,45 +67,41 @@ function oneLine(text, max = TITLE_MAX) {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-async function readHead(file) {
-  const handle = await fsp.open(file, 'r');
-  try {
-    const buffer = Buffer.alloc(HEAD_BYTES);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    return buffer.toString('utf8', 0, bytesRead);
-  } finally {
-    await handle.close();
-  }
-}
-
-// Parse the head of a provider transcript with the real conversation parser
-// and pull the facts a rail row needs: the first genuinely-human user text
-// (title material) and, for codex, the session_meta cwd.
+// Read complete records: a large session_meta line must not consume the entire
+// title budget. Stop early once a real prompt is found, with a bounded scan.
 async function extractRowFacts(file, provider) {
-  const head = await readHead(file);
-  const lines = head.split('\n').slice(0, HEAD_LINES);
-  const parser = new TranscriptParser(provider);
   // The first Codex record is unbounded (it currently embeds the system
-  // prompt), so cwd uses the complete-line reader rather than this module's
-  // bounded conversation head.
+  // prompt), so cwd + lineage use the complete-line reader rather than this
+  // module's bounded conversation head.
   const meta = provider === 'codex' ? await readCodexRolloutMeta(file) : null;
   let cwd = meta?.cwd || null;
   const lineage = meta?.lineage || null;
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let obj;
-    try { obj = JSON.parse(line); } catch { continue; }
-    if (provider === 'codex' && obj.type === 'session_meta') {
-      cwd = obj.payload?.cwd || null;
+  const stream = fs.createReadStream(file, { end: HEAD_BYTES - 1 });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const parser = new TranscriptParser(provider);
+  let isInternalSession = lineage?.kind === 'guardian';
+  let count = 0;
+  let firstUser = null;
+  try {
+    for await (const line of lines) {
+      if (++count > HEAD_LINES) break;
+      if (!line.trim()) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      if (provider === 'codex' && obj.type === 'session_meta') {
+        cwd = obj.payload?.cwd || cwd;
+        isInternalSession = isInternalSession || obj.payload?.source?.subagent?.other === 'guardian';
+      }
+      try { parser.applyLine(obj); } catch { /* malformed records cannot kill indexing */ }
+      firstUser = parser.blocks.filter(b => b.kind === 'user' && b.text)
+        .map(b => sessionTitleText(b.text, { internal: isInternalSession })).find(Boolean);
+      if (firstUser && (provider !== 'codex' || cwd)) return { cwd, lineage, firstUser, isInternalSession };
     }
-    try { parser.applyLine(obj); } catch { /* a malformed line never kills the row */ }
-    const firstUser = parser.blocks.find((b) => b.kind === 'user' && b.text);
-    if (firstUser && (provider !== 'codex' || cwd)) {
-      return { cwd, lineage, firstUser: firstUser.text };
-    }
+    return { cwd, lineage, firstUser: firstUser || null, isInternalSession };
+  } finally {
+    lines.close();
+    stream.destroy();
   }
-  const firstUser = parser.blocks.find((b) => b.kind === 'user' && b.text);
-  return { cwd, lineage, firstUser: firstUser?.text || null };
 }
 
 function createProviderHistory(options = {}) {
@@ -196,7 +196,8 @@ function createProviderHistory(options = {}) {
       id,
       lastActive: formatLocal(stat.mtimeMs),
       project: (cwd ? projectLabelForCwd(cwd) : projectHint) || projectHint || '',
-      title: facts.lineage?.kind === 'guardian' ? 'approval review'
+      isInternalSession: Boolean(facts.isInternalSession),
+      title: facts.lineage?.kind === 'guardian' ? (oneLine(facts.firstUser) || 'approval review')
         : facts.lineage?.parentThreadId ? [facts.lineage.nickname || 'subagent', facts.lineage.agentPath && `(${facts.lineage.agentPath})`].filter(Boolean).join(' ')
           : oneLine(facts.firstUser) || `(${provider} session)`,
       lineage: facts.lineage || null,
@@ -272,6 +273,18 @@ function createProviderHistory(options = {}) {
     await loadMetadata();
     await scanCodex(rows);
     await scanCursor(rows, knownCwds);
+    const nativeByHome = new Map();
+    for (const item of codexRoots) {
+      const home = typeof item === 'string' ? path.dirname(item) : item.configHome || path.dirname(item.root);
+      nativeByHome.set(home, await readCodexTitles(home));
+    }
+    for (const row of rows) {
+      if (row.provider !== 'codex' || row.isInternalSession) continue;
+      const source = codexRoots.find(item => row.path.startsWith((typeof item === 'string' ? item : item.root) + path.sep));
+      const home = source && (typeof source === 'string' ? path.dirname(source) : source.configHome || path.dirname(source.root));
+      const title = nativeByHome.get(home)?.get(row.id);
+      if (title) row.title = title;
+    }
     metaById.clear();
     for (const row of rows) {
       const meta = {
@@ -297,7 +310,12 @@ function createProviderHistory(options = {}) {
     // the desktop's ~90, and the e2e harness daemon's reads went dark —
     // live-caught 2026-07-24 as spec 6 flaking). Cursor's non-transcript
     // churn (worker.log, terminals) is absorbed by the debounce.
-    for (const item of codexRoots) watchDir(typeof item === 'string' ? item : item.root, { recursive: true });
+    for (const item of codexRoots) {
+      const root = typeof item === 'string' ? item : item.root;
+      watchDir(root, { recursive: true });
+      // Renaming a chat changes this sibling index without touching its rollout.
+      watchDir(path.dirname(root));
+    }
     watchDir(cursorRoot, { recursive: true });
   };
 

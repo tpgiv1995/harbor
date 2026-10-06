@@ -5,6 +5,7 @@ import { projectColor } from './project-colors.js';
 import { ProjectIcon } from './ProjectIcon.jsx';
 import { providerIdentity, providerModel, ProfileBadge, useProfiles, resolveProfile } from '../providers.js';
 import { AskCard } from './AskCard.jsx';
+import turnMetaHelpers from './turn-meta.cjs';
 import { AskForm } from './AskForm.jsx';
 import { PromptForm } from './PromptForm.jsx';
 import { useModelDialogs } from './use-dialog-state.js';
@@ -128,6 +129,51 @@ function OrchestrationPill({ summary, onClick }) {
 // terminal behind the TTY toggle (permission prompts and menus live in the
 // pty, not the transcript; a session waiting on one must never be a dead end).
 // The question card itself is stage/AskCard.jsx (the answer sheet, 2026-09-03).
+const { parseTokenCount, liveMeterLabel } = turnMetaHelpers;
+
+// LIVE WORK METER (2026-10-05). While a Claude window is mid-turn the header
+// shows "38s · ↓ 2.4k" beside the run state, like the CLI's own working line.
+// Main reads that line off the pane (main/work-meter.js), but the CLI HIDES it
+// while prose streams, so the chip does not mirror it frame by frame: elapsed
+// ticks locally from the task's prompt, and tokens are the larger of the last
+// count the CLI showed and the transcript's running total for the task
+// (turn-meta.cjs liveMeterLabel). Polled only while the window is working.
+function useWorkMeter(session, pane, working, prompt) {
+  const paneId = pane?.paneId || null;
+  const active = Boolean(working && paneId && (session.provider || 'claude') === 'claude');
+  const promptKey = prompt?.key || null;
+  const [cli, setCli] = useState(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setCli(null);
+    if (!active) return undefined;
+    let alive = true;
+    let timer = null;
+    const tick = async () => {
+      const next = await window.harbor?.session?.workMeter?.({ pane, sessionId: session.id }).catch(() => null);
+      if (!alive) return;
+      // Keep the last count through the stretches the CLI hides its line.
+      if (next) setCli((prev) => ({ elapsed: next.elapsed || prev?.elapsed || null, tokens: parseTokenCount(next.tokens) ?? prev?.tokens ?? null, verb: next.verb, thinking: next.thinking }));
+      setNow(Date.now());
+      timer = setTimeout(tick, 1000);
+    };
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+    // pane is read through paneId; a fresh pane object for the same id is the same pane.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, paneId, session.id, promptKey]);
+  if (!active) return null;
+  const startMs = prompt?.ts ? Date.parse(prompt.ts) : NaN;
+  const label = liveMeterLabel({
+    startMs: Number.isFinite(startMs) ? startMs : null,
+    now,
+    cliTokens: cli?.tokens ?? null,
+    turnTokens: prompt?.turnMeta?.outputTokens ?? null,
+    cliElapsed: cli?.elapsed || null,
+  });
+  return label ? { label, title: cli?.verb ? `${cli.verb}${cli.thinking ? ' · thinking' : ''}` : 'Working' } : null;
+}
+
 export const SessionTile = memo(forwardRef(function SessionTile({
   session,
   data,
@@ -166,6 +212,8 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   const modelDialogs = useModelDialogs();
   const awaitingAnswer = pendingAsk && !pendingAsk.answered || modelDialogs.has(session.id);
   const runState = runStateCue(session, pane, awaitingAnswer ? { ...header, blocked: true } : header);
+  const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued) return blocks[i]; return null; }, [blocks]);
+  const workMeter = useWorkMeter(session, pane, Boolean(header?.working) && !awaitingAnswer, lastPrompt);
   const title = session.isChildTask && session.childTitle ? session.childTitle : session.title;
   const projectLabel = !session.project || session.project === '~' ? 'home' : session.project;
   const showKeycap = index < 9;
@@ -180,10 +228,11 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   // launch itself resolves it: a session with no home of its own (a codex or
   // cursor window, a provisional pane) falls back to the default profile, so
   // the tooltip and the outcome cannot disagree.
-  const newSiblingProfile = resolveProfile(profiles, session.home);
+  const newSiblingProvider = session.provider || 'claude';
+  const newSiblingProfile = resolveProfile(profiles.filter(p => (p.provider || 'claude') === newSiblingProvider), session.home);
   const newSiblingTitle = newSiblingProfile
-    ? `New ${newSiblingProfile.label} session in ${projectLabel}`
-    : `New session in ${projectLabel}`;
+    ? `New ${providerIdentity(newSiblingProvider).label} session (${newSiblingProfile.label}) in ${projectLabel}`
+    : `New ${providerIdentity(newSiblingProvider).label} session in ${projectLabel}`;
   const noTranscript = !data || data.missing;
   // A codex/cursor window is a DESIGNED window, same as claude's: the raw
   // terminal is what the >_ toggle is for. The one exception is a pane Harbor
@@ -239,7 +288,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
               type="button"
               className="ico tile-new"
               title={newSiblingTitle}
-              aria-label={`New session in ${projectLabel}`}
+              aria-label={newSiblingTitle}
               onClick={(e) => { e.stopPropagation(); onNewSibling?.(); }}
             >
               +
@@ -316,6 +365,9 @@ export const SessionTile = memo(forwardRef(function SessionTile({
               <span className="runstate-dot" aria-hidden="true" />
               <span className="runstate-verb">{runState.label}</span>
             </span>
+          ) : null}
+          {workMeter ? (
+            <span className="work-meter" title={workMeter.title}>{workMeter.label}</span>
           ) : null}
           {taskTip && runState?.tooltip ? createPortal(<div role="tooltip" className="background-task-tip" style={{ left: Math.min(taskTip.left, window.innerWidth - 370), top: taskTip.bottom + 6 }}>{runState.tooltip}</div>, document.body) : null}
           {session.delegationSummary?.total ? <button className="orch-pill delegation-pill" type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onOpenDelegations(); }}>agents {session.delegationSummary.running} running / {session.delegationSummary.total}</button> : null}

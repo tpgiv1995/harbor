@@ -465,7 +465,15 @@ function hasCanonicalSuccessor(lines, start, baseIndent, shape) {
   return false;
 }
 
-function parseList(lines, start) {
+// Nesting past this depth starts a fresh list instead of recursing (2026-10-05).
+// Claude Code 2.1.290 fixed a stack overflow on replies that nest lists
+// thousands of levels deep; Harbor renders those replies through this parser
+// and md.jsx's renderListSpec, both recursive, and 5,000 levels threw here and
+// broke the session window. Every item is kept; only the nesting is cut. The
+// composer stops at 5 levels, so drafts never reach this.
+const MAX_LIST_DEPTH = 32;
+
+function parseList(lines, start, depth = 1) {
   const first = listLine(lines[start]);
   if (!first) return null;
   const baseIndent = first.indent;
@@ -503,8 +511,8 @@ function parseList(lines, start) {
 
     if (current.indent > baseIndent) {
       const parent = list.children[list.children.length - 1];
-      if (!parent) break;
-      const nested = parseList(lines, i);
+      if (!parent || depth >= MAX_LIST_DEPTH) break;
+      const nested = parseList(lines, i, depth + 1);
       if (!nested) break;
       parent.children.push(nested.spec);
       i = nested.next;
@@ -629,6 +637,7 @@ module.exports = {
   TAG_MARKS,
   serializeDoc,
   markdownToSpec,
+  MAX_LIST_DEPTH,
   inlineToSpec,
   buildNodes,
   orderedMarker,

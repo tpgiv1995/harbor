@@ -50,6 +50,14 @@ function windowsFromLimits(limits, nowMs, endpoint = false) {
     .sort((a, b) => (a.windowMinutes || Infinity) - (b.windowMinutes || Infinity));
 }
 
+// The dropdown's name for a codex home: `.codex` is Default, `.codex-work` is
+// Work. bin/harbor-lean names seats with the same function.
+function codexHomeLabel(dir) {
+  const name = path.basename(dir);
+  const derived = name === '.codex' ? 'Default' : name.replace(/^\.codex-/, '');
+  return derived.charAt(0).toUpperCase() + derived.slice(1);
+}
+
 async function discoverCodexHomes({ io, home, env, profiles, platform }) {
   const candidates = [
     path.join(home, '.codex'),
@@ -300,14 +308,17 @@ function createPlanUsageProvider({
     };
   }
 
-  async function codexPlan(dir, time) {
-    const name = path.basename(dir);
-    const derivedLabel = name === '.codex' ? 'Default' : name.replace(/^\.codex-/, '');
+  async function codexPlan(dir, time, sharedStore = false) {
     const auth = await readJson(path.join(dir, 'auth.json'));
     const claims = jwtClaims(auth?.tokens?.id_token);
     const token = auth?.tokens?.access_token;
     const accountId = typeof auth?.tokens?.account_id === 'string' ? auth.tokens.account_id : null;
-    let sample = await readRolloutSample(dir, io, time);
+    // A sessions store shared by two Codex homes (one account's `sessions` linked to
+    // another's, so the rail shows every account's history) holds rollouts from BOTH
+    // logins, and a rollout's rate_limits name no account. Sampling it would show
+    // whichever account ran last under every plan, so a shared store is never sampled:
+    // each plan asks the usage endpoint with its own token instead.
+    let sample = sharedStore ? null : await readRolloutSample(dir, io, time);
     const needsUsage = !sample || time - stamp(sample.updatedAt) > STALE_MS;
     const [usage, credits] = await Promise.all([
       needsUsage ? remote(`${dir}:usage`, CODEX_USAGE_URL, token, accountId, endpointSample) : null,
@@ -336,7 +347,7 @@ function createPlanUsageProvider({
     return {
       provider: 'codex',
       id: `codex:${hash(dir).slice(0, 16)}`,
-      label: derivedLabel.charAt(0).toUpperCase() + derivedLabel.slice(1),
+      label: codexHomeLabel(dir),
       email: typeof claims.email === 'string' ? claims.email : null,
       planType: sample?.planType || null,
       windows,
@@ -430,14 +441,29 @@ function createPlanUsageProvider({
       };
     }));
     const homes = await discoverCodexHomes({ io, home, env, profiles, platform });
+    const stores = await Promise.all(homes.map(async (dir) => {
+      try {
+        const store = await io.realpath(path.join(dir, 'sessions'));
+        return platform === 'win32' ? store.toLowerCase() : store;
+      } catch {
+        return null;
+      }
+    }));
+    const shared = (store) => !!store && stores.filter((other) => other === store).length > 1;
     const [claudePlans, codexPlans, cursor] = await Promise.all([
       plans,
-      Promise.all(homes.map((dir) => codexPlan(dir, time))),
+      Promise.all(homes.map((dir, index) => codexPlan(dir, time, shared(stores[index])))),
       cursorPlan(),
     ]);
     return { generatedAt: new Date(now()).toISOString(), plans: [...claudePlans, ...codexPlans, cursor] };
   }
   return {
+    // Cursor alone, for bin/harbor-lean's mechanical-work route: one read-only
+    // request to Cursor's own usage endpoint, no Claude or Codex reads.
+    async getCursorPlan() {
+      if (env.HARBOR_PLAN_USAGE_FIXTURE) return (await collect()).plans.find((p) => p.provider === 'cursor') || null;
+      return cursorPlan();
+    },
     getPlans() {
       if (!flight) {
         flight = collect().finally(() => {
@@ -449,4 +475,4 @@ function createPlanUsageProvider({
   };
 }
 
-module.exports = { createPlanUsageProvider, createRequestCache, discoverCodexHomes, readRolloutSample, windowsFromLimits, jwtClaims, resetCredits, cursorWindow, cursorAuthFile, TAIL_BYTES };
+module.exports = { createPlanUsageProvider, createRequestCache, codexHomeLabel, discoverCodexHomes, readRolloutSample, windowsFromLimits, jwtClaims, resetCredits, cursorWindow, cursorAuthFile, TAIL_BYTES };

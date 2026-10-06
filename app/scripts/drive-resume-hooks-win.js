@@ -32,7 +32,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { SessionClient } = require('../src/daemon/client.js');
-const { createSessionSend, createLinkRegistry } = require('../src/main/session-send.js');
+const { createSessionSend, createLinkRegistry, claudeProjectDir } = require('../src/main/session-send.js');
 
 const DAEMON = path.join(__dirname, '../src/daemon/daemon.js');
 const CLAUDE = process.env.HARBOR_PROBE_CLAUDE
@@ -108,7 +108,7 @@ async function main() {
     if (process.env[key]) childEnv[key] = process.env[key];
   }
   const claudeSession = randomUUID();
-  const transcript = path.join(os.homedir(), '.claude', 'projects', cwd.replace(/[:\\/]/g, '-'), `${claudeSession}.jsonl`);
+  const transcript = path.join(claudeProjectDir(cwd), `${claudeSession}.jsonl`);
   cleanup.transcriptDir = path.dirname(transcript);
 
   const readScreenOf = (paneId) => async (lines, source) => {

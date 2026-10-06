@@ -172,3 +172,42 @@ test('keeper-linked Cursor cwd survives provider-history reconstruction without 
   assert.equal(Object.hasOwn(row, 'isLive'), false);
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test('rail titles skip attachment framing and read past a large Codex metadata record', async () => {
+  const { dir, codexRoot, cursorRoot } = await buildFixtureRoots();
+  try {
+    const file = path.join(codexRoot, '2026', '07', '21', `rollout-2026-07-21T01-35-28-${CODEX_ID}.jsonl`);
+    const meta = { type: 'session_meta', payload: { cwd: '/home/user/dev/widget', instructions: 'x'.repeat(300000) } };
+    const prompt = { type: 'event_msg', payload: { type: 'user_message', message: '# Files mentioned by the user:\n\n## screenshot.png\nImage attachment: true\n\n## My request:\nMake the sidebar easier to read\n<image name="Image #1">' } };
+    await fs.writeFile(file, [meta, prompt].map(x => JSON.stringify(x)).join('\n'));
+    const history = createProviderHistory({ codexRoot, cursorRoot });
+    const row = (await history.listSessions({})).find(r => r.provider === 'codex');
+    assert.equal(row.title, 'Make the sidebar easier to read');
+    assert.equal(row.isInternalSession, false);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('guardian sessions are identified by metadata and get a readable searchable title', async () => {
+  const { dir, codexRoot, cursorRoot } = await buildFixtureRoots();
+  try {
+    const file = path.join(codexRoot, '2026', '07', '21', `rollout-2026-07-21T01-35-28-${CODEX_ID}.jsonl`);
+    const meta = { type: 'session_meta', payload: { cwd: '/home/user/dev/widget', source: { subagent: { other: 'guardian' } } } };
+    const prompt = { type: 'event_msg', payload: { type: 'user_message', message: 'The following is the Codex agent history\nuser: Fix the sidebar\n>>> TRANSCRIPT START' } };
+    await fs.writeFile(file, [meta, prompt].map(x => JSON.stringify(x)).join('\n'));
+    const row = (await createProviderHistory({ codexRoot, cursorRoot }).listSessions({})).find(r => r.provider === 'codex');
+    assert.equal(row.isInternalSession, true);
+    assert.equal(row.title, 'Action review: Fix the sidebar');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('Codex native names override prompt titles and refresh when only the name index changes', async () => {
+  const { dir, codexRoot, cursorRoot } = await buildFixtureRoots();
+  try {
+    const index = path.join(dir, 'session_index.jsonl');
+    const history = createProviderHistory({ codexRoot, cursorRoot });
+    await fs.writeFile(index, JSON.stringify({ id: CODEX_ID, thread_name: 'Exact Codex name', updated_at: '2026-09-29' }) + '\n');
+    assert.equal((await history.listSessions({})).find(r => r.provider === 'codex').title, 'Exact Codex name');
+    await fs.appendFile(index, JSON.stringify({ id: CODEX_ID, thread_name: 'Renamed in Codex', updated_at: '2026-09-30' }) + '\n');
+    assert.equal((await history.listSessions({})).find(r => r.provider === 'codex').title, 'Renamed in Codex');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

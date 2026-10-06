@@ -178,6 +178,7 @@ function trustKeysFor(cwd) {
   return keys;
 }
 
+
 function preacceptFolderTrust(configHome, cwd) {
   if (process.env.HARBOR_NO_TRUST_PREACCEPT === '1') return false;
   if (process.env.HARBOR_E2E === '1') return false;
@@ -286,6 +287,13 @@ function cleanDaemonEnv() {
       : [
         path.join(home, '.local', 'bin'),
         path.join(home, '.npm-global', 'bin'),
+        // Apple Silicon Homebrew. Without it, a Mac whose node/git/npm are
+        // Homebrew-installed gets panes where `claude` launches (from
+        // ~/.local/bin) but the statusline command and `harbor-tasks` — both
+        // `#!/usr/bin/env node` — die of `env: node: No such file or
+        // directory`. Harmless elsewhere: a PATH entry that does not exist is
+        // simply never matched.
+        '/opt/homebrew/bin',
         '/usr/local/bin',
         '/usr/bin',
         '/bin',
@@ -314,6 +322,16 @@ function sessiondChildEnv(sourceEnv = process.env) {
   const env = cleanDaemonEnv();
   if (sourceEnv.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = sourceEnv.CLAUDE_CONFIG_DIR;
   if (sourceEnv.CODEX_HOME) env.CODEX_HOME = sourceEnv.CODEX_HOME;
+  // Claude's prompt suggestions (the command bar offers them on Tab, see
+  // src/daemon/screen.js composerSuggestion). The CLI draws them when its
+  // server-side flag is on for the account; this variable forces them on. Each
+  // suggestion is an extra model request per turn, so Harbor never sets it
+  // (2026-10-06): a user who wants them everywhere sets it in Harbor's own
+  // environment, and because the daemon only ever sees this cleaned env, that
+  // choice has to be carried explicitly.
+  if (sourceEnv.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION !== undefined) {
+    env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = sourceEnv.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION;
+  }
   return env;
 }
 

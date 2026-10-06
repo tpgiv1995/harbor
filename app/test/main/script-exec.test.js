@@ -11,10 +11,12 @@
 // then no session could ever be created or resumed. The app has never run on
 // Windows, which is the only reason this was not caught by use.
 //
-// The proof is deliberately TWO-SIDED. A test that only checked "win32 uses an
-// interpreter" would pass just as well if the POSIX path had also been changed
-// to route through Electron, which would risk the one platform that is proven
-// today. So the POSIX case asserts the command is still the script itself.
+// The proof is deliberately TWO-SIDED — but the axis is ELECTRON, not the
+// platform. Under Electron the shebang cannot be trusted to resolve `node`
+// (a packaged app inherits launchd's/systemd's PATH), so every platform names
+// the interpreter; outside Electron the CLI and this suite keep the bare
+// script. Both halves are asserted per platform below, so a regression in
+// either direction fails rather than being assumed away.
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -37,16 +39,76 @@ test('on win32 a bin/ script is run by naming the interpreter, with the script a
   assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
 });
 
-test('on linux and darwin the script path stays the command, so the proven path is untouched', () => {
-  for (const platform of ['linux', 'darwin']) {
-    const { command, args, env } = scriptInvocation('/repo/bin/ai', ['--team'], {
-      platform,
-      execPath: '/usr/bin/electron',
-    });
-    assert.equal(command, '/repo/bin/ai', `${platform} must still exec the script directly`);
-    assert.deepEqual(args, ['--team']);
-    assert.deepEqual(env, {}, `${platform} needs no extra environment`);
-  }
+test('on linux OUTSIDE Electron the shebang is trusted, so the CLI path is untouched', () => {
+  const { command, args, env } = scriptInvocation('/repo/bin/ai', ['--team'], {
+    platform: 'linux',
+    execPath: '/usr/bin/node',
+    electron: false,
+  });
+  assert.equal(command, '/repo/bin/ai', 'plain-node linux must still exec the script directly');
+  assert.deepEqual(args, ['--team']);
+  assert.deepEqual(env, {}, 'a real node on PATH needs no interpreter override');
+});
+
+test('on linux UNDER ELECTRON the interpreter is named, because a packaged AppImage has no node on PATH', () => {
+  // The packaged-Linux twin of the darwin case below: a desktop-entry launch
+  // inherits the session manager's PATH, `#!/usr/bin/env node` exits 127, and
+  // the daemon dies silently. Same rule, same fix, asserted per platform.
+  const { command, args, env } = scriptInvocation('/opt/Harbor/resources/bin/harbor-sessiond', ['start'], {
+    platform: 'linux',
+    execPath: '/opt/Harbor/harbor',
+    electron: true,
+  });
+  assert.equal(command, '/opt/Harbor/harbor');
+  assert.deepEqual(args, ['/opt/Harbor/resources/bin/harbor-sessiond', 'start']);
+  assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
+});
+
+test('on darwin UNDER ELECTRON the interpreter is named, because a packaged .app has no node on PATH', () => {
+  // A .app launched from Finder/Dock inherits launchd's
+  // `/usr/bin:/bin:/usr/sbin:/sbin`. There is no /usr/bin/node on macOS, so
+  // `#!/usr/bin/env node` exits 127 and the daemon auto-start silently never
+  // happens — observed as a `launchctl list` job parked at 127 while the app
+  // showed "Terminal daemon unreachable" (2026-08-27).
+  const { command, args, env } = scriptInvocation('/Harbor.app/Contents/Resources/bin/harbor-sessiond', ['start'], {
+    platform: 'darwin',
+    execPath: '/Harbor.app/Contents/MacOS/Harbor',
+    electron: true,
+  });
+  assert.equal(command, '/Harbor.app/Contents/MacOS/Harbor');
+  assert.deepEqual(args, ['/Harbor.app/Contents/Resources/bin/harbor-sessiond', 'start']);
+  assert.equal(env.ELECTRON_RUN_AS_NODE, '1', 'the Electron binary only behaves as node when told to');
+});
+
+test('on darwin OUTSIDE Electron the shebang is trusted, so the CLI and this suite are unaffected', () => {
+  const { command, args, env } = scriptInvocation('/repo/bin/harbor-sessiond', ['status'], {
+    platform: 'darwin',
+    execPath: '/opt/homebrew/bin/node',
+    electron: false,
+  });
+  assert.equal(command, '/repo/bin/harbor-sessiond');
+  assert.deepEqual(args, ['status']);
+  assert.deepEqual(env, {}, 'a real node on PATH needs no interpreter override');
+});
+
+// The packaged-mac resume path flips scriptExecArgs from the 2-arg to the
+// 3-arg execFile shape — exactly the arity hazard the implementation comment
+// records breaking resumeSession once already — and until 2026-08-28 no spec
+// exercised that shape on darwin. This is that spec: options-less call, under
+// Electron, must produce [command, args, options] with the env merged over
+// process.env rather than replacing it.
+test('scriptExecArgs on darwin under Electron takes the 3-arg shape with a merged env', () => {
+  const { command, args, options, execArgs } = scriptExecArgs(
+    '/Harbor.app/Contents/Resources/bin/claude-sessions',
+    ['--resume', 'abc123'],
+    {},
+    { platform: 'darwin', execPath: '/Harbor.app/Contents/MacOS/Harbor', electron: true },
+  );
+  assert.equal(command, '/Harbor.app/Contents/MacOS/Harbor');
+  assert.deepEqual(args, ['/Harbor.app/Contents/Resources/bin/claude-sessions', '--resume', 'abc123']);
+  assert.equal(execArgs.length, 3, 'the interpreter env forces the options-bearing execFile arity');
+  assert.equal(options.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(options.env.PATH, process.env.PATH, 'the interpreter env merges over process.env, never replaces it');
 });
 
 test('scriptExecArgs merges the interpreter environment without discarding the caller`s', () => {

@@ -469,9 +469,11 @@ function validateDefaults(state) {
   // Cursor exposes no effort levels, so demanding one there would be a dead
   // end invented by this screen.
   if (state.defaults.provider !== 'cursor') {
-    const allowed = state.defaults.provider === 'codex'
-      ? ['low', 'medium', 'high', 'xhigh']
-      : ['default', ...EFFORT_LEVELS];
+    const discovered = state.modelRegistry?.[state.defaults.provider];
+    const allowed = discovered?.effortsByModel?.[state.defaults.model] || discovered?.efforts
+      || (state.defaults.provider === 'codex'
+        ? ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+        : ['default', ...EFFORT_LEVELS]);
     if (!allowed.includes(state.defaults.effort)) {
       errors.push(err('defaults.effort', 'Pick an effort level this provider supports.'));
     }

@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+'use strict';
+
+// Prints the "Heavy lifting" setting from Harbor's plans menu, each GPT seat's
+// weekly usage, Cursor's monthly usage, and where each kind of task goes, so a
+// Claude session can decide whether to hand work to a GPT seat (an Astra run, a
+// codex worker, an image) or to Cursor BEFORE it launches one. Pat set this up
+// on 2026-10-05 after an Astra run went to a GPT seat while his OpenAI plans
+// were tight.
+//
+//   node bin/harbor-lean                         the setting, seats and routing
+//   node bin/harbor-lean --task image [--large] [--complex]  where ONE task goes (kinds:
+//                                                image, mechanical,
+//                                                connected, review, general)
+//   add --json to either for the same facts as JSON
+//
+// Reads the setting (~/.harbor/provider-lean.json, or HARBOR_PROVIDER_LEAN_FILE)
+// and the newest Codex rollouts of every ~/.codex* home from disk, and makes ONE
+// read-only request to Cursor's own usage endpoint with Cursor's own sign-in
+// (10 s deadline; off under HARBOR_NO_USAGE_FETCH=1, and HARBOR_PLAN_USAGE_FIXTURE
+// answers it for tests). No writes; exit 0 whenever it can print an answer.
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const app = path.join(path.dirname(__dirname), 'app', 'src');
+const { TASK_KINDS, leanMode, leanRoute, leanVerdict, cursorFromPlans } = require(path.join(app, 'shared', 'provider-lean.cjs'));
+const { resolveLeanFile, readLean } = require(path.join(app, 'main', 'providers', 'provider-lean.js'));
+const { createPlanUsageProvider, codexHomeLabel, discoverCodexHomes, readRolloutSample } = require(path.join(app, 'main', 'providers', 'plan-usage.js'));
+const { defaultConfigFile } = require(path.join(app, 'shared', 'tasks-file.cjs'));
+
+function configuredProfiles() {
+  try {
+    const config = JSON.parse(fs.readFileSync(defaultConfigFile({}), 'utf8'));
+    return Array.isArray(config.profiles) ? config.profiles : [];
+  } catch {
+    return [];
+  }
+}
+
+function age(iso, nowMs) {
+  const ms = nowMs - Date.parse(iso);
+  if (!Number.isFinite(ms)) return 'time unknown';
+  const minutes = Math.max(0, Math.round(ms / 60000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+async function seats(nowMs) {
+  const homes = await discoverCodexHomes({
+    io: fs.promises, home: os.homedir(), env: process.env, profiles: configuredProfiles(), platform: process.platform,
+  });
+  const out = [];
+  for (const dir of homes) {
+    const sample = await readRolloutSample(dir, fs.promises, nowMs);
+    const weekly = sample && sample.windows.find((w) => w.kind === 'weekly');
+    out.push({
+      label: codexHomeLabel(dir),
+      home: dir,
+      weeklyPct: weekly ? weekly.usedPct : null,
+      resetsAt: weekly && weekly.resetsAt ? new Date(weekly.resetsAt * 1000).toISOString() : null,
+      sampledAt: sample ? sample.updatedAt : null,
+    });
+  }
+  return out;
+}
+
+async function cursorUsage() {
+  try {
+    const plan = await createPlanUsageProvider({ profiles: configuredProfiles() }).getCursorPlan();
+    const cursor = cursorFromPlans(plan ? [plan] : []);
+    return cursor ? { ...cursor, reason: plan.reason || null } : { label: 'Cursor', monthlyPct: null, reason: 'No Cursor plan found.' };
+  } catch {
+    return { label: 'Cursor', monthlyPct: null, reason: "Cursor's usage could not be read." };
+  }
+}
+
+function argValue(name) {
+  const at = process.argv.indexOf(name);
+  return at > 0 ? process.argv[at + 1] : undefined;
+}
+
+function routeText(route) {
+  if (route.side === 'claude') return `Claude (${route.reason.replace(/\.$/, '')})`;
+  if (route.side === 'cursor') return 'Cursor';
+  return `GPT seat ${route.seat.label}, CODEX_HOME ${route.seat.home}`;
+}
+
+(async () => {
+  const nowMs = Date.now();
+  const file = resolveLeanFile();
+  const setting = readLean(file);
+  const [list, cursor] = await Promise.all([seats(nowMs), cursorUsage()]);
+  const verdict = leanVerdict(setting.mode, list, cursor);
+  const json = process.argv.includes('--json');
+  const large = process.argv.includes('--large');
+  const complex = process.argv.includes('--complex');
+  const task = argValue('--task');
+  if (task !== undefined) {
+    if (!TASK_KINDS.some((kind) => kind.id === task)) {
+      console.error(`harbor-lean: unknown task kind "${task}". Kinds: ${TASK_KINDS.map((kind) => kind.id).join(', ')}`);
+      process.exit(2);
+    }
+    const route = leanRoute(setting.mode, task, list, { large, cursor, complex });
+    if (json) {
+      console.log(JSON.stringify({ mode: setting.mode, task, large, complex, route }, null, 2));
+      return;
+    }
+    console.log(`${task}${large ? ' (large)' : ''}${complex ? ' (complex)' : ''}: ${routeText(route)}`);
+    // Optional local helpers are named only on a machine that has them; anywhere
+    // else the hint names the plain CLI.
+    const imageHelper = 'C:/tools/gpt-image/gpt-image.mjs';
+    const cursorWorker = 'C:/tools/cursor-worker/cursor-worker.mjs';
+    if (route.side === 'gpt') console.log(`Launch it with HARBOR_LEAN_TASK=${task} in front of the codex or astra-run command${task === 'image' && fs.existsSync(imageHelper) ? `, or use node ${imageHelper}` : ''}.`);
+    if (route.side === 'cursor') console.log(`Run it ${fs.existsSync(cursorWorker) ? `with node ${cursorWorker}, or put ` : 'by putting '}HARBOR_LEAN_TASK=mechanical in front of the cursor-agent command.`);
+    return;
+  }
+  const routes = TASK_KINDS.map((kind) => ({
+    kind: kind.id,
+    label: kind.label,
+    detail: kind.detail,
+    route: leanRoute(setting.mode, kind.id, list, { cursor }),
+    large: kind.side === null ? leanRoute(setting.mode, kind.id, list, { large: true, cursor }) : undefined,
+  }));
+  if (json) {
+    console.log(JSON.stringify({ mode: setting.mode, saved: setting.saved, updatedAt: setting.updatedAt, file, seats: list, cursor, verdict, routes }, null, 2));
+    return;
+  }
+  const label = leanMode(setting.mode).label;
+  let when = "default; never set in Harbor's plans menu";
+  if (setting.saved) when = setting.updatedAt ? `set ${age(setting.updatedAt, nowMs)} in Harbor's plans menu` : "set in Harbor's plans menu";
+  console.log(`Heavy lifting: ${label} (${when})`);
+  const seatText = list.length
+    ? list.map((s) => {
+      if (s.weeklyPct === null) return `${s.label} unknown`;
+      const pct = s.weeklyPct > 0 && s.weeklyPct < 1 ? '<1%' : `${Math.round(s.weeklyPct)}%`;
+      return `${s.label} ${pct}${s.weeklyPct >= 100 ? ' (capped)' : ''}, sampled ${age(s.sampledAt, nowMs)}`;
+    }).join('; ')
+    : 'none found';
+  console.log(`GPT seats this week: ${seatText}`);
+  const cursorPct = cursor.monthlyPct === null ? `unknown (${cursor.reason})` : (cursor.monthlyPct > 0 && cursor.monthlyPct < 1 ? '<1%' : `${Math.round(cursor.monthlyPct)}%`);
+  console.log(`Cursor this month: ${cursorPct}`);
+  console.log(`Verdict: ${verdict.summary}`);
+  console.log('Routing right now:');
+  for (const r of routes) {
+    console.log(`  ${r.label} (${r.detail}): ${routeText(r.route)}`);
+    if (r.large && r.large.side !== r.route.side) console.log(`    large jobs: ${routeText(r.large)}`);
+  }
+  console.log('One task: node bin/harbor-lean --task <kind> [--large] [--complex]');
+})().catch((error) => {
+  console.error(`harbor-lean: ${error.message}`);
+  process.exit(1);
+});

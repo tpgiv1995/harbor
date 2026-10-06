@@ -121,7 +121,13 @@ async function readClaudeHome(dir, readFile) {
 // accounts. It now SCANS, through the same helper the config migration uses, so
 // the two cannot disagree about what a profile is.
 function candidateHomes(homedir, overrides = {}) {
-  const found = listHomeDirs(homedir, overrides.readdir || fs.readdirSync);
+  // `exists` is threaded for the same reason `readdir` is: the comment above
+  // says the wizard and the migration must not disagree about what a profile
+  // is, and a home is now a directory holding a `.claude.json`, not merely one
+  // named `.claude-*`. Dropping it here would leave the WIZARD offering the
+  // phantom accounts the migration had just learned to reject, which is the
+  // surface the user actually sees.
+  const found = listHomeDirs(homedir, overrides.readdir || fs.readdirSync, overrides.exists || fs.existsSync);
   return found.length ? found : [path.join(homedir, PRIMARY_HOME)];
 }
 

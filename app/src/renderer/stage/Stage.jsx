@@ -4,6 +4,7 @@ import { ErrorBoundary } from '../ErrorBoundary.jsx';
 import { CommandBar } from './CommandBar.jsx';
 import { useProfiles, profileStyle } from '../providers.js';
 import gridNav from './grid-nav.cjs';
+import { siblingSessionRequest } from '../new-session-defaults.cjs';
 
 const { gridDimensions } = gridNav;
 
@@ -25,7 +26,7 @@ function ProfileLaunchButtons({ profiles, onLaunch, suffix = '' }) {
           className="slot-btn"
           style={profileStyle(profile)}
           title={profile.email || profile.label}
-          onClick={() => onLaunch(profile.id)}
+          onClick={() => onLaunch({ account: profile.id, provider: profile.provider || 'claude' })}
         >
           {`+ ${profile.label}${suffix}`}
         </button>
@@ -47,11 +48,15 @@ function NewSessionSlot({ onNew, style }) {
 }
 
 const DRAG_THRESHOLD = 6;
+// Columns layout: below this width a column stops being readable, so the
+// stage scrolls sideways instead of crushing every window.
+const COLUMN_MIN_PX = 380;
 
 // The stage: an adaptive Slate grid up to 16 windows. One open session gets the
 // whole stage, two split side by side, three or four tile 2x2 with dashed
 // new-session slots filling the gaps (counts 1-3 only). Right-drag a window
-// to rearrange.
+// to rearrange. layout="columns" puts every window in one row of full-height
+// columns instead.
 export function Stage({
   tiles,
   sessionsById,
@@ -65,6 +70,7 @@ export function Stage({
   externalControl,
   onSelect,
   onPlace,
+  layout = 'tiles',
   onClose,
   onToggleTty,
   onToggleFocus,
@@ -108,7 +114,8 @@ export function Stage({
   // Focus mode: one window takes the full stage; the rest stay MOUNTED (their
   // pty streams and scroll positions survive) but hidden via CSS.
   const focusActive = Boolean(focusedId && resolved.some((r) => r.session.id === focusedId));
-  const { cols, rows } = focusActive ? { cols: 1, rows: 1 } : gridDimensions(Math.max(count, maxSlot + 1));
+  const columnsLayout = layout === 'columns' && !focusActive;
+  const { cols, rows } = focusActive ? { cols: 1, rows: 1 } : gridDimensions(Math.max(count, maxSlot + 1), layout);
   // Every unoccupied cell is a hole: visible as a dashed new-session slot and
   // meaningful as a drop target (a window dropped there OWNS that cell).
   const occupied = new Set(resolved.map((r) => r.slot));
@@ -137,11 +144,13 @@ export function Stage({
     const padR = parseFloat(styles.paddingRight) || 0;
     const padB = parseFloat(styles.paddingBottom) || 0;
     const gap = parseFloat(styles.gap) || 0;
-    const innerW = Math.max(1, rect.width - padL - padR);
+    // scrollWidth/scrollLeft, not the rect: the columns layout scrolls
+    // sideways once the columns hit their minimum width.
+    const innerW = Math.max(1, Math.max(rect.width, grid.scrollWidth) - padL - padR);
     const innerH = Math.max(1, rect.height - padT - padB);
     const cellW = (innerW - gap * (cols - 1)) / cols;
     const cellH = (innerH - gap * (rows - 1)) / rows;
-    const cx = Math.min(Math.max(clientX - rect.left - padL, 0), innerW - 1);
+    const cx = Math.min(Math.max(clientX - rect.left + grid.scrollLeft - padL, 0), innerW - 1);
     const cy = Math.min(Math.max(clientY - rect.top - padT, 0), innerH - 1);
     const col = Math.min(cols - 1, Math.max(0, Math.floor(cx / (cellW + gap))));
     const row = Math.min(rows - 1, Math.max(0, Math.floor(cy / (cellH + gap))));
@@ -165,6 +174,13 @@ export function Stage({
   }, [onPlace]);
 
   useEffect(() => () => dragCleanupRef.current?.(), []);
+
+  // Columns can overflow the stage sideways: bring the selected window into
+  // view when it changes (rail click, Alt+arrows, Ctrl+1-9).
+  useEffect(() => {
+    if (!columnsLayout || !selectedId) return;
+    tileRefs.current.get(selectedId)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [columnsLayout, selectedId]);
 
   const onHeaderPointerDown = useCallback((event, fromSlot, sessionId) => {
     const diag = (k, extra) => window.__harborDiag?.push({
@@ -282,12 +298,13 @@ export function Stage({
       ) : (
         <div
           ref={gridRef}
-          className={`grid4${focusActive ? ' focus-mode' : ''}`}
+          className={`grid4${focusActive ? ' focus-mode' : ''}${columnsLayout ? ' columns' : ''}`}
+          data-layout={columnsLayout ? 'columns' : 'tiles'}
           data-grid-count={count}
           data-grid-cols={cols}
           data-grid-rows={rows}
           style={{
-            gridTemplateColumns: `repeat(${cols}, 1fr)`,
+            gridTemplateColumns: columnsLayout ? `repeat(${cols}, minmax(${COLUMN_MIN_PX}px, 1fr))` : `repeat(${cols}, 1fr)`,
             gridTemplateRows: `repeat(${rows}, 1fr)`,
           }}
         >
@@ -333,12 +350,7 @@ export function Stage({
                 onClose={() => onClose(session.id)}
                 onToggleTty={() => onToggleTty(session.id)}
                 onToggleFocus={() => onToggleFocus(session.id)}
-                onNewSibling={() => onNewSession({
-                  account: session.home,
-                  folder: session.cwd,
-                  sessionId: session.id,
-                  immediate: true,
-                })}
+                onNewSibling={() => onNewSession(siblingSessionRequest(session))}
                 onOpenConfig={() => onOpenConfig({
                   session,
                   header: transcripts.get(session.id)?.header || null,
@@ -373,7 +385,7 @@ export function Stage({
           {holes.map((cell) => (
             <NewSessionSlot
               key={`hole-${cell}`}
-              onNew={onNewSession}
+              onNew={(request) => onNewSession({ ...request, stageSlot: cell })}
               style={{ gridColumn: (cell % cols) + 1, gridRow: Math.floor(cell / cols) + 1 }}
             />
           ))}

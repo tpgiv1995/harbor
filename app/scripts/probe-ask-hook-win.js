@@ -27,6 +27,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { SessionClient } = require('../src/daemon/client.js');
+const { claudeProjectDir } = require('../src/main/session-send.js');
 
 const DAEMON = path.join(__dirname, '../src/daemon/daemon.js');
 const HOOK = path.join(__dirname, 'ask-hook-probe', 'hook.mjs');
@@ -46,6 +47,11 @@ const LANE = process.argv.includes('--permission-request') ? 'PermissionRequest'
 // tool_result is the verdict, exactly as in the probe lane.
 const HARBOR_LANE = process.argv.includes('--harbor');
 const REAL_HOOK = path.join(__dirname, '../../bin/harbor-ask-hook');
+// HARBOR_PROBE_PERMISSION_MODE runs the session in another mode (default,
+// auto, acceptEdits). Bypass hides any permission check the CLI applies after
+// the hook rewrites the input (2.1.290 started re-applying some), and Harbor's
+// own sessions run in default or auto, so a cycle proves the lane there too.
+const PERMISSION_MODE = process.env.HARBOR_PROBE_PERMISSION_MODE || 'bypassPermissions';
 const { createAskInbox } = require('../src/main/providers/ask-inbox.js');
 
 const cleanup = { client: null, daemon: null, paneId: null, transcriptDir: null, inbox: null };
@@ -77,7 +83,7 @@ async function main() {
     ? { PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: hookCommand, timeout: 600 }] }] }
     : { PermissionRequest: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: hookCommand, timeout: 600 }] }] };
   fs.writeFileSync(settingsFile, JSON.stringify({ hooks }, null, 2));
-  console.log(`lane=${LANE} hook=${hookCommand}`);
+  console.log(`lane=${LANE} mode=${PERMISSION_MODE} hook=${hookCommand}`);
 
   const daemon = spawn(guiNodeExec, [DAEMON], {
     windowsHide: true,
@@ -111,7 +117,7 @@ async function main() {
   childEnv.HARBOR_ASK_DIR = askDir;
   const claudeSession = randomUUID();
   const spawned = await client.request('spawn', {
-    argv: [CLAUDE, '--session-id', claudeSession, '--model', 'haiku', '--effort', 'low', '--permission-mode', 'bypassPermissions', '--settings', settingsFile],
+    argv: [CLAUDE, '--session-id', claudeSession, '--model', 'haiku', '--effort', 'low', '--permission-mode', PERMISSION_MODE, '--settings', settingsFile],
     cwd,
     env: childEnv,
     cols: 120,
@@ -119,7 +125,11 @@ async function main() {
   });
   const paneId = spawned.id;
   cleanup.paneId = paneId;
-  const transcript = path.join(os.homedir(), '.claude', 'projects', cwd.replace(/[:\\/]/g, '-'), `${claudeSession}.jsonl`);
+  // Claude turns EVERY non-alphanumeric character of the cwd into a dash; a
+  // TEMP with an underscore or dot in it sent the old ':\/'-only rule to the
+  // wrong folder, so the verdict read TIMEOUT and teardown left the
+  // transcript behind (2026-10-05).
+  const transcript = path.join(claudeProjectDir(cwd), `${claudeSession}.jsonl`);
   cleanup.transcriptDir = path.dirname(transcript);
   console.log(`spawned pane ${paneId}, claude session ${claudeSession}`);
 
@@ -185,6 +195,8 @@ async function main() {
   let dialogSeen = false;
   let hookRan = false;
   let result = null;
+  // Whatever the CLI actually returned, so a timeout says why instead of "(none)".
+  let lastToolResult = null;
   while (Date.now() - started < 180_000 && !verdict) {
     await sleep(700);
     hookRan = hookRan || fs.existsSync(path.join(outDir, 'hook-input.json')) || inboxSaw || fs.existsSync(path.join(askDir, 'hook.log'));
@@ -197,6 +209,7 @@ async function main() {
         const content = o.message?.content;
         if (!Array.isArray(content)) continue;
         for (const part of content) {
+          if (part.type === 'tool_result' && o.type === 'user') lastToolResult = JSON.stringify(part.content || '');
           if (part.type === 'tool_result' && o.type === 'user') {
             const text = JSON.stringify(part.content || '');
             if (/answered|answers|Careful path|File only|PROBE-DECLINE|denied|deny/u.test(text)) result = text;
@@ -214,7 +227,9 @@ async function main() {
     console.log('hook stdin keys:', Object.keys(input).join(', '));
     console.log('questions the hook received:', JSON.stringify(input.tool_input?.questions?.map((q) => ({ header: q.header, multi: q.multiSelect, options: q.options.map((o) => o.label + (o.preview ? ' [preview]' : '')) }))));
   }
-  console.log('tool_result:', result ? result.slice(0, 700) : '(none)');
+  console.log('tool_result:', result ? result.slice(0, 700) : `(no match; last tool_result: ${lastToolResult ? lastToolResult.slice(0, 700) : 'none'})`);
+  // HARBOR_PROBE_KEEP_TRANSCRIPT=<file> keeps a copy for diagnosis (synthetic prompt, throwaway cwd).
+  if (process.env.HARBOR_PROBE_KEEP_TRANSCRIPT) { try { fs.copyFileSync(transcript, process.env.HARBOR_PROBE_KEEP_TRANSCRIPT); } catch { /* none written */ } }
   const screen = await readScreen(30).catch(() => '');
   console.log('--- screen tail ---\n' + screen.split('\n').slice(-12).join('\n'));
   console.log(`\nVERDICT: ${verdict || 'TIMEOUT'}`);

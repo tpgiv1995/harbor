@@ -5,8 +5,13 @@
 // Stage imports gridDimensions from here too, so navigation math and the
 // rendered grid can never disagree about shape.
 
+// Stage layouts: 'tiles' is the adaptive grid below; 'columns' lays every
+// window out as a full-height column in one row, left to right.
+const STAGE_LAYOUTS = ['tiles', 'columns'];
+
 // Adaptive grid: every tile in a layout shares identical cell size.
-function gridDimensions(count) {
+function gridDimensions(count, layout = 'tiles') {
+  if (layout === 'columns') return { cols: Math.max(1, count), rows: 1 };
   if (count <= 1) return { cols: 1, rows: 1 };
   if (count === 2) return { cols: 2, rows: 1 };
   if (count <= 4) return { cols: 2, rows: 2 };
@@ -42,4 +47,4 @@ function navigateSlot({ slots, fromSlot, direction, cols, rows }) {
   }
 }
 
-module.exports = { gridDimensions, navigateSlot };
+module.exports = { STAGE_LAYOUTS, gridDimensions, navigateSlot };

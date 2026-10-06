@@ -34,7 +34,7 @@ import { createStallContext, installPerfWatch } from './perf-watch.js';
 import { planProvisionalUpgrades } from './stage/provisional-upgrade.cjs';
 import { terminalView } from './stage/terminal-view.cjs';
 import { mergeLaunchMeta, withLaunchFacts } from './stage/launch-meta.cjs';
-import { resolveStage, pickEviction } from './stage/stage-resolve.cjs';
+import { resolveStage, pickEviction, placeNewTile } from './stage/stage-resolve.cjs';
 import { externalLiveFromHeader } from '../shared/session-liveness.js';
 import { ProfilesProvider, useProfiles, normalizeProfileHome } from './providers.js';
 import { SetupGate } from './setup/SetupWizard.jsx';
@@ -94,6 +94,7 @@ const VIEW_STORE_KEY = 'harbor-view';
 const VIEWS = ['agents', 'tasks', 'notes', 'board', 'orch', 'artifacts'];
 const VIEW_NAMES = { agents: 'Agents', tasks: 'Tasks', notes: 'Notes', board: 'Board', orch: 'Orchestration', artifacts: 'Files' };
 const NEW_SESSION_DEFAULT_KEY = 'harbor-new-session-default';
+const STAGE_LAYOUT_KEY = 'harbor-stage-layout';
 const MAX_TILES = 16;
 const VOICE_TOOL_NAMES = voiceToolsModule.TOOL_NAMES;
 
@@ -210,6 +211,15 @@ function restoreTiles() {
   }
 }
 
+function readStoredStageLayout() {
+  try {
+    const stored = localStorage.getItem(STAGE_LAYOUT_KEY);
+    return gridNav.STAGE_LAYOUTS.includes(stored) ? stored : 'tiles';
+  } catch {
+    return 'tiles';
+  }
+}
+
 function readStoredView() {
   try {
     const stored = localStorage.getItem(VIEW_STORE_KEY);
@@ -224,6 +234,14 @@ function App() {
   const [sidebarModel, setSidebarModel] = useState({ projects: [], liveProjects: [] });
   const [sidebarModelLoaded, setSidebarModelLoaded] = useState(false);
   const [view, setViewState] = useState(readStoredView);
+  const [stageLayout, setStageLayout] = useState(readStoredStageLayout);
+  const toggleStageLayout = useCallback(() => {
+    setStageLayout((prev) => {
+      const next = prev === 'columns' ? 'tiles' : 'columns';
+      try { localStorage.setItem(STAGE_LAYOUT_KEY, next); } catch { /* layout just won't restore */ }
+      return next;
+    });
+  }, []);
   // Defaults TRUE so the tab never flickers away for the overwhelming majority
   // who have orchestration on; only an explicit false from config removes it.
   const [orchEnabled, setOrchEnabled] = useState(true);
@@ -526,7 +544,7 @@ function App() {
     });
   };
 
-  const openSession = useCallback((session) => {
+  const openSession = useCallback((session, preferredSlot) => {
     if (!session?.id || session.isWindowsEra) return;
     // Opening a window from any view lands on the stage; a window opened into
     // a hidden view would read as a dead click.
@@ -545,9 +563,13 @@ function App() {
         const evict = pickEviction({ tiles, selectedId: prev.selectedId, isResolvable: isTileResolvableRef.current });
         tiles = tiles.filter((t) => t !== evict);
       }
-      const usedSlots = new Set(tiles.map((t) => t.slot));
-      let slot = 0; while (usedSlots.has(slot)) slot += 1;
-      tiles.push({ sessionId: session.id, tty: false, lastSel: Date.now(), slot });
+      tiles = placeNewTile({
+        tiles,
+        tile: { sessionId: session.id, tty: false, lastSel: Date.now() },
+        preferredSlot,
+        isResolvable: isTileResolvableRef.current,
+        maxTiles: MAX_TILES,
+      });
       return { ...prev, tiles, selectedId: session.id };
     });
   }, [setView]);
@@ -834,7 +856,7 @@ function App() {
       });
       return;
     }
-    openSession({ id: info.sessionId, provider: info.provider });
+    openSession({ id: info.sessionId, provider: info.provider }, info.stageSlot);
   }), [openSession, renameDraft]);
 
   // openSession needs real session facts once the model catches up; a launched
@@ -1437,6 +1459,7 @@ function App() {
         ...defaults,
         folder,
         sessionId,
+        stageSlot: request.stageSlot,
       }).catch((error) => {
         // A refused one-click launch (dead folder, bin/ai failure) must say so
         // where sends already do, not die as an unhandled rejection.
@@ -1451,7 +1474,7 @@ function App() {
         return null;
       });
     }
-    setConfigRequest({ ...defaults, folder });
+    setConfigRequest({ ...defaults, folder, stageSlot: request.stageSlot });
   }, [selectedId, sessionsWithSynthetic]);
 
   // Opening a window's config SELECTS that window first, so the modal's live
@@ -1503,7 +1526,7 @@ function App() {
           if (first) selectTile(first.sessionId);
           return;
         }
-        const { cols, rows } = gridNav.gridDimensions(Math.max(tiles.length, Math.max(...slots) + 1));
+        const { cols, rows } = gridNav.gridDimensions(Math.max(tiles.length, Math.max(...slots) + 1), stageLayout);
         const target = gridNav.navigateSlot({
           slots,
           fromSlot: Number.isInteger(selectedTile.slot) ? selectedTile.slot : 0,
@@ -1533,7 +1556,7 @@ function App() {
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [tiles, selectTile, view, selectedId]);
+  }, [tiles, selectTile, view, selectedId, stageLayout]);
 
   // ---- title bar data ----
   const liveSessions = useMemo(() => {
@@ -1600,6 +1623,8 @@ function App() {
         onNewSession={openNewSession}
         profiles={profiles}
         liveCount={liveCount}
+        stageLayout={stageLayout}
+        onToggleStageLayout={toggleStageLayout}
         workers={workers}
         onOpenWorker={openSession}
       />
@@ -1610,7 +1635,7 @@ function App() {
         <NewSessionConfig
           request={configRequest}
           onClose={() => setConfigRequest(null)}
-          onStart={(payload) => window.harbor.session.newInProject(payload)}
+          onStart={(payload) => window.harbor.session.newInProject({ ...payload, stageSlot: configRequest.stageSlot })}
           onReconfigure={reconfigureSelected}
         />
       ) : null}
@@ -1673,6 +1698,7 @@ function App() {
                 focusedId={focusedId}
                 onSelect={selectTile}
                 onPlace={placeTile}
+                layout={stageLayout}
                 onClose={closeTile}
                 onToggleTty={toggleTty}
                 onToggleFocus={toggleFocus}

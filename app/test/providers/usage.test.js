@@ -70,7 +70,7 @@ test('provider keeps samples separate per account and reads each account email',
   const personal = await usage.getUsage('personal');
   assert.equal(personal.unavailable, true);
   assert.equal(personal.email, 'personal@example.com');
-  assert.match(personal.reason, /live Claude statusline payload/);
+  assert.match(personal.reason, /Claude is not signed in/);
 });
 
 test('a codex profile is answered as not-Claude without touching its home or the endpoint', async () => {
@@ -230,4 +230,49 @@ test('fetchOauthUsage never calls the endpoint with an expired token', async () 
     fetchImpl: async () => { throw new Error('must not be called'); },
   });
   assert.equal(result, null);
+});
+
+// 2026-10-05: every endpoint failure collapsed to null, so the panel showed one
+// generic "unavailable" line for a timeout, a 429 and an empty body alike.
+test('fetchOauthUsage names the failure when asked for reasons, and stays null when not', async () => {
+  const creds = async () => ({ claudeAiOauth: { accessToken: 'fixture', expiresAt: 9999999999999 } });
+  const cases = [
+    [async () => { const e = new Error('fetch failed'); e.cause = { code: 'ENOTFOUND' }; throw e; }, /request failed: ENOTFOUND/],
+    [async () => { const e = new Error('t'); e.name = 'TimeoutError'; throw e; }, /timed out after 10s/],
+    [async () => ({ ok: false, status: 429 }), /HTTP 429 \(rate limited/],
+    [async () => ({ ok: false, status: 401 }), /HTTP 401$/],
+    [async () => ({ ok: true, json: async () => { throw new Error('bad'); } }), /not JSON/],
+    [async () => ({ ok: true, json: async () => ({ five_hour: null }) }), /no 5-hour or weekly numbers/],
+  ];
+  for (const [fetchImpl, reason] of cases) {
+    const loud = await fetchOauthUsage('/claude', { readCredentials: creds, reportUnavailable: true, fetchImpl });
+    assert.equal(loud.unavailable, true);
+    assert.match(loud.reason, reason);
+    assert.equal(await fetchOauthUsage('/claude', { readCredentials: creds, fetchImpl }), null);
+  }
+});
+
+test('a Keychain read failure is reported as such, not as "not signed in"', async () => {
+  const r = await fetchOauthUsage('/claude', {
+    readCredentials: async () => ({ keychainError: 'the Keychain prompt timed out' }),
+    reportUnavailable: true,
+    fetchImpl: async () => { throw new Error('must not call'); },
+  });
+  assert.equal(r.unavailable, true);
+  assert.match(r.reason, /macOS Keychain: the Keychain prompt timed out/);
+});
+
+test('keychainServicesFor names each config home its own Claude Code credential item', () => {
+  const { keychainServicesFor } = require('../../src/main/providers/usage.js');
+  const sha8 = (s) => require('node:crypto').createHash('sha256').update(s).digest('hex').slice(0, 8);
+  // A custom home reads ONLY its own hashed item, never the default account's.
+  assert.deepEqual(keychainServicesFor('/Users/x/.claude-max', '/Users/x'),
+    [`Claude Code-credentials-${sha8('/Users/x/.claude-max')}`]);
+  // A literal pin, so a naming change is caught here. The formula was checked
+  // against a real Keychain item on 2026-10-05; the path is neutral.
+  assert.deepEqual(keychainServicesFor('/Users/demo/.claude-max', '/Users/demo'),
+    ['Claude Code-credentials-2683c6ee']);
+  // The default home: the bare item first, then its hashed twin.
+  assert.deepEqual(keychainServicesFor('/Users/x/.claude', '/Users/x'),
+    ['Claude Code-credentials', `Claude Code-credentials-${sha8('/Users/x/.claude')}`]);
 });

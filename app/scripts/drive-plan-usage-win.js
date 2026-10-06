@@ -35,9 +35,17 @@ async function host() {
   const { emptyDoc } = require('../src/shared/tasks-model.cjs');
   const provider = createPlanUsageProvider({ home: root, env: process.env,
     io: { readFile: fs.promises.readFile, readdir: () => { throw Error('Fixture must not discover homes'); } } });
+  // The heavy-lifting setting goes through the production resolver with this
+  // drive's relocated userData, so it must land in the drive's own profile.
+  const { resolveLeanFile, readLean, writeLean } = require('../src/main/providers/provider-lean.js');
+  const leanFile = resolveLeanFile({ env: {}, homedir: root, userDataPath: app.getPath('userData'),
+    defaultUserDataPath: path.join(root, 'not-the-default') });
+  assert.equal(leanFile, path.join(root, 'userData', 'provider-lean.json'));
   let reads = 0;
   const answers = {
     'usage:get-plans': () => { reads++; return provider.getPlans(); },
+    'usage:get-lean': () => readLean(leanFile),
+    'usage:set-lean': (mode) => writeLean(leanFile, mode),
     'sidebar:get-state': () => ({ model: mergeSidebarModel({ historySessions: [], livePanes: [], workspaces: [] }) }),
     'terminal:get-state': () => ({ panes: [], workspaces: [], tabs: [], connected: false }),
     'new-session:options': () => ({ profiles: [], providers: {}, defaults: {} }),
@@ -84,6 +92,54 @@ async function host() {
     assert.equal(reads, 1);
     assert.equal(await evaluate(`document.querySelector('[aria-label="Plan usage"]').classList.contains('open')`), true);
     assert.ok(!content.includes('Used / limit'));
+    // Heavy lifting: unset reads as Balanced, every click saves at once, and the
+    // "Right now" rows follow the fixture: codex Default 53%, Projects 19%; Cursor <1%.
+    const lean = `(() => {
+      const g = document.querySelector('.plan-lean-seg');
+      const on = [...g.querySelectorAll('[role=radio]')].filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.textContent);
+      const rows = [...document.querySelectorAll('.plan-lean-route')].map((r) => [...r.children].map((c) => c.textContent).join(' | '));
+      const cells = [...document.querySelectorAll('.plan-lean-seg button, .plan-lean-route > span')];
+      return { labels: [...g.querySelectorAll('[role=radio]')].map((b) => b.textContent), on, rows,
+        detail: document.querySelector('.plan-lean-detail')?.textContent || '',
+        clipped: cells.some((b) => b.scrollWidth > b.clientWidth + 1),
+        within: (() => { const p = document.querySelector('.plan-usage-menu').getBoundingClientRect(); return [g, document.querySelector('.plan-lean-now')].every((e) => { const r = e.getBoundingClientRect(); return r.left >= p.left && r.right <= p.right; }); })() };
+    })()`;
+    const rowsAre = (rows) => `JSON.stringify([...document.querySelectorAll('.plan-lean-route')].map((r) => [...r.children].map((c) => c.textContent).join(' | '))) === ${JSON.stringify(JSON.stringify(rows))}`;
+    const BALANCED = ['Image work | Projects | 19% used this week', 'Simple mechanical work | Cursor | <1% used this month', 'Large general jobs | Projects | 19% used this week', 'Everything else | Claude | '];
+    await waitFor(rowsAre(BALANCED));
+    let state = await evaluate(lean);
+    assert.deepEqual(state.labels, ['Claude only', 'Lean Claude', 'Balanced', 'Lean OpenAI']);
+    assert.deepEqual(state.on, ['Balanced']);
+    assert.equal(state.clipped, false);
+    assert.equal(state.within, true);
+    assert.equal(fs.existsSync(leanFile), false, 'opening the menu must not write the setting');
+    await shot('lean-balanced');
+    await click('.plan-lean-seg [data-lean="claude-only"]');
+    await waitFor(rowsAre(['All work | Claude | ']));
+    assert.equal(readLean(leanFile).mode, 'claude-only');
+    state = await evaluate(lean);
+    assert.equal(state.detail, 'Claude does all the work. No Astra runs, GPT or Cursor workers.');
+    await shot('lean-claude-only');
+    // Lean Claude still sends image work to a GPT seat and mechanical work to Cursor (Pat, 2026-10-05).
+    await click('.plan-lean-seg [data-lean="lean-claude"]');
+    await waitFor(rowsAre(['Image work | Projects | 19% used this week', 'Simple mechanical work | Cursor | <1% used this month', 'Everything else | Claude | ']));
+    assert.equal(readLean(leanFile).mode, 'lean-claude');
+    assert.equal((await evaluate(lean)).detail, 'Claude does the work. Images go to a GPT seat, mechanical work to Cursor.');
+    await shot('lean-lean-claude');
+    await click('.plan-lean-seg [data-lean="lean-openai"]');
+    await waitFor(rowsAre(['Image work | Projects | 19% used this week', 'Simple mechanical work | Cursor | <1% used this month', 'Connected work and reviews | Claude | ', 'Everything else | Projects | 19% used this week']));
+    assert.equal(readLean(leanFile).mode, 'lean-openai');
+    assert.equal((await evaluate(lean)).clipped, false);
+    await shot('lean-openai');
+    // Arrow keys move the choice and save it, like any radio group.
+    await evaluate(`document.querySelector('.plan-lean-seg [data-lean="lean-openai"]').focus()`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Left' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Left' });
+    await waitFor(`document.querySelector('.plan-lean-seg [data-lean="balanced"]').getAttribute('aria-checked') === 'true'`);
+    assert.equal(await evaluate(`document.activeElement.dataset.lean`), 'balanced');
+    await waitFor(rowsAre(BALANCED));
+    assert.equal(readLean(leanFile).mode, 'balanced');
+    assert.equal(fs.existsSync(path.join(root, '.harbor', 'provider-lean.json')), false, 'the shared home file must stay untouched');
     await evaluate(`document.fonts.ready`);
     const fonts = await evaluate(`(() => {
       const reset = document.querySelector('.plan-usage-reset');
@@ -125,10 +181,18 @@ async function host() {
     await click('.titlebar-controls [aria-label="Plan usage"]');
     await waitFor(`document.querySelectorAll('.plan-usage-row').length === 6`);
     assert.deepEqual(await evaluate(geometry), { within: true, overflow: false, portal: true, rows: 6 });
+    await waitFor(rowsAre(BALANCED));
+    state = await evaluate(lean);
+    assert.equal(state.clipped, false, 'segment labels fit at the 960px minimum');
+    assert.equal(state.within, true);
     await shot('narrow');
     await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width: 960, height: 480, deviceScaleFactor: 1, mobile: false });
     await sleep(100);
     await evaluate(`document.querySelector('.plan-usage-menu').focus()`);
+    // The heavy-lifting group is ONE stop (its checked option), then the plan list.
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+    await waitFor(`document.activeElement.dataset.lean === 'balanced'`);
     win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
     win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
     await waitFor(`document.activeElement.classList.contains('plan-usage-scroll')`);
@@ -145,7 +209,8 @@ async function host() {
     await waitFor(`!!document.querySelector('.plan-usage-message[role=alert]')`);
     await shot('refresh-error');
     assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length`), 6);
-    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'six plans', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480'] };
+    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'six plans', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480',
+      'heavy lifting: unset reads Balanced, clicks and arrow keys save to the relocated profile only, Right now follows the seats, labels unclipped at 960px'] };
     fs.writeFileSync(path.join(OUT, 'verdict.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));
   } finally { win.destroy(); app.quit(); }
 }

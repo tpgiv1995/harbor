@@ -31,6 +31,11 @@ fsSync.writeFileSync(path.join(PRIOR_INSTALL_CACHE, 'artifacts-index.json'), '{}
 
 const HOMES = ['.claude', '.claude-team', '.claude-lab'];
 const listing = (...names) => () => names.map((name) => ({ name, isFile: () => false }));
+// Discovery consults the filesystem for each suffixed home's proofs (see the
+// phantom-home spec in config-migrate-fidelity.test.js). These HOMES are all
+// meant to be real; the shared separator-agnostic stand-in says so and defers
+// everything else — including this file's prior-install marker — to the real fs.
+const { claudeJsonIn } = require('../support/claude-json-in.js');
 
 const runtime = {
   homedir: HOME,
@@ -39,6 +44,7 @@ const runtime = {
   findBinary: (name) => name,
   cacheDir: PRIOR_INSTALL_CACHE,
   readdir: listing(...HOMES),
+  exists: claudeJsonIn(HOMES),
 };
 
 async function missingFile() {

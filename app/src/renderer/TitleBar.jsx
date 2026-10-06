@@ -5,6 +5,74 @@ import { AppMenu } from './AppMenu.jsx';
 import { MemoryChip } from './MemoryChip.jsx';
 import { armedConfirmClick, DISARM_MS } from './armed-confirm.cjs';
 import { ago, formatWindow, formatResets } from './plan-usage-format.cjs';
+import { LEAN_MODES, leanMode, leanVerdict, seatsFromPlans, cursorFromPlans } from '../shared/provider-lean.cjs';
+
+// "Heavy lifting": how much Claude sessions may hand to GPT seats. Saved by main
+// (providers/provider-lean.js) and read by sessions before they launch Astra or
+// a codex/cursor worker. Each click saves at once; there is no Apply.
+function LeanControl({ data }) {
+  const [lean, setLean] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let live = true;
+    window.harbor.usage.getLean()
+      .then((value) => { if (live) setLean(value?.mode || null); })
+      .catch(() => { if (live) setError('Could not read this setting.'); });
+    return () => { live = false; };
+  }, []);
+  const choose = async (id) => {
+    if (saving || id === lean) return;
+    const previous = lean;
+    setLean(id);
+    setSaving(true);
+    setError('');
+    try {
+      const saved = await window.harbor.usage.setLean(id);
+      setLean(saved?.mode || id);
+    } catch {
+      setLean(previous);
+      setError('Could not save this setting. Try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+  const step = (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const index = Math.max(0, LEAN_MODES.findIndex((m) => m.id === lean));
+    const next = LEAN_MODES[(index + (event.key === 'ArrowRight' ? 1 : LEAN_MODES.length - 1)) % LEAN_MODES.length];
+    choose(next.id);
+    event.currentTarget.querySelector(`[data-lean="${next.id}"]`)?.focus();
+  };
+  const mode = lean ? leanMode(lean) : null;
+  // Every lean but Claude only routes some work by plan usage (image work to a
+  // GPT seat and mechanical work to Cursor even under Lean Claude).
+  const needsUsage = lean !== 'claude-only';
+  const rows = mode && (!needsUsage || data)
+    ? leanVerdict(lean, seatsFromPlans(data?.plans), cursorFromPlans(data?.plans)).rows
+    : null;
+  return <div className="plan-lean">
+    <div className="plan-lean-head">Heavy lifting</div>
+    <div className="plan-lean-seg" role="radiogroup" aria-label="Heavy lifting" onKeyDown={step}>
+      {LEAN_MODES.map((m) => <button key={m.id} type="button" role="radio" data-lean={m.id}
+        aria-checked={lean === m.id} className={lean === m.id ? 'on' : undefined}
+        tabIndex={lean === m.id ? 0 : -1}
+        title={m.detail} disabled={!lean} onClick={() => choose(m.id)}>{m.label}</button>)}
+    </div>
+    {error ? <p className="plan-lean-error" role="alert">{error}</p> : null}
+    {mode ? <p className="plan-lean-detail">{mode.detail}</p> : null}
+    {mode && !rows ? <p className="plan-lean-reading">Reading plan usage...</p> : null}
+    {rows ? <div className="plan-lean-now" aria-label="Where work goes right now">
+      <div className="plan-lean-now-head">Right now</div>
+      {rows.map((row) => <div className="plan-lean-route" key={row.label}>
+        <span className="plan-lean-route-label">{row.label}</span>
+        <span className="plan-lean-route-target">{row.target}</span>
+        <span className="plan-lean-route-note" title={row.note || undefined}>{row.note || ''}</span>
+      </div>)}
+    </div> : null}
+  </div>;
+}
 
 export function PlanUsageButton() {
   const [open, setOpen] = useState(false);
@@ -62,7 +130,8 @@ export function PlanUsageButton() {
       }
       if (event.key === 'Tab') {
         // The scroll region is a keyboard stop so short windows expose every plan.
-        const targets = [...(panel.current?.querySelectorAll('[tabindex="0"], button:not(:disabled)') || [])];
+        // A radio group is one stop (its checked option); arrows move inside it.
+        const targets = [...(panel.current?.querySelectorAll('[tabindex="0"], button:not(:disabled):not([tabindex="-1"])') || [])];
         const index = targets.indexOf(document.activeElement);
         let next = (index + 1) % targets.length;
         if (event.shiftKey) next = index <= 0 ? targets.length - 1 : index - 1;
@@ -100,6 +169,7 @@ export function PlanUsageButton() {
       <button className="menu-backdrop" type="button" tabIndex={-1} aria-label="Close plan usage" onClick={close} />
       <div ref={panel} className="plan-usage-menu" style={pos || undefined} role="dialog" aria-modal="true" aria-label="All plan usage" tabIndex={-1}>
         <div className="plan-usage-title">Plan usage</div>
+        <LeanControl data={data} />
         <div className="plan-usage-scroll" tabIndex={0} aria-label="Plan details, scroll for more" aria-busy={busy}>
           {error ? <p className="plan-usage-message" role="alert">{error}</p> : null}
           {!data ? <p className="plan-usage-message">{busy ? 'Reading plan usage...' : 'Usage unavailable'}</p> : null}
@@ -724,7 +794,41 @@ function RailToggle() {
   );
 }
 
-export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenWorker, profiles }) {
+// Flips the stage between the adaptive tile grid and one row of full-height
+// columns. The glyph shows the layout a click switches TO.
+function StageLayoutToggle({ layout, onToggle }) {
+  if (!onToggle) return null;
+  const columns = layout === 'columns';
+  return (
+    <button
+      type="button"
+      className={`rail-toggle-btn layout-toggle-btn${columns ? ' columns' : ''}`}
+      title={columns ? 'Stage layout: columns (click for tiles)' : 'Stage layout: tiles (click for columns)'}
+      aria-label={columns ? 'Switch the stage to tiles' : 'Switch the stage to columns'}
+      aria-pressed={columns}
+      onClick={onToggle}
+    >
+      <svg width="14" height="12" viewBox="0 0 14 12" aria-hidden="true">
+        {columns ? (
+          <g fill="none" stroke="currentColor" strokeWidth="1.1">
+            <rect x="0.8" y="0.8" width="5.4" height="4.4" rx="0.8" />
+            <rect x="7.8" y="0.8" width="5.4" height="4.4" rx="0.8" />
+            <rect x="0.8" y="6.8" width="5.4" height="4.4" rx="0.8" />
+            <rect x="7.8" y="6.8" width="5.4" height="4.4" rx="0.8" />
+          </g>
+        ) : (
+          <g fill="none" stroke="currentColor" strokeWidth="1.1">
+            <rect x="0.8" y="0.8" width="3.2" height="10.4" rx="0.8" />
+            <rect x="5.4" y="0.8" width="3.2" height="10.4" rx="0.8" />
+            <rect x="10" y="0.8" width="3.2" height="10.4" rx="0.8" />
+          </g>
+        )}
+      </svg>
+    </button>
+  );
+}
+
+export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenWorker, profiles, stageLayout, onToggleStageLayout }) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -754,6 +858,7 @@ export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenW
       <div className="titlebar-left">
         <AppMenu onOpenHelp={onOpenHelp} onNewSession={onNewSession} profiles={profiles} />
         <RailToggle />
+        <StageLayoutToggle layout={stageLayout} onToggle={onToggleStageLayout} />
       </div>
       <div className="titlebar-brand">
         <img className="titlebar-mark" src={harborIcon} alt="" aria-hidden="true" />

@@ -32,6 +32,8 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { SessionClient } = require('../src/daemon/client.js');
+// The CURRENT folder rule, even when SEND_MODULE pins an older send path.
+const { claudeProjectDir } = require('../src/main/session-send.js');
 
 const SEND_MODULE = process.env.HARBOR_DRIVE_SEND_MODULE
   ? path.resolve(process.env.HARBOR_DRIVE_SEND_MODULE)
@@ -110,7 +112,7 @@ async function main() {
   });
   const paneId = spawned.id;
   cleanup.paneId = paneId;
-  const transcript = path.join(os.homedir(), '.claude', 'projects', cwd.replace(/[:\\/]/g, '-'), `${claudeSession}.jsonl`);
+  const transcript = path.join(claudeProjectDir(cwd), `${claudeSession}.jsonl`);
   cleanup.transcriptDir = path.dirname(transcript);
   console.log(`spawned pane ${paneId}, claude session ${claudeSession}`);
 
