@@ -60,7 +60,14 @@ The first swap also upgrades the watcher chain: the successor runs under the
 new supervising daemon-watch (wedge detection + crash respawn), and it writes
 owner.json, which arms the `recover` lane.
 
-Then drive the canary (input -> screen round trip) and kill it:
+Then drive the canary (input -> screen round trip) and kill it. The CLI has no
+input verb; drive it through `src/daemon/client.js` `SessionClient` against
+`resolvePaths().socket`: `request('input', { id, text: 'echo marker\r' })`
+(the field is `text`, or `base64`; `data` is refused), then
+`request('screen', { id })` until the marker shows twice. Run the drive and the
+kill as separate steps, so a failed drive cannot remove the canary before it
+was checked (2026-10-06, the sleep-ledger rollout lost one canary that way and
+spawned a second).
 
 ```
 # through the app, or:
