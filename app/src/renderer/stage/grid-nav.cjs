@@ -6,8 +6,7 @@
 // rendered grid can never disagree about shape.
 
 // Stage layouts: 'tiles' is the adaptive grid below; 'columns' lays every
-// window out as a full-height column in one row, left to right (Ryan,
-// 2026-10-05: "all vertical in a row up and down not the tiles").
+// window out as a full-height column in one row, left to right.
 const STAGE_LAYOUTS = ['tiles', 'columns'];
 
 // Adaptive grid: every tile in a layout shares identical cell size.

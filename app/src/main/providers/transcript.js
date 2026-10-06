@@ -630,9 +630,8 @@ class TranscriptParser {
     return block;
   }
 
-  // PER-TASK TOKENS (2026-10-05, Ryan: "token usage per task like you get while
-  // its thinking in the normal claude app"). A task runs from a user prompt to
-  // the next one. Each assistant line carries its API message's usage, and one
+  // PER-TASK TOKENS, like the Claude app's live usage readout. A task runs
+  // from a user prompt to the next one. Each assistant line carries its API message's usage, and one
   // message is written as SEVERAL lines (one per content block) repeating the
   // same message id, so output tokens are kept per id (max, never summed twice)
   // and the turn total is the sum across ids. The total and the elapsed time
