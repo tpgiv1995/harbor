@@ -73,22 +73,24 @@ test('provider keeps samples separate per account and reads each account email',
   assert.match(personal.reason, /Claude is not signed in/);
 });
 
-test('a codex profile is answered as not-Claude without touching its home or the endpoint', async () => {
+test('a cursor profile is answered as not-Claude without touching its home or the endpoint', async () => {
   const reads = [];
   const fetches = [];
   const usage = createUsageProvider({
     profiles: [
       { id: 'personal', provider: 'claude', configHome: '/personal' },
-      { id: 'codex-second', provider: 'codex', configHome: '/codex-second' },
+      { id: 'cursor-second', provider: 'cursor', configHome: '/cursor-second' },
     ],
     teeDir: '/tee',
     readFile: async (file) => { reads.push(file); const e = new Error('missing'); e.code = 'ENOENT'; throw e; },
     fetchRemoteUsage: async (home) => { fetches.push(home); return null; },
   });
-  const codex = await usage.getUsage('codex-second');
-  assert.equal(codex.unavailable, true);
-  assert.equal(codex.notClaude, true);
-  assert.match(codex.reason, /Not a Claude account/);
+  // Codex profiles are NOT in this lane: they read Codex usage for the rail's
+  // usage panel (usage-multi-provider.test.js). Cursor has no reader.
+  const cursor = await usage.getUsage('cursor-second');
+  assert.equal(cursor.unavailable, true);
+  assert.equal(cursor.notClaude, true);
+  assert.match(cursor.reason, /Not a Claude account/);
   assert.deepEqual(reads, []);
   assert.deepEqual(fetches, []);
   // The Claude profile beside it still goes through the normal path.
