@@ -2,7 +2,6 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { SessionClient } = require('../../daemon/client.js');
 
 // Harbor depends on a pane's foreground processes in two
 // places that matter: worker close captures the pid BEFORE closing so it can
@@ -50,12 +49,20 @@ function splitWindowsCommandLine(command) {
 // agent itself, because `node .../bin/codex` spawns the real binary beneath it.
 // Depth-limited and count-limited so a fork bomb cannot turn a status read into
 // an unbounded walk.
-async function foregroundProcesses(rootPid, { maxDepth = 12, maxNodes = 64 } = {}) {
+//
+// On win32 the chain comes from the daemon's resident process snapshot
+// (proc-tree), and it MUST be asked through the caller's own daemon client
+// (`request`). A fresh SessionClient resolves its socket from process.env, so
+// a client pointed at an isolated store asked the user's REAL sessiond instead
+// (2026-10-07: session-daemon-live's processInfo spec passed or failed on
+// whether the real daemon's 2s snapshot already held the test shell). With no
+// `request`, there is nothing safe to ask: answer [] rather than guess a daemon.
+async function foregroundProcesses(rootPid, { maxDepth = 12, maxNodes = 64, request = null } = {}) {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
   if (process.platform === 'win32') {
-    const client = new SessionClient({ requestTimeoutMs: 2000 });
+    if (typeof request !== 'function') return [];
     try {
-      const result = await client.request('proc-tree', { pid: rootPid });
+      const result = await request('proc-tree', { pid: rootPid });
       if (!result) return [];
       // The daemon returns breadth-first rows. Choose one foreground chain,
       // root first/deepest last, matching the Linux consumer contract.
@@ -69,7 +76,7 @@ async function foregroundProcesses(rootPid, { maxDepth = 12, maxNodes = 64 } = {
         row = children.length === 1 ? children[0] : children.sort((a, b) => b.pid - a.pid)[0];
       }
       return chain;
-    } catch { return []; } finally { client.close(); }
+    } catch { return []; }
   }
   if (process.platform !== 'linux') return [];
   // A pid that is not there yields NOTHING, not a hollow entry. The provider

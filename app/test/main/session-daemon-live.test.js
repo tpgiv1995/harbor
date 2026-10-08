@@ -37,7 +37,10 @@ const IS_WIN32 = process.platform === 'win32';
 const SHELL = IS_WIN32 ? process.env.ComSpec : '/bin/bash';
 const SHELL_ARGS = IS_WIN32 ? ['/Q'] : ['--noprofile', '--norc'];
 const line = (command) => `${command}${IS_WIN32 ? '\r' : '\n'}`;
-const shellEnv = (prompt) => IS_WIN32 ? { PROMPT: prompt, PATH: process.env.PATH } : { PS1: prompt, PATH: process.env.PATH };
+// Windows PowerShell will not load without SystemRoot ("Loading managed Windows
+// PowerShell failed with error 8009001d"), and the processInfo spec starts one
+// as the pane's child.
+const shellEnv = (prompt) => IS_WIN32 ? { PROMPT: prompt, PATH: process.env.PATH, SystemRoot: process.env.SystemRoot } : { PS1: prompt, PATH: process.env.PATH };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -370,8 +373,17 @@ test('bootstrap delivers live session events to its caller and labels the projec
 // foreground process to learn which codex/cursor session a pane holds. sessiond
 // reported only { pid, running, exit }, so on that backend force-close refused
 // outright with "no shell pid or process group found for pane".
-test('processInfo reports a pane process the way its consumers read it, deepest child last', async () => {
+test('processInfo reports a pane process the way its consumers read it, deepest child last', async (t) => {
   const harness = await startIsolatedSessiond('sessiond-process-info');
+  // Every question must reach THIS harness's daemon through the client's own
+  // socket. The process's default socket is pointed at nothing for the test,
+  // so a lookup that falls back to it gets no answer instead of the user's
+  // real sessiond (2026-10-07: the win32 proc-tree lookup did exactly that,
+  // and passed or failed on whether the real daemon's 2s snapshot already held
+  // the test's shell).
+  const savedSocket = process.env.HARBOR_SESSIOND_SOCKET;
+  process.env.HARBOR_SESSIOND_SOCKET = path.join(harness.dir, 'no-default-daemon.sock');
+  t.after(() => { if (savedSocket === undefined) delete process.env.HARBOR_SESSIOND_SOCKET; else process.env.HARBOR_SESSIOND_SOCKET = savedSocket; });
   const client = new SessionDaemonClient({ socketPath: harness.socketPath, env: harness.env });
 
   const created = await client.createWorkspace({
@@ -397,10 +409,17 @@ test('processInfo reports a pane process the way its consumers read it, deepest 
   assert.equal(shell.running, true);
 
   if (IS_WIN32) {
-    assert.deepEqual(shell.foreground_processes, [], 'without /proc the child chain is honestly unavailable');
-    await client.closePane(created.pane_id).catch(() => {});
-    client.close();
-    return;
+    // No /proc: the chain comes from the daemon's resident process snapshot
+    // (proc-tree), asked through this client. It starts at the pane shell.
+    const chain = await waitUntil(
+      async () => {
+        const procs = (await client.processInfo(created.pane_id)).process_info?.foreground_processes || [];
+        return procs.length ? procs : null;
+      },
+      'the harness daemon never reported the pane shell through this client',
+      8000,
+    );
+    assert.equal(chain[0].pid, shell.shell_pid, 'the chain starts at the pane shell');
   }
 
   // Start a distinguishable child so the chain has real depth, then require the
@@ -418,7 +437,8 @@ test('processInfo reports a pane process the way its consumers read it, deepest 
     8000,
   );
   assert.notEqual(deepest.pid, shell.shell_pid, 'the deepest process is the child, not the shell');
-  assert.equal(deepest.cwd, harness.dir, 'a foreground process reports a resolvable cwd');
+  // win32 reports no cwd for a process (honestly unknown, never guessed).
+  assert.equal(deepest.cwd, IS_WIN32 ? null : harness.dir, 'a foreground process reports a resolvable cwd');
 
   await client.closePane(created.pane_id).catch(() => {});
   client.close();

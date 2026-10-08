@@ -202,7 +202,9 @@ class SessionDaemonClient {
         ...info,
         shell_pid: pid,
         foreground_process_group_id: pid,
-        foreground_processes: pid && info?.running ? await foregroundProcesses(pid) : [],
+        foreground_processes: pid && info?.running
+          ? await foregroundProcesses(pid, { request: (verb, params) => this.request(verb, params) })
+          : [],
       },
     };
   }
