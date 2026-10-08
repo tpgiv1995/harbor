@@ -577,7 +577,7 @@ function App() {
 
   const closeTile = useCallback((sessionId) => {
     setStagePersist((prev) => {
-      // Preserve the survivors' current visual order (including drag swaps),
+      // Preserve the survivors' current visual order (including drag moves),
       // then remove any gap left by the closed window. Sparse slots are useful
       // while arranging windows, but should not survive a close.
       const tiles = prev.tiles
@@ -1477,9 +1477,10 @@ function App() {
     setConfigRequest(request);
   }, [selectTile]);
 
-  // Windows OWN grid cells. Dropping onto another window swaps the two;
-  // dropping into an empty cell moves the window and the windows after the
-  // cell it left slide back to close it (2026-10-07, Pat: no gap left behind).
+  // Windows OWN grid cells. Dropping onto another window slides the windows
+  // between into the cell left behind (never a swap); dropping into an empty
+  // cell moves the window and the windows after the cell it left slide back to
+  // close it (2026-10-07, Pat: no gap left behind, "slide ... not swap").
   // The whole rule, and why a last window can still sit bottom-right with three
   // open, lives in stage-resolve.cjs placeDraggedTile.
   const placeTile = useCallback((sessionId, cell) => {

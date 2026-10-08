@@ -6,7 +6,9 @@
 // Five windows in a 3x2 grid, one empty cell:
 //   1. drag the window in cell 1 into the empty cell 5: the windows after it
 //      slide back, it lands in cell 4, cell 5 stays empty, no hole in the middle;
-//   2. drag the last window (cell 4) into cell 5: it moves there (bottom-right).
+//   2. drag the last window (cell 4) into cell 5: it moves there (bottom-right);
+//   3. drag the first window onto the window in cell 2: it takes cell 2 and the
+//      two windows between slide back one place each (never a swap).
 // Usage (from app/): node scripts/drive-stage-slide-win.js   (fails at the old
 // swap-or-move rule on step 1, exactly the gap Pat reported). HARBOR_DRIVE_APP
 // points it at another checkout; screenshots go to HARBOR_DRIVE_OUT.
@@ -82,6 +84,14 @@ const OUT = process.env.HARBOR_DRIVE_OUT || path.join(require('node:os').tmpdir(
     await page.screenshot({ path: path.join(OUT, '3-after-last-window-to-corner.png') });
     const s2 = slotOf(l);
     if (s2[ids[1]] !== 5 || s2[ids[4]] !== 3) problems.push(`corner: got ${JSON.stringify(s2)}`);
+
+    await drag(ids[0], 2, l);
+    l = await layout();
+    facts.afterOnto = l;
+    await page.screenshot({ path: path.join(OUT, '4-after-first-onto-third.png') });
+    const s3 = slotOf(l);
+    const want3 = { [ids[2]]: 0, [ids[3]]: 1, [ids[0]]: 2, [ids[4]]: 3, [ids[1]]: 5 };
+    if (JSON.stringify(Object.keys(want3).map((k) => s3[k])) !== JSON.stringify(Object.values(want3))) problems.push(`onto a window: got ${JSON.stringify(s3)}`);
   } catch (error) {
     problems.push(error.message);
   } finally {

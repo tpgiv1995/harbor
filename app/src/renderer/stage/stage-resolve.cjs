@@ -90,10 +90,13 @@ function placeNewTile({ tiles = [], tile, preferredSlot, isResolvable = () => tr
 }
 
 // Where a dragged window lands (2026-10-07, Pat: a window dragged to the end
-// "left behind a 'gap'", "the others would 'slide' and adjust"). Windows own
-// grid cells and empty cells are real (each offers New session, and a click
-// launches into that cell), so a drag never packs the whole grid:
-// - onto another visible window: the two swap, and no cell empties;
+// "left behind a 'gap'", "the others would 'slide' and adjust"; then "i would
+// want it to slide in between the two, not swap"). Windows own grid cells and
+// empty cells are real (each offers New session, and a click launches into
+// that cell), so a drag never packs the whole grid:
+// - onto another visible window: the dragged window takes that cell and the
+//   windows between its old and new cells slide one place toward the cell it
+//   left; empty and hidden cells in between stay where they are. Never a swap;
 // - onto an empty cell: the window moves there, then the run of windows after
 //   the cell it left slides back one cell to close it, up to the next empty
 //   (or hidden) cell. A window dropped just past the others therefore joins
@@ -110,7 +113,14 @@ function placeDraggedTile({ tiles = [], sessionId, cell, isResolvable = () => tr
   const visible = t => isResolvable(String(t.sessionId));
   const target = tiles.find(t => t.slot === cell && t !== source);
   if (target && visible(target)) {
-    return tiles.map(t => (t === source ? { ...t, slot: cell } : t === target ? { ...t, slot: source.slot } : t));
+    const lo = Math.min(source.slot, cell);
+    const hi = Math.max(source.slot, cell);
+    const inRange = tiles.filter(t => (t === source || visible(t)) && t.slot >= lo && t.slot <= hi).sort((a, b) => a.slot - b.slot);
+    const cells = inRange.map(t => t.slot);
+    const order = inRange.filter(t => t !== source);
+    if (cell > source.slot) order.push(source); else order.unshift(source);
+    const next = new Map(order.map((t, i) => [t, cells[i]]));
+    return tiles.map(t => (next.has(t) ? { ...t, slot: next.get(t) } : t));
   }
   const vacated = source.slot;
   let placed = tiles.map(t => (t === source ? { ...t, slot: cell } : t));

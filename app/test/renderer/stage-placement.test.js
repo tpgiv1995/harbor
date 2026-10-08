@@ -58,9 +58,19 @@ test('the last window still moves into the empty cell after it (three windows, o
   assert.deepEqual(slots(placed), { w0: 0, w1: 1, w2: 3 });
 });
 
-test('dropping onto another window still swaps the two', () => {
-  const placed = placeDraggedTile({ tiles: grid(5), sessionId: 'w1', cell: 3 });
-  assert.deepEqual(slots(placed), { w0: 0, w1: 3, w2: 2, w3: 1, w4: 4 });
+// Same evening, Pat: "i would want it to slide in between the two, not swap.
+// swap is a terrible design choice".
+test('dropping onto another window slides the windows between, never swaps', () => {
+  assert.deepEqual(slots(placeDraggedTile({ tiles: grid(5), sessionId: 'w1', cell: 3 })), { w0: 0, w1: 3, w2: 1, w3: 2, w4: 4 }, 'forward: w2 and w3 slide back, w1 takes cell 3');
+  assert.deepEqual(slots(placeDraggedTile({ tiles: grid(5), sessionId: 'w3', cell: 1 })), { w0: 0, w1: 2, w2: 3, w3: 1, w4: 4 }, 'backward: w1 and w2 slide on, w3 takes cell 1');
+});
+
+test('a slide onto a window keeps empty and hidden cells where they are', () => {
+  const tiles = [tile('a', 0), tile('b', 1), tile('c', 3), tile('d', 4)];
+  assert.deepEqual(slots(placeDraggedTile({ tiles, sessionId: 'a', cell: 4 })), { b: 0, c: 1, d: 3, a: 4 }, 'the empty cell 2 stays empty');
+  const hidden = id => id !== 'ghost';
+  const withGhost = [tile('a', 0), tile('ghost', 1), tile('b', 2), tile('c', 3)];
+  assert.deepEqual(slots(placeDraggedTile({ tiles: withGhost, sessionId: 'a', cell: 3, isResolvable: hidden })), { ghost: 1, b: 0, c: 2, a: 3 }, 'the hidden window keeps its cell');
 });
 
 test('a backward drag into a hole closes the vacated cell with the windows after it', () => {
