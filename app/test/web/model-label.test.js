@@ -42,6 +42,8 @@ test('the phone and the desktop derive the same label from a model id', async ()
   assert.equal(prettyModelId('claude-opus-5'), 'Opus 5');
   assert.equal(prettyModelId('claude-sonnet-5-5'), 'Sonnet 5.5');
   assert.equal(modelDisplay('claude-sonnet-5-5').name, 'Sonnet 5.5');
+  assert.equal(prettyModelId('claude-haiku-5-5'), 'Haiku 5.5');
+  assert.equal(modelDisplay('claude-haiku-5-5').name, 'Haiku 5.5');
   // Codex 0.159.1's new default keeps its dotted minor version on both surfaces.
   assert.equal(prettyModelId('gpt-6.1-sol'), 'Gpt 6.1 Sol');
   assert.equal(prettyModelId(''), '');

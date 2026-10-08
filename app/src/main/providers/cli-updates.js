@@ -179,7 +179,10 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'model',
-      re: /\/model\b|model id|model picker|\beffort\b|--effort/i,
+      // A family name with a version (2026-10-07): "Added Claude Haiku 5.5
+      // (`claude-haiku-5-5`)" matched nothing here, and a new model is the
+      // line that most needs the seed, the menus and the worker recipes.
+      re: /\/model\b|model id|model picker|\beffort\b|--effort|\bclaude-(?:opus|sonnet|haiku|fable|mythos)-\d|\b(?:Opus|Sonnet|Haiku|Fable|Mythos) \d+(?:\.\d+)?\b/i,
       why: 'model-catalog.js scans the installed binary for launchable ids and bin/ai forwards --effort at launch. A renamed id or dropped flag empties the capability menu.',
       verify: 'npm test -- model-catalog',
     },
@@ -210,11 +213,23 @@ const IMPACT_FLAGS = {
     },
     // Same review: "queued messages show ... above the spinner" (2.1.281) and
     // "pasted multi-line text ... bracketed paste" (2.1.282) matched nothing.
+    // 2026-10-07: neither did "pasted text ... sent as if it had been typed"
+    // (2.1.290, 2.1.292, 2.1.293), which is how the CLI classifies every
+    // multi-line Harbor send.
     {
       id: 'composer',
-      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed/i,
+      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text/i,
       why: 'session-send confirms a delivery by reading the composer box and the echo above it, and sends every message as a bracketed paste plus Enter. A change to either is felt by every send.',
       verify: 'node_modules/electron/dist/electron.exe scripts/drive-resume-hooks-win.js',
+    },
+    // 2026-10-07 (2.1.292): "Changed usage limit messages to write claude.ai
+    // settings links with https://" matched nothing, and model-switch.js reads
+    // that screen.
+    {
+      id: 'usage-limit',
+      re: /usage limits?\b|usage credits|extra usage|rate limit/i,
+      why: 'model-switch.js recognizes the usage-limit, checking-credits and session-paused screens by their title lines and draws the CLI\'s own choices as a card. A wording or layout change sends them back to the raw fallback panel.',
+      verify: 'npm test -- model-switch',
     },
   ],
   codex: [

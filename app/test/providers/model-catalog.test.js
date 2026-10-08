@@ -170,6 +170,27 @@ test('capabilities: Sonnet 5.5 survives a failed discovery and leads the sonnet 
   assert.ok(extractIdsFromText('"claude-sonnet-5-5"').has('claude-sonnet-5-5'));
 });
 
+// Haiku 5.5 shipped with CLI 2.1.293 (2026-10-07). The seed carries it so a
+// failed or disabled scan, or a CLI older than 2.1.293, still offers it and
+// labels the haiku family with it, the same posture as Sonnet 5.5.
+test('capabilities: Haiku 5.5 survives a failed discovery and leads the haiku family', async () => {
+  const { MODEL_VERSION_SEED, newSessionOptions } = require('../../src/main/providers/capabilities.js');
+  const haikuSeed = MODEL_VERSION_SEED.filter((m) => m.family === 'haiku');
+  assert.equal(haikuSeed[0].id, 'claude-haiku-5-5');
+  assert.equal(haikuSeed[0].label, 'Haiku 5.5');
+  assert.ok(haikuSeed.some((m) => m.id === 'claude-haiku-4-5'), 'Haiku 4.5 stays offered');
+  const catalog = createModelCatalog({ seedIds: MODEL_VERSION_SEED.map((m) => m.id) });
+  const missing = path.join(os.tmpdir(), 'harbor-missing-haiku-binary', 'claude');
+  assert.equal((await catalog.refresh({ env: { HARBOR_CLAUDE_BIN: missing } })).ok, false);
+  assert.deepEqual(catalog.families().find((m) => m.family === 'haiku'), {
+    alias: 'haiku', label: 'Haiku 5.5', family: 'haiku',
+  });
+  const options = newSessionOptions({ profiles: [] }, { env: {}, homedir: () => '/harbor-test-no-home' });
+  assert.equal(options.providers.claude.models.find((m) => m.value === 'haiku').label, 'Haiku 5.5');
+  assert.equal(labelForId('claude-haiku-5-5'), 'Haiku 5.5');
+  assert.ok(extractIdsFromText('"claude-haiku-5-5"').has('claude-haiku-5-5'));
+});
+
 // Fable 5.1 shipped 2026-09-01. The installed CLI predated it, so discovery (which
 // scans the binary) could not surface it; the seed floor carries it until the CLI
 // catches up, the same reason Opus 5 was seeded the day it shipped.

@@ -440,6 +440,21 @@ test('the release lines that changed a Harbor pane carry a flag', () => {
   assert.deepEqual(ids('codex', 'Added retries for transient file-upload failures and increased the upload timeout to five minutes. (#47122, #47393)'), []);
 });
 
+// The 2026-10-07 review (claude 2.1.291 to 2.1.293) found three more: a new
+// model, the paste-classification fixes every Harbor send rides on, and the
+// usage-limit wording model-switch.js reads, all with no flag.
+test('a new model, paste classification and usage-limit lines carry a flag', () => {
+  const ids = (provider, line) => tagLine(provider, line).flags.map((f) => f.id);
+  assert.ok(ids('claude', 'Added Claude Haiku 5.5 (`claude-haiku-5-5`), now the default Haiku model on the Anthropic API').includes('model'));
+  assert.ok(ids('claude', 'Added Claude Sonnet 5.5, the new default Sonnet').includes('model'));
+  assert.ok(ids('claude', 'Fixed pasted text that begins and ends with the same words sometimes being sent to Claude as if it had been typed').includes('composer'));
+  assert.ok(ids('claude', 'Fixed some pasted text reaching Claude as typed text when several pastes overlapped in one prompt').includes('composer'));
+  assert.ok(ids('claude', 'Changed usage limit messages to write claude.ai settings links with https:// so terminals and apps can make them clickable').includes('usage-limit'));
+  assert.ok(ids('claude', 'Fixed the usage limit alert repeating once per background agent when agents failed on a limit that had already stopped the main conversation').includes('usage-limit'));
+  assert.equal(tagLine('claude', 'Changed usage limit messages to write claude.ai settings links with https://').flags.find((f) => f.id === 'usage-limit').verify, 'npm test -- model-switch');
+  assert.deepEqual(ids('claude', 'Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
+});
+
 test('check reads installed versions off disk and latest off the network, per provider', async () => {
   const fixture = await makeHome();
   const checker = checkerFor(fixture);
