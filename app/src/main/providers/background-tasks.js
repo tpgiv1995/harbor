@@ -40,7 +40,9 @@ function applyBackgroundLine(state, row) {
     const block = match[0];
     const id = field(block, 'task-id');
     const task = state.tasks[id];
-    const status = field(block, 'status');
+    // A monitor that hits its timeout is killed, but the CLI's notice carries
+    // no <status>, only an <event> saying it expired.
+    const status = field(block, 'status') || (/^\[Monitor expired after\b/.test(field(block, 'event')) ? 'stopped' : '');
     if (!task) {
       if (TERMINAL.has(status) && ms >= (state.pendingNotices[id]?.ms || 0)) state.pendingNotices[id] = { status, ms };
       continue;

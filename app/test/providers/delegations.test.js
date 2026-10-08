@@ -55,6 +55,18 @@ test('monitor progress, sidechains, successful and refused stops, and reactivati
   notification(s, 'a1', 'completed', 'queue-operation', 12); assert.equal(s.tasks.a1.status, 'completed');
   tool(s, ...launches[0].slice(0, 3)); tool(s, 'KillShell', { shell_id: 'b1' }, 'Successfully stopped task: b1'); assert.equal(s.tasks.b1.status, 'stopped');
 });
+test('a monitor that expires is no longer running, whether or not it delivered events', () => {
+  for (const tail of ['no events delivered', '3 events delivered']) {
+    const s = bg.createBackgroundState(); tool(s, ...launches[7].slice(0, 3));
+    const text = `<task-notification>\n<task-id>b3</task-id>\n<summary>Monitor event: "Watch build"</summary>\n<event>[Monitor expired after 30m with ${tail}. Re-arm it if you still need the watch.]</event>\n</task-notification>`;
+    bg.applyBackgroundLine(s, { type: 'queue-operation', timestamp: stamp(5), operation: 'enqueue', content: text });
+    assert.equal(s.tasks.b3.status, 'stopped'); assert.equal(bg.backgroundSnapshot(s).outstanding.length, 0);
+  }
+  const s = bg.createBackgroundState(); tool(s, ...launches[7].slice(0, 3));
+  const quoted = '<task-notification><task-id>b3</task-id><event>build log says [Monitor expired after 30m]</event></task-notification>';
+  bg.applyBackgroundLine(s, { type: 'queue-operation', timestamp: stamp(5), operation: 'enqueue', content: quoted });
+  assert.equal(s.tasks.b3.status, 'running');
+});
 test('wakeup cancellation, supersession and firing; cron never blocks ready', () => {
   const s = bg.createBackgroundState();
   tool(s, 'ScheduleWakeup', {}, 'Next wakeup scheduled for 15:47:00 (in 60s).', 'wake1');
