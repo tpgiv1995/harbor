@@ -8,7 +8,7 @@ const { createProviderHistory } = require('./providers/provider-history.js');
 const { createProviderSessionLinker } = require('./providers/provider-session-link.js');
 const { mergeSidebarModel } = require('../shared/sidebar-model.cjs');
 const { freshWorking } = require('../shared/claude-turn-state.cjs');
-const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, mergeDelegationLinks } = require('./providers/delegations.js');
+const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, delegationSummaries, mergeDelegationLinks } = require('./providers/delegations.js');
 const { createSingleFlight } = require('./single-flight.js');
 
 // The home map the rail renders from, with launch-known accounts filled in
@@ -191,8 +191,6 @@ function createSidebarBridge(options = {}) {
       row.ownerEvidence = parents.get(row.id)?.ownerEvidence;
       if (background) row.background = { ...background, tasks: undefined, outstanding: (background.outstanding || []).map(({ command, prompt, rounds, ...task }) => task) };
       row.delegatedBy = row.lineage?.parentThreadId || delegationLinks[row.id] || null;
-      const group = built.groups.find((g) => g.parentId === row.id);
-      row.delegationSummary = group ? { total: group.agents.length, running: group.agents.filter((a) => ['running', 'quiet', 'no signal'].includes(a.state)).length } : null;
     }
     publish();
   });
@@ -268,6 +266,10 @@ function createSidebarBridge(options = {}) {
 
   const publish = () => {
     if (closed) return;
+    // The header agents chip is aged on every publish, the overview's rule:
+    // shown while a group is active or recently done, gone after.
+    const summaries = delegationSummaries(delegationGroups, Date.now(), liveSessionIds());
+    for (const row of historySessions) row.delegationSummary = summaries.get(row.id) || null;
     const model = mergeSidebarModel({
       historySessions,
       // The daemon does not name a codex/cursor session; the linker fills the id in

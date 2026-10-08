@@ -480,3 +480,26 @@ test('opaque shell dispatch scripts are not inferred from arguments or heredoc p
   const command = 'cat >> brief.md <<\'EOF\'\nReview the sample with codex exec\nEOF\nbash C:/temp/dispatch.sh r1 astra work xhigh';
   assert.equal(dispatchFor({ command }, 'C:/dev/sample'), null);
 });
+// 2026-10-07, Pat: "why does it say agents 0 running / 1 up top?" The header chip
+// showed for every group on record, so one finished review kept a session saying
+// "0 running / 1" for as long as the 48h window held it, while the overview the
+// chip opens had dropped that group after ten minutes. The chip now follows the
+// overview's visibility, aged at read time.
+test('the header agents chip follows the overview: running or recently done, then gone without a rescan', () => {
+  const { delegationSummaries } = require('../../src/main/providers/delegations.js');
+  const quietRoot = { ...root(), signal: { working: false, lastSignalMs: 5000 } };
+  const done = parent('codex exec "Review"'); done.background.tasks[0].status = 'completed'; done.background.tasks[0].endedMs = 6000;
+  const groups = buildDelegationGroups([done], [quietRoot], 7000).groups;
+  assert.deepEqual(delegationSummaries(groups, 7000, ['parent']).get('parent'), { total: 1, running: 0 }, 'just finished: shown');
+  assert.deepEqual(delegationSummaries(groups, 300000, ['parent']).get('parent'), { total: 1, running: 0 }, 'inside ten minutes: shown');
+  assert.equal(delegationSummaries(groups, 700000, ['parent']).has('parent'), false, 'past ten minutes: gone, from aging alone');
+  // A busy parent makes its group active, but the chip is about the agents.
+  const busy = parent('codex exec "Review"'); busy.background.tasks[0].status = 'completed'; busy.background.tasks[0].endedMs = 6000;
+  busy.background.working = true; busy.background.lastInTurnMs = 699000;
+  const busyGroups = buildDelegationGroups([busy], [quietRoot], 700000).groups;
+  assert.equal(busyGroups[0].active, true, 'fixture: the parent turn keeps the group active');
+  assert.equal(delegationSummaries(busyGroups, 700000, ['parent']).has('parent'), false, 'a mid-turn parent does not revive a finished agent');
+  const working = parent('codex exec "Review"');
+  const live = buildDelegationGroups([working], [{ ...root(), signal: { working: true, lastSignalMs: 5000 } }], 7000).groups;
+  assert.deepEqual(delegationSummaries(live, 7000, ['parent']).get('parent'), { total: 1, running: 1 }, 'a running agent is counted');
+});

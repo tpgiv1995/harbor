@@ -24,6 +24,8 @@ const ORPHAN_CHILD = '20000000-0000-4000-8000-000000000004';
 const OLD_PARENT = '50000000-0000-4000-8000-000000000004';
 const OLD_CHILD = '20000000-0000-4000-8000-000000000005';
 const SILENT_CHILD = '20000000-0000-4000-8000-000000000006';
+const DONE_PARENT = '50000000-0000-4000-8000-000000000005';
+const DONE_CHILD = '20000000-0000-4000-8000-000000000007';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function host() {
@@ -34,7 +36,7 @@ async function host() {
   app.commandLine.appendSwitch('remote-debugging-port', String(PORT));
   app.commandLine.appendSwitch('disable-background-timer-throttling');
   const { createProviderHistory } = require('../src/main/providers/provider-history.js');
-  const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups } = require('../src/main/providers/delegations.js');
+  const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, delegationSummaries } = require('../src/main/providers/delegations.js');
   const { mergeSidebarModel } = require('../src/shared/sidebar-model.cjs');
   const { createTranscriptProvider } = require('../src/main/providers/transcript.js');
   const { METHOD_CHANNELS } = require('../src/main/rpc/channels.js');
@@ -60,7 +62,7 @@ async function host() {
     const file = path.join(projects, `${id}.jsonl`); fs.writeFileSync(file, JSON.stringify({ type: 'user', timestamp: stamp(600000), message: { content: `Grid companion ${i}` } }) + '\n');
     parents.push({ id, title: `Grid companion ${i}`, project: 'Delegation demo', cwd, path: file, lastActive: stamp(600000) });
   }
-  for (const [id, title, ago] of [[DEAD, 'Closed parent from yesterday', 1800000], [RECENT_DEAD, 'Recently closed parent', 240000], [ORPHAN, 'Closed parent with independent agent', 1800000], [OLD_PARENT, 'Closed parent with old completed child', 1800000]]) {
+  for (const [id, title, ago] of [[DEAD, 'Closed parent from yesterday', 1800000], [RECENT_DEAD, 'Recently closed parent', 240000], [ORPHAN, 'Closed parent with independent agent', 1800000], [OLD_PARENT, 'Closed parent with old completed child', 1800000], [DONE_PARENT, 'Parent whose review finished 25 minutes ago', 1800000]]) {
     const records = [];
     const launch = (tool, task, output, input) => {
       const launchedAgo = id === OLD_PARENT ? 60 * 3600000 + 1000 : ago;
@@ -69,6 +71,7 @@ async function host() {
     };
     if (id === ORPHAN) launch('Bash', 'independent', 'Command running in background with ID: independent.', { description: 'Independent child review', command: `codex exec resume ${ORPHAN_CHILD} "Continue review"` });
     else if (id === OLD_PARENT) launch('Bash', 'old-review', 'Command running in background with ID: old-review.', { description: 'Old completed review', command: `codex exec resume ${OLD_CHILD} "Review sample"` });
+    else if (id === DONE_PARENT) launch('Bash', 'done-review', 'Command running in background with ID: done-review.', { description: 'Finished review', command: `codex exec resume ${DONE_CHILD} "Review sample"` });
     else {
       launch('Monitor', 'watch', 'Monitor started (task watch, expires in 5m unless the source ends first;', { description: 'Watch sample build' });
       launch('Bash', 'command', 'Command running in background with ID: command.', { description: 'Wait for sample build', command: 'node wait.js' });
@@ -79,7 +82,7 @@ async function host() {
     parents.push({ id, title, project: 'Delegation demo', cwd, path: file, lastActive: stamp(ago) });
   }
   const codexRoot = path.join(tmp, 'codex', 'sessions'); const day = path.join(codexRoot, '2026', '09', '26'); fs.mkdirSync(day, { recursive: true });
-  for (const [id, parent, kind, ago, done] of [[CHILD, null, 'exec', 1000, false], [SECOND, null, 'exec', 720000, false], [THIRD, null, 'exec', 179000, true], [ORPHAN_CHILD, null, 'exec', 1000, false], [OLD_CHILD, null, 'exec', 60 * 3600000, true], [SILENT_CHILD, null, 'exec', 3600000, false], [SUB, CHILD, 'subagent', 4000, false], ['40000000-0000-4000-8000-000000000001', CHILD, 'guardian', 1000, true], ['40000000-0000-4000-8000-000000000002', SUB, 'guardian', 1000, true]]) {
+  for (const [id, parent, kind, ago, done] of [[CHILD, null, 'exec', 1000, false], [SECOND, null, 'exec', 720000, false], [THIRD, null, 'exec', 179000, true], [ORPHAN_CHILD, null, 'exec', 1000, false], [OLD_CHILD, null, 'exec', 60 * 3600000, true], [DONE_CHILD, null, 'exec', 1500000, true],[SILENT_CHILD, null, 'exec', 3600000, false], [SUB, CHILD, 'subagent', 4000, false], ['40000000-0000-4000-8000-000000000001', CHILD, 'guardian', 1000, true], ['40000000-0000-4000-8000-000000000002', SUB, 'guardian', 1000, true]]) {
     const source = kind === 'exec' ? 'exec' : { subagent: kind === 'guardian' ? { other: 'guardian' } : { thread_spawn: { parent_thread_id: parent, agent_nickname: 'Ohm', agent_path: '/root/semantic' } } };
     const rows = [
       { type: 'session_meta', payload: { id, session_id: CHILD, parent_thread_id: parent, source, cwd, timestamp: stamp(800000), originator: 'codex_exec' } },
@@ -102,8 +105,15 @@ async function host() {
     row.background = scan.parents.find((p) => p.id === row.id)?.background;
     row.ownerEvidence = scan.parents.find((p) => p.id === row.id)?.ownerEvidence;
     if (row.background) for (const task of row.background.tasks) task.delegated = true;
-    if (row.id === PARENT) row.delegationSummary = { total: 3, running: 2 };
   }
+  // The header chip comes from the shipped rule (sidebar-bridge calls the same
+  // function on every publish), not a hand-set count.
+  const doneGroup = groups.groups.find((g) => g.parentId === DONE_PARENT);
+  assert.equal(doneGroup?.agents.length, 1, 'fixture: the finished review is on record inside the 48h window');
+  const summaries = delegationSummaries(groups.groups, now, [PARENT]);
+  for (const row of parents) row.delegationSummary = summaries.get(row.id) || null;
+  assert.ok(summaries.get(PARENT)?.running > 0, 'the live parent with running agents keeps its chip');
+  assert.equal(summaries.has(DONE_PARENT), false, 'a review that finished 25 minutes ago carries no chip');
   for (const row of providers) row.delegatedBy = row.lineage?.parentThreadId || groups.delegatedBy[row.id];
   const model = mergeSidebarModel({ historySessions: [...parents, ...providers], livePanes: [{ pane_id: 'fixture-pane', workspace_id: 'fixture-workspace', agent: 'claude', agent_session: { kind: 'id', value: PARENT }, agent_status: 'idle' }], workspaces: [{ workspace_id: 'fixture-workspace', label: 'Delegation demo', cwd }] });
   const rows = new Map([...parents, ...providers].map((r) => [r.id, r]));
@@ -219,6 +229,15 @@ async function drive() {
     await cdp.eval(`document.querySelector('.delegation-agent[data-agent-id="${CHILD}"] .delegation-agent-copy button').click()`);
     await waitFor(cdp, `Boolean(document.querySelector('.win2[data-session-id="${CHILD}"] .ro-flag'))`);
     await cdp.shot('05-child-read-only-2560');
+    // 2026-10-07: the header chip is about the agents. A session whose review
+    // finished 25 minutes ago carries no "agents 0 running / 1" chip; the live
+    // parent with running agents still does (its chip opened the focused group).
+    await cdp.eval(`localStorage.setItem('harbor-slate-stage', ${JSON.stringify(JSON.stringify({ tiles: [{ sessionId: DONE_PARENT, slot: 0 }, { sessionId: PARENT, slot: 1 }], selectedId: DONE_PARENT }))}); localStorage.setItem('harbor-view','agents'); location.reload()`);
+    await waitFor(cdp, `Boolean(document.querySelector('.win2[data-session-id="${PARENT}"] .delegation-pill'))`);
+    assert.equal(await cdp.eval(`Boolean(document.querySelector('.win2[data-session-id="${DONE_PARENT}"]'))`), true, 'the finished parent window renders');
+    assert.equal(await cdp.eval(`Boolean(document.querySelector('.win2[data-session-id="${DONE_PARENT}"] .delegation-pill'))`), false, 'a finished review shows no agents chip');
+    assert.match(await cdp.eval(`document.querySelector('.win2[data-session-id="${PARENT}"] .delegation-pill').textContent`), /agents [1-9]\d* running \/ \d+/);
+    await cdp.shot('05b-finished-review-no-agents-chip');
     const tiles = Array.from({ length: 9 }, (_, i) => ({ sessionId: `10000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, slot: i }));
     await cdp.eval(`localStorage.setItem('harbor-slate-stage', ${JSON.stringify(JSON.stringify({ tiles, selectedId: PARENT }))}); localStorage.setItem('harbor-view','agents'); location.reload()`);
     await waitFor(cdp, 'document.querySelectorAll(".win2").length === 9');

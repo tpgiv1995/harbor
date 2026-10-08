@@ -228,6 +228,26 @@ function ageDelegationGroups(groups, now = Date.now(), liveIds = null) {
   }).sort((a, b) => Number(b.active) - Number(a.active) || b.lastSignalMs - a.lastSignalMs);
 }
 
+// The session header's agents chip is about the AGENTS (2026-10-07, Pat: "why
+// does it say agents 0 running / 1 up top?"). It used to show for every group on
+// record, so a session that delegated once read "agents 0 running / 1" for as
+// long as the 48h window kept the group. It now shows while an agent is running
+// and for RECENT_DONE_MS after the last agent signal, the overview's linger.
+// Deliberately NOT the group's `visible`: a group is active whenever its parent
+// is mid-turn, which would keep the chip on every busy session. Aged at read
+// time, so it expires without a new write.
+function delegationSummaries(groups, now = Date.now(), liveIds = null) {
+  const summaries = new Map();
+  for (const group of ageDelegationGroups(groups, now, liveIds)) {
+    if (!group.agents.length) continue;
+    const running = group.agents.filter((a) => ['running', 'quiet', 'no signal'].includes(a.state)).length;
+    const lastAgentSignal = Math.max(0, ...group.agents.map((a) => a.lastSignalMs || 0));
+    if (!running && now - lastAgentSignal > RECENT_DONE_MS) continue;
+    summaries.set(group.parentId, { total: group.agents.length, running });
+  }
+  return summaries;
+}
+
 // One worker and one coalesced flight, triggered by the bridge's existing
 // watchers. No new polling, no process-table reads, no per-row meta requests.
 function createDelegationIndex(ownerOptions = {}) {
@@ -247,4 +267,4 @@ function createDelegationIndex(ownerOptions = {}) {
   return { scan(rows, liveIds = []) { latestRows = rows; latestLiveIds = liveIds; return scan(); },
     close() { closed = true; pending?.resolve({ parents: [], providers: [] }); pending = null; worker?.terminate(); worker = null; } };
 }
-module.exports = { RECENT_WINDOW_MS, FRESH_WINDOW_MS, RECENT_DONE_MS, QUIET_MS, canonicalCwd, shellWords, dispatchFor, linkDispatches, agentState, buildDelegationGroups, ageDelegationGroups, createDelegationIndex, mergeDelegationLinks };
+module.exports = { RECENT_WINDOW_MS, FRESH_WINDOW_MS, RECENT_DONE_MS, QUIET_MS, canonicalCwd, shellWords, dispatchFor, linkDispatches, agentState, buildDelegationGroups, ageDelegationGroups, delegationSummaries, createDelegationIndex, mergeDelegationLinks };
