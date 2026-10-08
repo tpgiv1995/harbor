@@ -35,7 +35,7 @@ import { createStallContext, installPerfWatch } from './perf-watch.js';
 import { planProvisionalUpgrades } from './stage/provisional-upgrade.cjs';
 import { terminalView } from './stage/terminal-view.cjs';
 import { mergeLaunchMeta, withLaunchFacts } from './stage/launch-meta.cjs';
-import { resolveStage, pickEviction, placeNewTile } from './stage/stage-resolve.cjs';
+import { resolveStage, pickEviction, placeNewTile, placeDraggedTile } from './stage/stage-resolve.cjs';
 import { externalLiveFromHeader } from '../shared/session-liveness.js';
 import { ProfilesProvider, useProfiles, normalizeProfileHome } from './providers.js';
 import { SetupGate } from './setup/SetupWizard.jsx';
@@ -1477,22 +1477,15 @@ function App() {
     setConfigRequest(request);
   }, [selectTile]);
 
-  // Windows OWN grid cells. Dropping into an empty cell moves the window
-  // there (the vacated cell becomes a hole); dropping onto another window
-  // swaps the two. This is what "move these around as needed" means; the old
-  // order-packing model could not even represent bottom-left -> bottom-right
-  // with three windows open (live-caught by Pat, repeatedly).
+  // Windows OWN grid cells. Dropping onto another window swaps the two;
+  // dropping into an empty cell moves the window and the windows after the
+  // cell it left slide back to close it (2026-10-07, Pat: no gap left behind).
+  // The whole rule, and why a last window can still sit bottom-right with three
+  // open, lives in stage-resolve.cjs placeDraggedTile.
   const placeTile = useCallback((sessionId, cell) => {
-    if (!Number.isInteger(cell) || cell < 0 || cell >= MAX_TILES) return;
     setStagePersist((prev) => {
-      const source = prev.tiles.find((t) => t.sessionId === sessionId);
-      if (!source || source.slot === cell) return prev;
-      const tiles = prev.tiles.map((t) => {
-        if (t.sessionId === sessionId) return { ...t, slot: cell };
-        if (t.slot === cell) return { ...t, slot: source.slot };
-        return t;
-      });
-      return { ...prev, tiles };
+      const tiles = placeDraggedTile({ tiles: prev.tiles, sessionId, cell, isResolvable: isTileResolvableRef.current, maxTiles: MAX_TILES });
+      return tiles === prev.tiles ? prev : { ...prev, tiles };
     });
   }, []);
 

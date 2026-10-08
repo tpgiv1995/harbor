@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { placeNewTile, resolveStage } = require('../../src/renderer/stage/stage-resolve.cjs');
+const { placeNewTile, resolveStage, placeDraggedTile } = require('../../src/renderer/stage/stage-resolve.cjs');
 const tile = (sessionId, slot) => ({ sessionId, slot });
 const visible = id => id !== 'missing';
 
@@ -34,4 +34,60 @@ test('invalid requested cells fall back to reading order; manual positions are p
     const placed = placeNewTile({ tiles: [tile('a', 3)], tile: tile('new'), preferredSlot });
     assert.deepEqual(placed.map(t => t.slot), [3, 0]);
   }
+});
+
+// 2026-10-07, Pat dragged a window from the middle of a full 4x4 stage to the
+// empty cell after the last window and it "left behind a 'gap'": "the others
+// would 'slide' and adjust and there wouldn't be that gap".
+const slots = (tiles) => Object.fromEntries(tiles.map(t => [t.sessionId, t.slot]));
+const grid = (n) => Array.from({ length: n }, (_, i) => tile(`w${i}`, i));
+
+test('a window dragged into the empty cells after the others joins the end of their run, no gap', () => {
+  const tiles = grid(14).map(t => t.sessionId === 'w6' ? { ...t, sessionId: 'mover' } : t);
+  const placed = placeDraggedTile({ tiles, sessionId: 'mover', cell: 14 });
+  const s = slots(placed);
+  assert.deepEqual([...new Set(placed.map(t => t.slot))].sort((a, b) => a - b), Array.from({ length: 14 }, (_, i) => i), 'cells 0..13 filled, no hole');
+  assert.equal(s.mover, 13, 'it lands right after the window that was last');
+  assert.equal(s.w7, 6, 'the window after the vacated cell slid back into it');
+  assert.equal(s.w13, 12);
+  assert.equal(s.w0, 0, 'windows before the vacated cell never move');
+});
+
+test('the last window still moves into the empty cell after it (three windows, one bottom-right)', () => {
+  const placed = placeDraggedTile({ tiles: grid(3), sessionId: 'w2', cell: 3 });
+  assert.deepEqual(slots(placed), { w0: 0, w1: 1, w2: 3 });
+});
+
+test('dropping onto another window still swaps the two', () => {
+  const placed = placeDraggedTile({ tiles: grid(5), sessionId: 'w1', cell: 3 });
+  assert.deepEqual(slots(placed), { w0: 0, w1: 3, w2: 2, w3: 1, w4: 4 });
+});
+
+test('a backward drag into a hole closes the vacated cell with the windows after it', () => {
+  const tiles = [tile('a', 0), tile('b', 2), tile('c', 3), tile('d', 4)];
+  assert.deepEqual(slots(placeDraggedTile({ tiles, sessionId: 'c', cell: 1 })), { a: 0, c: 1, b: 2, d: 3 });
+  assert.deepEqual(slots(placeDraggedTile({ tiles, sessionId: 'd', cell: 1 })), { a: 0, d: 1, b: 2, c: 3 }, 'nothing after the last window: no slide');
+});
+
+test('the slide stops at the next empty cell; a window dropped beyond it lands exactly there', () => {
+  const tiles = [tile('a', 0), tile('b', 1), tile('c', 2), tile('d', 4), tile('e', 5)];
+  assert.deepEqual(slots(placeDraggedTile({ tiles, sessionId: 'a', cell: 7 })), { b: 0, c: 1, a: 7, d: 4, e: 5 });
+});
+
+test('a hidden window reads as an empty cell: the slide stops there, and a drop on it moves the hidden one aside', () => {
+  const hidden = id => id !== 'ghost';
+  const tiles = [tile('a', 0), tile('b', 1), tile('ghost', 2), tile('c', 3)];
+  const stop = placeDraggedTile({ tiles, sessionId: 'a', cell: 5, isResolvable: hidden });
+  assert.deepEqual(slots(stop), { b: 0, a: 5, ghost: 2, c: 3 }, 'b slides back; the run ends at the hidden cell');
+  const onto = placeDraggedTile({ tiles, sessionId: 'c', cell: 2, isResolvable: hidden });
+  const s = slots(onto);
+  assert.equal(s.c, 2);
+  assert.equal(new Set(onto.map(t => t.slot)).size, 4, 'no two windows share a cell');
+  assert.ok(![0, 1, 2].includes(s.ghost), 'the hidden window keeps its identity in a free cell');
+});
+
+test('no-op and invalid drags return the tiles unchanged', () => {
+  const tiles = grid(3);
+  for (const cell of [1, -1, 16, NaN, '2']) assert.equal(placeDraggedTile({ tiles, sessionId: 'w1', cell }), tiles);
+  assert.equal(placeDraggedTile({ tiles, sessionId: 'nope', cell: 2 }), tiles);
 });

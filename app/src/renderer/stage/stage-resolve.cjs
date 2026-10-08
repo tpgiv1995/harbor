@@ -89,4 +89,45 @@ function placeNewTile({ tiles = [], tile, preferredSlot, isResolvable = () => tr
   return [...placed, { ...tile, slot }];
 }
 
-module.exports = { resolveStage, pickEviction, placeNewTile };
+// Where a dragged window lands (2026-10-07, Pat: a window dragged to the end
+// "left behind a 'gap'", "the others would 'slide' and adjust"). Windows own
+// grid cells and empty cells are real (each offers New session, and a click
+// launches into that cell), so a drag never packs the whole grid:
+// - onto another visible window: the two swap, and no cell empties;
+// - onto an empty cell: the window moves there, then the run of windows after
+//   the cell it left slides back one cell to close it, up to the next empty
+//   (or hidden) cell. A window dropped just past the others therefore joins
+//   the end of their run, with no hole left in the middle;
+// - unless that run is only the dragged window itself: the last window moved
+//   into the empty cell after it stays there, which is how three open windows
+//   put one in the bottom-right (live-caught by Pat before this rule existed).
+// A hidden window's cell reads as empty, the way the stage draws it; one that
+// a drop lands on moves to the first free cell and keeps its identity.
+function placeDraggedTile({ tiles = [], sessionId, cell, isResolvable = () => true, maxTiles = 16 }) {
+  if (!Number.isInteger(cell) || cell < 0 || cell >= maxTiles) return tiles;
+  const source = tiles.find(t => t.sessionId === sessionId);
+  if (!source || source.slot === cell) return tiles;
+  const visible = t => isResolvable(String(t.sessionId));
+  const target = tiles.find(t => t.slot === cell && t !== source);
+  if (target && visible(target)) {
+    return tiles.map(t => (t === source ? { ...t, slot: cell } : t === target ? { ...t, slot: source.slot } : t));
+  }
+  const vacated = source.slot;
+  let placed = tiles.map(t => (t === source ? { ...t, slot: cell } : t));
+  const bySlot = new Map(placed.filter(t => t.sessionId === sessionId || (t !== target && visible(t))).map(t => [t.slot, t]));
+  const run = [];
+  for (let c = vacated + 1; c < maxTiles && bySlot.has(c); c += 1) run.push(bySlot.get(c));
+  if (run.length && !(run.length === 1 && run[0].sessionId === sessionId)) {
+    const sliding = new Set(run);
+    placed = placed.map(t => (sliding.has(t) ? { ...t, slot: t.slot - 1 } : t));
+  }
+  if (target) {
+    const used = new Set(placed.filter(t => t.sessionId !== target.sessionId).map(t => t.slot));
+    let free = 0;
+    while (used.has(free)) free += 1;
+    placed = placed.map(t => (t.sessionId === target.sessionId ? { ...t, slot: free } : t));
+  }
+  return placed;
+}
+
+module.exports = { resolveStage, pickEviction, placeNewTile, placeDraggedTile };
