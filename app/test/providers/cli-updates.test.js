@@ -455,6 +455,41 @@ test('a new model, paste classification and usage-limit lines carry a flag', () 
   assert.deepEqual(ids('claude', 'Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
 });
 
+// The 2026-10-09 review (claude 2.1.293 to 2.1.295) found ten contract lines
+// with no flag again, among them the one that needed a fix (the /loop wakeup
+// notice the background fold did not match) and a new terminal protocol the
+// pty screen model receives. Each line is pinned verbatim from the changelog.
+test('background-task, terminal-protocol, titler and resume lines carry a flag', () => {
+  const ids = (line) => tagLine('claude', line).flags.map((f) => f.id);
+  const background = [
+    'Fixed a background session\'s `/loop` stopping without notice when its next wakeup came due while the session\'s process was down; the session now says so and Claude is told',
+    'Fixed Esc not stopping a self-paced `/loop` that was moved to the background with `←`; cancelling a pending wakeup now shows a notice',
+    'Changed Ctrl+C at the idle prompt of an attached background session to leave a pending `/loop` wakeup alone, so pressing it twice detaches and the loop keeps running; press Esc to stop it',
+    'Fixed Claude being told on resume that an unfinished background workflow may have been stopped by `TaskStop`, which can never be the cause',
+    'Fixed Claude not being told when you stop a long-running MCP tool call from the tasks panel or a connected client',
+    'Fixed the notification for an MCP tool call that moved to the background showing a shortened task id',
+    'Fixed Claude not being told it can resume background subagents with SendMessage after a session was killed and resumed a second time',
+    'Fixed a stopped scheduled task coming back on resume after a rewind, and a scheduled task being lost on resume after Esc or a rewind following a compaction',
+  ];
+  for (const line of background) assert.ok(ids(line).includes('background-tasks'), line);
+  assert.equal(tagLine('claude', background[0]).flags.find((f) => f.id === 'background-tasks').verify, 'npm test -- delegations');
+  assert.ok(ids('Added Program Status Protocol (OSC 7501) support: terminals that implement it can show whether Claude Code is working, waiting on you, or done').includes('screen'));
+  assert.ok(ids('Changed tab stops to count from where a text starts instead of from the screen\'s left edge: an answer indented by 2 has its first stop 8 cells in, where it was 6').includes('screen'));
+  assert.ok(ids('Fixed text with tabs or bidirectional control characters losing its end at the edge of the screen or drawing over nearby rows').includes('screen'));
+  assert.ok(ids('Added a "Backgrounding cancelled" message when you stop the turn while `←` is waiting for the current tool to finish').includes('composer'));
+  assert.ok(ids('Fixed Claude stopping at the end of the current tool when text typed in the prompt cancelled backgrounding with `←`; Claude now keeps working in the foreground').includes('composer'));
+  assert.ok(ids('Fixed `--tools` and `--restricted` not applying to built-in tools that register after launch, and deprecated tool names reaching tools outside the caller\'s tool set').includes('titler'));
+  assert.ok(ids('Fixed the prompt sent after a `/rewind` being lost, and the removed turns coming back, when the session was moved to the background or resumed after being killed').includes('transcript'));
+  // Narrow on purpose: background sessions of `claude agents`, a VS Code
+  // background agent's activity, and a background service are not Harbor's
+  // background-task fold.
+  assert.equal(ids('Fixed commands and hooks in background sessions inheriting `FORCE_COLOR=3`, which put color escape codes into the output Claude reads').includes('background-tasks'), false);
+  assert.equal(ids('[VSCode] Fixed "Fork conversation from here" and Rewind\'s conversation restore failing with "Message not found in session" after a background agent\'s activity or one of the panel\'s own status lines').includes('background-tasks'), false);
+  assert.equal(ids('Fixed `claude agents` starting a new background service as it exited when both were stopped with a session open (for example at a reboot), which could delay shutdown and restart an interrupted session').includes('background-tasks'), false);
+  assert.equal(ids('Fixed raw terminal hyperlink bytes in a reply or a teammate\'s message being drawn as a clickable link with a hidden address').includes('screen'), false);
+  assert.deepEqual(ids('Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
+});
+
 test('check reads installed versions off disk and latest off the network, per provider', async () => {
   const fixture = await makeHome();
   const checker = checkerFor(fixture);

@@ -80,6 +80,28 @@ test('wakeup cancellation, supersession and firing; cron never blocks ready', ()
   tool(s, 'CronCreate', {}, 'Scheduled recurring job 92eedefc (Every 3 hours at :51).');
   assert.equal(bg.backgroundSnapshot(s).outstanding.length, 0);
 });
+// CLI 2.1.295: a session that restarts after its next /loop wakeup came due
+// gets a stopped task notification saying that wakeup will not fire. The CLI
+// names it by the ScheduleWakeup tool_use id, while the fold keys the wakeup
+// as `wakeup:<tool_use_id>`, so the notice must reach that task.
+test('a /loop wakeup the CLI says will not fire is no longer running', () => {
+  for (const type of ['queue-operation', 'attachment']) {
+    const s = bg.createBackgroundState();
+    tool(s, 'ScheduleWakeup', { prompt: '/loop check the build', reason: 'poll' }, 'Next wakeup scheduled for 15:47:00 (in 60s).', 'toolu_wake');
+    assert.equal(bg.backgroundSnapshot(s).outstanding.length, 1);
+    const text = '<task-notification>\n<task-id>toolu_wake</task-id>\n<tool-use-id>toolu_wake</tool-use-id>\n<status>stopped</status>\n'
+      + '<summary>This session restarted 5 minutes after its next /loop wakeup was due, so that wakeup will not fire. The loop stays stopped until Claude schedules it again: reply to continue it.</summary>\n'
+      + '<note>The wakeup scheduled by the ScheduleWakeup call this notification names was still pending when this session\'s process ended. It will not fire.</note>\n</task-notification>';
+    bg.applyBackgroundLine(s, { type, timestamp: stamp(400), operation: 'enqueue', content: text, attachment: { type: 'queued_command', prompt: text } });
+    assert.equal(s.tasks['wakeup:toolu_wake'].status, 'stopped', type);
+    assert.equal(bg.backgroundSnapshot(s).outstanding.length, 0, type);
+  }
+  // A notice for some other task id never touches a wakeup.
+  const s = bg.createBackgroundState();
+  tool(s, 'ScheduleWakeup', {}, 'Next wakeup scheduled for 15:47:00 (in 60s).', 'toolu_wake');
+  notification(s, 'toolu_other', 'stopped', 'queue-operation', 400);
+  assert.equal(s.tasks['wakeup:toolu_wake'].status, 'running');
+});
 test('synthetic transcript retains only the final pending task', () => {
   const file = path.join(__dirname, '../fixtures/delegations/parent.jsonl');
   const s = bg.createBackgroundState();

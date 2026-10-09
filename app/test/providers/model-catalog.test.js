@@ -35,8 +35,11 @@ const REAL_BINARY_STRINGS = [
   'claude-sonnet-5',
 ];
 
+// Discovery reads the ids as the CLI's embedded JavaScript writes them: as
+// complete quoted string literals (every real id in 2.1.293 and 2.1.295 has
+// at least one). The same filter still has to throw out the noise around them.
 test('extracts only launchable dateless ids from the real binary string set', () => {
-  const text = REAL_BINARY_STRINGS.join('\0');
+  const text = REAL_BINARY_STRINGS.map((s) => JSON.stringify(s)).join('\0');
   const ids = [...extractIdsFromText(text)].sort();
   assert.deepEqual(ids, [
     'claude-fable-5',
@@ -78,6 +81,60 @@ test('labels derive from the id, never a table', () => {
   assert.equal(labelForId('claude-opus-6'), 'Opus 6', 'a future model needs no code change');
 });
 
+// CLI 2.1.295 (2026-10-09): the compiled string pool stores each string as a
+// 4-byte length word (high bit set), a 4-byte hash, the bytes, and padding to
+// 4. "claude-haiku-3-5" is 16 bytes, so it needs no padding, and the next
+// entry is 53 bytes long: its length word starts with 0x35, the digit "5".
+// A raw substring scan read "claude-haiku-3-55" and offered "Haiku 3.55", a
+// model that does not exist. Synthetic bytes in exactly that layout.
+function poolEntry(text, hash = [0x11, 0x22, 0x33, 0x00]) {
+  const body = Buffer.from(text, 'latin1');
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE((body.length | 0x80000000) >>> 0);
+  const pad = Buffer.alloc((4 - (body.length % 4)) % 4);
+  return Buffer.concat([len, Buffer.from(hash), body, pad]);
+}
+
+test('a string-pool length word after an id never becomes a model row', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'model-pool-'));
+  try {
+    const bin = path.join(dir, 'claude');
+    const next = 'x'.repeat(53);
+    await fs.writeFile(bin, Buffer.concat([
+      poolEntry('haiku-3-5'),
+      poolEntry('claude-haiku-3-5'),
+      poolEntry(next),
+      Buffer.from(' var t=[["haiku-3-5","claude-haiku-3-5"],["opus-5","claude-opus-5"]];'),
+    ]));
+    assert.equal((await fs.readFile(bin)).includes(Buffer.from('claude-haiku-3-55')), true, 'the raw bytes do read as the phantom id');
+    const catalog = createModelCatalog({ seedIds: [] });
+    assert.equal((await catalog.refresh({ env: { HARBOR_CLAUDE_BIN: bin } })).ok, true);
+    assert.deepEqual(catalog.ids().sort(), ['claude-haiku-3-5', 'claude-opus-5']);
+    assert.equal(catalog.versions().some((v) => v.label === 'Haiku 3.55'), false);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// A cache written by the old raw scan, for the SAME binary, would otherwise
+// keep the phantom row after the fix lands: the running Harbor rescans the new
+// CLI the moment the update chip installs it, before Harbor itself restarts.
+test('a cache written by an older scan is rescanned, not trusted', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'model-old-cache-'));
+  try {
+    const bin = path.join(dir, 'claude');
+    const cacheFile = path.join(dir, 'models.json');
+    await fs.writeFile(bin, '"claude-haiku-3-5"');
+    const stat = await fs.stat(bin);
+    await fs.writeFile(cacheFile, JSON.stringify({ binPath: await fs.realpath(bin), size: stat.size,
+      mtimeMs: stat.mtimeMs, ids: ['claude-haiku-3-5', 'claude-haiku-3-55'] }));
+    const catalog = createModelCatalog({ seedIds: [], cacheFile });
+    const result = await catalog.refresh({ env: { HARBOR_CLAUDE_BIN: bin } });
+    assert.equal(result.cacheHit, false);
+    assert.deepEqual(catalog.ids(), ['claude-haiku-3-5']);
+    const second = await catalog.refresh({ env: { HARBOR_CLAUDE_BIN: bin } });
+    assert.equal(second.cacheHit, true, 'the rewritten cache is trusted again');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('version ordering: opus 5 outranks every 4.x; flagship leads the family', () => {
   const ids = ['claude-opus-4-8', 'claude-opus-5', 'claude-opus-4-1'];
   assert.deepEqual(ids.sort(compareVersionsDesc), ['claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-1']);
@@ -95,7 +152,7 @@ test('catalog: seed stands alone, discovery merges over it, cache short-circuits
   // A fake binary carrying a FUTURE model id the seed does not know.
   await fs.writeFile(fakeBin, Buffer.concat([
     Buffer.from([0, 1, 2, 3]),
-    Buffer.from('xx claude-opus-6 yy claude-opus-5 zz claude-opus-4-6-fast claude-sonnet-5-20270101'),
+    Buffer.from('xx "claude-opus-6" yy \'claude-opus-5\' zz `claude-opus-4-6-fast` "claude-sonnet-5-20270101" claude-opus-7'),
     Buffer.from([0xff, 0xfe]),
   ]));
   const cacheFile = path.join(dir, 'cache.json');
@@ -135,7 +192,7 @@ test('an id split across chunk boundaries still extracts (overlap guard)', async
   const fakeBin = path.join(dir, 'claude');
   // Force the id to straddle the 8MB chunk boundary.
   const pad = Buffer.alloc(8 * 1024 * 1024 - 10, 0x20);
-  await fs.writeFile(fakeBin, Buffer.concat([pad, Buffer.from(' claude-opus-5 ')]));
+  await fs.writeFile(fakeBin, Buffer.concat([pad, Buffer.from(' "claude-opus-5" ')]));
   const catalog = createModelCatalog({ seedIds: [], cacheFile: path.join(dir, 'cache.json') });
   const result = await catalog.refresh({ env: { HARBOR_CLAUDE_BIN: fakeBin } });
   assert.equal(result.ok, true);

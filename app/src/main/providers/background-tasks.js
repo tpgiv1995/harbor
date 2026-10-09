@@ -38,7 +38,11 @@ function applyBackgroundLine(state, row) {
   for (const match of String(carrier || '').matchAll(/<task-notification>[\s\S]*?<\/task-notification>/g)) {
     notified = true;
     const block = match[0];
-    const id = field(block, 'task-id');
+    const named = field(block, 'task-id');
+    // A /loop wakeup is keyed `wakeup:<ScheduleWakeup tool_use id>`, but the
+    // CLI's own notice about it (2.1.295: the wakeup came due while the
+    // session's process was down, so it will not fire) names the bare id.
+    const id = !state.tasks[named] && state.tasks[`wakeup:${named}`]?.kind === 'wakeup' ? `wakeup:${named}` : named;
     const task = state.tasks[id];
     // A monitor that hits its timeout is killed, but the CLI's notice carries
     // no <status>, only an <event> saying it expired.

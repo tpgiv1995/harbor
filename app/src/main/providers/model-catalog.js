@@ -31,7 +31,20 @@ const FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'];
 // (claude-opus-4-6-fast), doc slugs (claude-fable-5.md, claude-fable-5-mythos-5)
 // and bare-major aliases (claude-opus-4: generation 4 ids carry a minor;
 // generation 5+ ids are single-segment).
-const MODEL_ID_RE = /claude-(fable|opus|sonnet|haiku)-\d{1,2}(?:-\d{1,2})?(?![\w.@:-])/g;
+//
+// An id counts only as a COMPLETE QUOTED STRING LITERAL ("id", 'id' or `id`),
+// the way the CLI's embedded JavaScript writes every model it knows (19 of 19
+// ids in both 2.1.293 and 2.1.295 appear quoted). A raw substring scan cannot
+// tell where a string ends in the compiled string pool, which stores each
+// string as a length word, a hash and the bytes with no terminator: in 2.1.295
+// "claude-haiku-3-5" filled its slot exactly and the next entry's length word
+// began with 0x35, the digit "5", so the raw scan offered "Haiku 3.55", a model
+// that does not exist (2026-10-09). The closing quote is the boundary.
+const MODEL_ID_RE = /(["'`])(claude-(?:fable|opus|sonnet|haiku)-\d{1,2}(?:-\d{1,2})?)\1/g;
+// Bumped whenever the scan rule changes, so a cache an older rule wrote for
+// the same binary is rescanned instead of trusted (the running Harbor rescans
+// a new CLI the moment the update chip installs it, before Harbor restarts).
+const SCAN_FORMAT = 2;
 
 function isLaunchableId(id) {
   const m = String(id).match(/^claude-(fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?$/);
@@ -71,11 +84,11 @@ function labelForId(id) {
 }
 
 // Extract candidate ids from an arbitrary byte buffer (a slice of the CLI
-// binary decoded as latin1). Returns raw matches; the launchable filter and
-// the boundary lookahead in MODEL_ID_RE do the pruning.
+// binary decoded as latin1). The matching quotes in MODEL_ID_RE bound each id;
+// the launchable filter does the rest of the pruning.
 function extractIdsFromText(text, into = new Set()) {
   for (const match of text.matchAll(MODEL_ID_RE)) {
-    if (isLaunchableId(match[0])) into.add(match[0]);
+    if (isLaunchableId(match[2])) into.add(match[2]);
   }
   return into;
 }
@@ -221,6 +234,7 @@ function createModelCatalog({ seedIds, cacheFile } = {}) {
     if (!bin) return { ok: false, reason: 'claude binary not found', added: [] };
     const cached = cacheFile ? await readCache() : null;
     const cacheHit = cached
+      && cached.scanFormat === SCAN_FORMAT
       && cached.binPath === bin.path
       && cached.size === bin.size
       && cached.mtimeMs === bin.mtimeMs
@@ -241,6 +255,7 @@ function createModelCatalog({ seedIds, cacheFile } = {}) {
       if (cacheFile) {
         await fsp.mkdir(path.dirname(cacheFile), { recursive: true }).catch(() => {});
         await fsp.writeFile(cacheFile, JSON.stringify({
+          scanFormat: SCAN_FORMAT,
           binPath: bin.path,
           size: bin.size,
           mtimeMs: bin.mtimeMs,

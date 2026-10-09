@@ -152,7 +152,10 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'transcript',
-      re: /transcript|\.jsonl|jsonl|projects director|session id|--session-id|\bresume\b|--continue|\B-p\b/i,
+      // "resumed" too (2026-10-09): 2.1.295 "the removed turns coming back,
+      // when the session was ... resumed after being killed" matched nothing,
+      // and dormancy kills and Harbor resumes sessions every day.
+      re: /transcript|\.jsonl|jsonl|projects director|session id|--session-id|\bresum(?:e|ed|es|ing)\b|--continue|\B-p\b/i,
       why: 'The history index, the transcript parser, resume and the minted --session-id all read ~/.claude/projects. A transcript or session-id change is felt by every rail row and every conversation window.',
       verify: 'npm test -- transcript',
     },
@@ -173,7 +176,11 @@ const IMPACT_FLAGS = {
       // the pty on purpose; 2026-09-14), so those two words are anchored to a
       // terminal/fullscreen/pty word on the same line: an image "resized" or a
       // VSCode tab "going blank" must not fire it.
-      re: /emoji|wrap(ped|ping)? line|word wrap|alternate screen|\bANSI\b|\bcolumns?\b|repaint|redraw|terminal (width|size|render)|^(?=.*\b(?:terminal|fullscreen|pty)\b).*(?:resiz(?:e|ed|es|ing)\b|\bblank\b)/i,
+      // 2026-10-09 (2.1.295): a new terminal protocol ("Program Status
+      // Protocol (OSC 7501)", a query written into every pane at startup), tab
+      // stops and bidirectional text "drawing over nearby rows" all matched
+      // nothing; the last is the same overdraw class as the emoji width bug.
+      re: /emoji|wrap(ped|ping)? line|word wrap|alternate screen|\bANSI\b|\bcolumns?\b|repaint|redraw|terminal (width|size|render)|^(?=.*\b(?:terminal|fullscreen|pty)\b).*(?:resiz(?:e|ed|es|ing)\b|\bblank\b)|\bOSC ?\d+\b|\btab stops?\b|\bbidirectional\b/i,
       why: 'The daemon models the pty SCREEN. Width, emoji width and alternate-screen changes desync that model, which is exactly what broke the ask card on 2026-09-03.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
@@ -216,9 +223,12 @@ const IMPACT_FLAGS = {
     // 2026-10-07: neither did "pasted text ... sent as if it had been typed"
     // (2.1.290, 2.1.292, 2.1.293), which is how the CLI classifies every
     // multi-line Harbor send.
+    // 2026-10-09: the left-arrow "backgrounding" messages draw next to the
+    // composer box that delivery confirmation reads (2.1.295 "Backgrounding
+    // cancelled"), and matched nothing.
     {
       id: 'composer',
-      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text/i,
+      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bbackgrounding\b/i,
       why: 'session-send confirms a delivery by reading the composer box and the echo above it, and sends every message as a bracketed paste plus Enter. A change to either is felt by every send.',
       verify: 'node_modules/electron/dist/electron.exe scripts/drive-resume-hooks-win.js',
     },
@@ -230,6 +240,25 @@ const IMPACT_FLAGS = {
       re: /usage limits?\b|usage credits|extra usage|rate limit/i,
       why: 'model-switch.js recognizes the usage-limit, checking-credits and session-paused screens by their title lines and draws the CLI\'s own choices as a card. A wording or layout change sends them back to the raw fallback panel.',
       verify: 'npm test -- model-switch',
+    },
+    // 2026-10-09 (2.1.295): the /loop wakeup notice, the cancelled-wakeup
+    // notice and the stopped-MCP-call notice matched no flag, and the first
+    // was a notice background-tasks.js did not match. Narrow on purpose:
+    // `claude agents` background sessions and services are not this fold.
+    {
+      id: 'background-tasks',
+      re: /\bbackground (?:tasks?|agents?(?!')|subagents?|workflows?|shells?|commands?)\b|\/loop\b|\bwakeups?\b|\btask[- ]notifications?\b|\bTaskStop\b|\bscheduled tasks?\b|\btasks panel\b|\btask ids?\b/i,
+      why: 'background-tasks.js folds the whole transcript for background work: launch results, the CLI\'s task notifications, TaskStop, /loop wakeups and the stopped-on-resume notices. A notice it does not match leaves a finished task counted as running, and the session stays in the light-blue background state instead of ready.',
+      verify: 'npm test -- delegations',
+    },
+    // 2026-10-09 (2.1.295): "Fixed `--tools` ... not applying to built-in
+    // tools that register after launch" matched nothing, and the titler's
+    // empty room is built from exactly these flags.
+    {
+      id: 'titler',
+      re: /--tools\b|--setting-sources\b|--disable-slash-commands\b|--strict-mcp-config\b|--system-prompt\b|--max-turns\b|\bMAX_THINKING_TOKENS\b/,
+      why: 'titles.js mints every rail title with claude -p in an empty room: no tools, no setting sources, no slash commands, a strict empty MCP config and zero thinking. A change to any of those flags changes what each title call loads and costs.',
+      verify: 'npm test -- titles',
     },
   ],
   codex: [
