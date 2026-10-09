@@ -67,6 +67,33 @@ function oneLine(text, max = TITLE_MAX) {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+// The persisted facts are only as good as the code that read them, so their
+// format IS that code: a hash of every module extractRowFacts runs. Any change
+// to the parser, the title rule or the rollout-meta reader rebuilds the cache
+// on the next launch by itself; nobody has to remember to bump a number.
+const FACTS_FORMAT = (() => {
+  const hash = require('node:crypto').createHash('sha1');
+  for (const file of [__filename, './transcript.js', './session-title.cjs', './provider-session-link.js', '../../shared/claude-turn-state.cjs']) {
+    try { hash.update(fs.readFileSync(file === __filename ? file : require.resolve(file))); } catch { hash.update(file); }
+  }
+  return hash.digest('hex').slice(0, 16);
+})();
+// A first prompt can be a whole pasted document, and every reader of it goes
+// through oneLine with a max of at most 400, so the stored copy is collapsed
+// and clipped well past that: oneLine(stored, max) === oneLine(original, max)
+// for any max under 2000. A whitespace-only prompt keeps one raw character so
+// its truthiness, which decides firstPrompt's null, is unchanged.
+function storableFacts(facts) {
+  const firstUser = facts.firstUser == null ? null : String(facts.firstUser);
+  const collapsed = firstUser == null ? null : firstUser.replace(/\s+/g, ' ').trim();
+  return {
+    cwd: facts.cwd || null,
+    lineage: facts.lineage || null,
+    firstUser: firstUser == null ? null : (collapsed ? collapsed.slice(0, 2000) : firstUser.slice(0, 1)),
+    isInternalSession: Boolean(facts.isInternalSession),
+  };
+}
+
 // Read complete records: a large session_meta line must not consume the entire
 // title budget. Stop early once a real prompt is found, with a bounded scan.
 async function extractRowFacts(file, provider) {
@@ -121,6 +148,52 @@ function createProviderHistory(options = {}) {
     return parts.length ? parts[parts.length - 1] : null;
   });
   const debounceMs = options.debounceMs ?? 5000;
+
+  // WHAT A HEAD READ LEARNED SURVIVES A RESTART (2026-10-09). The row cache
+  // below lives in memory, so every launch re-read the head of every codex and
+  // cursor log (3,415 files: 12.5s measured) before Harbor could show its
+  // window, and the window waits on this scan. Only what extractRowFacts READ
+  // is persisted, keyed by the file's size and mtime; the row is rebuilt from
+  // those facts every time, so project labels and keeper metadata stay live.
+  // Opt-in by path (the app passes one; tests and the phone server do not).
+  // Bump FACTS_FORMAT whenever extractRowFacts changes what it returns.
+  const factsCacheFile = options.factsCacheFile || null;
+  let storedFacts = null; // file path -> { size, mtimeMs, facts }
+  let storedFactsDirty = false;
+  const loadStoredFacts = () => {
+    if (storedFacts || !factsCacheFile) return storedFacts;
+    storedFacts = {};
+    try {
+      const parsed = JSON.parse(fs.readFileSync(factsCacheFile, 'utf8'));
+      if (parsed?.format === FACTS_FORMAT && parsed.files && typeof parsed.files === 'object') storedFacts = parsed.files;
+    } catch { /* first launch, or an unreadable cache: the scan rebuilds it */ }
+    return storedFacts;
+  };
+  const saveStoredFacts = async (seen) => {
+    if (!storedFacts) return;
+    for (const file of Object.keys(storedFacts)) {
+      if (!seen.has(file)) { delete storedFacts[file]; storedFactsDirty = true; }
+    }
+    if (!storedFactsDirty) return;
+    storedFactsDirty = false;
+    const temporary = `${factsCacheFile}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await fsp.mkdir(path.dirname(factsCacheFile), { recursive: true });
+      await fsp.writeFile(temporary, JSON.stringify({ format: FACTS_FORMAT, files: storedFacts }));
+      // Windows refuses a rename over a file another process has open for a
+      // moment (the index.json lesson, 2026-09-04): retry briefly, and a cache
+      // that still cannot be written just costs the next launch a rescan.
+      for (let attempt = 0; ; attempt += 1) {
+        try { await fsp.rename(temporary, factsCacheFile); break; } catch (error) {
+          if (attempt >= 4 || !['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+        }
+      }
+    } catch {
+      storedFactsDirty = true;
+      await fsp.rm(temporary, { force: true }).catch(() => {});
+    }
+  };
 
   const emitter = new EventEmitter();
   const cache = new Map(); // file path -> { size, mtimeMs, row }
@@ -190,7 +263,18 @@ function createProviderHistory(options = {}) {
       };
     }
     let facts = { cwd: null, firstUser: null };
-    try { facts = await extractRowFacts(file, provider); } catch { /* unreadable head; row still lists */ }
+    const stored = loadStoredFacts()?.[file];
+    if (stored && stored.size === stat.size && stored.mtimeMs === stat.mtimeMs) {
+      facts = stored.facts;
+    } else {
+      try {
+        facts = await extractRowFacts(file, provider);
+        if (storedFacts) {
+          storedFacts[file] = { size: stat.size, mtimeMs: stat.mtimeMs, facts: storableFacts(facts) };
+          storedFactsDirty = true;
+        }
+      } catch { /* unreadable head; row still lists, and the next scan retries */ }
+    }
     const cwd = facts.cwd || cwdHint || metadata.cwd || null;
     const row = {
       id,
@@ -285,6 +369,7 @@ function createProviderHistory(options = {}) {
       const title = nativeByHome.get(home)?.get(row.id);
       if (title) row.title = title;
     }
+    await saveStoredFacts(new Set(rows.map((row) => row.path)));
     metaById.clear();
     for (const row of rows) {
       const meta = {

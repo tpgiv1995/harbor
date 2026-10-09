@@ -283,20 +283,83 @@ async function findProviderTranscript({ provider, sessionId, cwd, home = os.home
   return null;
 }
 
+// THE MAIN PROCESS NEVER READS A WHOLE TRANSCRIPT (2026-10-09). Two callers
+// read the entire file into one string to look at its last few records, and an
+// orchestration worker's codex log routinely runs 100-600MB. A fresh launch
+// built the Orch summaries by doing that for every worker session at once, and
+// one string that size cannot be placed in a main-process heap already holding
+// a gigabyte: "JavaScript heap out of memory" about 20 seconds after the window
+// came up, two launches in a row (crash dumps 2026-10-09 02:26 and 02:31).
+// Every question asked of a transcript's END is now answered from its tail:
+// the window starts at MAX_INITIAL_BYTES and doubles until it holds `minLines`
+// non-empty lines, reaches the start of the file, or hits `maxBytes`. Lines are
+// decoded one at a time from the buffer, so no string is ever larger than one
+// record. The first line of a window that starts mid-file is dropped (it is
+// cut); the trailing segment is kept, and a half-written one simply fails to
+// parse, exactly as it did when the whole file was split.
+const TAIL_SIGNAL_MIN_LINES = 64;
+const TAIL_SIGNAL_MAX_BYTES = 16 * 1024 * 1024;
+const TAIL_RECORDS_MAX_BYTES = 64 * 1024 * 1024;
+
+async function readTailLines(filePath, { minLines = 1, startBytes = MAX_INITIAL_BYTES, maxBytes = TAIL_RECORDS_MAX_BYTES } = {}) {
+  const handle = await fsp.open(filePath, 'r');
+  try {
+    const { size } = await handle.stat();
+    let span = Math.min(size, startBytes, maxBytes);
+    for (;;) {
+      const start = size - span;
+      const buffer = Buffer.alloc(span);
+      let filled = 0;
+      while (filled < span) {
+        const { bytesRead } = await handle.read(buffer, filled, span - filled, start + filled);
+        if (!bytesRead) break;
+        filled += bytesRead;
+      }
+      const lines = [];
+      let lineStart = 0;
+      if (start > 0) {
+        const firstNewline = buffer.indexOf(0x0a);
+        lineStart = firstNewline === -1 || firstNewline >= filled ? filled : firstNewline + 1;
+      }
+      while (lineStart < filled) {
+        let lineEnd = buffer.indexOf(0x0a, lineStart);
+        if (lineEnd === -1 || lineEnd > filled) lineEnd = filled;
+        const text = buffer.toString('utf8', lineStart, lineEnd).trim();
+        if (text) lines.push(text);
+        lineStart = lineEnd + 1;
+      }
+      if (lines.length >= minLines || start === 0 || span >= maxBytes) return lines;
+      span = Math.min(size, span * 2, maxBytes);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 // Resume recovery needs raw tail records, not renderer blocks: origin,
 // promptSource, and isMeta are exactly what distinguish a typed message from
-// harness traffic. Read complete JSONL lines so even one very long final
-// message is never clipped by a byte window.
+// harness traffic. The tail window grows until it holds maxRecords complete
+// lines, so one very long final message is never clipped by a byte window
+// (up to TAIL_RECORDS_MAX_BYTES, which no single record has come near).
 async function readTranscriptTailRecords(transcriptPath, { maxRecords = 128 } = {}) {
-  const raw = await fsp.readFile(transcriptPath, 'utf8');
-  const lines = raw.split('\n');
+  const lines = await readTailLines(transcriptPath, { minLines: maxRecords, maxBytes: TAIL_RECORDS_MAX_BYTES });
   const records = [];
   for (let index = lines.length - 1; index >= 0 && records.length < maxRecords; index -= 1) {
-    const line = lines[index].trim();
-    if (!line) continue;
-    try { records.unshift(JSON.parse(line)); } catch { /* incomplete or foreign line */ }
+    try { records.unshift(JSON.parse(lines[index])); } catch { /* incomplete or foreign line */ }
   }
   return records;
+}
+
+// Whether a session's last turn ended ('idle'), is waiting on a tool, or is
+// mid-turn: the same lastSignal the full parse produced, read off the tail the
+// way every tile prices its own working state off a MAX_INITIAL_BYTES tail.
+async function readTranscriptLastSignal(transcriptPath, provider = 'claude') {
+  const lines = await readTailLines(transcriptPath, { minLines: TAIL_SIGNAL_MIN_LINES, maxBytes: TAIL_SIGNAL_MAX_BYTES });
+  const parser = new TranscriptParser(provider);
+  for (const line of lines) {
+    try { parser.applyLine(JSON.parse(line)); } catch { /* skip partial records */ }
+  }
+  return parser.header.lastSignal;
 }
 
 // One tool_use -> one action row: verb + mono chip + optional right-hand pill,
@@ -1675,6 +1738,8 @@ module.exports = {
   transcriptPathFor,
   findProviderTranscript,
   readTranscriptTailRecords,
+  readTranscriptLastSignal,
+  readTailLines,
   extractHandoffPath,
   waitForHandoffPath,
   readArchiveBlocksBeforeOffset,

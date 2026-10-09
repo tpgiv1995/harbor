@@ -250,7 +250,7 @@ function delegationSummaries(groups, now = Date.now(), liveIds = null) {
 
 // One worker and one coalesced flight, triggered by the bridge's existing
 // watchers. No new polling, no process-table reads, no per-row meta requests.
-function createDelegationIndex(ownerOptions = {}) {
+function createDelegationIndex(ownerOptions = {}, { cacheFile = null } = {}) {
   let worker = null; let pending = null; let closed = false;
   const scan = createSingleFlight((rows, liveIds) => new Promise((resolve, reject) => {
     if (closed) return resolve({ parents: [], providers: [] });
@@ -261,7 +261,7 @@ function createDelegationIndex(ownerOptions = {}) {
       worker.on('error', (error) => { pending?.reject(error); pending = null; worker = null; });
     }
     pending = { resolve, reject };
-    worker.postMessage({ rows: latestRows, liveIds: latestLiveIds, ownerOptions });
+    worker.postMessage({ rows: latestRows, liveIds: latestLiveIds, ownerOptions, cacheFile });
   }));
   let latestRows = []; let latestLiveIds = [];
   return { scan(rows, liveIds = []) { latestRows = rows; latestLiveIds = liveIds; return scan(); },

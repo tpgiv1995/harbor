@@ -56,7 +56,7 @@ const {
 const { compareVersionsDesc } = require('./providers/model-catalog.js');
 const { createCliUpdateChecker } = require('./providers/cli-updates.js');
 const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath } = require('./providers/delegate.js');
-const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, TranscriptParser } = require('./providers/transcript.js');
+const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptLastSignal } = require('./providers/transcript.js');
 const { createAskTranscriptResolver } = require('./ask-transcript-path.js');
 const { createPendingAskReader } = require('./providers/pending-ask.js');
 const { createSessionSend, createLinkRegistry } = require('./session-send.js');
@@ -1451,6 +1451,7 @@ function registerIpc() {
   // so a cached verdict for an unchanged file can never render fresher than its
   // own mtime allows.
   const orchLivenessCache = new Map();
+  const ORCH_LIVENESS_CONCURRENCY = 6;
 
   async function orchHistoryRows(queues = []) {
     // Only pending/active batches need worker liveness: done ones render from
@@ -1482,7 +1483,23 @@ function registerIpc() {
       || ((session.isChildTask || /^BATCH TITLE:/i.test(String(session.firstPrompt || session.title || '')))
         && (session.lastActiveMs || 0) >= windowFloorMs)
     ));
-    return Promise.all(candidates.map(async (session) => {
+    // `finished` is read by the join for ACTIVE batches only (delegate.js
+    // joinBatchesToSessions), so only a session that can join one is read:
+    // an active batch's last_session_id, or the title join's own prefix test.
+    // Every other candidate still joins on identity and mtime, unread. Reading
+    // all 759 candidates' tails cost ~3.5s of main thread per broadcast
+    // (profiled 2026-10-09) to compute a verdict nothing looked at.
+    const activeBatches = queues.flatMap((queue) => queue?.batches || [])
+      .filter((batch) => String(batch.status || 'pending').toLowerCase() === 'active');
+    const activeExactIds = new Set(activeBatches.map((batch) => batch.last_session_id).filter(Boolean));
+    const activeTitleNeedles = activeBatches.filter((batch) => batch.title)
+      .map((batch) => `batch title: ${String(batch.title).trim()}`.toLowerCase());
+    const needsFinished = (session) => activeExactIds.has(session.id)
+      || activeTitleNeedles.some((needle) => String(session.firstPrompt || session.title || '').trim().toLowerCase().startsWith(needle));
+    // Bounded fan-out: the candidates can be every orch worker in the corpus
+    // (the zero floor for an unstamped batch), and a fresh launch has no
+    // cache, so one Promise.all opened and read all of them at once.
+    const joinCandidate = async (session) => {
       const meta = await sidebarBridge.getSessionMeta(session.id).catch(() => null);
       if (!meta?.path) return { ...session, id: session.id };
       const stat = await fs.stat(meta.path).catch(() => null);
@@ -1491,16 +1508,18 @@ function registerIpc() {
       // freshness from signalAt at its own read of the clock.
       let finished = null;
       const cached = orchLivenessCache.get(meta.path);
-      if (cached && stat && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+      if (!needsFinished(session)) {
+        // No active batch can join this session, so its verdict is never read.
+      } else if (cached && stat && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
         ({ finished } = cached);
       } else {
         try {
-          const parser = new TranscriptParser(meta.provider || session.provider || 'claude');
-          for (const line of (await fs.readFile(meta.path, 'utf8')).split(/\r?\n/)) {
-            if (!line.trim()) continue;
-            try { parser.applyLine(JSON.parse(line)); } catch { /* skip partial records */ }
-          }
-          finished = parser.header.lastSignal === 'idle';
+          // The TAIL only (readTranscriptLastSignal): this used to read and
+          // parse the whole file, and a codex worker log runs to hundreds of MB.
+          // On 2026-10-09 that crashed two launches in a row with a main-process
+          // heap OOM (the doctrine in docs/claude/views.md).
+          const lastSignal = await readTranscriptLastSignal(meta.path, meta.provider || session.provider || 'claude');
+          finished = lastSignal === 'idle';
           if (stat) orchLivenessCache.set(meta.path, { size: stat.size, mtimeMs: stat.mtimeMs, finished });
         } catch { /* The join still has identity and mtime if parsing fails. */ }
       }
@@ -1513,7 +1532,18 @@ function registerIpc() {
         signalAt: stat?.mtimeMs || meta.mt || null,
         finished,
       };
-    }));
+    };
+    const joined = new Array(candidates.length);
+    let nextCandidate = 0;
+    const drain = async () => {
+      while (nextCandidate < candidates.length) {
+        const index = nextCandidate;
+        nextCandidate += 1;
+        joined[index] = await joinCandidate(candidates[index]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(ORCH_LIVENESS_CONCURRENCY, candidates.length) }, drain));
+    return joined;
   }
 
   async function orchDeriveQueue(queue, now = Date.now(), suppliedRows = null) {
@@ -1750,12 +1780,23 @@ function bundledIconSlugs() {
 // stack many concurrent passes and spawn a storm of CLIs. A pass that fires while
 // one is busy simply skips; the next free pass re-reads the index and catches up.
 let titlerBusy = false;
+// ONE QUEUED PASS AT A TIME (2026-10-09). This runs on every rail update,
+// about twice a second, and each call armed its own 15s timer, so the moment
+// a pass finished the next timer fired: the titler re-read the 3MB index and
+// the titles file back to back for as long as Harbor ran (profiled, a few
+// hundred ms of main thread every few seconds). An update now queues a pass
+// only when none is waiting, and a firing pass clears the queue first, so a
+// session that appears mid-pass is still titled by the next one.
+let titlerQueued = false;
 function scheduleTitler() {
+  if (titlerQueued) return;
+  titlerQueued = true;
   const provider = createTitlesProvider({ isDelegated: (id) => sidebarBridge?.isDelegated(id) });
-  scheduleTitlesProvider({
+  const scheduled = scheduleTitlesProvider({
     env: process.env,
     e2eMode,
     run: async () => {
+      titlerQueued = false;
       if (titlerBusy) return { skipped: 'busy' };
       titlerBusy = true;
       try {
@@ -1770,6 +1811,8 @@ function scheduleTitler() {
       if (result.titled > 0) sidebarBridge?.refreshHistory?.().catch(() => {});
     },
   });
+  // Disabled (env or E2E): nothing was armed, so nothing is waiting.
+  if (!scheduled.scheduled) titlerQueued = false;
 }
 
 // A rebuild landing in dist/ while the app runs used to be invisible: the
@@ -2549,6 +2592,10 @@ app.whenReady().then(async () => {
     history: historyProvider,
     profiles: harborConfig.profiles,
     providerMetadataFile: path.join(harborConfig.paths.cacheDir, 'provider-session-metadata.json'),
+    // Both scans the window waits on resume from disk instead of starting
+    // cold on every launch (2026-10-09). A harness (E2E) never persists them.
+    providerFactsCacheFile: e2eMode ? null : path.join(harborConfig.paths.cacheDir, 'provider-row-facts.json'),
+    delegationScanCacheFile: e2eMode ? null : path.join(harborConfig.paths.cacheDir, 'background-fold.json'),
     delegationLinksFile: process.env.HARBOR_DELEGATIONS_FILE || path.join(harborConfig.paths.cacheDir, 'delegation-links.json'),
   });
   terminalBridge = createTerminalBridge({
@@ -3090,9 +3137,14 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
+  // Startup phases land on the window-created lifecycle line, so a slow
+  // launch names its own slow step (2026-10-09: launches had grown from
+  // seconds to over a minute with nothing recording where it went).
+  const bridgesStarted = Date.now();
+  const bootPhases = { beforeBridgesMs: Math.round(process.uptime() * 1000) };
   await Promise.all([
-    sidebarBridge.start(),
-    terminalBridge.start(),
+    sidebarBridge.start().finally(() => { bootPhases.sidebarMs = Date.now() - bridgesStarted; }),
+    terminalBridge.start().finally(() => { bootPhases.terminalMs = Date.now() - bridgesStarted; }),
   ]);
   // Hold EVERY driven pane at a size Claude's dialogs fit in, not just the ones
   // a window happens to be open on. Live-caught 2026-07-28: sizing ran only
@@ -3116,6 +3168,8 @@ app.whenReady().then(async () => {
   lifecycle.note('window-created', {
     daemon: daemonBanner === 'ok' ? 'ok' : (daemonBanner?.error || 'unknown'),
     historyRows: sidebarBridge.getState().historyCount,
+    sinceBootMs: Math.round(process.uptime() * 1000),
+    phases: { ...bootPhases, ...sidebarBridge.startTimings?.() },
   });
   watchDistForUpdates();
   scheduleTitler();

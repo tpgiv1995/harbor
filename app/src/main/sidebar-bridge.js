@@ -152,13 +152,14 @@ function createSidebarBridge(options = {}) {
       projectLabelForCwd: options.projectLabelForCwd,
       profiles: options.profiles,
       metadataFile: options.providerMetadataFile,
+      factsCacheFile: options.providerFactsCacheFile,
     });
   const makeClient = options.createControlClient || createControlClient;
   const emitter = new EventEmitter();
   let liveState = { workspaces: [], panes: [] };
   let historySessions = [];
   let historyById = new Map();
-  const delegationIndex = options.delegationIndex === null ? null : options.delegationIndex || createDelegationIndex(options.ownerOptions);
+  const delegationIndex = options.delegationIndex === null ? null : options.delegationIndex || createDelegationIndex(options.ownerOptions, { cacheFile: options.delegationScanCacheFile || null });
   let delegationGroups = [];
   // Identity outlives the 48h evidence window. Keep only child -> parent ids,
   // never commands or prompts, in the relocated cache selected by composition.
@@ -309,7 +310,11 @@ function createSidebarBridge(options = {}) {
     if (liveState !== previousState) scheduleStatusPublish();
   };
 
+  // Where the last refresh spent its time, for the lifecycle log's
+  // window-created line (the launch waits on the first refresh).
+  let refreshTimings = null;
   const refreshHistory = createSingleFlight(async () => {
+    const refreshStarted = Date.now();
     const [sessions, homeMap] = await Promise.all([
       history.listSessions(),
       history.sessionHomes(),
@@ -318,6 +323,7 @@ function createSidebarBridge(options = {}) {
       ...row,
       home: homeMap[row.id] ?? null,
     }));
+    const claudeDone = Date.now();
     let providerRows = [];
     if (providerHistory) {
       // Cursor never records its cwd; reverse the munge from cwds Harbor
@@ -344,7 +350,13 @@ function createSidebarBridge(options = {}) {
     for (const id of launchedHomes.keys()) {
       if (Object.hasOwn(homeMap, id)) launchedHomes.delete(id);
     }
+    const providersDone = Date.now();
     await refreshDelegations();
+    refreshTimings = {
+      claudeHistoryMs: claudeDone - refreshStarted,
+      providerHistoryMs: providersDone - claudeDone,
+      backgroundScanMs: Date.now() - providersDone,
+    };
     publish();
   });
 
@@ -485,13 +497,16 @@ function createSidebarBridge(options = {}) {
       emitter.emit('error', error);
       scheduleHistoryRetry();
     }
+    const daemonStarted = Date.now();
     try {
       await connectDaemon();
     } catch {
       // Degraded boot (daemon absent): history works; reconnect keeps trying.
       scheduleReconnect();
     }
+    daemonConnectMs = Date.now() - daemonStarted;
   };
+  let daemonConnectMs = null;
 
   const focusLivePane = async ({ paneId, workspaceId }) => {
     if (!daemonClient || !paneId) throw new Error('pane focus unavailable');
@@ -524,6 +539,7 @@ function createSidebarBridge(options = {}) {
     emitter,
     start,
     refreshHistory,
+    startTimings: () => ({ ...refreshTimings, daemonConnectMs }),
     refreshDelegations,
     listDelegations: () => ageDelegationGroups(delegationGroups, Date.now(), liveSessionIds()),
     isDelegatedPane: (paneId) => {

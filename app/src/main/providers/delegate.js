@@ -22,9 +22,25 @@ const RUN_STALE_MS = HARD_CAP_MS + 5 * 60 * 1000;
 const WORKING_FRESH_MS = 3 * 60 * 1000;
 const JOIN_SLACK_MS = 2 * 60 * 1000;
 
+// realpathSync walks every path component with a synchronous lstat, and the
+// Orch summaries compare every queue workspace and every batch worktree
+// against every open workspace on each broadcast: 150-430ms of blocked main
+// thread per broadcast, profiled 2026-10-09. A path's real location does not
+// move between broadcasts, so each answer is reused for RESOLVE_TTL_MS; a
+// worktree created or removed in that window is seen on the next expiry.
+const RESOLVE_TTL_MS = 30_000;
+const resolvedWorkspaces = new Map();
+
 function resolveWorkspace(workspace) {
-  try { return fs.realpathSync(workspace); }
-  catch { return path.resolve(workspace); }
+  const key = String(workspace);
+  const now = Date.now();
+  const hit = resolvedWorkspaces.get(key);
+  if (hit && now - hit.at < RESOLVE_TTL_MS) return hit.path;
+  let resolved;
+  try { resolved = fs.realpathSync(workspace); }
+  catch { resolved = path.resolve(workspace); }
+  resolvedWorkspaces.set(key, { path: resolved, at: now });
+  return resolved;
 }
 
 function sameWorkspace(left, right, platform = process.platform) {
