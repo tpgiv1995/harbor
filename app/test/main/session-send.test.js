@@ -613,6 +613,143 @@ test('a dim suggested prompt that reads like the message is not the message', as
   assert.deepEqual(typed(h), ['continue'], 'typed once, and no Enter into a box that only shows a suggestion');
 });
 
+// 2026-10-10: a brand-new cdt-app session drew its empty prompt, then kept
+// Harbor's typing in its startup buffer for over half a minute on a machine at
+// 100% CPU. Harbor gave up after 7.5 s and said "nothing was sent", Pat sent
+// again, Harbor typed the message a second time, and both copies landed in the
+// prompt later. composerPane's renderDelayReads stands in for that buffer: the
+// typing shows only after that many reads.
+const NEW_SESSION_MESSAGE = 'pick up three pieces of cdt-app work; read the findings first';
+
+test('a starting Claude that shows the typing late still gets it once, with one Enter, and says why it waits', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { renderDelayReads: 240 });
+  const send = createSessionSend(h.deps);
+  const details = [];
+  send.emitter.on('status', (s) => { if (s.phase === 'sending' && s.detail) details.push(s.detail); });
+
+  await send.send({ sessionId: 's-starting', text: NEW_SESSION_MESSAGE, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(typed(h), [NEW_SESSION_MESSAGE, '\r']);
+  assert.equal(pane.draft, '', 'the message was submitted');
+  assert.match(details[0] || '', /still starting up/);
+});
+
+test('a pane that has taken a message keeps the short wait', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h);
+  const composed = h.deps.readPane;
+  let reads = 0;
+  let deaf = false;
+  h.deps.readPane = async (...args) => {
+    if (!deaf) return composed(...args);
+    reads += 1;
+    return `conversation\n${PROMPT_EMPTY}`;
+  };
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 's-short', text: 'first one lands', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(pane.draft, '');
+  deaf = true;
+  await assert.rejects(
+    send.send({ sessionId: 's-short', text: 'second one is never shown', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PROMPT_NEVER_HELD',
+  );
+  assert.ok(reads < 120, `an established pane gives up in seconds, not minutes (${reads} reads)`);
+});
+
+test('a second send after a refusal waits for the first typing instead of typing the message again', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  // Longer than the whole first wait, so the first send is refused and the
+  // buffer lets go during the second.
+  const pane = composerPane(h, { renderDelayReads: 1300 });
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+
+  await assert.rejects(
+    send.send({ sessionId: 's-retry', text: NEW_SESSION_MESSAGE, pane: target }),
+    (error) => error.code === 'PROMPT_NEVER_HELD' && /sending again waits for it instead of typing it twice/.test(error.message),
+  );
+  await send.send({ sessionId: 's-retry', text: NEW_SESSION_MESSAGE, pane: target });
+
+  assert.deepEqual(typed(h), [NEW_SESSION_MESSAGE, '\r'], 'typed once, submitted once');
+  assert.equal(pane.draft, '');
+  const log = await readSendLog(h.deps.sendLogFile, (rows) => rows.some((r) => r.phase === 'awaiting-earlier-typing'));
+  assert.ok(log.some((r) => r.phase === 'awaiting-earlier-typing'));
+});
+
+test('a long message that showed up after the refusal is submitted by the resend, even though the prompt shows only its end', async () => {
+  // Claude draws only the last ~25 lines of a long prompt, so it can never
+  // match the whole message; the earlier attempt's record is what proves it.
+  const message = Array.from({ length: 60 }, (_, i) => `line ${i + 1} of the cdt-app handoff`).join('\n');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false });
+  let released = false;
+  let submitted = false;
+  h.deps.readPane = async () => {
+    if (submitted) return `❯ ${message.split('\n').slice(-3).join(' ')}\n${PROMPT_EMPTY}`;
+    const shown = released ? message.split('\n').slice(-25).join('\n  ') : '';
+    return `${PROMPT_RULE}\n❯ ${shown}\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`;
+  };
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r' && released) submitted = true;
+    return sendInput(paneId, text);
+  };
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+
+  await assert.rejects(send.send({ sessionId: 's-late', text: message, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  released = true;
+  await send.send({ sessionId: 's-late', text: message, pane: target });
+
+  assert.deepEqual(typed(h), [`\x1b[200~${message}\x1b[201~`, '\r']);
+});
+
+test('typing that never shows even after the second wait is typed fresh by the send after that', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false, readFrames: [PROMPT_EMPTY] });
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  const lost = 'these keys are truly lost';
+
+  await assert.rejects(send.send({ sessionId: 's-lost', text: lost, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  await assert.rejects(
+    send.send({ sessionId: 's-lost', text: lost, pane: target }),
+    (e) => e.code === 'PROMPT_NEVER_HELD' && /sending again types it fresh/.test(e.message),
+  );
+  assert.deepEqual(typed(h), [lost], 'the second send typed nothing');
+  await assert.rejects(send.send({ sessionId: 's-lost', text: lost, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  assert.deepEqual(typed(h), [lost, lost], 'no dead end: the third send types again');
+});
+
+test('a different message after a refusal is not typed on top of the earlier one when that one shows up', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { renderDelayReads: 1300 });
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+
+  await assert.rejects(send.send({ sessionId: 's-edit', text: NEW_SESSION_MESSAGE, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  await assert.rejects(
+    send.send({ sessionId: 's-edit', text: 'a shorter rewrite of it', pane: target }),
+    (e) => e.code === 'PROMPT_HOLDS_EARLIER',
+  );
+  assert.deepEqual(typed(h), [NEW_SESSION_MESSAGE], 'neither the rewrite nor an Enter went in');
+  assert.equal(pane.draft, NEW_SESSION_MESSAGE, 'the earlier message is left in the prompt for Pat');
+});
+
+test('a prompt already holding the message twice gets nothing typed and no Enter', async () => {
+  const h = makeHarness({
+    panes: ['pane-1'],
+    controlled: 'pane-1',
+    promptEchoes: false,
+    readFrames: [`${PROMPT_RULE}\n❯ ${NEW_SESSION_MESSAGE}${NEW_SESSION_MESSAGE}\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`],
+  });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-doubled', text: NEW_SESSION_MESSAGE, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PROMPT_HOLDS_MORE' && /typed and sent nothing/.test(error.message),
+  );
+  assert.deepEqual(typed(h), []);
+});
+
 test('a plan move never types /exit into the sessions view, and says why', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', readFrames: [enterFixture('sessions-view-2.1.295.txt')] });
   const send = createSessionSend(h.deps);

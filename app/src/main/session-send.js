@@ -920,12 +920,32 @@ function createSessionSend(deps) {
   // coalescing race at its source: the text has been read before Enter exists.
   // Counted in reads, like the Enter watch; a CLI that draws late is the normal
   // case it waits through, not a failure.
+  //
+  // A STARTING CLAUDE SHOWS TYPING LATE, NOT NEVER (2026-10-10, Pat: a 6,299
+  // character message into a brand-new cdt-app session, refused twice with
+  // "nothing was sent", then found sitting in its prompt minutes later). Until
+  // its prompt takes the keyboard, the CLI collects keystrokes in a startup
+  // buffer (startCapturingEarlyInput in 2.1.296: escape sequences stripped,
+  // so a paste arrives as plain lines and never collapses to "[Pasted text]",
+  // and Enter becomes a newline) and drops the whole buffer into the prompt
+  // when it takes over. Its prompt is DRAWN before that, so an empty box is not
+  // proof the typing was lost. That session drew an empty prompt at 7 s and was
+  // still holding both attempts in the buffer at 37 s, on a machine at 100% CPU.
+  // The 7.5 s wait gave up, the second attempt typed the message again, and
+  // both copies landed in one prompt. So the first message into a pane waits
+  // minutes, saying why, and a pane whose prompt never showed what Harbor
+  // typed is waited on, never typed into again (see unshownTyped).
   const PROMPT_HOLD_POLL_MS = 150;
   const PROMPT_HOLD_POLLS = 50;
-  const waitForPromptToHold = async (paneId, sent) => {
+  const PROMPT_HOLD_STARTUP_POLLS = 1200;
+  const PROMPT_HOLD_NOTICE_POLLS = 20;
+  const waitForPromptToHold = async (paneId, sent, { polls = PROMPT_HOLD_POLLS, onWait = null } = {}) => {
     let state = 'nobox';
     let screen = '';
-    for (let poll = 0; poll < PROMPT_HOLD_POLLS; poll += 1) {
+    for (let poll = 0; poll < polls; poll += 1) {
+      if (poll === PROMPT_HOLD_NOTICE_POLLS && onWait) {
+        try { onWait(); } catch { /* a status line must never break a send */ }
+      }
       await sleep(PROMPT_HOLD_POLL_MS);
       screen = await readScreen(paneId, MENU_READ_LINES);
       if (!screen) { state = 'nobox'; continue; }
@@ -965,18 +985,44 @@ function createSessionSend(deps) {
     error.code = 'FLEET_VIEW';
     return error;
   };
-  const promptNeverHeldError = (state) => {
+  const promptNeverHeldError = (state, { awaitedEarlier = false } = {}) => {
     if (state === 'fleet') return fleetViewError();
     const error = new Error(state === 'blocked'
       ? 'a prompt appeared in the session while Harbor was typing, so it did not press Enter and nothing was sent. Your text is kept; answer the prompt in its window first'
-      : 'Claude\'s prompt never showed your text, so Harbor did not press Enter and nothing was sent. Your text is kept. Check the >_ terminal before resending');
+      : awaitedEarlier
+        ? 'Claude still has not shown the text Harbor typed earlier, so nothing was typed or sent this time. Your text is kept. Check the >_ terminal; sending again types it fresh'
+        : 'Claude\'s prompt never showed your text, so Harbor did not press Enter and nothing was sent. Your text is kept. If Claude was still starting up, the text can still appear in its prompt, so sending again waits for it instead of typing it twice. Check the >_ terminal');
     error.code = 'PROMPT_NEVER_HELD';
     return error;
   };
+  const promptHoldsMoreError = () => {
+    const error = new Error('Claude\'s prompt already has text in it that ends like this message (probably an earlier try that showed up late), so Harbor typed and sent nothing. Your text is kept. Open the >_ terminal, fix the prompt there and press Enter');
+    error.code = 'PROMPT_HOLDS_MORE';
+    return error;
+  };
+  const earlierLandedError = () => {
+    const error = new Error('Claude\'s prompt now shows the earlier message Harbor typed, not this one, so nothing was typed or sent. Your text is kept. Send or clear the earlier message in the >_ terminal first');
+    error.code = 'PROMPT_HOLDS_EARLIER';
+    return error;
+  };
+
+  // What Harbor typed into a pane whose prompt never showed it. It may still be
+  // in Claude's startup buffer (see waitForPromptToHold), so the next send into
+  // that pane types NOTHING and waits for it instead: typing again is how one
+  // message became two. One full wait settles it either way: shown, it is
+  // submitted (or, if the new send differs, refused with the prompt left to the
+  // user); still missing, the record is dropped and the send after that types
+  // fresh, so a prompt that truly lost the keys is never a dead end.
+  const unshownTyped = new Map(); // paneId -> { sent, at }
+  const UNSHOWN_TYPED_MS = 10 * 60_000;
+  const STARTUP_WAIT_NOTICE = 'Claude is still starting up. Your message is typed and goes in as soon as its prompt shows it';
+  const EARLIER_WAIT_NOTICE = 'waiting for Claude to show the message Harbor typed earlier, so it is not typed twice';
 
   // The box already holds exactly this message: an earlier attempt typed it,
   // the prompt drew it after that attempt gave up, and typing it again would
-  // send it twice. Only an exact match counts; anything else is typed as usual.
+  // send it twice. Only an exact match counts. A box that merely ENDS like the
+  // message (two copies, or a paste placeholder) is refused in deliver():
+  // pressing Enter there sends the extra, and typing again adds another copy.
   const promptHoldsExactly = (screen, text) => {
     const found = composerBox(screen);
     if (!found || !text || isFleetView(screen)) return false;
@@ -986,7 +1032,8 @@ function createSessionSend(deps) {
   // No default. A silent `= 'claude'` here is what let a codex pane be driven
   // down the claude path: wrong readiness test, wrong composer guard, and a
   // Claude chip on a gpt-5.6-sol session. Callers resolve it explicitly.
-  const deliver = async (paneId, workspaceId, text, images = [], provider = 'claude') => {
+  // `onWait(detail)` lets a caller say why a send is taking minutes.
+  const deliver = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null } = {}) => {
     // Lease the pane's control for the whole keystroke sequence: a renderer
     // blur mid-send defers until the lease drops instead of yanking control.
     terminalBridge.holdControl?.(paneId);
@@ -1088,15 +1135,38 @@ function createSessionSend(deps) {
       const gated = provider === 'claude' && !isSlashCommand(text);
       const sent = { text, pasted: mayCollapseToPlaceholder(text), imageMarker: lastImageMarker };
       let alreadyInPrompt = false;
-      if (gated && text && !lastImageMarker) {
-        alreadyInPrompt = promptHoldsExactly(await readScreen(paneId, MENU_READ_LINES), text)
-          && !(await dimSuggestion(paneId));
-        if (alreadyInPrompt) logSend({ paneId, phase: 'already-in-prompt' });
+      let earlier = unshownTyped.get(paneId) || null;
+      if (earlier && clock() - earlier.at > UNSHOWN_TYPED_MS) {
+        unshownTyped.delete(paneId);
+        earlier = null;
       }
+      if (gated && text && !lastImageMarker) {
+        const screen = await readScreen(paneId, MENU_READ_LINES);
+        const suggestion = composerBox(screen) ? await dimSuggestion(paneId) : null;
+        // The prompt draws only the last ~25 lines of a long message, so no
+        // long message can match exactly; it ending like this one is the
+        // evidence. That cannot be chance for a paste or anything longer than
+        // the compared tail, but a short message can end a draft by chance
+        // ("blue blocks" ending "keep the blue blocks"), so those type as before.
+        const endsLikeIt = !suggestion && composerSendState(screen, sent) === 'holds'
+          && (sent.pasted || squashSpace(text).length > SEND_TAIL_CHARS);
+        const sameAsEarlier = Boolean(earlier && squashSpace(earlier.sent.text) === squashSpace(text));
+        alreadyInPrompt = !suggestion && (promptHoldsExactly(screen, text) || (sameAsEarlier && endsLikeIt));
+        if (alreadyInPrompt) {
+          logSend({ paneId, phase: 'already-in-prompt' });
+        } else if (endsLikeIt) {
+          logSend({ paneId, phase: 'prompt-holds-more' });
+          await captureSendScreen(paneId, 'holds-more', screen);
+          throw promptHoldsMoreError();
+        }
+      }
+      // Typed earlier and never shown: wait for THAT, type nothing new.
+      const awaitEarlier = Boolean(gated && text && !lastImageMarker && earlier && !alreadyInPrompt);
+      if (awaitEarlier) logSend({ paneId, phase: 'awaiting-earlier-typing' });
       // Slash command tokens must be typed raw so the CLI parses them. The
       // trailing space closes its popup; any remainder keeps the normal
       // single-line/raw or multi-line/bracketed-paste behavior.
-      if (text && !alreadyInPrompt) {
+      if (text && !alreadyInPrompt && !awaitEarlier) {
         if (isSlashCommand(text)) {
           const trimmed = String(text).trim();
           const token = trimmed.split(/\s+/, 1)[0];
@@ -1119,11 +1189,26 @@ function createSessionSend(deps) {
         debug('deliver: text written');
       }
       if (gated) {
-        const held = await waitForPromptToHold(paneId, sent);
+        // A pane that has never taken a message from this Harbor may still be
+        // starting, and so may one still owing an earlier attempt's typing.
+        const startup = awaitEarlier || !deliveredPanes.has(paneId);
+        const held = await waitForPromptToHold(paneId, awaitEarlier ? earlier.sent : sent, {
+          polls: startup ? PROMPT_HOLD_STARTUP_POLLS : PROMPT_HOLD_POLLS,
+          onWait: startup && onWait ? () => onWait(awaitEarlier ? EARLIER_WAIT_NOTICE : STARTUP_WAIT_NOTICE) : null,
+        });
         if (held.state !== 'holds') {
-          logSend({ paneId, phase: 'prompt-never-held', state: held.state });
+          logSend({ paneId, phase: 'prompt-never-held', state: held.state, awaitedEarlier: awaitEarlier });
           await captureSendScreen(paneId, held.state, held.screen);
-          throw promptNeverHeldError(held.state);
+          if (awaitEarlier) unshownTyped.delete(paneId);
+          else if ((held.state === 'pending' || held.state === 'nobox') && text && !alreadyInPrompt && !lastImageMarker) {
+            unshownTyped.set(paneId, { sent, at: clock() });
+          }
+          throw promptNeverHeldError(held.state, { awaitedEarlier: awaitEarlier });
+        }
+        unshownTyped.delete(paneId);
+        if (awaitEarlier && squashSpace(earlier.sent.text) !== squashSpace(text)) {
+          logSend({ paneId, phase: 'earlier-typing-landed' });
+          throw earlierLandedError();
         }
       } else {
         await sleep(160);
@@ -1979,6 +2064,7 @@ function createSessionSend(deps) {
     const imagePaths = Array.isArray(images) ? images.filter(Boolean) : [];
     if (!trimmed && imagePaths.length === 0 && !resumeOnly) throw new Error('nothing to send');
     const slash = isSlashCommand(trimmed);
+    const waitNotice = (detail) => status(sessionId, 'sending', detail);
     const target = await resolvePane(sessionId, pane);
     debug('resolved target', JSON.stringify(target), 'link was', JSON.stringify(links.get(sessionId)));
     logSend({
@@ -2019,7 +2105,7 @@ function createSessionSend(deps) {
         // message inside preSize and guaranteeing a false timeout.
         const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
         try {
-          await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider);
+          await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
           status(sessionId, 'sent');
           if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation);
           return { ok: true, paneId: target.paneId, delivery: trimmed ? 'confirming' : 'delivered' };
@@ -2068,7 +2154,7 @@ function createSessionSend(deps) {
         return { ok: true, paneId: providerFresh.paneId, resumed: true };
       }
       status(sessionId, 'sending');
-      await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider);
+      await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
       status(sessionId, 'sent');
       return { ok: true, paneId: providerFresh.paneId, resumed: true, delivery: 'delivered' };
     }
@@ -2102,7 +2188,7 @@ function createSessionSend(deps) {
     }
     status(sessionId, 'sending');
     const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
-    await deliver(fresh.paneId, fresh.workspaceId, trimmed, imagePaths, provider);
+    await deliver(fresh.paneId, fresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
     status(sessionId, 'sent');
     if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation);
     return { ok: true, paneId: fresh.paneId, resumed: true, delivery: trimmed ? 'confirming' : 'delivered' };

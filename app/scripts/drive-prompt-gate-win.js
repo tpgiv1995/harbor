@@ -14,6 +14,11 @@
 // Everything else is production code reading the real screen.
 //
 // Scenarios:
+//   a starting Claude (2026-10-10): the FIRST message into a pane reaches the
+//   CLI 20 seconds late, as Claude's startup buffer delivered Pat's 6,299
+//   character message into a new cdt-app session. It must land once; the
+//   pre-fix code gave up at 7.5 s, said nothing was sent, and left the text to
+//   show up in the prompt afterwards.
 //   control, a 1,600-character single line (drawn by the CLI as "[Pasted text
 //   #1]"), and a pasted multi-line body: each must land in the CLI's own
 //   transcript exactly once through the new check.
@@ -53,6 +58,8 @@ const sendLogFile = path.join(store, 'send-log.jsonl');
 
 const words = 'the quick brown fox jumps over the lazy dog ';
 const SCENARIOS = [
+  // First on purpose: only a pane that has never taken a message gets the long wait.
+  { name: 'a starting Claude that shows the typing 20 s late', text: (m) => `Reply with just OK.\n\nThis first message reached Claude late. ${m}`, delayTextMs: 20_000 },
   { name: 'control: a short message', text: (m) => `Reply with just OK. ${m}` },
   { name: 'a 1,600-character single line', text: (m) => `Reply with just OK. ${words.repeat(36)}${m}` },
   { name: 'a pasted multi-line body', text: (m) => `Reply with just OK.\n\nThis body is pasted, like a message with paragraphs. ${m}` },
@@ -141,6 +148,7 @@ async function main() {
   await idle();
 
   let dropText = false;
+  let delayTextMs = 0;
   const written = [];
   const send = createSessionSend({
     snapshot: async () => ({ panes: [{ pane_id: paneId, workspace_id: 'ws' }], workspaces: [{ workspace_id: 'ws', label: 'proof' }] }),
@@ -153,6 +161,11 @@ async function main() {
       sendInput: (_id, text) => {
         if (text !== '\r' && dropText) {
           written.push('<text dropped>');
+          return { ok: true };
+        }
+        if (text !== '\r' && delayTextMs) {
+          written.push(`<${text.length} chars, ${delayTextMs / 1000}s late>`);
+          setTimeout(() => client.request('input', { id: paneId, text }).catch(() => {}), delayTextMs);
           return { ok: true };
         }
         written.push(text === '\r' ? '<Enter>' : `<${text.length} chars>`);
@@ -179,11 +192,13 @@ async function main() {
     send.emitter.on('status', onStatus);
     written.length = 0;
     dropText = Boolean(scenario.dropText);
+    delayTextMs = scenario.delayTextMs || 0;
     let thrown = null;
     try {
       await send.send({ sessionId: claudeSession, text: scenario.text(marker), pane: { paneId, workspaceId: 'ws' } });
     } catch (error) { thrown = error; }
     dropText = false;
+    delayTextMs = 0;
     const copies = () => {
       try {
         return fs.readFileSync(transcript, 'utf8').split('\n').filter((line) => {
@@ -198,6 +213,12 @@ async function main() {
       landed = copies();
     } else {
       try { await until(async () => (errors.length ? 'error' : copies() > 0), 30_000, 'neither landed nor errored'); } catch { /* reported below */ }
+      // The pre-fix code refuses and the late text still shows up afterwards;
+      // say so, since that text sitting in the prompt was Pat's whole report.
+      if (scenario.delayTextMs && errors.length) {
+        await sleep(scenario.delayTextMs);
+        console.log(`  prompt afterwards: ${(await readScreen(8, 'visible')).split('\n').filter((l) => /^\s*❯/.test(l)).pop() || '(no prompt line)'}`);
+      }
       await idle();
       await sleep(1500);
       landed = copies();
@@ -222,7 +243,7 @@ async function main() {
     console.log(`\nPROOF FAILED:\n  ${failures.join('\n  ')}`);
     process.exitCode = 1;
   } else {
-    console.log('\nPROOF OK: every message the prompt showed landed once, and a prompt that never showed it got no Enter and an honest refusal');
+    console.log('\nPROOF OK: every message the prompt showed landed once (one shown 20 s late included), and a prompt that never showed it got no Enter and an honest refusal');
   }
 }
 
