@@ -440,6 +440,13 @@ test('the release lines that changed a Harbor pane carry a flag', () => {
   assert.deepEqual(ids('codex', 'Added retries for transient file-upload failures and increased the upload timeout to five minutes. (#47122, #47393)'), []);
 });
 
+// 2026-10-09 evening (codex 0.162.1): the visibility flag's reason is the pty
+// screen model, so its Verify runs the screen suites, not the transcript parser.
+test('the codex visibility flag verifies with the screen suites', () => {
+  const flag = tagLine('codex', 'Fixed a TUI crash when asynchronous questions contain multiple lines, preserving line breaks and complete hyperlink destinations. (#51866)').flags.find((f) => f.id === 'visibility');
+  assert.equal(flag.verify, 'npm test -- screen');
+});
+
 // The 2026-10-07 review (claude 2.1.291 to 2.1.293) found three more: a new
 // model, the paste-classification fixes every Harbor send rides on, and the
 // usage-limit wording model-switch.js reads, all with no flag.
@@ -487,6 +494,26 @@ test('background-task, terminal-protocol, titler and resume lines carry a flag',
   assert.equal(ids('[VSCode] Fixed "Fork conversation from here" and Rewind\'s conversation restore failing with "Message not found in session" after a background agent\'s activity or one of the panel\'s own status lines').includes('background-tasks'), false);
   assert.equal(ids('Fixed `claude agents` starting a new background service as it exited when both were stopped with a session open (for example at a reboot), which could delay shutdown and restart an interrupted session').includes('background-tasks'), false);
   assert.equal(ids('Fixed raw terminal hyperlink bytes in a reply or a teammate\'s message being drawn as a clickable link with a hidden address').includes('screen'), false);
+  assert.deepEqual(ids('Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
+});
+
+// The 2026-10-09 evening review (claude 2.1.295 to 2.1.296) found four more:
+// a new prompt in the permission mode every Harbor launch uses, spelled "bypass
+// permissions mode", and three lines about a prompt sent around the `←` move to
+// the background, the view session-send refuses to type into. Verbatim.
+test('bypass permissions mode and left-arrow background lines carry a flag', () => {
+  const ids = (line) => tagLine('claude', line).flags.map((f) => f.id);
+  assert.ok(ids('Windows: Fixed `rm -rf /c/Users/<name>` in Git Bash not asking in bypass permissions mode').includes('bypass-mode'));
+  const leftArrow = [
+    'Fixed a prompt sent just after `←` being run twice, once unseen in the foreground, when the background service was slow to answer',
+    'Fixed a prompt sent while SessionStart hooks were still running vanishing when `←` moved the session to the background; it is still not sent, but `↑` now brings it back',
+    'Changed `←`: a turn or `!` command started while the session moves to the background is now stopped instead of finishing out of sight',
+  ];
+  for (const line of leftArrow) assert.ok(ids(line).includes('composer'), line);
+  // The /model effort slider's arrows are not the background move.
+  assert.equal(ids('Fixed `/model` effort ←/→ wrapping past the highest or lowest level, which could accidentally save Low as a model\'s default effort').includes('composer'), false);
+  // A permission line that is not about the bypass mode stays off that flag.
+  assert.equal(ids('Windows: Fixed PowerShell commands longer than about 1 KB always asking for permission, so allow rules and read-only detection now apply up to 32 KB').includes('bypass-mode'), false);
   assert.deepEqual(ids('Fixed `/add-dir` path box letting Shift+Enter or a paste add a line break'), []);
 });
 

@@ -212,9 +212,11 @@ const IMPACT_FLAGS = {
     // 2026-09-25 (2.1.281): "the dangerous `rm` prompt in
     // --dangerously-skip-permissions ... wait 2 minutes, then deny" matched no
     // flag, yet it is a NEW dialog in the exact mode every Harbor launch uses.
+    // 2026-10-09 (2.1.296): "`rm -rf ...` ... not asking in bypass permissions
+    // mode" matched nothing either; the changelog spells the mode with a space.
     {
       id: 'bypass-mode',
-      re: /dangerously-skip-permissions|bypass(?:Permissions)? mode|permission mode|defaultMode/i,
+      re: /dangerously-skip-permissions|bypass[ _-]?(?:permissions)? mode|permission mode|defaultMode/i,
       why: 'Harbor launches every claude session with --dangerously-skip-permissions. A prompt that appears in that mode is a dialog the ask card must surface, and a mode change alters what every pane does unattended.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
@@ -225,10 +227,13 @@ const IMPACT_FLAGS = {
     // multi-line Harbor send.
     // 2026-10-09: the left-arrow "backgrounding" messages draw next to the
     // composer box that delivery confirmation reads (2.1.295 "Backgrounding
-    // cancelled"), and matched nothing.
+    // cancelled"), and matched nothing. 2.1.296 named the key instead ("a
+    // prompt sent just after `←` being run twice"): `←` at an empty prompt opens
+    // the sessions view session-send refuses to type into (FLEET_VIEW). Only
+    // the key cited alone in backticks: "effort ←/→" is the /model slider.
     {
       id: 'composer',
-      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bbackgrounding\b/i,
+      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bbackgrounding\b|`←`/i,
       why: 'session-send confirms a delivery by reading the composer box and the echo above it, and sends every message as a bracketed paste plus Enter. A change to either is felt by every send.',
       verify: 'node_modules/electron/dist/electron.exe scripts/drive-resume-hooks-win.js',
     },
@@ -298,7 +303,7 @@ const IMPACT_FLAGS = {
       // here, and it moved the whole pane onto the alternate screen.
       re: /visibilit|\bTUI\b|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw/i,
       why: 'The codex pane is read through the same pty screen model as claude; a TUI rewrite changes what Harbor sees. bin/ai pins tui.fullscreen_transcript=false so panes keep the inline transcript Harbor was proven against.',
-      verify: 'npm test -- transcript',
+      verify: 'npm test -- screen',
     },
     // 2026-09-25: codex 0.157.0 "Enabled automatic background-server startup"
     // and "migration prompts for older models" both matched NO flag, and they

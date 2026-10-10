@@ -1,0 +1,18 @@
+
+ ▐▛███▛█   Claude Code v2.1.295
+▝▜██████▀  Haiku 5.5 · ~\work\project
+ ▝▝   ▝▝   2 awaiting input · 0 working · 1 completed
+
+Your conversation moved to the background - enter opens it · esc returns to it · ctrl+c twice quits                     
+                                                                                                                        
+Needs input
+ ✻ Waiter background agent               OK.                                                                         0s
+ ✻ Release notes draft                   send a prompt to start                                                       6m
+
+Completed
+ ∙ message receiver                      stopped                                                                     47s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions · enter to return · space to reply · ctrl+x to delete · ? for shortcuts

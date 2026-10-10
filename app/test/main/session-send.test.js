@@ -12,6 +12,7 @@ const {
   claudeProjectDir,
   providerTranscriptDirs,
   composerSendState,
+  isFleetView,
 } = require('../../src/main/session-send.js');
 
 const resumeDialogFixture = (name) => fs.readFileSync(
@@ -72,7 +73,14 @@ test.after(() => {
   }
 });
 
-function makeHarness({ panes = [], readFrames = [], controlled = null } = {}) {
+// A real Claude draws what is typed into its prompt, and since 2026-10-09 a
+// send presses Enter only once the prompt shows the text. So the stand-in pane
+// draws it too: typed text (never a control key or escape sequence; bracketed
+// paste markers stripped) appears in a prompt box under whatever frame the
+// test staged, and Enter clears it. `promptEchoes: false` stands in for the
+// 2026-10-09 failure, a prompt that takes none of the typing.
+const PROMPT_RULE = '─'.repeat(60);
+function makeHarness({ panes = [], readFrames = [], controlled = null, promptEchoes = true } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-session-send-test-'));
   harnessTempDirs.push(stateDir);
   const sent = [];
@@ -80,10 +88,12 @@ function makeHarness({ panes = [], readFrames = [], controlled = null } = {}) {
   const sequence = [];
   const state = { controlledPaneId: controlled, panes: [...panes] };
   const reads = [...readFrames];
+  const prompt = { draft: '', echo: promptEchoes };
   const harness = {
     sent,
     focused,
     state,
+    prompt,
     sized: [],
     resumeCalls: [],
     deps: {
@@ -91,7 +101,6 @@ function makeHarness({ panes = [], readFrames = [], controlled = null } = {}) {
         panes: state.panes.map((p) => (typeof p === 'string' ? { pane_id: p, workspace_id: 'ws-1' } : p)),
         workspaces: [{ workspace_id: 'ws-1', label: 'harbor' }],
       }),
-      readPane: async () => (reads.length > 1 ? reads.shift() : reads[0] ?? ''),
       terminalBridge: {
         getState: () => ({ controlledPaneId: state.controlledPaneId }),
         requestFocusPane: async ({ paneId }) => {
@@ -102,6 +111,10 @@ function makeHarness({ panes = [], readFrames = [], controlled = null } = {}) {
         sendInput: (paneId, text) => {
           sent.push({ paneId, text });
           sequence.push(['input', text]);
+          if (text === '\r') prompt.draft = '';
+          else if (!/^[\x00-\x1f\x7f]/.test(text) || text.startsWith('\x1b[200~')) {
+            prompt.draft += text.replace(/\x1b\[20[01]~/g, '');
+          }
           return { ok: true };
         },
         ensureDialogSize: async (paneId, opts = {}) => {
@@ -125,6 +138,25 @@ function makeHarness({ panes = [], readFrames = [], controlled = null } = {}) {
     },
     sequence,
   };
+  // Whatever screen a test installs (most assign their own readPane), the
+  // prompt it typed into is drawn under it. The getter binds the reader it
+  // wraps, so a test that wraps the current readPane (closesOnEnter) does not
+  // recurse, and a frame that already ends in the prompt is not drawn twice.
+  let stagedRead = async () => (reads.length > 1 ? reads.shift() : reads[0] ?? '');
+  Object.defineProperty(harness.deps, 'readPane', {
+    enumerable: true,
+    configurable: true,
+    get: () => {
+      const base = stagedRead;
+      return async (...args) => {
+        const frame = await base(...args);
+        if (!prompt.echo || !prompt.draft) return frame;
+        const box = `${PROMPT_RULE}\n❯ ${prompt.draft}\n${PROMPT_RULE}`;
+        return String(frame).endsWith(box) ? frame : `${frame}\n${box}`;
+      };
+    },
+    set: (fn) => { stagedRead = fn; },
+  });
   return harness;
 }
 
@@ -364,6 +396,7 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0 } = {}) {
   let hideReads = 0;
   const echoed = [];
   const divider = '─'.repeat(60);
+  h.prompt.echo = false; // this stand-in draws its own prompt
   // A submitted prompt is echoed above the box, as Claude draws it; a busy CLI
   // shows nothing new for `renderDelayReads` reads after each keystroke.
   h.deps.readPane = async () => {
@@ -498,6 +531,153 @@ test('composerSendState reads the real 2.1.280 composer shapes', () => {
   assert.equal(composerSendState(`${divider}\n❯ [Image #7] \n${divider}\n  status`, { imageMarker: '[Image #7]' }), 'holds');
   assert.equal(composerSendState(`${divider}\n❯ \n${divider}\n  status`, { imageMarker: '[Image #7]' }), 'pending');
   assert.equal(composerSendState(`❯ [Image #7]\n${divider}\n❯\n${divider}\n  status`, { imageMarker: '[Image #7]' }), 'taken');
+});
+
+// 2026-10-09: session aac2564b's prompt took none of Harbor's keystrokes for 45
+// minutes while Claude was alive and idle (two image pastes drew no marker; two
+// messages and a "continue" never appeared; Claude's own prompt history never
+// recorded them), and Harbor pressed Enter blind and reported "sent". The
+// fixtures below are real CLI 2.1.295 screens from the probes run that day,
+// with session names and paths replaced.
+const PROMPT_EMPTY = `${PROMPT_RULE}\n❯ \n${PROMPT_RULE}\n  personal  ·  Opus 5.5\n  ⏵⏵ bypass permissions on`;
+const harborCaptures = (h) => {
+  const dir = path.join(path.dirname(h.deps.sendLogFile), 'send-captures');
+  try { return fs.readdirSync(dir); } catch { return []; }
+};
+
+test('composerSendState reads the 2.1.295 prompt shapes it used to miss', () => {
+  // A single line past ~800 characters collapses to a placeholder WITHOUT a
+  // line count (measured: 799 drew literally, 1,599 collapsed).
+  const longLine = 'the quick brown fox jumps over the lazy dog '.repeat(36).trim();
+  assert.equal(composerSendState(enterFixture('long-single-line-placeholder-2.1.295.txt'), { text: longLine, pasted: true }), 'holds');
+  // A message starting with "!" puts the prompt in shell mode, drawn with "!".
+  assert.equal(composerSendState(enterFixture('shell-mode-prompt-2.1.295.txt'), { text: '!echo hello there' }), 'holds');
+  assert.equal(composerSendState(enterFixture('shell-mode-prompt-2.1.295.txt'), { text: '!echo something else' }), 'pending');
+});
+
+test('the sessions view is recognized by its own box and key hints, never by prose that quotes it', () => {
+  assert.equal(isFleetView(enterFixture('sessions-view-2.1.295.txt')), true);
+  assert.equal(isFleetView(enterFixture('sessions-view-typed-2.1.295.txt')), true);
+  const prose = [
+    '● The input reads "describe a task for a new session" and the hints say',
+    '  enter to return · space to reply · ctrl+x to delete.',
+    PROMPT_EMPTY,
+  ].join('\n');
+  assert.equal(isFleetView(prose), false);
+  assert.equal(isFleetView(PROMPT_EMPTY), false);
+});
+
+test('a prompt that never shows the typed text gets no Enter, an honest error, and a saved screen', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false, readFrames: [PROMPT_EMPTY] });
+  const send = createSessionSend(h.deps);
+  const errors = [];
+  send.emitter.on('status', (s) => { if (s.phase === 'error') errors.push(s.detail); });
+
+  await assert.rejects(
+    send.send({ sessionId: 's-deaf', text: 'i like the calm stone a lot more', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PROMPT_NEVER_HELD' && /did not press Enter and nothing was sent/.test(error.message),
+  );
+  assert.deepEqual(typed(h), ['i like the calm stone a lot more'], 'Enter is never pressed blind');
+  assert.match(errors[0] || '', /prompt never showed your text/);
+  const log = await readSendLog(h.deps.sendLogFile, (rows) => rows.some((r) => r.phase === 'prompt-never-held'));
+  assert.ok(log.some((r) => r.phase === 'prompt-never-held' && r.state === 'pending'));
+  assert.equal(harborCaptures(h).length, 1, 'the screen the send saw is kept for diagnosis');
+});
+
+test('a send into the sessions view is refused before a single key is typed', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', readFrames: [enterFixture('sessions-view-2.1.295.txt')] });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-fleet', text: 'continue', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'FLEET_VIEW' && /sessions list/.test(error.message),
+  );
+  assert.deepEqual(typed(h), [], 'Enter there would create a new background session from the text');
+});
+
+test('a dim suggested prompt that reads like the message is not the message', async () => {
+  // Claude fills an EMPTY box with a dim suggestion; the keeper reports it as
+  // `suggestion`. Here the typing is lost and the suggestion says "continue",
+  // so the box reads exactly like the message without holding it.
+  const h = makeHarness({
+    panes: ['pane-1'],
+    controlled: 'pane-1',
+    promptEchoes: false,
+    readFrames: [`${PROMPT_RULE}\n❯ continue\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`],
+  });
+  h.deps.readSuggestion = async () => 'continue';
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-suggested', text: 'continue', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PROMPT_NEVER_HELD',
+  );
+  assert.deepEqual(typed(h), ['continue'], 'typed once, and no Enter into a box that only shows a suggestion');
+});
+
+test('a plan move never types /exit into the sessions view, and says why', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', readFrames: [enterFixture('sessions-view-2.1.295.txt')] });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.moveIdleSession({ sessionId: 's-plan', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }, (exit) => exit()),
+    (error) => error.code === 'FLEET_VIEW',
+  );
+  assert.deepEqual(typed(h), []);
+});
+
+test('the sessions view appearing mid-send gets no Enter', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false });
+  let typedText = false;
+  h.deps.readPane = async () => (typedText ? enterFixture('sessions-view-typed-2.1.295.txt') : PROMPT_EMPTY);
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => { typedText = true; return sendInput(paneId, text); };
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-fleet-mid', text: 'hello typed in the sessions view', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'FLEET_VIEW',
+  );
+  assert.equal(typed(h).includes('\r'), false);
+});
+
+test('a frame with no prompt box right after Enter is read again, not taken as delivered', async () => {
+  // The Enter watcher used to end on the first boxless frame and call the
+  // message gone; that is how two of the 2026-10-09 sends read "sent" in half
+  // a second. Here the Enter is swallowed and the box only comes back three
+  // reads later, still holding the message, so a spare Enter is owed.
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { swallowEnters: 1 });
+  const composed = h.deps.readPane;
+  let blank = 0;
+  h.deps.readPane = async (...args) => {
+    if (blank > 0) { blank -= 1; return 'redrawing'; }
+    return composed(...args);
+  };
+  const sendInput = h.deps.terminalBridge.sendInput;
+  let enters = 0;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r' && (enters += 1) === 1) blank = 3;
+    return sendInput(paneId, text);
+  };
+  const send = createSessionSend(h.deps);
+
+  await send.send({ sessionId: 's-blank', text: 'group them by sub-group', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(typed(h), ['group them by sub-group', '\r', '\r']);
+  assert.equal(pane.draft, '');
+});
+
+test('a message already sitting in the prompt from an earlier attempt is submitted, not typed twice', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let submitted = false;
+  h.deps.readPane = async () => (submitted
+    ? `❯ continue\n${PROMPT_EMPTY}`
+    : `${PROMPT_RULE}\n❯ continue\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`);
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r') submitted = true;
+    return sendInput(paneId, text);
+  };
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 's-stranded', text: 'continue', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), ['\r']);
 });
 
 // Live-caught 2026-08-08. A brand-new codex session took a message and the
@@ -1727,6 +1907,105 @@ test('a real message that never lands becomes a background error (slash leniency
     assert.equal(result.delivery, 'confirming');
     await new Promise((resolve) => setTimeout(resolve, 550));
     assert.match(errors.at(-1).detail, /could not confirm/);
+  } finally {
+    delete process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Live-caught 2026-10-09 (send log 19:18:08Z): "continue" reached a busy 28MB
+// session two minutes after the confirm window closed, and the "could not
+// confirm" error stayed in the status bar for an hour. A late landing must
+// replace the error.
+test('a message that lands after the confirm window clears the error', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  await fsp.writeFile(file, '');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.readPane = async () => '──────\n❯\n──────';
+  h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file });
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '300';
+  process.env.HARBOR_LATE_CONFIRM_MS = '8000';
+  try {
+    const send = createSessionSend(h.deps);
+    const statuses = [];
+    send.emitter.on('status', (value) => statuses.push(value));
+    await send.send({ sessionId: 's-late', text: 'continue', pane: { paneId: 'pane-1' } });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(statuses.at(-1).phase, 'error');
+    await fsp.appendFile(file, `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'continue' } })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 2600));
+    assert.equal(statuses.at(-1).phase, 'sent');
+    assert.match(statuses.at(-1).detail, /reached the session after all/);
+  } finally {
+    delete process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+    delete process.env.HARBOR_LATE_CONFIRM_MS;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a late landing never overwrites a newer status for the same session', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  await fsp.writeFile(file, '');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.readPane = async () => '──────\n❯\n──────';
+  h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file });
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '300';
+  process.env.HARBOR_LATE_CONFIRM_MS = '8000';
+  try {
+    const send = createSessionSend(h.deps);
+    const statuses = [];
+    send.emitter.on('status', (value) => statuses.push(value));
+    await send.send({ sessionId: 's-late2', text: 'first message', pane: { paneId: 'pane-1' } });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(statuses.at(-1).phase, 'error');
+    // A newer send for the same session says something new before the first lands.
+    await send.send({ sessionId: 's-late2', text: 'second message', pane: { paneId: 'pane-1' } });
+    await fsp.appendFile(file, `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'first message' } })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 2600));
+    assert.ok(
+      !statuses.some((s) => /reached the session after all/.test(s.detail || '')),
+      'the superseded watcher stayed quiet',
+    );
+  } finally {
+    delete process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+    delete process.env.HARBOR_LATE_CONFIRM_MS;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('confirmation finds a queued message written after more than 1MB of other output', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  await fsp.writeFile(file, '');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.readPane = async () => '──────\n❯\n──────';
+  h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file });
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '600';
+  try {
+    const send = createSessionSend(h.deps);
+    const statuses = [];
+    send.emitter.on('status', (value) => statuses.push(value));
+    await send.send({ sessionId: 's-big', text: 'café latté please', pane: { paneId: 'pane-1' } });
+    // A screenshot-sized tool result lands first, then the queued message.
+    const screenshot = JSON.stringify({ type: 'user', message: { content: [{ type: 'image', data: 'A'.repeat(1_500_000) }] } });
+    await fsp.appendFile(file, `${screenshot}\n${JSON.stringify({
+      type: 'queue-operation',
+      operation: 'enqueue',
+      content: 'café latté please',
+    })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.equal(statuses.at(-1).phase, 'sent');
   } finally {
     delete process.env.HARBOR_CONFIRM_TIMEOUT_MS;
     await fsp.rm(dir, { recursive: true, force: true });

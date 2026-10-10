@@ -12,6 +12,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { StringDecoder } = require('node:string_decoder');
 const { parseMenu, menuArrowToward, MENU_KEYS } = require('./menu-parse.js');
 const { parseWorkMeter } = require('./work-meter.js');
 const { isDividerLine } = require('../shared/divider.cjs');
@@ -178,10 +179,21 @@ function isComposerLine(lines, i) {
 // A screen with no composer box on it at all answers `nobox`.
 // Whitespace is dropped before comparing, because the box re-wraps the text
 // and pads its lines. Fixtures: test/fixtures/composer-enter/.
+//
+// Two prompt shapes measured on CLI 2.1.295 (2026-10-09) that this used to call
+// `pending` or `nobox` while the text sat right there: a SINGLE-LINE message
+// somewhere past 800 characters collapses to "[Pasted text #1]" with no line
+// count (799 drew literally, 1,599 collapsed), and a message starting with "!"
+// switches the prompt to shell mode, which draws "!" where the "❯" would be.
 const SEND_TAIL_CHARS = 24;
-const PASTE_PLACEHOLDER_RE = /\[Pastedtext#\d+\+\d+lines\]/;
+const PASTE_PLACEHOLDER_RE = /\[Pastedtext#\d+(?:\+\d+lines)?\]/;
+// Comfortably under the measured collapse point; a long send that still draws
+// literally matches on its tail first, so this only ever ADDS the placeholder.
+const PASTE_COLLAPSE_CHARS = 700;
+const mayCollapseToPlaceholder = (text) => /\n/.test(String(text || '')) || String(text || '').length >= PASTE_COLLAPSE_CHARS;
+const PROMPT_GLYPH_RE = /^\s*[❯!]/;
 const squashSpace = (value) => String(value || '').replace(/\s+/g, '');
-function composerSendState(screen, { text = '', pasted = false, imageMarker = null } = {}) {
+function composerBox(screen) {
   const lines = String(screen || '').split('\n');
   let bottom = -1;
   let top = -1;
@@ -192,10 +204,18 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
     break;
   }
   const box = top < 0 ? [] : lines.slice(top + 1, bottom);
-  if (!box.length || !/^\s*❯/.test(box[0])) return 'nobox';
-  const inside = squashSpace(box.join('\n').replace(/^\s*❯/, ''));
+  if (!box.length || !PROMPT_GLYPH_RE.test(box[0])) return null;
+  const shell = /^\s*!/.test(box[0]);
+  return { lines, top, bottom, box, shell, inside: squashSpace(box.join('\n').replace(PROMPT_GLYPH_RE, '')) };
+}
+function composerSendState(screen, { text = '', pasted = false, imageMarker = null } = {}) {
+  const found = composerBox(screen);
+  if (!found) return 'nobox';
+  const { lines, top, inside } = found;
   const above = squashSpace(lines.slice(0, top).join('\n'));
-  const tail = squashSpace(text).slice(-SEND_TAIL_CHARS);
+  // In shell mode the typed "!" IS the glyph, so the box shows the rest.
+  const shown = found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text);
+  const tail = shown.slice(-SEND_TAIL_CHARS);
   const marker = squashSpace(imageMarker);
   if (tail ? inside.endsWith(tail) : Boolean(marker && inside.endsWith(marker))) return 'holds';
   if (pasted && new RegExp(`${PASTE_PLACEHOLDER_RE.source}$`).test(inside)) return 'holds';
@@ -203,6 +223,25 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
   if (pasted && PASTE_PLACEHOLDER_RE.test(above)) return 'taken';
   return 'pending';
 }
+
+// CLAUDE'S SESSIONS VIEW IS NOT THIS CONVERSATION (measured on CLI 2.1.295,
+// 2026-10-09). The ← key at an empty prompt moves the conversation "to the
+// background" and opens a list of sessions whose input reads "describe a task
+// for a new session". It looks like a composer (a box, a pointer, text), so
+// every composer test above passes on it, and a message typed there plus Enter
+// CREATES A NEW BACKGROUND SESSION from the text. Driven against the real CLI:
+// Harbor reported "sent" in half a second and the conversation never got it.
+// Identified only where the view draws its own words, the input box and the key
+// hints under it, never in the scrollback: a conversation ABOUT this view (this
+// one, for instance) quotes those words in its prose.
+const FLEET_INPUT_RE = /describe a task for a new session/;
+const FLEET_KEYS_RE = /\benter to (?:return|create|open)\b.*·.*(?:space to reply|esc to clear|ctrl\+x to delete)/;
+const isFleetView = (screen) => {
+  const found = composerBox(screen);
+  if (!found) return false;
+  if (FLEET_INPUT_RE.test(found.box[0])) return true;
+  return found.lines.slice(found.bottom + 1).some((line) => FLEET_KEYS_RE.test(line));
+};
 
 // Chrome only a dialog draws.
 const BLOCKED_CHROME_RE = /(Press Enter to continue|Enter to select|Enter to confirm|Tab to amend|ctrl\+e to explain|(?:Tab\/Arrow|↑\/↓|Arrow keys)[^\n]*navigate|Resuming the full session will consume|Resume from summary)/i;
@@ -337,7 +376,11 @@ function createSessionSend(deps) {
     })();
   };
 
+  // Every status a session emits bumps its sequence, so a late correction can
+  // tell whether anything newer has been said about that session since.
+  const statusSeq = new Map();
   const status = (sessionId, phase, detail = null) => {
+    statusSeq.set(sessionId, (statusSeq.get(sessionId) || 0) + 1);
     logSend({ sessionId, phase, detail });
     emitter.emit('status', { sessionId, phase, detail, queue: getQueueState(sessionId) });
   };
@@ -544,6 +587,7 @@ function createSessionSend(deps) {
     // and the composer test another.
     const screen = await readScreen(paneId, MENU_READ_LINES);
     if (!screen) return; // unreadable: no evidence to refuse on
+    if (isFleetView(screen)) throw fleetViewError();
     if (classifyBlocked(screen)) {
       // When the blocker parses as an answerable question, the window shows
       // the labeled card; otherwise the window shows the fallback answer
@@ -643,29 +687,86 @@ function createSessionSend(deps) {
     // own MemoryHigh band still writes its transcript late, and this confirm
     // is an async status, so the extra patience costs nothing interactive.
     const budget = timeoutMs ?? envTimeout ?? (optional ? 3000 : 20000);
-    const needle = confirmNeedle(text);
     let preSize = prepared?.preSize;
     if (preSize == null) {
       try { preSize = (await fs.stat(transcriptPath)).size; } catch { preSize = 0; }
     }
+    const scan = transcriptScanner(transcriptPath, preSize, text);
     const deadline = Date.now() + budget;
     while (Date.now() < deadline) {
       await sleep(500);
       try {
-        const stat = await fs.stat(transcriptPath);
-        if (stat.size > preSize) {
-          const handle = await fs.open(transcriptPath, 'r');
-          const length = stat.size - preSize;
-          const buffer = Buffer.alloc(Math.min(length, 1024 * 1024));
-          await handle.read(buffer, 0, buffer.length, preSize);
-          await handle.close();
-          const chunk = buffer.toString('utf8');
-          if (chunk.includes(needle) || confirmsQueuedDelivery(chunk, text)) return true;
-        }
+        if (await scan()) return true;
       } catch { /* keep polling */ }
     }
     if (optional) return false; // slash command: delivered into a safe composer, requested
-    throw new Error('could not confirm the message reached the session. Check the window before resending');
+    const error = new Error('could not confirm the message reached the session. Check the window before resending');
+    error.code = 'UNCONFIRMED';
+    error.lateWatch = { transcriptPath, scan };
+    throw error;
+  };
+
+  // Reads EVERYTHING the transcript grew by since the send, in bounded slices.
+  // The confirm used to read only the first 1MB past the boundary, so a busy
+  // session that wrote a screenshot-sized tool result before the queued
+  // message hid the message past the cutoff. The trailing partial line is
+  // carried into the next read so a record split across reads is still whole,
+  // and the decoder keeps a multi-byte character split across reads intact.
+  const SCAN_SLICE_BYTES = 1024 * 1024;
+  const SCAN_CARRY_MAX = 64 * 1024; // only a giant line (an image) ever exceeds this
+  const transcriptScanner = (transcriptPath, from, text) => {
+    const needle = confirmNeedle(text);
+    const decoder = new StringDecoder('utf8');
+    let offset = from;
+    let carry = '';
+    return async () => {
+      const { size } = await fs.stat(transcriptPath);
+      while (offset < size) {
+        const length = Math.min(size - offset, SCAN_SLICE_BYTES);
+        const buffer = Buffer.alloc(length);
+        const handle = await fs.open(transcriptPath, 'r');
+        try {
+          await handle.read(buffer, 0, length, offset);
+        } finally {
+          await handle.close();
+        }
+        offset += length;
+        const chunk = carry + decoder.write(buffer);
+        if (chunk.includes(needle) || confirmsQueuedDelivery(chunk, text)) return true;
+        const cut = chunk.lastIndexOf('\n');
+        carry = cut >= 0 ? chunk.slice(cut + 1) : chunk;
+        if (carry.length > SCAN_CARRY_MAX) carry = carry.slice(-SCAN_CARRY_MAX);
+      }
+      return false;
+    };
+  };
+
+  // A message that misses the confirm window is not necessarily lost. Live-caught
+  // 2026-10-09 (send log 19:18:08Z): Pat's "continue" reached a 28MB-transcript
+  // session two minutes late, right after the machine woke from a 19-minute
+  // sleep, and the "could not confirm" error stayed in the status bar for the
+  // next hour, which read as a session that would not take messages. After the
+  // error, keep watching the same transcript; if the text lands, say so, unless
+  // something newer has been said about the session since.
+  const LATE_WATCH_MS = Number(process.env.HARBOR_LATE_CONFIRM_MS) || 10 * 60 * 1000;
+  const LATE_POLL_MS = 2000;
+  const lateSleep = (ms) => new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.(); // a watcher must never keep Harbor (or a test run) alive
+  });
+  const watchLateDelivery = async (sessionId, scan, errorSeq) => {
+    const deadline = Date.now() + LATE_WATCH_MS;
+    while (Date.now() < deadline) {
+      await lateSleep(LATE_POLL_MS);
+      if (statusSeq.get(sessionId) !== errorSeq) return false; // superseded
+      let landed = false;
+      try { landed = await scan(); } catch { /* keep watching */ }
+      if (!landed) continue;
+      if (statusSeq.get(sessionId) !== errorSeq) return false;
+      status(sessionId, 'sent', 'Your message reached the session after all');
+      return true;
+    }
+    return false;
   };
 
   // Control is acquired on tile focus and released on blur, and both travel
@@ -767,9 +868,14 @@ function createSessionSend(deps) {
   // two reads in a row and nothing on screen is a dialog an Enter would answer.
   // Two spares at most. The watch runs inside the send's own control hold and
   // queue slot, so the next message cannot be typed onto a stranded one while
-  // it is undecided. It ends at `taken`, at a screen with no composer box, or
-  // after ENTER_WATCH_POLLS reads (about 8s), and whatever it could not decide
-  // is left to confirmDelivery, as before. Counted in reads, not wall time.
+  // it is undecided. It ends at `taken`, at a dialog, or after
+  // ENTER_WATCH_POLLS reads (about 8s), and whatever it could not decide is
+  // left to confirmDelivery, as before. Counted in reads, not wall time.
+  //
+  // A screen with NO composer box is not a verdict (2026-10-09). It used to end
+  // the watch as if the message had gone, which is how two of Pat's messages
+  // were reported "sent" half a second after an Enter that never submitted
+  // anything; an unreadable or boxless frame now just means "read again".
   const ENTER_POLL_MS = 350;
   const ENTER_WATCH_POLLS = 24;
   const ENTER_SPARES = 2;
@@ -779,9 +885,9 @@ function createSessionSend(deps) {
     for (let poll = 0; poll < ENTER_WATCH_POLLS; poll += 1) {
       await sleep(ENTER_POLL_MS);
       const screen = await readScreen(paneId, MENU_READ_LINES);
-      if (!screen || classifyBlocked(screen)) return 'unconfirmed';
-      const state = composerSendState(screen, sent);
-      if (state === 'taken' || state === 'nobox') return state;
+      if (screen && classifyBlocked(screen)) return 'unconfirmed';
+      const state = screen ? composerSendState(screen, sent) : 'nobox';
+      if (state === 'taken') return state;
       held = state === 'holds' ? held + 1 : 0;
       if (held < 2) continue;
       if (spares >= ENTER_SPARES) return 'unconfirmed';
@@ -791,6 +897,90 @@ function createSessionSend(deps) {
       await typeInto(paneId, workspaceId, '\r');
     }
     return 'unconfirmed';
+  };
+
+  // THE PROMPT MUST SHOW THE TEXT BEFORE ENTER IS PRESSED (2026-10-09, Pat:
+  // messages "silently not reaching" session aac2564b). For 45 minutes that
+  // session's Claude was alive and idle, finishing its own turns, while its
+  // prompt took none of Harbor's keystrokes: two image pastes drew no marker,
+  // two messages and a "continue" never appeared in the prompt, and Claude's
+  // own prompt history (~/.claude/history.jsonl, written on every submit)
+  // recorded none of them. Harbor typed, waited a fixed 160ms, pressed Enter
+  // blind, and reported "sent" twice. The trigger inside the CLI was not
+  // identified; resizes, terminal focus, the agent list and Alt+V were each
+  // measured innocent against the real CLI, and the keeper answered every read
+  // (see docs/claude/conversation.md). A second state
+  // with the same look was reproduced on CLI 2.1.295: after the ← sessions
+  // view and Esc, the prompt drew normally and dropped typed text, and Harbor
+  // said "sent" after 8.6 seconds, the exact timing of Pat's "continue".
+  //
+  // So the Enter waits for evidence: the box ends with this send (composerSendState
+  // `holds`). Without it Harbor presses NOTHING, says so at once, and keeps the
+  // screen for diagnosis. Waiting for the draw also removes the 2026-09-23
+  // coalescing race at its source: the text has been read before Enter exists.
+  // Counted in reads, like the Enter watch; a CLI that draws late is the normal
+  // case it waits through, not a failure.
+  const PROMPT_HOLD_POLL_MS = 150;
+  const PROMPT_HOLD_POLLS = 50;
+  const waitForPromptToHold = async (paneId, sent) => {
+    let state = 'nobox';
+    let screen = '';
+    for (let poll = 0; poll < PROMPT_HOLD_POLLS; poll += 1) {
+      await sleep(PROMPT_HOLD_POLL_MS);
+      screen = await readScreen(paneId, MENU_READ_LINES);
+      if (!screen) { state = 'nobox'; continue; }
+      if (isFleetView(screen)) return { state: 'fleet', screen };
+      if (classifyBlocked(screen)) return { state: 'blocked', screen };
+      state = composerSendState(screen, sent);
+      // Claude's dim suggested prompt fills an EMPTY box; a suggestion that
+      // happens to read like the message ("continue") is not the message.
+      if (state === 'holds' && await dimSuggestion(paneId)) state = 'pending';
+      if (state === 'holds') return { state, screen };
+    }
+    return { state, screen };
+  };
+  const dimSuggestion = async (paneId) => {
+    try { return await readSuggestion(paneId); } catch { return null; }
+  };
+
+  // The screen a refused send saw, kept beside the send log so the next time
+  // a prompt stops taking text the state is on disk, not reconstructed from
+  // scrollback hours later. Bounded; a write failure never breaks the send.
+  const SEND_CAPTURES_KEPT = 40;
+  const captureSendScreen = async (paneId, reason, screen) => {
+    try {
+      const dir = path.join(path.dirname(sendLogFile), 'send-captures');
+      await fs.mkdir(dir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      await fs.writeFile(path.join(dir, `${stamp}-${String(paneId).replace(/[^\w-]/g, '_')}-${reason}.txt`), String(screen || ''));
+      const names = (await fs.readdir(dir)).sort();
+      for (const name of names.slice(0, Math.max(0, names.length - SEND_CAPTURES_KEPT))) {
+        await fs.rm(path.join(dir, name), { force: true });
+      }
+    } catch { /* diagnostics must never break a send */ }
+  };
+
+  const fleetViewError = () => {
+    const error = new Error('Claude is showing its sessions list (the ← key opens it), not this conversation, so nothing was sent. Your text is kept. Press Esc in the >_ terminal to go back to the conversation');
+    error.code = 'FLEET_VIEW';
+    return error;
+  };
+  const promptNeverHeldError = (state) => {
+    if (state === 'fleet') return fleetViewError();
+    const error = new Error(state === 'blocked'
+      ? 'a prompt appeared in the session while Harbor was typing, so it did not press Enter and nothing was sent. Your text is kept; answer the prompt in its window first'
+      : 'Claude\'s prompt never showed your text, so Harbor did not press Enter and nothing was sent. Your text is kept. Check the >_ terminal before resending');
+    error.code = 'PROMPT_NEVER_HELD';
+    return error;
+  };
+
+  // The box already holds exactly this message: an earlier attempt typed it,
+  // the prompt drew it after that attempt gave up, and typing it again would
+  // send it twice. Only an exact match counts; anything else is typed as usual.
+  const promptHoldsExactly = (screen, text) => {
+    const found = composerBox(screen);
+    if (!found || !text || isFleetView(screen)) return false;
+    return found.inside === (found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text));
   };
 
   // No default. A silent `= 'claude'` here is what let a codex pane be driven
@@ -841,10 +1031,9 @@ function createSessionSend(deps) {
       // provider is no longer able to masquerade as claude.
       //
       // Claude has the same shape of exposure (assertComposerSafe is a single
-      // READ, a refusal check rather than a wait) and is NOT covered here. Its
-      // TUI comes up faster so it has not been caught in the wild, and adding a
-      // settle to that path changes what four existing specs' staged screens
-      // feed the guard. Tracked in docs/BACKLOG.md rather than half-done.
+      // READ, a refusal check rather than a wait) and is covered differently:
+      // since 2026-10-09 its Enter waits until the prompt SHOWS the text
+      // (waitForPromptToHold), which a TUI still starting cannot fake.
       if (provider !== 'claude' && !deliveredPanes.has(paneId)) {
         const settled = await waitForProviderReady(paneId, { timeoutMs: 15_000, blankTimeoutMs: 45_000 });
         if (!settled) debug('deliver: fresh', provider, 'pane never settled; sending anyway');
@@ -893,10 +1082,21 @@ function createSessionSend(deps) {
         const line = `${prefix} ${pathOnlyImages.join(' ')}`;
         text = text ? `${line}\n${text}` : line;
       }
+      // A Claude message (not a slash command: its picker draws over the box and
+      // its delivery is best-effort) presses Enter only once the prompt SHOWS
+      // the text; see waitForPromptToHold.
+      const gated = provider === 'claude' && !isSlashCommand(text);
+      const sent = { text, pasted: mayCollapseToPlaceholder(text), imageMarker: lastImageMarker };
+      let alreadyInPrompt = false;
+      if (gated && text && !lastImageMarker) {
+        alreadyInPrompt = promptHoldsExactly(await readScreen(paneId, MENU_READ_LINES), text)
+          && !(await dimSuggestion(paneId));
+        if (alreadyInPrompt) logSend({ paneId, phase: 'already-in-prompt' });
+      }
       // Slash command tokens must be typed raw so the CLI parses them. The
       // trailing space closes its popup; any remainder keeps the normal
       // single-line/raw or multi-line/bracketed-paste behavior.
-      if (text) {
+      if (text && !alreadyInPrompt) {
         if (isSlashCommand(text)) {
           const trimmed = String(text).trim();
           const token = trimmed.split(/\s+/, 1)[0];
@@ -918,19 +1118,25 @@ function createSessionSend(deps) {
         }
         debug('deliver: text written');
       }
-      await sleep(160);
+      if (gated) {
+        const held = await waitForPromptToHold(paneId, sent);
+        if (held.state !== 'holds') {
+          logSend({ paneId, phase: 'prompt-never-held', state: held.state });
+          await captureSendScreen(paneId, held.state, held.screen);
+          throw promptNeverHeldError(held.state);
+        }
+      } else {
+        await sleep(160);
+      }
       await typeInto(paneId, workspaceId, '\r');
       deliveredPanes.add(paneId);
       debug('deliver: enter written');
       // Not for a slash command: its picker or confirmation dialog would take a
       // spare Enter as an answer, and a slash send is best-effort anyway.
       let enterState = 'unconfirmed';
-      if (provider === 'claude' && !isSlashCommand(text)) {
-        enterState = await watchEnterTaken(paneId, workspaceId, {
-          text,
-          pasted: String(text || '').includes('\n'),
-          imageMarker: lastImageMarker,
-        });
+      if (gated) {
+        enterState = await watchEnterTaken(paneId, workspaceId, sent);
+        logSend({ paneId, phase: 'enter-state', state: enterState });
       }
       await resolveClaudeSwitchConfirm(paneId, workspaceId, text, provider);
       return enterState;
@@ -1910,6 +2116,9 @@ function createSessionSend(deps) {
       confirmDelivery(sessionId, text, { optional, prepared })
     )).catch((error) => {
       status(sessionId, 'error', error.message);
+      if (error?.code === 'UNCONFIRMED' && error.lateWatch?.scan) {
+        watchLateDelivery(sessionId, error.lateWatch.scan, statusSeq.get(sessionId)).catch(() => {});
+      }
     });
   };
 
@@ -2045,6 +2254,7 @@ function createSessionSend(deps) {
         const exit = async () => {
           await acquireControl(pane.paneId, pane.workspaceId);
           const screen = await readScreen(pane.paneId, MENU_READ_LINES);
+          if (isFleetView(screen)) throw fleetViewError();
           if (!screen || classifyBlocked(screen) || isWorkingTurn(screen) || composerSendState(screen) === 'nobox') {
             throw new Error('The session is not at an idle composer. Nothing was stopped.');
           }
@@ -2248,4 +2458,5 @@ module.exports = {
   claudeProjectDir,
   providerTranscriptDirs,
   composerSendState,
+  isFleetView,
 };
