@@ -53,7 +53,14 @@ function renderListChildren(children, keyBase) {
     if (typeof child === 'string') return <React.Fragment key={key}>{child}</React.Fragment>;
     if (child.tag === 'ul' || child.tag === 'ol') return renderListSpec(child, key);
     const Tag = child.tag;
-    return <Tag key={key} href={child.tag === 'a' ? child.href : undefined}>{renderListChildren(child.children, key)}</Tag>;
+    // A link opens in the default browser: target="_blank" makes the click a
+    // new-window request, which main answers with the browser, so the app page
+    // never starts a navigation of its own. A plain href here is what froze
+    // every open window on 2026-10-09 (main/shell-navigation.js has why).
+    const link = child.tag === 'a'
+      ? { href: child.href, target: '_blank', rel: 'noopener noreferrer', title: child.href }
+      : null;
+    return <Tag key={key} {...link}>{renderListChildren(child.children, key)}</Tag>;
   });
 }
 

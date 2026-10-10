@@ -90,6 +90,8 @@ const { registerContextMenuIpc, attachContextMenu } = require('./context-menu.js
 const { registerSetupIpc } = require('./setup/ipc.js');
 const { createRouter } = require('./rpc/router.js');
 const { bindIpcMain } = require('./rpc/ipc-transport.js');
+const { isShellNavigation, navigationReplacesPage } = require('./shell-navigation.js');
+const { safeExternalUrl } = require('../shared/elicitation.cjs');
 
 const rpcRouter = createRouter();
 const ipcMain = {
@@ -259,6 +261,27 @@ let assertDialogAllowed = (what) => createDialogGuard({
     defaultUserDataPath: path.join(app.getPath('appData'), app.getName()),
   }),
 })(what);
+// A link opening in the default browser is a real effect on this machine, so
+// it answers to the same launch policy as a session launch: a harness records
+// it (HARBOR_E2E_FAKE_LAUNCH) and any other isolated profile refuses it. That
+// is what keeps a drive that clicks a link from putting a browser over Pat's
+// screen. Resolved per call, like assertDialogAllowed, so it is guarded from
+// the first window onward.
+function openExternalLink(url) {
+  if (e2eFakeLaunch) {
+    e2eLaunchCalls.push({ command: 'open-external', argv: [url], ts: Date.now() });
+    return;
+  }
+  const policy = resolveLaunchPolicy({
+    userDataPath: app.getPath('userData'),
+    defaultUserDataPath: path.join(app.getPath('appData'), app.getName()),
+  });
+  if (!policy.allowed) {
+    console.warn('isolation:', policy.reason, '(blocked opening a link)');
+    return;
+  }
+  shell.openExternal(url).catch((error) => console.warn('could not open link:', error.message));
+}
 let launchActions = null;
 let takeoverHandler = null;
 // Module scope on purpose: the E2E seam that asks whether a session still has a
@@ -1879,9 +1902,7 @@ function createBoardWindow() {
     },
   });
   win.webContents.on('will-navigate', (event, url) => {
-    const target = new URL(url);
-    const current = new URL(win.webContents.getURL() || 'about:blank');
-    if (target.origin === current.origin && target.pathname === current.pathname) return;
+    if (isShellNavigation(url, win.webContents.getURL())) return;
     event.preventDefault();
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -2031,14 +2052,20 @@ function createWindow() {
   // window, so the main process refuses the navigation outright: this app never
   // navigates anywhere after its own load.
   window.webContents.on('will-navigate', (event, url) => {
-    const target = new URL(url);
-    const current = new URL(window.webContents.getURL() || 'about:blank');
-    if (target.origin === current.origin && target.pathname === current.pathname) return;
+    if (isShellNavigation(url, window.webContents.getURL())) return;
     event.preventDefault();
     console.warn('blocked navigation away from the app shell:', url.slice(0, 200));
   });
+  // Links in a conversation open in the default browser (2026-10-09). They
+  // render with target="_blank" (renderer/stage/md.jsx), so a click arrives
+  // HERE as a new-window request and never starts a navigation of the app
+  // page, which is what froze every open window that night (see
+  // shell-navigation.js). Only http and https leave the app, and no window
+  // ever opens here.
   window.webContents.setWindowOpenHandler(({ url }) => {
-    console.warn('blocked a new window request:', String(url).slice(0, 200));
+    const external = safeExternalUrl(url);
+    if (external) openExternalLink(external);
+    else console.warn('blocked a new window request:', String(url).slice(0, 200));
     return { action: 'deny' };
   });
 
@@ -2086,8 +2113,14 @@ function createWindow() {
     // on "Loading transcript…" until the whole app was reopened (2026-09-05).
     transcriptProvider?.dropAll();
   };
-  window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) dropStrandedTranscripts('a renderer reload');
+  // Only a navigation that REPLACES the page strands its transcripts. A link,
+  // a dropped file, or any address will-navigate refuses fires this event too,
+  // BEFORE the refusal, and the page survives it; releasing on those froze
+  // every open window for good (2026-10-09, measured in shell-navigation.js).
+  window.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+    if (navigationReplacesPage({ url, currentUrl: window.webContents.getURL(), isMainFrame, isSameDocument: isInPlace })) {
+      dropStrandedTranscripts('a renderer reload');
+    }
   });
   window.webContents.on('render-process-gone', (_event, details) => {
     const reason = details?.reason || 'unknown';
