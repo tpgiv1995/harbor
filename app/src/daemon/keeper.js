@@ -29,7 +29,7 @@ try {
   }
   throw err;
 }
-const { ScreenModel } = require('./screen.js');
+const { ScreenModel, PROGRAM_STATUS_REPLY } = require('./screen.js');
 const { writeStateResilient } = require('./persist-state.js');
 const { readRecords, writeRecord } = require('./ndjson.js');
 const { ObserverWriter } = require('./observer-writer.js');
@@ -157,6 +157,13 @@ function persist(extra = {}) {
     boot_id: bootId,
     last_activity_at: new Date(lastActivityAt).toISOString(),
     exit,
+    // The CLI's own OSC 7501 status (screen.js; null until it reports, and
+    // after `clear`). Readers treat a missing field, a state file from an
+    // older keeper, as null.
+    agent_status: screen.programStatus?.state ?? null,
+    agent_status_kind: screen.programStatus?.kind ?? null,
+    agent_status_msg: screen.programStatus?.msg ?? null,
+    agent_status_seq: screen.programStatus?.seq ?? null,
     ...extra,
   };
   // Resilient on purpose: a transient EPERM on this rename used to walk up
@@ -177,6 +184,18 @@ function event(payload) {
 }
 
 const screen = new ScreenModel({ cols: config.cols, rows: config.rows });
+// Answer the Claude CLI's OSC 7501 probe so it reports its status (screen.js).
+// Only the keeper can: it alone holds the pty, and it is there for every
+// session, on screen or not; the renderer's xterm ignores 7501, so nothing
+// answers twice. The answer is `?ok`, never the probe's own bytes, and only
+// while the pty is alive. A status change is persisted at once, which is how
+// it reaches the daemon's `list` and from there every subscriber in main; a
+// title/progress-only move is not a change.
+screen.onProbe = () => {
+  if (!terminal || exit) return;
+  try { terminal.write(PROGRAM_STATUS_REPLY); } catch { /* pty gone: nothing to answer */ }
+};
+screen.onStatus = () => { if (terminal) persist(); };
 // ASSIGNED INSIDE THE LISTEN CALLBACK, NOT AT MODULE LOAD (2026-08-09, review).
 // The pty used to be spawned here, well before the socket bound and the state
 // file existed, so a keeper killed in that gap (the spawn-deadline reap, an
