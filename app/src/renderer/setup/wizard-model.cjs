@@ -22,6 +22,8 @@
 //    hold is an email address READ BACK from a home's .claude.json, which is
 //    confirmation of what the user picked, not a secret.
 
+const { normalizePreferences } = require('../../shared/preferences.cjs');
+
 // Seeded profile identity. Pat's install is P/T/S with the rail colors the
 // portability inventory recorded, and the batch is explicit that those are
 // DEFAULTS and never hardcoded: seeds apply by index, and a fourth profile
@@ -284,6 +286,9 @@ function initialState(detected = {}, config = null) {
       effort: (completed && config?.newSessionDefaults?.effort)
         || (profiles.length ? 'xhigh' : 'medium'),
     },
+    // Opt-in preferences: a re-run opens on what was saved, a first run on the
+    // defaults (every one off), the same `setup.completed` rule as above.
+    preferences: normalizePreferences(completed ? config?.preferences : null),
   };
 }
 
@@ -640,6 +645,7 @@ function configFromWizard(state, base = {}, meta = {}) {
       model: state.defaults.model,
       effort: state.defaults.provider === 'cursor' ? 'default' : state.defaults.effort,
     },
+    preferences: normalizePreferences(state.preferences),
   };
 }
 

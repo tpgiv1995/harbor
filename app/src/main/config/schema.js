@@ -57,6 +57,15 @@ const SCHEMA = Object.freeze({
     stateDir: null,
   },
   newSessionDefaults: { provider: 'claude', model: 'opus', effort: 'xhigh' },
+  // Opt-in preferences, every one OFF by default (shared/preferences.cjs owns
+  // what each means; the setup wizard's Preferences card sets them).
+  preferences: {
+    claudeAutoMode: false,
+    codexAutoMode: false,
+    promptSuggestions: false,
+    theme: 'default',
+    usageDebugLog: false,
+  },
 });
 
 function isObject(value) {

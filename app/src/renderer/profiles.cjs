@@ -1,5 +1,7 @@
 'use strict';
 
+const { claudePermissionArgs } = require('../shared/preferences.cjs');
+
 // Profile list helpers for the renderer. The authoritative profile objects
 // arrive from main via `new-session:options`; these utilities keep every
 // badge, meter row, and launch button derived from that list instead of the
@@ -61,8 +63,8 @@ function profileStyle(profile) {
 // The binary is the CLAUDE CLI, not a wrapper. This line is copied and pasted
 // into a terminal by a human, so naming a wrapper that ships with nothing was a
 // command that could not run on any machine but one.
-function resumeCommandForProfile(profile, profiles = [], sessionId = '') {
-  const resume = `claude --dangerously-skip-permissions --resume ${sessionId}`;
+function resumeCommandForProfile(profile, profiles = [], sessionId = '', preferences = undefined) {
+  const resume = `claude ${claudePermissionArgs(preferences).join(' ')} --resume ${sessionId}`;
   if (!profile?.configHome) return resume;
   const isDefault = profile.isDefault || profiles.findIndex((item) => item.id === profile.id) <= 0;
   if (isDefault) return resume;

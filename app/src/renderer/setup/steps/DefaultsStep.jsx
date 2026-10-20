@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import model from '../wizard-model.cjs';
-import { Field, Segmented, errorFor } from './controls.jsx';
+import { Field, Segmented, Toggle, errorFor } from './controls.jsx';
 import { watchProviderOptions } from '../../provider-options.cjs';
 import { sessionModelOptions, sessionEffortOptions } from '../../session-model-options.cjs';
 
@@ -76,6 +76,8 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
   }, [providerOptions, choice.effort, state.defaults.effort, patch]);
 
   const set = (patchObj) => patch((prev) => ({ ...prev, defaults: { ...prev.defaults, ...patchObj } }));
+  const prefs = state.preferences || {};
+  const setPref = (patchObj) => patch((prev) => ({ ...prev, preferences: { ...prev.preferences, ...patchObj } }));
 
   return (
     <div className="setup-pane">
@@ -138,6 +140,50 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
         ) : state.defaults.provider === 'cursor' ? (
           <p className="setup-note-fine">Cursor does not expose effort levels, so there is nothing to set.</p>
         ) : null}
+      </div>
+
+      {/* Opt-in preferences, every one off by default, so leaving this card
+          alone keeps Harbor's own behaviour. shared/preferences.cjs owns what
+          each one does; bin/ reads them on every launch. */}
+      <div className="setup-card setup-preferences">
+        <h2 className="setup-card-title">Preferences</h2>
+        <p className="setup-note-fine">All off by default. Saved with Finish; Harbor restarts to apply them.</p>
+        <Toggle
+          name="claudeAutoMode"
+          checked={prefs.claudeAutoMode}
+          onChange={(value) => setPref({ claudeAutoMode: value })}
+          label="Start Claude sessions in auto mode"
+          description="New and resumed Claude sessions start in auto mode instead of bypass, with bypass one Shift+Tab away. A model without auto mode starts in manual."
+        />
+        <Toggle
+          name="codexAutoMode"
+          checked={prefs.codexAutoMode}
+          onChange={(value) => setPref({ codexAutoMode: value })}
+          label="Start Codex sessions in auto"
+          description="New and resumed Codex sessions run with --approve-for-me (automatic approval review in a workspace-write sandbox) instead of full access."
+        />
+        <Toggle
+          name="promptSuggestions"
+          checked={prefs.promptSuggestions}
+          onChange={(value) => setPref({ promptSuggestions: value })}
+          label="Always show prompt suggestions"
+          description="Claude sessions get CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=1, so the command bar offers a suggestion on Tab. Each suggestion is an extra model request per turn. A value already in Harbor's environment wins."
+        />
+        <Field label="Theme" hint="Reading: a brighter neutral palette, system fonts, and larger, looser conversation text.">
+          <Segmented
+            name="Theme"
+            options={[{ value: 'default', label: 'Slate' }, { value: 'reading', label: 'Reading' }]}
+            value={prefs.theme || 'default'}
+            onChange={(value) => setPref({ theme: value })}
+          />
+        </Field>
+        <Toggle
+          name="usageDebugLog"
+          checked={prefs.usageDebugLog}
+          onChange={(value) => setPref({ usageDebugLog: value })}
+          label="Usage debug log"
+          description="Each Claude usage fetch and unavailable answer is appended to usage-debug.log in Harbor's cache folder (256 KB, one rotation), for diagnosing a meter that reads unavailable."
+        />
       </div>
 
       <div className="setup-card setup-review">

@@ -92,3 +92,10 @@ test('the Orch team chart is pushed by main, never polled and never refreshed by
   assert.match(chart, /setInterval\(\(\) => setNow\(Date\.now\(\)\), CLOCK_MS\)/);
   assert.doesNotMatch(chart, /sidebar\.onUpdate|listRuns|listDelegations/);
 });
+
+test('setup:state carries the opt-in preferences, normalized, for the renderer', () => {
+  assert.equal(setupState({}).preferences.theme, 'default');
+  assert.equal(setupState(null).preferences.claudeAutoMode, false);
+  assert.equal(setupState({ preferences: { theme: 'reading', claudeAutoMode: 'true' } }).preferences.theme, 'reading');
+  assert.equal(setupState({ preferences: { theme: 'reading', claudeAutoMode: 'true' } }).preferences.claudeAutoMode, false);
+});

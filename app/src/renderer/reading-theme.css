@@ -1,0 +1,114 @@
+/* The opt-in Reading theme (config.preferences.theme = "reading", set in the
+   setup wizard's Preferences card). Every rule is scoped to the root attribute
+   app-preferences.cjs sets, so with the default theme this file matches
+   nothing and the Slate palette is untouched. Structural layout and semantic
+   status colours stay in styles.css; this sheet loads after it.
+
+   What it changes: a neutral, brighter dark palette and system fonts; larger,
+   looser conversation type with the user bubble filled; and no width cap on
+   the conversation column, so it keeps using the whole window. */
+:root[data-harbor-theme="reading"] {
+  color-scheme: dark;
+  --bg: #1b1b1b;
+  --tx: #f5f5f5;
+  --sub: #c2c2c2;
+  --fnt: #a0a0a0;
+  --text-soft: #dedede;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --glass-win: #212121;
+  --glass-panel: #1b1b1b;
+  --glass-rail: #181818;
+  --glass-1: #242424;
+  --glass-2: #292929;
+  --wb-panel: #292929;
+  --glass-sheen: none;
+}
+
+:root[data-harbor-theme="reading"] .titlebar,
+:root[data-harbor-theme="reading"] .rail { box-shadow: none; }
+
+:root[data-harbor-theme="reading"] .grid4 { gap: 12px; padding: 12px; }
+
+:root[data-harbor-theme="reading"] .win2 { box-shadow: none; border-radius: 12px; }
+:root[data-harbor-theme="reading"] .win2::before { display: none; }
+/* Selection is a border cue, never a filter over the words being read. */
+:root[data-harbor-theme="reading"] .win2.rest { filter: none; box-shadow: none; }
+:root[data-harbor-theme="reading"] .win2.sel { box-shadow: 0 0 0 1px rgb(var(--sel-rgb) / 18%); }
+
+:root[data-harbor-theme="reading"] .pg { font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+:root[data-harbor-theme="reading"] .sr { font-size: 13px; }
+:root[data-harbor-theme="reading"] .sr-t { color: var(--tx); }
+:root[data-harbor-theme="reading"] .rail-find { font-size: 13px; }
+
+:root[data-harbor-theme="reading"] .conv { padding: 28px 32px 36px; }
+:root[data-harbor-theme="reading"] .conv-body { width: 100%; max-width: none; gap: 24px; }
+:root[data-harbor-theme="reading"] .conv-body > * { min-width: 0; }
+:root[data-harbor-theme="reading"] .conv-assistant { max-width: 100%; font-size: 15px; line-height: 1.7; }
+:root[data-harbor-theme="reading"] .conv-assistant-who { margin-bottom: 12px; font-size: 11px; letter-spacing: 0; text-transform: none; }
+:root[data-harbor-theme="reading"] .conv-user {
+  max-width: 88%;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 18px;
+  background: #303030;
+  box-shadow: none;
+  font-size: 15px;
+  line-height: 1.65;
+}
+:root[data-harbor-theme="reading"] .conv-user.command { font-size: 13px; }
+:root[data-harbor-theme="reading"] .md-p { margin-bottom: 16px; }
+/* Scoping raises specificity, so the last paragraph keeps the base sheet's
+   zero bottom margin explicitly (a one-line user bubble otherwise sits on
+   16px of empty space). */
+:root[data-harbor-theme="reading"] .md-p:last-child,
+:root[data-harbor-theme="reading"] .md-list:last-child,
+:root[data-harbor-theme="reading"] .md-code-wrap:last-child,
+:root[data-harbor-theme="reading"] .md-table-wrap:last-child { margin-bottom: 0; }
+:root[data-harbor-theme="reading"] .md-h { margin: 24px 0 12px; font-size: 1.12em; line-height: 1.4; font-weight: 650; }
+:root[data-harbor-theme="reading"] .md-list { margin-bottom: 16px; padding-left: 24px; }
+:root[data-harbor-theme="reading"] .md-list li { margin-bottom: 7px; padding-left: 2px; }
+:root[data-harbor-theme="reading"] .md-list .md-list { margin-top: 7px; margin-bottom: 0; }
+:root[data-harbor-theme="reading"] .conv-assistant strong,
+:root[data-harbor-theme="reading"] .conv-user strong { font-weight: 650; color: #fff; }
+:root[data-harbor-theme="reading"] .conv-assistant a,
+:root[data-harbor-theme="reading"] .conv-user a { color: #b8d8ff; text-decoration: underline; text-underline-offset: 3px; }
+:root[data-harbor-theme="reading"] .conv-assistant code,
+:root[data-harbor-theme="reading"] .conv-user code { font-size: 13px; font-weight: 400; padding: 2px 5px; background: #343434; }
+:root[data-harbor-theme="reading"] .md-code {
+  padding: 38px 16px 16px;
+  background: #181818;
+  color: var(--tx);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.65;
+  border-color: var(--ln);
+}
+:root[data-harbor-theme="reading"] .md-code-wrap { margin-bottom: 18px; }
+:root[data-harbor-theme="reading"] .md-code-copy { background: #303030; color: var(--tx); font-size: 11px; opacity: 1; }
+:root[data-harbor-theme="reading"] .md-table-wrap { margin: 8px 0 18px; }
+:root[data-harbor-theme="reading"] .md-table { font-size: 14px; line-height: 1.6; }
+:root[data-harbor-theme="reading"] .md-table th,
+:root[data-harbor-theme="reading"] .md-table td { padding: 10px 14px; }
+:root[data-harbor-theme="reading"] .md-table th { color: var(--tx); background: #2a2a2a; }
+
+:root[data-harbor-theme="reading"] .conv-act,
+:root[data-harbor-theme="reading"] .conv-act-group-toggle { background: #242424; border-color: rgba(255, 255, 255, 0.06); }
+:root[data-harbor-theme="reading"] .conv-act-group-toggle:hover { background: #2b2b2b; }
+:root[data-harbor-theme="reading"] .conv-act-code { font-size: 12px; background: #181818; }
+
+:root[data-harbor-theme="reading"] .ubar-input { font-size: 15px; line-height: 24px; max-height: min(40vh, 218px); }
+
+/* Keep dense multi-window layouts legible without spending their width on gutters. */
+@container win (max-width: 600px) {
+  :root[data-harbor-theme="reading"] .conv { padding: 20px 18px 24px; }
+  :root[data-harbor-theme="reading"] .conv-body { gap: 20px; }
+  :root[data-harbor-theme="reading"] .conv-user { max-width: 94%; padding: 10px 14px; }
+}
+@container win (max-width: 360px) {
+  :root[data-harbor-theme="reading"] .conv { padding-inline: 12px; }
+  :root[data-harbor-theme="reading"] .conv-assistant,
+  :root[data-harbor-theme="reading"] .conv-user { font-size: 14px; }
+}
+
+:root[data-harbor-theme="reading"] .sr-wrap:focus-within .sr-x { opacity: 1; pointer-events: auto; }
