@@ -73,7 +73,7 @@ const {
 const { createNotifier } = require('./notify.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
-const { createArtifactsProvider } = require('./providers/artifacts.js');
+const { createArtifactsProvider, codexHomesFromProfiles } = require('./providers/artifacts.js');
 const { createTaskStore } = require('./providers/tasks.js');
 const { createNoteStore } = require('./providers/notes.js');
 const { createWhiteboardStore } = require('./providers/whiteboard.js');
@@ -2850,6 +2850,9 @@ app.whenReady().then(async () => {
   const artifactsProvider = createArtifactsProvider({
     getSessionLabel: (id) => sidebarBridge.getSessionLabel(id),
     roots: [harborConfig.paths.projectsDir],
+    // Codex outputs too: the same codex homes the rail lists sessions from,
+    // asked per collection (harborConfig is reassigned when the wizard saves).
+    codexHomes: () => codexHomesFromProfiles(harborConfig.profiles),
     cacheFile: path.join(harborConfig.paths.cacheDir, 'artifacts-index.json'),
   });
   // Grid previews: HTML artifacts render in a short-lived OFFSCREEN window
