@@ -93,6 +93,9 @@ function createNotifier(opts = {}) {
 
     const prev = prevStatus.get(paneId);
     prevStatus.set(paneId, newStatus);
+    // An idle the CLI's `clear` became (session-daemon/client.js): the CLI
+    // is exiting, so a killed working session is not a finished turn.
+    if (data.agent_status_cleared) return;
 
     // Only working -> {idle,done,blocked} transitions
     if (prev !== WORKING) return;
