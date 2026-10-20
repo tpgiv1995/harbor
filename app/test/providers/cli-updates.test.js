@@ -136,6 +136,9 @@ function checkerFor(fixture, extra = {}) {
     fetchImpl: fakeFetch(),
     homedir: () => fixture.home,
     env: { HARBOR_NPM_PREFIX: fixture.prefix, LOCALAPPDATA: fixture.local },
+    // The fixtures use the win32 npm layout (<prefix>/node_modules); the POSIX
+    // layout (<prefix>/lib/node_modules) has its own tests below.
+    platform: 'win32',
     now: () => new Date('2026-09-03T12:00:00.000Z'),
     stateFile: path.join(fixture.root, 'state', 'cli-updates.json'),
     execFile: async () => { throw new Error('execFile must not run in this test'); },
