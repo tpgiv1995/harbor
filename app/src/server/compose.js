@@ -246,7 +246,8 @@ async function composeServer(options = {}) {
   const whiteboard = options.whiteboard || createWhiteboardStore({ app, env, configuredDir: config.paths.boardsDir });
   const terminalBridge = options.terminalBridge || createTerminalBridge({ env, sessionStorePolicy, processKill: guardedKill });
   const transcript = options.transcript || createTranscriptProvider({
-    getSessionMeta: (id) => sidebar.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => (sidebar.getReadableSessionMeta ? sidebar.getReadableSessionMeta(id) : sidebar.getSessionMeta(id)),
     contextCacheDir: contextDir,
   });
   // What each connected client has acquired, so it can be given back when that

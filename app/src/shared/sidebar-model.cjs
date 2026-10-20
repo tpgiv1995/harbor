@@ -336,6 +336,9 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       agentStatusSeq: live?.agentStatusSeq ?? null,
       isWindowsEra: isWindowsEra(row.project),
       isInternalSession: Boolean(row.isInternalSession),
+      // A codex chat its user archived (provider-history.js): out of the list
+      // by default, like codex's own, and found again by a search.
+      isArchived: Boolean(row.archived),
       entrypoint: row.entrypoint || null,
       isSubSession: isSubSession(row),
       isChildTask: isChildTask(row.title),
@@ -394,7 +397,7 @@ function filterProjects(model, { filter, query, now } = {}) {
       // rather than per project so it behaves the same under date grouping,
       // where a group holds several projects; a project left with no sessions is
       // already dropped below.
-      if (!needle && (isScratchSession(session) || (session.isInternalSession && !session.isLive))) return false;
+      if (!needle && (isScratchSession(session) || ((session.isInternalSession || session.isArchived) && !session.isLive))) return false;
       if (!needle) return true;
       if (projectMatches) return true;
       return `${session.project}\n${session.title}\n${session.firstPrompt || ''}`.toLowerCase().includes(needle);
