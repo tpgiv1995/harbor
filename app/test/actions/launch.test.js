@@ -267,7 +267,9 @@ test('newSession: rejects if cwd is missing', async () => {
 
 test('resumeProviderSession: bin/ai resume argv in the session cwd, claude and cwd-less rejected', async () => {
   const { execFile, calls } = makeExecRecorder();
-  const launch = createLaunchActions({ execFile });
+  // No record readable in main: bin/ai reads it itself (the fallback argv).
+  const unreadable = async () => { throw new Error('no rollout'); };
+  const launch = createLaunchActions({ execFile, readCodexResumeSettings: unreadable });
   // A REAL directory: resume refuses a deleted working folder by design
   // (live-caught 2026-07-24), so the happy path must use one that exists.
   const realCwd = require('node:os').tmpdir();
@@ -366,4 +368,65 @@ test('the ownership probe never reopens the single-flight window', async () => {
   // The deduped caller gets the same answer, not undefined.
   assert.deepEqual(a, b);
   assert.equal(a.command, CLAUDE_SESSIONS);
+});
+
+// bin/ai reads a .zst rollout's settings with the SYSTEM node, which may lack
+// zstd, and would then refuse, telling the user to pass flags the rail cannot
+// pass. Main (Electron's Node, zstd built in) reads the record and passes all
+// three flags plus --recorded.
+test('a codex resume passes the recorded model, effort and permission, with --recorded', () => {
+  const recorded = { model: 'gpt-6-luna', effort: 'low', permission: 'read-only' };
+  assert.deepEqual(buildProviderResumeArgv({ provider: 'codex', id: 'sid', profiles: [], recorded }),
+    ['--provider', 'codex', '--resume-id', 'sid', '--model', 'gpt-6-luna', '--effort', 'low', '--permission', 'read-only', '--recorded']);
+  // A record that names no model, effort or single mode: the default, as bin/ai itself would.
+  assert.deepEqual(buildProviderResumeArgv({ provider: 'codex', id: 'sid', profiles: [], recorded: { model: '', effort: '', permission: null } }),
+    ['--provider', 'codex', '--resume-id', 'sid', '--permission', 'full', '--recorded']);
+  assert.deepEqual(buildProviderResumeArgv({ provider: 'cursor', id: 'sid', profiles: [], recorded }), ['--provider', 'cursor', '--resume-id', 'sid']);
+});
+
+test('resumeProviderSession reads a .zst rollout in main and hands bin/ai the flags', { skip: typeof require('node:zlib').zstdCompressSync !== 'function' && 'runtime has no zstd' }, async () => {
+  const fs = require('node:fs');
+  const zlib = require('node:zlib');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-launch-zst-'));
+  const id = '01a14000-0000-7000-8000-000000000021';
+  try {
+    const dir = path.join(home, 'sessions', '2026', '10', '01');
+    fs.mkdirSync(dir, { recursive: true });
+    const rows = [
+      { type: 'session_meta', payload: { id, cwd: '/tmp/fixture', base_instructions: 'x'.repeat(20000) } },
+      { type: 'turn_context', payload: { model: 'gpt-6-sol', effort: 'high', approval_policy: 'on-request', approvals_reviewer: 'auto_review', sandbox_policy: { type: 'workspace-write' } } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'y'.repeat(200_000) } },
+      { type: 'turn_context', payload: { model: 'gpt-6-luna', effort: 'low', approval_policy: 'on-request', approvals_reviewer: 'user', sandbox_policy: { type: 'read-only' } } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'z'.repeat(300_000) } },
+    ];
+    const text = `${rows.map((row) => JSON.stringify({ timestamp: '2026-10-01T10:00:00Z', ...row })).join('\n')}\n`;
+    fs.writeFileSync(path.join(dir, `rollout-2026-10-01T10-00-00-${id}.jsonl.zst`), zlib.zstdCompressSync(Buffer.from(text)));
+    const { execFile, calls } = makeExecRecorder();
+    const profiles = [{ id: 'codex-work', provider: 'codex', configHome: home }];
+    const launch = createLaunchActions({ execFile, profiles });
+    await launch.resumeProviderSession({ provider: 'codex', cwd: os.tmpdir(), id, profileId: 'codex-work' });
+    assert.deepEqual(calls[0].argv, [
+      '--provider', 'codex', '--resume-id', id, '--home', home,
+      '--model', 'gpt-6-luna', '--effort', 'low', '--permission', 'read-only', '--recorded',
+    ]);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('resumeProviderSession reads the record inside the single-flight entry', async () => {
+  const { execFile, calls } = makeExecRecorder();
+  let reads = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const launch = createLaunchActions({
+    execFile,
+    readCodexResumeSettings: async () => { reads += 1; await gate; return { model: 'm1', effort: 'e1', permission: 'ask' }; },
+  });
+  const cwd = os.tmpdir();
+  const first = launch.resumeProviderSession({ provider: 'codex', cwd, id: 'dup' });
+  const second = launch.resumeProviderSession({ provider: 'codex', cwd, id: 'dup' });
+  release();
+  await Promise.all([first, second]);
+  assert.equal(reads, 1);
+  assert.equal(calls.length, 1, 'a double click still starts ONE resume');
+  assert.deepEqual(calls[0].argv.slice(-7), ['--model', 'm1', '--effort', 'e1', '--permission', 'ask', '--recorded']);
 });
