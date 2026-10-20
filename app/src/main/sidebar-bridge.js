@@ -709,7 +709,10 @@ function createSidebarBridge(options = {}) {
       const id = typeof pane.agent_session === 'string' ? pane.agent_session : pane.agent_session?.value;
       const row = historyById.get(id);
       const readOnly = subSessionReadOnly({ ...row, isLive: true, isLiveInteractive: pane.isLiveInteractive });
-      return { alive: true, delegatedBy: readOnly ? (row?.delegatedBy || 'sub-session') : null, working: pane.agent_status === 'working' || freshWorking(row?.background),
+      // sessionId is the rail row's id (a pane with no session yet rides its
+      // live: key), which is what a window's mute and a toast's click name.
+      return { alive: true, sessionId: id || `live:${paneId}`, title: row?.title || pane.terminal_title || pane.label || null,
+        delegatedBy: readOnly ? (row?.delegatedBy || 'sub-session') : null, working: pane.agent_status === 'working' || freshWorking(row?.background),
         background: Boolean(row?.background?.outstanding?.length || row?.background?.awaitingFinal) };
     },
     // Called by the launch flow with the profile it actually passed to the CLI
