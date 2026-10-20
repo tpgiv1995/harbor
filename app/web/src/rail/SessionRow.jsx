@@ -1,19 +1,68 @@
-import { runStateCue } from '../../../src/shared/session-run-state.cjs';
-import React from 'react';
+import { runStateCue, canQuickAnswer, quickAllowOffered } from '../../../src/shared/session-run-state.cjs';
+import React, { useEffect, useState } from 'react';
 import { ProjectIcon } from './ProjectIcon.jsx';
 import { formatRelative } from './format.js';
 import { prettyModelId } from '../shell/model-label.js';
 
+// Allow / Deny from the phone's "Needs your answer" rows while the CLI reports
+// a permission prompt (OSC 7501 blocked/permission), without opening the
+// session. Same server path as the desktop (session:menu-answer, action
+// permission-quick): the tap names the prompt the row showed (`expect`, and the
+// keeper's `expectSeq`), and main refuses it when the session has moved on, so
+// a list that has not refreshed yet can never approve a request the phone never
+// displayed. Allow is the one-time "Yes", Deny is Esc; plan approval gets Deny
+// only. Big enough to hit with a thumb.
+function PhoneQuickAnswer({ client, session, label }) {
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+  const expect = session.agentStatusMsg;
+  const expectSeq = session.agentStatusSeq ?? null;
+  const allowOffered = quickAllowOffered(expect);
+  useEffect(() => { setError(null); }, [expect, expectSeq]);
+  const answer = async (decision) => {
+    if (busy || (decision === 'allow' && !allowOffered)) return;
+    setBusy(decision);
+    setError(null);
+    try {
+      const res = await client.call('session:menu-answer', {
+        pane: { paneId: session.paneId, workspaceId: session.workspaceId },
+        sessionId: session.id,
+        action: { type: 'permission-quick', decision, expect, expectSeq },
+      });
+      if (!res?.ok) setError(res?.reason || 'that answer did not land');
+    } catch (e) {
+      setError(e?.message || 'that answer did not land');
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div className="session-quick" role="group" aria-label="Answer the permission prompt">
+      <span className={`session-quick-label${error ? ' error' : ''}`} title={error || expect || ''}>{error || label}</span>
+      {allowOffered ? (
+        <button type="button" className="session-quick-btn allow" disabled={Boolean(busy)} onClick={() => answer('allow')}>
+          {busy === 'allow' ? '…' : 'Allow'}
+        </button>
+      ) : null}
+      <button type="button" className="session-quick-btn deny" disabled={Boolean(busy)} onClick={() => answer('deny')}>
+        {busy === 'deny' ? '…' : 'Deny'}
+      </button>
+    </div>
+  );
+}
+
 export function SessionRow({
-  row, selected, onSelect, iconUrl, showProject = false,
+  row, selected, onSelect, iconUrl, showProject = false, client = null,
 }) {
   const { session } = row;
   const cue = runStateCue(session);
   const needsAnswer = cue?.kind === 'blocked';
   const working = cue?.kind === 'running';
   const title = session.childTitle || session.title;
+  const quickPane = session.paneId ? { paneId: session.paneId, workspaceId: session.workspaceId } : null;
+  const quick = Boolean(client && needsAnswer && canQuickAnswer(session, quickPane));
 
-  return (
+  const rowButton = (
     <button
       type="button"
       className={[
@@ -50,9 +99,16 @@ export function SessionRow({
           ) : null}
         </span>
       </span>
-      {needsAnswer ? <span className="session-badge">Answer</span> : null}
+      {needsAnswer && !quick ? <span className="session-badge">Answer</span> : null}
       {cue?.kind === "background" ? <span className="session-badge background">{cue.label}</span> : null}
       {working ? <span className="session-badge working">Working</span> : null}
     </button>
+  );
+  if (!quick) return rowButton;
+  return (
+    <div className="session-row-wrap">
+      {rowButton}
+      <PhoneQuickAnswer client={client} session={session} label={cue?.label || 'needs your answer'} />
+    </div>
   );
 }
