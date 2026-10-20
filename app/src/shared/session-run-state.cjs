@@ -1,5 +1,6 @@
 'use strict';
 const { freshWorking } = require('./claude-turn-state.cjs');
+const { subSessionReadOnly } = require('./sub-sessions.cjs');
 
 function processAliveFromEvidence(evidence = {}, now = Date.now()) {
   if (evidence.processAlive != null) return evidence.processAlive;
@@ -31,6 +32,24 @@ function blockedLabel(session) {
   return short && short.length <= 40 ? short : null;
 }
 
+// One-click Allow / Deny (renderer/stage/QuickAnswer.jsx, the phone's rows):
+// offered only while the CLI ITSELF reports a permission prompt with its words
+// (OSC 7501 blocked/permission plus a msg), on a pane Harbor runs, for a
+// session the user may write to. The words are what the click names (`expect`),
+// so a prompt with none gets no buttons. Main re-checks all of it against the
+// live screen before pressing anything (session-send.js permission-quick).
+function canQuickAnswer(session, pane, readOnly = false) {
+  return Boolean(pane?.paneId && !readOnly && !subSessionReadOnly(session)
+    && session?.agentStatus === 'blocked' && session.agentStatusKind === 'permission'
+    && typeof session.agentStatusMsg === 'string' && session.agentStatusMsg.trim());
+}
+// Plan approval is reported as a permission prompt too ("approve plan"), but it
+// has no one-time Yes (each Yes also picks a mode for the edits after it), so
+// it gets Deny only.
+function quickAllowOffered(msg) {
+  return typeof msg === 'string' && Boolean(msg.trim()) && !/^approve plan\b/i.test(msg.trim());
+}
+
 function runStateCue(session = {}, pane, header, now = Date.now()) {
   session ||= {};
   const alive = sessionLiveOwned(session, pane, header, now);
@@ -57,4 +76,4 @@ function runStateCue(session = {}, pane, header, now = Date.now()) {
   }
   return alive ? { kind: 'ready', label: 'ready', ariaLabel: 'ready' } : null;
 }
-module.exports = { processAliveFromEvidence, sessionLiveOwned, backgroundBusy, runStateCue, blockedLabel };
+module.exports = { processAliveFromEvidence, sessionLiveOwned, backgroundBusy, runStateCue, blockedLabel, canQuickAnswer, quickAllowOffered };
