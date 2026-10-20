@@ -60,8 +60,8 @@ const {
 const { compareVersionsDesc, resolveClaudeBinary } = require('./providers/model-catalog.js');
 const { createMcpConnections } = require('./providers/mcp-connections.js');
 const { createCliUpdateChecker } = require('./providers/cli-updates.js');
-const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath } = require('./providers/delegate.js');
-const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptLastSignal } = require('./providers/transcript.js');
+const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath, sameWorkspace } = require('./providers/delegate.js');
+const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptTailSignal } = require('./providers/transcript.js');
 const { createAskTranscriptResolver } = require('./ask-transcript-path.js');
 const { createPendingAskReader } = require('./providers/pending-ask.js');
 const { createSessionSend, createLinkRegistry } = require('./session-send.js');
@@ -1510,6 +1510,7 @@ function registerIpc() {
   // so a cached verdict for an unchanged file can never render fresher than its
   // own mtime allows. Bounded (LRU, 200 paths): the corpus of orch workers
   // only grows, and a plain Map kept every transcript any poll ever read.
+  // An entry holds at most 2 KB of the worker's final reply.
   const orchLivenessCache = createLruCache();
   const ORCH_LIVENESS_CONCURRENCY = 6;
 
@@ -1537,10 +1538,24 @@ function registerIpc() {
     const windowFloorMs = incompleteBatches.length === 0
       ? Infinity
       : (dispatchStamps.length ? Math.min(...dispatchStamps) - DISPATCH_SLACK_MS : 0);
+    // Lane worktrees of in-flight batches: a worker started there is that
+    // batch's worker even without the BATCH TITLE: prefix (codex workers).
+    // The basename gate keeps realpath off every other session on each poll.
+    const laneGate = (batches) => {
+      const worktrees = batches.map((batch) => batch.worktree).filter(Boolean);
+      const names = new Set(worktrees.map((worktree) => path.basename(String(worktree)).toLowerCase()));
+      return (cwd) => Boolean(cwd) && names.has(path.basename(String(cwd)).toLowerCase())
+        && worktrees.some((worktree) => sameWorkspace(cwd, worktree));
+    };
+    const inLane = laneGate(incompleteBatches);
+    const titledWorker = (session) => {
+      const prompt = String(session.firstPrompt || session.title || '');
+      return /^BATCH TITLE:/i.test(prompt) || (session.provider === 'codex' && /BATCH TITLE:/i.test(prompt));
+    };
     const candidates = sidebarBridge.getHistoryRows().filter((session) => (
       exactIds.has(session.id)
-      || ((session.isChildTask || /^BATCH TITLE:/i.test(String(session.firstPrompt || session.title || '')))
-        && (session.lastActiveMs || Date.parse(session.lastActive) || 0) >= windowFloorMs)
+      || ((session.lastActiveMs || Date.parse(session.lastActive) || 0) >= windowFloorMs
+        && (session.isChildTask || titledWorker(session) || inLane(session.cwd)))
     ));
     // `finished` is read by the join for ACTIVE batches only (delegate.js
     // joinBatchesToSessions), so only a session that can join one is read:
@@ -1553,8 +1568,13 @@ function registerIpc() {
     const activeExactIds = new Set(activeBatches.map((batch) => batch.last_session_id).filter(Boolean));
     const activeTitleNeedles = activeBatches.filter((batch) => batch.title)
       .map((batch) => `batch title: ${String(batch.title).trim()}`.toLowerCase());
+    const inActiveLane = laneGate(activeBatches);
     const needsFinished = (session) => activeExactIds.has(session.id)
-      || activeTitleNeedles.some((needle) => String(session.firstPrompt || session.title || '').trim().toLowerCase().startsWith(needle));
+      || activeTitleNeedles.some((needle) => {
+        const prompt = String(session.firstPrompt || session.title || '').trim().toLowerCase();
+        return prompt.startsWith(needle) || (session.provider === 'codex' && prompt.includes(needle));
+      })
+      || inActiveLane(session.cwd);
     // Bounded fan-out: the candidates can be every orch worker in the corpus
     // (the zero floor for an unstamped batch), and a fresh launch has no
     // cache, so one Promise.all opened and read all of them at once.
@@ -1565,21 +1585,23 @@ function registerIpc() {
       // Only content-derived facts are cached; anything computed against the
       // wall clock would come back stale from a cache hit. The join derives
       // freshness from signalAt at its own read of the clock.
-      let finished = null;
+      let finished = null; let turnEnd = null; let turnError = null; let resultText = null;
       const cached = orchLivenessCache.get(meta.path);
       if (!needsFinished(session)) {
         // No active batch can join this session, so its verdict is never read.
       } else if (cached && stat && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
-        ({ finished } = cached);
+        ({ finished, turnEnd, turnError, resultText } = cached);
       } else {
         try {
-          // The TAIL only (readTranscriptLastSignal): this used to read and
+          // The TAIL only (readTranscriptTailSignal): this used to read and
           // parse the whole file, and a codex worker log runs to hundreds of MB.
           // On 2026-10-09 that crashed two launches in a row with a main-process
-          // heap OOM (the doctrine in docs/claude/views.md).
-          const lastSignal = await readTranscriptLastSignal(meta.path, meta.provider || session.provider || 'claude');
-          finished = lastSignal === 'idle';
-          if (stat) orchLivenessCache.set(meta.path, { size: stat.size, mtimeMs: stat.mtimeMs, finished });
+          // heap OOM (the doctrine in docs/claude/views.md). The same tail says
+          // how the last turn ended and what the worker last said.
+          const tail = await readTranscriptTailSignal(meta.path, meta.provider || session.provider || 'claude');
+          finished = tail.lastSignal === 'idle';
+          ({ turnEnd, turnError, resultText } = tail);
+          if (stat) orchLivenessCache.set(meta.path, { size: stat.size, mtimeMs: stat.mtimeMs, finished, turnEnd, turnError, resultText });
         } catch { /* The join still has identity and mtime if parsing fails. */ }
       }
       return {
@@ -1590,6 +1612,9 @@ function registerIpc() {
         start: meta.start || session.startedAt || null,
         signalAt: stat?.mtimeMs || meta.mt || null,
         finished,
+        turnEnd,
+        turnError,
+        resultText,
       };
     };
     const joined = new Array(candidates.length);

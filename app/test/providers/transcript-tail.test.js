@@ -17,6 +17,7 @@ const {
   readTailLines,
   readTranscriptTailRecords,
   readTranscriptLastSignal,
+  readTranscriptTailSignal,
 } = require('../../src/main/providers/transcript.js');
 
 const TS = '2026-10-09T07:00:00.000Z';
@@ -123,4 +124,46 @@ test('the tail read is bounded by maxBytes however many lines were asked for', a
   for (const line of lines) JSON.parse(line);
   const whole = fs.readFileSync(file, 'utf8').trim().split('\n');
   assert.deepEqual(lines, whole.slice(whole.length - lines.length), 'the lines are exactly the newest ones, in order');
+});
+
+// The Orch view also asks a codex worker HOW its last turn ended and what it
+// last said. Same bounded tail: the turn sits after more than one start window
+// of earlier codex turns, so the head is never read.
+const codexEvent = (ms, payload) => ({ timestamp: new Date(Date.parse(TS) + ms).toISOString(), type: 'event_msg', payload });
+function codexPadding() {
+  const lines = [];
+  for (let i = 0; i < 2400; i += 1) {
+    lines.push(codexEvent(i * 10, { type: 'task_started' }));
+    lines.push(codexEvent(i * 10 + 1, { type: 'item_completed', item: { type: 'AgentMessage', id: `a${i}`, phase: 'final_answer', content: [{ type: 'Text', text: `answer ${i} ${'y'.repeat(800)}` }] } }));
+    lines.push(codexEvent(i * 10 + 2, { type: 'task_complete', last_agent_message: `answer ${i}` }));
+  }
+  return lines;
+}
+
+test('a codex worker tail says how its last turn ended and keeps its final reply', async () => {
+  const late = 1_000_000;
+  const endings = {
+    complete: [codexEvent(late, { type: 'task_started' }),
+      codexEvent(late + 1, { type: 'item_completed', item: { type: 'AgentMessage', id: 'z', phase: 'final_answer', content: [{ type: 'Text', text: 'All checks pass.' }] } }),
+      codexEvent(late + 2, { type: 'task_complete', last_agent_message: 'All checks pass.' })],
+    error: [codexEvent(late, { type: 'task_started' }), codexEvent(late + 1, { type: 'task_complete', error: { message: 'usage limit reached' } })],
+    aborted: [codexEvent(late, { type: 'task_started' }), codexEvent(late + 1, { type: 'turn_aborted', reason: 'interrupted' })],
+    running: [codexEvent(late, { type: 'task_started' })],
+  };
+  for (const [name, tail] of Object.entries(endings)) {
+    const file = await writeJsonl(`codex-${name}.jsonl`, [...codexPadding(), ...tail]);
+    assert.ok(fs.statSync(file).size > 2 * 1024 * 1024, 'fixture must be larger than the start window');
+    const signal = await readTranscriptTailSignal(file, 'codex');
+    assert.equal(signal.lastSignal, await readTranscriptLastSignal(file, 'codex'), `${name}: one tail, one verdict`);
+    if (name === 'complete') {
+      assert.equal(signal.turnEnd, 'complete'); assert.equal(signal.resultText, 'All checks pass.');
+    } else if (name === 'error') {
+      assert.equal(signal.turnEnd, 'error'); assert.equal(signal.turnError.message, 'usage limit reached');
+    } else if (name === 'aborted') {
+      assert.equal(signal.turnEnd, 'aborted');
+    } else {
+      assert.equal(signal.turnEnd, null, 'a running turn has no end yet');
+      assert.equal(signal.resultText, null, 'no result while it works');
+    }
+  }
 });

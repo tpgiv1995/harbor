@@ -367,12 +367,29 @@ async function readTranscriptTailRecords(transcriptPath, { maxRecords = 128 } = 
 // mid-turn: the same lastSignal the full parse produced, read off the tail the
 // way every tile prices its own working state off a MAX_INITIAL_BYTES tail.
 async function readTranscriptLastSignal(transcriptPath, provider = 'claude') {
+  return (await readTranscriptTailSignal(transcriptPath, provider)).lastSignal;
+}
+
+// The same tail, and what the Orch view asks of a batch worker beyond "has it
+// stopped": how its last turn ended (the parser's codex turnEnd / turnError;
+// claude headers leave them null) and, once it has stopped, its own final
+// reply. Bounded exactly like readTranscriptLastSignal, so a worker rollout of
+// hundreds of MB costs one tail window per changed poll, never a whole read.
+const TAIL_RESULT_MAX = 2000;
+async function readTranscriptTailSignal(transcriptPath, provider = 'claude') {
   const lines = await readTailLines(transcriptPath, { minLines: TAIL_SIGNAL_MIN_LINES, maxBytes: TAIL_SIGNAL_MAX_BYTES });
   const parser = new TranscriptParser(provider);
   for (const line of lines) {
     try { parser.applyLine(JSON.parse(line)); } catch { /* skip partial records */ }
   }
-  return parser.header.lastSignal;
+  const { lastSignal } = parser.header;
+  const reply = lastSignal === 'idle' ? parser.blocks.findLast((block) => block.kind === 'assistant' && block.text) : null;
+  return {
+    lastSignal,
+    turnEnd: parser.header.turnEnd ?? null,
+    turnError: parser.header.turnError ?? null,
+    resultText: reply ? String(reply.text).trim().slice(0, TAIL_RESULT_MAX) || null : null,
+  };
 }
 
 // One tool_use -> one action row: verb + mono chip + optional right-hand pill,
@@ -3178,6 +3195,7 @@ module.exports = {
   findProviderTranscript,
   readTranscriptTailRecords,
   readTranscriptLastSignal,
+  readTranscriptTailSignal,
   readTailLines,
   extractHandoffPath,
   waitForHandoffPath,

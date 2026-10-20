@@ -33,7 +33,7 @@ function eventStamp(value, full = false) {
 function BatchCard({ batch, onPreview, previewText, previewLoading }) {
   const [expanded, setExpanded] = useState(false);
   const hasExcerpt = batch.notes || batch.done_when || batch.worktree || batch.last_error
-    || batch.last_result_excerpt || batch.last_session_id;
+    || batch.last_result_excerpt || batch.last_session_id || batch.workerResult || batch.workerError;
   const hasSession = Boolean(batch.last_session_id);
   const lastEvent = batch.notes || batch.last_error;
   const stateLabel = batch.workerState === 'quiet'
@@ -43,7 +43,9 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
     : batch.workerState === 'awaiting-review' ? 'awaiting review'
       : batch.workerState === 'error-blocked' ? 'error / blocked'
         : batch.workerState === 'no-signal' ? 'no liveness signal'
-          : batch.workerState || batch.status || 'pending';
+          : batch.workerState === 'failed' ? 'worker failed'
+            : batch.workerState === 'stopped' ? 'worker stopped'
+              : batch.workerState || batch.status || 'pending';
 
   return (
     <div className={`orch-batch-card ${STATUS_COLORS[batch.status] || ''} ${batch.workerState === 'quiet' ? 'orch-batch-quiet' : ''}`}>
@@ -88,6 +90,12 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
           )}
           {batch.last_result_excerpt && !batch.last_error && (
             <pre className="orch-batch-excerpt">{batch.last_result_excerpt}</pre>
+          )}
+          {/* The worker's own last turn, read from its transcript: the queue
+              excerpt only exists once the orchestrator has reviewed it. */}
+          {batch.workerError && <pre className="orch-batch-error">{`Worker turn failed: ${batch.workerError}`}</pre>}
+          {batch.workerResult && !batch.last_result_excerpt && (
+            <pre className="orch-batch-excerpt">{batch.workerResult}</pre>
           )}
           {batch.notes && <p>{batch.notes}</p>}
           {batch.done_when && <p>{`Done when: ${batch.done_when}`}</p>}

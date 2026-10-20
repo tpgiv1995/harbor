@@ -25,8 +25,10 @@ function runCounts(summary) {
   const parts = [];
   const derived = ['working', 'awaitingReview', 'quiet', 'missing'].some((key) => typeof summary[key] === 'number');
   if (derived) {
+    if (summary.failed) parts.push(`${summary.failed} failed`);
     if (summary.working) parts.push(`${summary.working} working`);
     if (summary.awaitingReview) parts.push(`${summary.awaitingReview} awaiting review`);
+    if (summary.stopped) parts.push(`${summary.stopped} stopped`);
     if (summary.quiet) parts.push(`${summary.quiet} quiet`);
     if (summary.missing) parts.push(`${summary.missing} with no signal`);
   } else if (summary.active) {

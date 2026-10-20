@@ -100,6 +100,21 @@ Each dispatch response should carry, if your delegate tooling supports it:
    example two full test/e2e suites) concurrently against the same
    workspace: concurrent runs of the same gate can deadlock each other.
 
+**Make every worker findable (Harbor's Orch view joins workers to batches).**
+Harbor reads a batch's worker in this order: the queue's `last_session_id`,
+then a transcript whose prompt starts with `BATCH TITLE: <batch title>`, then
+the first session started in the batch's own lane `worktree` after its
+dispatch. A Codex worker gets neither of the first two for free, so when you
+(or your delegate tooling) launch one:
+
+- Launch it with `codex exec --json` and read the first stdout event,
+  `{"type":"thread.started","thread_id":"<id>"}`. Record that id on the
+  batch with your delegate tooling's session-id update, the same field a
+  Claude worker's session id goes in.
+- Start the worker prompt with the line `BATCH TITLE: <batch title>`.
+- Do not launch workers with `--ephemeral`: it writes no transcript, so
+  nothing can show the worker's liveness or result.
+
 Run the queue as a **pipeline, never in waves**. Serial-only execution
 turns a day's queue into an unnecessarily long night, and so does waiting
 for a whole wave to finish before starting the next batch:
