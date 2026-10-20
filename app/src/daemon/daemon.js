@@ -146,6 +146,8 @@ function derivedIdentity(argv) {
   if (agent === 'claude') {
     const index = argv.indexOf('--session-id');
     if (index >= 0 && typeof argv[index + 1] === 'string' && argv[index + 1]) agentSession = argv[index + 1];
+    const joined = argv.find((arg) => typeof arg === 'string' && arg.startsWith('--session-id='));
+    if (!agentSession && joined && joined.length > '--session-id='.length) agentSession = joined.slice('--session-id='.length);
   }
   return { agent, agent_session: agentSession };
 }
@@ -154,6 +156,27 @@ function derivedIdentity(argv) {
 // re-reads a record only when its stat stamp moves. Why, with the measurements,
 // is the header of state-cache.js.
 const stateFiles = createStateFileCache();
+
+// A claude started with no session flag picks its own id, the daemon never
+// learns it, and the pane sits in the rail as an untitled "Live session" that
+// links to no transcript. Naming the id up front is what a Harbor launch
+// already does (actions/launch.js mints it). Flags that choose or own the
+// session are left alone, and so is anything after `--`.
+const CLAUDE_SESSION_FLAGS = new Set([
+  '--session-id', '--resume', '-r', '--continue', '-c', '--from-pr', '--teleport', '--remote', '--print', '-p',
+]);
+
+function withClaudeSessionId(argv) {
+  if (derivedIdentity(argv).agent !== 'claude') return argv;
+  // Only an interactive start: argv[1] is absent or a flag. A first word that
+  // is not a flag may be a subcommand (`claude update`, `doctor`, `mcp ...`),
+  // which takes no --session-id, so it is never prefixed.
+  if (argv.length > 1 && !String(argv[1]).startsWith('-')) return argv;
+  const end = argv.indexOf('--');
+  const flags = end >= 0 ? argv.slice(1, end) : argv.slice(1);
+  if (flags.some((arg) => CLAUDE_SESSION_FLAGS.has(String(arg).split('=')[0]))) return argv;
+  return [argv[0], '--session-id', randomUUID(), ...argv.slice(1)];
+}
 
 function readState(id) {
   try { return stateFiles.readJson(statePath(id)); }
@@ -408,13 +431,17 @@ async function spawnSession(params) {
   if (!Number.isInteger(params.rows) || params.rows < 1) throw new Error('spawn rows must be a positive integer');
   const id = randomUUID();
   assertSocketPathFits(keeperSocket(id));
-  const derived = derivedIdentity(params.argv);
+  // A caller that names the session itself is trusted with the argv as given.
+  const argv = Object.prototype.hasOwnProperty.call(params, 'agent_session')
+    ? params.argv
+    : withClaudeSessionId(params.argv);
+  const derived = derivedIdentity(argv);
   const agent = Object.prototype.hasOwnProperty.call(params, 'agent') ? params.agent : derived.agent;
   const agentSession = Object.prototype.hasOwnProperty.call(params, 'agent_session')
     ? params.agent_session
     : derived.agent_session;
   const config = {
-    id, argv: params.argv, cwd: params.cwd, env: params.env || {}, cols: params.cols, rows: params.rows,
+    id, argv, cwd: params.cwd, env: params.env || {}, cols: params.cols, rows: params.rows,
     agent: agent ?? null, agent_session: agentSession ?? null,
     created_at: new Date().toISOString(), state_path: statePath(id), keeper_socket: keeperSocket(id),
     // The pid this store's life is tied to (harness-watch.js), handed to the
