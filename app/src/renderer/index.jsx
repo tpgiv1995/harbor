@@ -47,6 +47,7 @@ const { emptyDraft, resolveDraftAlias } = draftStore;
 import gridNav from './stage/grid-nav.cjs';
 import unseenCompletions from './stage/unseen-completions.cjs';
 import taskbarBadge from './stage/taskbar-badge.cjs';
+import { useQuickAnswerKeys } from './stage/use-quick-answer-keys.js';
 import handoffChainLib from './stage/handoff-chain.cjs';
 import * as sidebarModelShared from '../shared/sidebar-model.js';
 import './styles.css';
@@ -1008,6 +1009,8 @@ function App() {
   const prevControlRef = useRef(null);
   const selectedSession = sessionsWithSynthetic.get(selectedId) || null;
   const selectedPaneId = selectedSession ? resolvePane(selectedSession)?.paneId || null : null;
+  // Cmd/Ctrl+Shift+Y / N answer the selected window's permission prompt.
+  useQuickAnswerKeys(selectedSession, selectedSession ? resolvePane(selectedSession) : null);
   useEffect(() => {
     const session = selectedSession;
     const pane = session ? resolvePane(session) : null;
