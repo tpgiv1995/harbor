@@ -207,6 +207,7 @@ test('headless composition exposes the phone providers and preserves explicit fa
     answerMenu: async (payload) => ({ ok: true, action: payload.action }),
     getQueueState: (session) => ({ count: 1, session }),
     cancelQueued: (session, sendId) => ({ ok: true, session, sendId }),
+    sendNow: (request) => ({ ok: true, request }),
     readPermissionMode: async (paneId) => ({ mode: 'acceptEdits', paneId }),
     cyclePermissionMode: async (paneId, workspaceId) => ({ mode: 'plan', paneId, workspaceId }),
   };
@@ -277,6 +278,9 @@ test('headless composition exposes the phone providers and preserves explicit fa
   assert.deepEqual(await composed.router.call('session:send-queue', { sessionId }), { count: 1, session: sessionId });
   assert.deepEqual(await composed.router.call('session:cancel-send', { sessionId, sendId: 7 }), { ok: true, session: sessionId, sendId: 7 });
   assert.deepEqual(await composed.router.call('session:interrupt', { paneId: 'pane-1' }), { ok: true, paneId: 'pane-1', text: '\x1b' });
+  assert.deepEqual(await composed.router.call('session:send-now', { sessionId, paneId: 'pane-1', workspaceId: 'ws-1' }), {
+    ok: true, request: { sessionId, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } },
+  });
   assert.deepEqual(await composed.router.call('usage:get-all'), {
     personal: { id: 'personal', fiveHour: 12 },
     team: { id: 'team', fiveHour: 12 },
@@ -314,7 +318,7 @@ test('delegated sessions refuse every phone write entry point', async (t) => {
   providers.sidebar.isDelegatedPane = (id) => id === 'child-pane';
   const unexpected = () => { assert.fail('a delegated write reached the session service'); };
   const composed = await composeServer({ userDataDir: isolated.userDataDir, env: isolated.env, ...providers,
-    sessionSend: { emitter: new EventEmitter(), send: unexpected, answerMenu: unexpected, cyclePermissionMode: unexpected },
+    sessionSend: { emitter: new EventEmitter(), send: unexpected, answerMenu: unexpected, cyclePermissionMode: unexpected, sendNow: unexpected },
     terminalBridge: { emitter: new EventEmitter(), start: async () => {}, close() {}, sendInput: unexpected },
     launchActions: { resumeSession: unexpected, resumeProviderSession: unexpected }, takeoverHandler: unexpected,
     usage: { getUsage: async () => ({}) }, capabilities: { get: async () => ({}) }, workflowRuns: { runsForSession: async () => [] },
@@ -323,6 +327,7 @@ test('delegated sessions refuse every phone write entry point', async (t) => {
   await assert.rejects(composed.router.call('session:send', { sessionId: 'child', text: 'write' }), /read-only/);
   for (const [method, payload] of [
     ['session:menu-answer', { sessionId: 'child' }], ['session:interrupt', { paneId: 'child-pane' }],
+    ['session:send-now', { paneId: 'child-pane' }], ['session:send-now', { sessionId: 'child', paneId: 'other-pane' }],
     ['capabilities:cycle-permission-mode', { paneId: 'child-pane' }], ['resume-session', { id: 'child' }], ['session:takeover', { sessionId: 'child' }],
   ]) assert.match((await composed.router.call(method, payload)).reason, /read-only/, method);
 });
