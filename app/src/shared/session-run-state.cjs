@@ -7,7 +7,9 @@ function processAliveFromEvidence(evidence = {}, now = Date.now()) {
   return null;
 }
 function sessionLiveOwned(session, pane, header, now = Date.now()) {
-  if (session?.isLive || pane) return true;
+  // cliAlive: the CLI itself lists this session as running (`claude agents
+  // --json`, main/providers/cli-agents.js), wherever it runs.
+  if (session?.isLive || session?.cliAlive || pane) return true;
   const evidence = { ...session?.ownerEvidence, ...header };
   const alive = processAliveFromEvidence(evidence, now);
   if (alive != null) return alive;
@@ -36,7 +38,12 @@ function runStateCue(session = {}, pane, header, now = Date.now()) {
   const alive = sessionLiveOwned(session, pane, header, now);
   if (header?.blocked || alive && session.agentStatus === 'blocked') {
     const label = (alive && blockedLabel(session)) || 'needs your answer';
-    const tooltip = alive && session.agentStatus === 'blocked' && session.agentStatusMsg ? session.agentStatusMsg : null;
+    // Without OSC 7501 words, the CLI list says what the session waits on. A
+    // session Harbor does not run can only be answered where it runs.
+    const elsewhere = !session.isLive && !pane && session.cliAlive;
+    const tooltip = alive && session.agentStatus === 'blocked' && session.agentStatusMsg ? session.agentStatusMsg
+      : alive && session.agentStatus === 'blocked' && session.agentWaitingFor
+        ? `waiting on a ${session.agentWaitingFor}${elsewhere ? ' in a window outside Harbor' : ''}` : null;
     return { kind: 'blocked', label, ariaLabel: `blocked: ${label}`, ...(tooltip ? { tooltip } : {}) };
   }
   if (alive && (header?.working || session.agentStatus === 'working' || freshWorking(session.background, now))) {

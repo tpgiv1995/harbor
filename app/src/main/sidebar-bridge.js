@@ -6,7 +6,7 @@ const { createControlClient } = require('./session-daemon/factory.js');
 const { createHistoryProvider } = require('./providers/history.js');
 const { createProviderHistory } = require('./providers/provider-history.js');
 const { createProviderSessionLinker } = require('./providers/provider-session-link.js');
-const { mergeSidebarModel, sleptSince, paneStatusFields } = require('../shared/sidebar-model.cjs');
+const { mergeSidebarModel, sleptSince, paneStatusFields, cliStatusForPane } = require('../shared/sidebar-model.cjs');
 const { parseLocalDateTime } = require('../shared/date-roll.cjs');
 const { freshWorking } = require('../shared/claude-turn-state.cjs');
 const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, delegationSummaries, mergeDelegationLinks } = require('./providers/delegations.js');
@@ -335,6 +335,8 @@ function createSidebarBridge(options = {}) {
     }
     if (changed && !closed) publish();
   };
+  // `claude agents --json` (providers/cli-agents.js), when main runs it.
+  const cliStatuses = () => options.cliAgents?.snapshot() || null;
   const publish = () => {
     if (closed) return;
     const ids = new Set(liveState.panes.map((p) => p.pane_id));
@@ -362,6 +364,9 @@ function createSidebarBridge(options = {}) {
       // because a session can be moved or reconfigured after it starts.
       homes: withLaunchedHomes(homes, launchedHomes),
       dormantSessions,
+      // `claude agents --json` (providers/cli-agents.js): status for the
+      // Claude sessions Harbor does not run.
+      cliStatuses: cliStatuses(),
     });
     const delta = publisher.publish({
       model,
@@ -387,11 +392,12 @@ function createSidebarBridge(options = {}) {
   let statusNeedsMerge = false;
   let statusPublishDue = 0;
   const scheduleStatusPublish = (event, { stepOnly = false } = {}) => {
-    const { pane_id: paneId, agent_status: status } = event.data;
-    if (status === 'unknown' || !paneRows.has(paneId)) statusNeedsMerge = true;
+    // No event: the CLI's own session list changed, which can touch any row.
+    const { pane_id: paneId, agent_status: status } = event?.data || {};
+    if (!event || status === 'unknown' || !paneRows.has(paneId)) statusNeedsMerge = true;
     else {
       const pane = liveState.panes.find((p) => p.pane_id === paneId);
-      pendingStatuses.set(paneRows.get(paneId), paneStatusFields(pane || { agent_status: status }));
+      pendingStatuses.set(paneRows.get(paneId), paneStatusFields(pane || { agent_status: status }, cliStatusForPane(pane, cliStatuses())));
     }
     const delay = stepOnly ? STEP_PUBLISH_MS : 16;
     const due = Date.now() + delay;
@@ -415,6 +421,9 @@ function createSidebarBridge(options = {}) {
     }, delay);
     statusPublishTimer.unref?.();
   };
+
+  const onCliAgentsChange = () => { if (!closed) scheduleStatusPublish(null); };
+  options.cliAgents?.on('change', onCliAgentsChange);
 
   const onPaneAgentStatus = (event) => {
     const previousState = liveState;
@@ -639,6 +648,7 @@ function createSidebarBridge(options = {}) {
 
   const close = () => {
     closed = true;
+    options.cliAgents?.off('change', onCliAgentsChange);
     clearTimeout(refreshTimer);
     clearTimeout(statusPublishTimer);
     clearTimeout(reconnectTimer);

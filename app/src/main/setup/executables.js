@@ -5,14 +5,22 @@ const { constants } = require('node:fs');
 const path = require('node:path');
 
 // Check the selected file without launching it or starting a sign-in flow.
-async function executablePath(bin, { env = process.env, platform = process.platform } = {}) {
+// pathextOnly (win32, a name without an extension): skip the bare name and
+// accept only name+PATHEXT candidates, the way cmd.exe itself searches. npm's
+// cmd-shim installs `claude` (an sh script), `claude.cmd` and `claude.ps1` side
+// by side, and a caller that execs the result (providers/cli-agents.js) cannot
+// run the sh script. Setup keeps the default (bare name first) so an
+// explicitly chosen extensionless file still validates.
+async function executablePath(bin, { env = process.env, platform = process.platform, pathextOnly = false } = {}) {
   const value = String(bin || '').trim();
   if (!value) return null;
   const windows = platform === 'win32';
   const extensions = windows ? String(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')
     .map((ext) => ext.trim().toLowerCase()).filter((ext) => /^\.[a-z0-9]+$/.test(ext)) : [];
   const explicit = /[\\/]/.test(value) || path.isAbsolute(value);
-  const names = windows && !path.extname(value) ? [value, ...extensions.map((ext) => value + ext)] : [value];
+  const names = windows && !path.extname(value)
+    ? [...(pathextOnly ? [] : [value]), ...extensions.map((ext) => value + ext)]
+    : [value];
   const candidates = explicit ? names : String(env.PATH || '').split(windows ? ';' : path.delimiter).filter(Boolean)
     .flatMap((dir) => names.map((name) => path.join(dir.replace(/^"|"$/g, ''), name)));
   for (const candidate of candidates) {
