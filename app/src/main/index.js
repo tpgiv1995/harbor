@@ -2772,6 +2772,7 @@ app.whenReady().then(async () => {
   transcriptProvider = createTranscriptProvider({
     // The readable form: a compressed codex rollout opens from its plain copy.
     getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
+    providerPaneAlive: (id, provider) => sidebarBridge.providerPaneAlive(id, provider),
     contextCacheDir: contextDir,
     // Slow and failed transcript opens, with the step that took the time: the
     // evidence for the next window stuck on "No transcript yet".
