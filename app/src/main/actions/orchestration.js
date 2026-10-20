@@ -1,4 +1,6 @@
 'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
 const { legacyConfig } = require('../config/migrate.js');
 const { createControlClient } = require('../session-daemon/factory.js');
 const { shellWords, canonicalCwd } = require('../providers/delegations.js');
@@ -19,7 +21,7 @@ function shellQuote(value) {
 // would open a second one and leave this pane empty. A launcher the user
 // supplied instead of ours has never heard of `--here`, so it gets exactly what
 // it got before: the config home and the prompt.
-const SHIPPED_LAUNCHER = require('node:path').resolve(__dirname, '../../../../bin/ai');
+const SHIPPED_LAUNCHER = path.resolve(__dirname, '../../../../bin/ai');
 const WINDOWS_LAUNCHER_EXTENSIONS = ['.cmd', '.exe', '.bat'];
 
 function launcherFlags(launcher) {
@@ -74,14 +76,27 @@ function launcherCommand(launcher, {
 // always inside one quoted word.
 const ROLE_ENV = 'HARBOR_ORCH_ROLE';
 const roleAssignment = (role) => `${ROLE_ENV}=${role}`;
+const ORCH_PROVIDERS = new Set(['claude', 'codex']);
+
+// Only Harbor's own bin/ai understands --provider; a user-supplied launcher
+// gets exactly what it always got (createOrchestrationActions refuses a codex
+// orchestrator on one). bin/ai launches codex with approvals and the sandbox
+// bypassed, which a codex orchestrator needs: it spawns `codex exec` workers,
+// creates lane worktrees outside the project root and writes the delegate
+// queue, and a workspace-write sandbox refuses all three.
+function providerFlags(launcher, { provider = 'claude' } = {}) {
+  if (!launcherFlags(launcher).length || provider === 'claude') return '';
+  return `--provider ${provider} `;
+}
 
 function buildResearchCommand(launcher, home, researchCommand, goal, overrides = {}) {
-  const escaped = sanitizeGoal(goal).replace(/'/g, "'\\''");
-  return `${roleAssignment('research')} ${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} '${researchCommand} ${escaped}'`;
+  const prompt = overrides.prompt ?? `${researchCommand} ${sanitizeGoal(goal)}`;
+  return `${roleAssignment('research')} ${launcherCommand(launcher, overrides)}${providerFlags(launcher, overrides)}--home ${shellQuote(home)} ${shellQuote(prompt)}`;
 }
 
 function buildExecuteCommand(launcher, home, executionCommand, overrides = {}) {
-  return `${roleAssignment('execution')} ${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} ${shellQuote(executionCommand)}`;
+  const prompt = overrides.prompt ?? executionCommand;
+  return `${roleAssignment('execution')} ${launcherCommand(launcher, overrides)}${providerFlags(launcher, overrides)}--home ${shellQuote(home)} ${shellQuote(prompt)}`;
 }
 
 function isExecutionTabLabel(label, executionCommand = '/orchestrate-execution') {
@@ -184,18 +199,91 @@ function createLruCache(max = ORCH_LIVENESS_CACHE_MAX) {
   };
 }
 
+// CODEX HAS NO CLAUDE SLASH COMMANDS, so a Codex orchestrator gets the
+// workflow as its opening prompt: the same command file Claude would expand,
+// frontmatter dropped and $ARGUMENTS substituted. Not Codex custom prompts:
+// installing one would write into the user's CODEX_HOME (a config home Harbor
+// only reads), and a prompt named on the launch argv is sent as text, never
+// expanded as a /prompts: command. The lookup order is Claude's own: the
+// project's commands, then the Claude home's, then the copy Harbor ships.
+// Source tree: <repo>/app/src/main/actions -> <repo>/.claude/commands.
+// Packaged: <Resources>/app/src/main/actions -> <Resources>/.claude/commands,
+// which exists only because package.json's build.extraResources copies it.
+function shippedCommandsDir(actionsDir = __dirname) {
+  return path.resolve(actionsDir, '../../../../.claude/commands');
+}
+const SHIPPED_COMMANDS = shippedCommandsDir();
+
+async function readWorkflowCommand(command, dirs, readFile = fs.promises.readFile) {
+  const name = String(command || '').replace(/^\//, '');
+  if (!/^[\w.-]+$/.test(name)) throw new Error(`orchestration command ${command} is not a command name`);
+  for (const dir of dirs.filter(Boolean)) {
+    try { return { file: path.join(dir, `${name}.md`), text: await readFile(path.join(dir, `${name}.md`), 'utf8') }; }
+    catch { /* next location */ }
+  }
+  throw new Error(`Codex cannot run ${command}: no ${name}.md in the project, the Claude home or Harbor's shipped commands`);
+}
+
+function codexWorkflowPrompt(command, text, args = '') {
+  // A function replacer: a string one would expand $`, $', $& and $$ from the
+  // user's goal ("budget $` dollars" arrived as the text before the token).
+  const body = String(text).replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').replace(/\$ARGUMENTS/g, () => args).trim();
+  return [
+    `Run Harbor's ${command} workflow. These are its instructions verbatim (Codex has no Claude slash commands, so they arrive as this prompt).`,
+    `Its arguments ($ARGUMENTS) are: ${args || '(none)'}`,
+    'Where they name Claude-only tools or sub-agents, use your own shell and tools to the same effect.',
+    '',
+    body,
+  ].join('\n');
+}
+
+// The provider's own profile, never another provider's home: a codex launch
+// handed a CLAUDE config home (or the reverse) is the provider-scoping bug
+// docs/claude/providers.md forbids. Same order as launch.js: the default,
+// then the first.
+function orchestrationProfile(profiles, provider) {
+  const matching = (profiles || []).filter((profile) => (profile.provider || 'claude') === provider && profile.configHome);
+  return matching.find((profile) => profile.isDefault) || matching[0] || null;
+}
+
 function createOrchestrationActions(options = {}) {
   const config = options.config || legacyConfig();
   const launcher = options.launcher || config.orchestration?.launcher;
-  const profile = (config.profiles || []).find((item) => item.isDefault) || config.profiles?.[0];
-  if (!launcher || !profile?.configHome) throw new TypeError('orchestration requires a launcher and profile');
+  const readFile = options.readFile || fs.promises.readFile;
+  if (!launcher || !(config.profiles || []).some((profile) => profile.configHome)) {
+    throw new TypeError('orchestration requires a launcher and profile');
+  }
   const controlClient = options.controlClient || createControlClient({
     env: options.env || process.env,
     sessionStorePolicy: options.sessionStorePolicy,
   });
 
-  async function launchInSession({ projectRoot, command, tabLabel }) {
-    const created = await controlClient.createWorkspace({ cwd: projectRoot, command });
+  function profileFor(provider) {
+    if (!ORCH_PROVIDERS.has(provider)) throw new TypeError(`orchestration cannot run on provider ${provider}`);
+    const profile = orchestrationProfile(config.profiles, provider);
+    if (!profile) throw new Error(`No ${provider} plan with a config home is set up, so a ${provider} orchestrator has nowhere to run.`);
+    // --provider is bin/ai's flag; a user-supplied launcher would hand a
+    // codex request to whatever it wraps, most likely claude.
+    if (provider !== 'claude' && !launcherFlags(launcher).length) {
+      throw new Error(`A ${provider} orchestrator needs Harbor's own bin/ai launcher; orchestration.launcher names another one.`);
+    }
+    return profile;
+  }
+
+  async function overridesFor(provider, projectRoot, command, args) {
+    if (provider !== 'codex') return { provider };
+    const claudeHome = orchestrationProfile(config.profiles, 'claude')?.configHome;
+    const { text } = await readWorkflowCommand(command, [path.join(projectRoot, '.claude', 'commands'),
+      claudeHome && path.join(claudeHome, 'commands'), SHIPPED_COMMANDS], readFile);
+    return { provider, prompt: codexWorkflowPrompt(command, text, args) };
+  }
+
+  // The pane runs `$SHELL -lc <string>`, so the daemon's argv[0] detection
+  // reads a shell and records agent null, and the provider linker's annotate
+  // then refuses (the keeper only rebinds a codex/cursor agent). The kickoff
+  // knows which CLI it started, so a codex orchestrator says so.
+  async function launchInSession({ projectRoot, command, tabLabel, profile, provider }) {
+    const created = await controlClient.createWorkspace({ cwd: projectRoot, command, ...(provider === 'claude' ? {} : { agent: provider }) });
     const paneId = created?.pane_id || created?.id;
     if (!paneId) throw new Error(`session daemon spawn returned no pane_id (got: ${JSON.stringify(created)})`);
     return {
@@ -205,27 +293,32 @@ function createOrchestrationActions(options = {}) {
       cwd: projectRoot,
       tabLabel,
       account: profile.id,
+      provider,
     };
   }
 
-  async function kickoffResearch({ projectRoot, projectLabel, goal }) {
+  async function kickoffResearch({ projectRoot, projectLabel, goal, provider = 'claude' }) {
     if (!projectRoot) throw new TypeError('kickoffResearch requires projectRoot');
     if (!projectLabel) throw new TypeError('kickoffResearch requires projectLabel');
     const trimmedGoal = String(goal || '').trim();
     if (!trimmedGoal) throw new TypeError('kickoffResearch requires a non-empty goal');
+    const profile = profileFor(provider);
+    const overrides = await overridesFor(provider, projectRoot, config.orchestration.researchCommand, sanitizeGoal(trimmedGoal));
     const command = buildResearchCommand(
-      launcher, profile.configHome, config.orchestration.researchCommand, trimmedGoal,
+      launcher, profile.configHome, config.orchestration.researchCommand, trimmedGoal, overrides,
     );
-    return launchInSession({ projectRoot, command, tabLabel: 'orchestrate-research' });
+    return launchInSession({ projectRoot, command, tabLabel: 'orchestrate-research', profile, provider });
   }
 
-  async function kickoffExecute({ projectRoot, projectLabel }) {
+  async function kickoffExecute({ projectRoot, projectLabel, provider = 'claude' }) {
     if (!projectRoot) throw new TypeError('kickoffExecute requires projectRoot');
     if (!projectLabel) throw new TypeError('kickoffExecute requires projectLabel');
+    const profile = profileFor(provider);
+    const overrides = await overridesFor(provider, projectRoot, config.orchestration.executionCommand, '');
     const command = buildExecuteCommand(
-      launcher, profile.configHome, config.orchestration.executionCommand,
+      launcher, profile.configHome, config.orchestration.executionCommand, overrides,
     );
-    return launchInSession({ projectRoot, command, tabLabel: 'orchestrate-execution' });
+    return launchInSession({ projectRoot, command, tabLabel: 'orchestrate-execution', profile, provider });
   }
 
   return {
@@ -242,6 +335,7 @@ module.exports = {
   ROLE_ENV,
   buildResearchCommand,
   buildExecuteCommand,
+  codexWorkflowPrompt,
   isExecutionTabLabel,
   launcherFlags,
   checkExecuteMutex,
@@ -250,4 +344,6 @@ module.exports = {
   createLruCache,
   ORCH_LIVENESS_CACHE_MAX,
   createOrchestrationActions,
+  SHIPPED_COMMANDS,
+  shippedCommandsDir,
 };

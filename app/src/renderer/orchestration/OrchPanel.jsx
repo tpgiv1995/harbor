@@ -137,6 +137,9 @@ export function OrchPanel({ project, onClose }) {
   const [overrideMutexReason, setOverrideMutexReason] = useState(null);
   const [previewText, setPreviewText] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(null);
+  // Which CLI runs the orchestrator. Codex gets the same workflow as its
+  // opening prompt (actions/orchestration.js), under its own plan's home.
+  const [provider, setProvider] = useState('claude');
 
   // For verify-mode: expose a way to force mutex blocked state
   useEffect(() => {
@@ -200,6 +203,7 @@ export function OrchPanel({ project, onClose }) {
         projectLabel: project.label,
         sessionId,
         goal: researchGoal.trim(),
+        provider,
       });
       if (result?.error) throw new Error(result.error);
       setResearchState('done');
@@ -219,6 +223,7 @@ export function OrchPanel({ project, onClose }) {
       const result = await window.harbor.orchestration.kickoffExecute({
         projectLabel: project.label,
         sessionId,
+        provider,
       });
       if (result?.blocked) {
         setOverrideMutexReason(result.reason);
@@ -303,6 +308,22 @@ export function OrchPanel({ project, onClose }) {
       <div className="orch-section orch-kickoff-section">
         <h3 className="orch-section-label">Kickoff</h3>
 
+        <div className="orch-provider-pick" role="radiogroup" aria-label="Orchestrator">
+          {[['claude', 'Claude'], ['codex', 'Codex']].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="radio"
+              aria-checked={provider === id}
+              className={`orch-provider-opt${provider === id ? ' on' : ''}`}
+              disabled={researchState === 'running' || executeState === 'running'}
+              onClick={() => setProvider(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="orch-kickoff-research">
           <label className="orch-goal-label" htmlFor="orch-goal-input">Research goal</label>
           <textarea
@@ -319,7 +340,7 @@ export function OrchPanel({ project, onClose }) {
             disabled={!researchGoal.trim() || researchState === 'running' || !sessionId}
             onClick={handleResearch}
           >
-            {researchState === 'running' ? 'Starting...' : 'Start research (team)'}
+            {researchState === 'running' ? 'Starting...' : `Start research (${provider === 'codex' ? 'Codex' : 'team'})`}
           </button>
           {researchState === 'done' && (
             <p className="orch-kickoff-ok">Research session started. Opening its pane...</p>
@@ -333,7 +354,7 @@ export function OrchPanel({ project, onClose }) {
             disabled={executeLocked({ mutexBlocked: mutex.blocked, executeState, sessionId })}
             onClick={handleExecute}
           >
-            {executeState === 'running' ? 'Starting...' : 'Execute (team)'}
+            {executeState === 'running' ? 'Starting...' : `Execute (${provider === 'codex' ? 'Codex' : 'team'})`}
           </button>
           {mutex.blocked && (
             <p className="orch-mutex-reason">{mutex.reason}</p>

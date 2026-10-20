@@ -5754,6 +5754,11 @@ button { font-family: inherit; }
 
 .orch-kickoff-btn:hover:not(:disabled) { background: var(--surface-3); }
 
+.orch-provider-pick { display: inline-flex; gap: 2px; padding: 2px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.orch-provider-opt { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--text-dim, var(--text)); cursor: pointer; font: inherit; font-size: 12px; }
+.orch-provider-opt.on { background: var(--surface-3); color: var(--text); }
+.orch-provider-opt:disabled { opacity: 0.45; cursor: not-allowed; }
+
 .orch-kickoff-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;

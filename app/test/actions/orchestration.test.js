@@ -16,6 +16,8 @@ const {
   createLruCache,
   ORCH_LIVENESS_CACHE_MAX,
   createOrchestrationActions,
+  SHIPPED_COMMANDS,
+  shippedCommandsDir,
 } = require('../../src/main/actions/orchestration.js');
 const { createDelegateProvider, queuePath } = require('../../src/main/providers/delegate.js');
 const { snapshotFromSessions } = require('../../src/main/session-daemon/client.js');
@@ -423,4 +425,135 @@ test('the --here flag is emitted for Harbor own launcher and withheld from a use
     buildExecuteCommand(theirs, ORCH_HOME, EXECUTION_COMMAND),
     `HARBOR_ORCH_ROLE=execution ${theirs} --home '${ORCH_HOME}' '/orchestrate-execution'`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Codex as the orchestrator
+// ---------------------------------------------------------------------------
+
+const CODEX_HOME = `${TEST_HOME}/.codex-work`;
+const CODEX_CONFIG = {
+  ...ORCH_CONFIG,
+  profiles: [
+    ...ORCH_CONFIG.profiles,
+    { id: 'codex-work', label: 'Codex', letter: 'C', color: '#888888', provider: 'codex', configHome: CODEX_HOME, email: null, isDefault: true },
+  ],
+};
+
+test('a codex execute kickoff runs bin/ai --provider codex under the codex home and names the agent', async () => {
+  const { controlClient, calls } = makeClientFake();
+  const actions = createOrchestrationActions({ controlClient, config: CODEX_CONFIG });
+  const result = await actions.kickoffExecute({ projectRoot: '/nonexistent/project', projectLabel: 'project', provider: 'codex' });
+  const [call] = calls;
+  // The pane is `$SHELL -lc`, so the daemon reads a shell off argv[0]; the
+  // kickoff says which CLI it started so the codex linker's annotate is accepted.
+  assert.equal(call.agent, 'codex');
+  assert.ok(call.command.startsWith(`HARBOR_ORCH_ROLE=execution ${LAUNCHER} --here --provider codex --home '${CODEX_HOME}' '`), call.command);
+  assert.ok(!call.command.includes(ORCH_HOME), 'a claude config home is never handed to codex');
+  // No project or claude-home copy exists here, so the SHIPPED command is used.
+  const shipped = await fs.readFile(path.join(SHIPPED_COMMANDS, 'orchestrate-execution.md'), 'utf8');
+  assert.ok(shipped.includes('allowed-tools:'));
+  assert.ok(call.command.includes('Execute the already-loaded orchestration queue'), 'the workflow body travels as the prompt');
+  assert.ok(!call.command.includes('allowed-tools:'), 'frontmatter is dropped');
+  assert.equal(result.provider, 'codex');
+  assert.equal(result.account, 'codex-work');
+  // And the pane it makes is what the mutex recognises.
+  const state = snapshotFromSessions([{ id: 'x', cwd: '/nonexistent/project', argv: ['/bin/zsh', '-lc', call.command] }], TEST_HOME);
+  assert.equal(checkExecuteMutex({ projectLabel: 'project', projectRoot: '/nonexistent/project', terminalState: state, queue: { batches: [] } }).blocked, true);
+});
+
+test('a codex research prompt takes the project command first and substitutes the goal', async () => {
+  const reads = [];
+  const readFile = async (file) => {
+    reads.push(file);
+    if (file === path.join('/repo', '.claude', 'commands', 'orchestrate-research.md')) {
+      return '---\ndescription: x\nargument-hint: <goal>\n---\n\nResearch this: $ARGUMENTS\nThen stop.\n';
+    }
+    throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+  };
+  const { controlClient, calls } = makeClientFake();
+  const actions = createOrchestrationActions({ controlClient, config: CODEX_CONFIG, readFile });
+  await actions.kickoffResearch({ projectRoot: '/repo', projectLabel: 'repo', goal: "the author's\nwidget costs $` dollars", provider: 'codex' });
+  assert.equal(reads[0], path.join('/repo', '.claude', 'commands', 'orchestrate-research.md'));
+  const words = require('../../src/main/providers/delegations.js').shellWords(calls[0].command.replace(/^HARBOR_ORCH_ROLE=research /, ''));
+  const prompt = words.at(-1);
+  assert.match(prompt, /^Run Harbor's \/orchestrate-research workflow/);
+  assert.ok(prompt.includes("Research this: the author's widget costs $` dollars"), prompt);
+  assert.ok(!prompt.includes('argument-hint'), prompt);
+});
+
+test('codex kickoffs refuse honestly: no codex plan, a launcher that is not bin/ai, or an unknown provider', async () => {
+  const { controlClient } = makeClientFake();
+  const noCodex = createOrchestrationActions({ controlClient, config: ORCH_CONFIG });
+  await assert.rejects(() => noCodex.kickoffExecute({ projectRoot: '/p', projectLabel: 'p', provider: 'codex' }), /No codex plan/);
+  const foreign = createOrchestrationActions({ controlClient, config: { ...CODEX_CONFIG, orchestration: { ...CODEX_CONFIG.orchestration, launcher: '/home/u/bin/my-ai' } } });
+  await assert.rejects(() => foreign.kickoffExecute({ projectRoot: '/p', projectLabel: 'p', provider: 'codex' }), /bin\/ai/);
+  await assert.rejects(() => noCodex.kickoffExecute({ projectRoot: '/p', projectLabel: 'p', provider: 'cursor' }), /cannot run on provider cursor/);
+});
+
+test('a claude kickoff keeps the claude home even when a codex plan is the default', async () => {
+  const { controlClient, calls } = makeClientFake();
+  const actions = createOrchestrationActions({ controlClient, config: CODEX_CONFIG });
+  await actions.kickoffExecute({ projectRoot: '/p', projectLabel: 'p' });
+  assert.equal(calls[0].command, `HARBOR_ORCH_ROLE=execution ${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-execution'`);
+  assert.equal('agent' in calls[0], false, 'a claude kickoff spawns exactly as before');
+});
+
+test('the kickoff IPC handlers pass the provider through and return a refusal as an error', () => {
+  const source = require('node:fs').readFileSync(path.join(__dirname, '../../src/main/index.js'), 'utf8');
+  for (const [channel, call] of [['orchestration:kickoff-research', 'orchActions.kickoffResearch('], ['orchestration:kickoff-execute', 'orchActions.kickoffExecute(']]) {
+    const start = source.indexOf(`ipcMain.handle('${channel}'`);
+    const body = source.slice(start, source.indexOf('ipcMain.handle(', start + 10));
+    assert.match(body, /provider = 'claude'/, channel);
+    assert.ok(body.slice(body.indexOf(call)).match(/^[^)]*provider/), `${channel} forwards provider`);
+    assert.match(body, /catch \(error\) \{\s*return \{ error: error\.message \};/, `${channel} surfaces the refusal`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Shipped workflow commands reach the PACKAGED app
+// ---------------------------------------------------------------------------
+
+// A Codex Orch kickoff in a project without its own command files falls back
+// to Harbor's shipped copy. From the source tree that is <repo>/.claude/commands;
+// in a packaged app it is <Resources>/.claude/commands, which exists only if
+// build.extraResources copies the folder there. Without it every Codex kickoff
+// outside the Harbor repo threw in the installed app while tests, running from
+// the source tree, stayed green.
+const APP_DIR = path.resolve(__dirname, '../..');
+const WORKFLOW_FILES = ['orchestrate-execution.md', 'orchestrate-research.md'];
+
+test('the shipped commands directory resolves to the repo copy in the source tree', async () => {
+  assert.equal(SHIPPED_COMMANDS, path.resolve(APP_DIR, '..', '.claude', 'commands'));
+  for (const name of WORKFLOW_FILES) {
+    const text = await fs.readFile(path.join(SHIPPED_COMMANDS, name), 'utf8');
+    assert.ok(text.length > 0, `${name} is empty`);
+  }
+});
+
+test('every platform build copies the workflow commands to where the packaged app looks for them', async () => {
+  const pkg = JSON.parse(await fs.readFile(path.join(APP_DIR, 'package.json'), 'utf8'));
+  const build = pkg.build;
+  // electron-builder places the app at <Resources>/app (asar is off) and
+  // resolves each extraResources `to` against <Resources>, `from` against the
+  // app dir. The root list and the platform list are BOTH applied
+  // (app-builder-lib getFileMatchers: config[name], then the platform's).
+  assert.equal(build.asar, false, 'the packaged-path math below assumes an unpacked app dir');
+  const resources = path.resolve('/packaged/Resources');
+  const packagedLookup = shippedCommandsDir(path.join(resources, 'app', 'src', 'main', 'actions'));
+  for (const platform of ['mac', 'win', 'linux']) {
+    const entries = [...(build.extraResources || []), ...((build[platform] || {}).extraResources || [])]
+      .filter((entry) => entry && typeof entry === 'object');
+    const match = entries.find((entry) => path.resolve(resources, entry.to || '') === packagedLookup);
+    assert.ok(match, `${platform}: no extraResources entry copies to ${path.relative(resources, packagedLookup)}`);
+    const from = path.resolve(APP_DIR, match.from);
+    assert.equal(from, SHIPPED_COMMANDS, `${platform}: extraResources copies from ${from}`);
+    for (const name of WORKFLOW_FILES) {
+      await fs.access(path.join(from, name));
+      if (match.filter) {
+        const filters = [].concat(match.filter);
+        assert.ok(filters.some((filter) => filter === '**/*' || filter === '*.md' || filter === '**/*.md'), `${platform}: filter ${filters} drops ${name}`);
+      }
+    }
+  }
 });

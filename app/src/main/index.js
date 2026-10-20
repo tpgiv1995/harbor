@@ -1763,18 +1763,25 @@ function registerIpc() {
   // no explanation, and the Orch view surfaces `error` to the user.
   const ORCH_UNAVAILABLE = { error: 'Orchestration is not configured: Harbor could not build it from this config. Check orchestration.launcher and your default plan, or turn the Orch view off in the setup wizard.' };
 
-  ipcMain.handle('orchestration:kickoff-research', async (_event, { projectLabel, sessionId, goal }) => {
+  // `provider` picks the orchestrator's CLI (claude | codex); the actions
+  // refuse anything else by name, and a missing plan or workflow file comes
+  // back as `error` for the Orch view to show.
+  ipcMain.handle('orchestration:kickoff-research', async (_event, { projectLabel, sessionId, goal, provider = 'claude' }) => {
     if (!orchActions) return ORCH_UNAVAILABLE;
     const projectRoot = await orchGetProjectRoot(sessionId);
     if (!projectRoot) return { error: 'Could not determine project root' };
-    return orchActions.kickoffResearch({ projectRoot, projectLabel, goal });
+    try {
+      return await orchActions.kickoffResearch({ projectRoot, projectLabel, goal, provider });
+    } catch (error) {
+      return { error: error.message };
+    }
   });
 
   let executeKickoffInFlight = false;
   // Covers the ~1 s between a successful kickoff and the bridge's next poll
   // reporting the new pane (see createExecuteReservations).
   const executeReservations = createExecuteReservations();
-  ipcMain.handle('orchestration:kickoff-execute', async (_event, { projectLabel, sessionId }) => {
+  ipcMain.handle('orchestration:kickoff-execute', async (_event, { projectLabel, sessionId, provider = 'claude' }) => {
     if (!orchActions) return ORCH_UNAVAILABLE;
     if (executeKickoffInFlight) return { blocked: true, reason: 'An execute kickoff is already in progress.' };
     executeKickoffInFlight = true;
@@ -1796,9 +1803,11 @@ function registerIpc() {
       if (mutex.blocked) return { blocked: true, reason: mutex.reason };
       const reserved = executeReservations.blockedReason(projectRoot, terminalState);
       if (reserved) return { blocked: true, reason: reserved };
-      const launched = await orchActions.kickoffExecute({ projectRoot, projectLabel });
+      const launched = await orchActions.kickoffExecute({ projectRoot, projectLabel, provider });
       executeReservations.reserve(projectRoot, launched);
       return launched;
+    } catch (error) {
+      return { error: error.message };
     } finally {
       executeKickoffInFlight = false;
     }
