@@ -578,6 +578,11 @@ function createSidebarBridge(options = {}) {
       subscription.on('error', (e) => emitter.emit('error', e));
       subscription.on('close', () => { if (!closed) scheduleReconnect(); });
       liveState = extractLiveState(boot.snapshot);
+      // The subscription was seeded with this snapshot, so it reports only
+      // what changes after it. Whoever reads its status events (the notifier)
+      // needs the same starting point, on a reconnect as much as at boot, or a
+      // pane already working when it connected never toasts its finish.
+      emitter.emit('daemon-snapshot', boot.snapshot);
       publish();
       {
         dormantTimer = setInterval(() => { if (dormantSupported) refreshDormant(); refreshInteractivePanes(); }, DORMANT_POLL_MS);
