@@ -5,8 +5,9 @@ import { sessionModelOptions, sessionEffortOptions } from './session-model-optio
 import { watchProviderOptions } from './provider-options.cjs';
 import { folderLabel as labelFolder } from './folder-label.cjs';
 import {
-  currentEffort, currentModel, isReconfigure, pendingSwitch,
+  codexApplyPlan, currentCodexPermission, currentEffort, currentModel, isReconfigure, pendingSwitch,
 } from './session-config-mode.cjs';
+import { CODEX_PERMISSIONS, DEFAULT_CODEX_PERMISSION } from '../shared/codex-permission.cjs';
 
 const PROVIDER_KEYS = ['claude', 'codex', 'cursor'];
 const DEFAULT_KEY = 'harbor-new-session-default';
@@ -116,12 +117,22 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
   const previousProvider = useRef(runningProvider);
   const [account, setAccount] = useState(request.account || defaultProfileId);
   const [model, setModel] = useState(
-    request.model || currentModel(request.header, request.session?.model),
+    request.model || currentModel(request.header, request.session?.model, runningProvider),
   );
   const [effort, setEffort] = useState(
     request.effort || currentEffort(request.header, request.session?.effort) || 'high',
   );
   const [permMode, setPermMode] = useState(undefined);
+  // Codex's permission mode is a LAUNCH choice (codex has no Shift+Tab cycle a
+  // pane can be driven through). An existing session starts from what its
+  // header can name, which may be nothing (null: no button lit, and Apply keeps
+  // the recorded mode); a launch starts on the provider's default mode.
+  const [codexPermission, setCodexPermission] = useState(() => (
+    runningProvider === 'codex' && request.session?.id && !/^(pane|live):/.test(request.session.id)
+      ? currentCodexPermission(request.header) : DEFAULT_CODEX_PERMISSION
+  ));
+  const [codexSearch, setCodexSearch] = useState(false);
+  const [codexAddDirs, setCodexAddDirs] = useState([]);
   const [showVersions, setShowVersions] = useState(false);
   const [cmdSearch, setCmdSearch] = useState('');
   const [starting, setStarting] = useState(false);
@@ -203,6 +214,19 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
   // pane presence: keying the copy on the pane alone showed "unreadable" plus
   // an enabled-sounding tooltip over a dead button for exactly those classes.
   const driving = request.drivable !== false && Boolean(request.pane?.paneId);
+  // How Apply reaches a codex session: resume a dormant one, or close an idle
+  // Harbor pane and resume it; refused mid-turn and for outside panes.
+  const codexPlan = reconfiguring && provider === 'codex' ? codexApplyPlan({
+    session: request.session,
+    pane: request.pane,
+    drivable: request.drivable,
+    header: request.header,
+    model,
+    effort: selectedEffort,
+    permission: codexPermission,
+    launchedModel: request.session?.model,
+    launchedEffort: request.session?.effort,
+  }) : null;
   // Cycling the permission mode still needs a live pane Harbor already controls.
   const canCyclePermission = reconfiguring && driving;
   const folder = request.folder || request.session?.cwd || null;
@@ -230,7 +254,25 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
     setLaunchError(null);
     try {
       if (makeDefault) saveDefault();
-      if (reconfiguring) {
+      if (codexPlan) {
+        if (codexPlan.kind === 'blocked') throw new Error(codexPlan.reason);
+        if (codexPlan.kind !== 'none') {
+          if (codexPlan.kind === 'restart') {
+            // The same verified close the workers menu runs: it reports
+            // verified only once the codex PROCESS is gone, so a resume never
+            // lands beside a survivor writing the same rollout.
+            const closed = await window.harbor.workers.close({ paneId: request.pane.paneId });
+            if (!closed?.ok || !closed?.verified) {
+              throw new Error(`Could not stop the running Codex pane: ${closed?.reason || 'the process did not exit'}`);
+            }
+          }
+          await window.harbor.session.resume({
+            id: request.session.id,
+            detectedHome: request.session.home,
+            overrides: codexPlan.overrides,
+          });
+        }
+      } else if (reconfiguring) {
         // Switch only what the user actually changed. The parent adopts an
         // outside session (or resumes a dead one) as part of the switch, once.
         const next = pendingSwitch({
@@ -242,7 +284,10 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
         });
         if (next.model || next.effort) await onReconfigure(next);
       } else {
-        await onStart({ account, provider, model, effort: selectedEffort, folder, sessionId: request.session?.id });
+        await onStart({
+          account, provider, model, effort: selectedEffort, folder, sessionId: request.session?.id,
+          ...(provider === 'codex' ? { permission: codexPermission || DEFAULT_CODEX_PERMISSION, search: codexSearch, addDirs: codexAddDirs } : {}),
+        });
       }
       onClose();
     } catch (error) {
@@ -262,6 +307,11 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
       workspaceId: request.pane.workspaceId,
     });
     if (res?.ok) setPermMode(res.mode ?? null);
+  };
+
+  const addCodexDir = async () => {
+    const dir = await window.harbor.session.pickFolder().catch(() => null);
+    if (dir) setCodexAddDirs((dirs) => (dirs.includes(dir) || dir === folder ? dirs : [...dirs, dir]));
   };
 
   const insert = (value) => {
@@ -315,6 +365,41 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
             {provider === 'claude' && caps?.effort?.note ? <div className="cap-note">{caps.effort.note}</div> : null}
           </section> : null}
 
+          {provider === 'codex' ? <section className="cap-sec">
+            <div className="cap-sec-h">Permissions</div>
+            <div className="config-account config-codex-perm" role="group" aria-label="Codex permissions">
+              {(providerOptions?.permissions || CODEX_PERMISSIONS).map((mode) => (
+                <button
+                  type="button"
+                  key={mode.id}
+                  className={codexPermission === mode.id ? 'active' : ''}
+                  aria-pressed={codexPermission === mode.id}
+                  title={mode.hint}
+                  onClick={() => setCodexPermission(mode.id)}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+            <div className="cap-note">{CODEX_PERMISSIONS.find((mode) => mode.id === codexPermission)?.hint
+              || 'current mode as recorded; pick one to change it'}</div>
+          </section> : null}
+
+          {/* Launch-only codex extras: live web search and extra writable
+              folders. Neither is recorded in the rollout, so they are not
+              offered when reconfiguring (a resume could not keep them). */}
+          {provider === 'codex' && !reconfiguring ? <section className="cap-sec">
+            <div className="cap-sec-h">Codex extras</div>
+            <label className="config-default config-codex-opt"><input type="checkbox" checked={codexSearch} onChange={(event) => setCodexSearch(event.target.checked)} /> Web search</label>
+            {codexAddDirs.map((dir) => (
+              <div key={dir} className="config-codex-dir" title={dir}>
+                <span>{labelFolder(dir) || dir}</span>
+                <button type="button" aria-label={`Remove ${dir}`} onClick={() => setCodexAddDirs((dirs) => dirs.filter((item) => item !== dir))}>×</button>
+              </div>
+            ))}
+            <button type="button" className="cap-more" onClick={addCodexDir}>Add writable folder…</button>
+          </section> : null}
+
           {/* EVERYTHING BELOW DESCRIBES A RUNNING SESSION, so none of it belongs
               on the launch form. Permission mode is read off a pane and changed
               by typing into it; fast mode, plugins and slash commands all come
@@ -342,20 +427,27 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
         </div>
 
         <label className="config-default"><input type="checkbox" checked={makeDefault} onChange={(event) => setMakeDefault(event.target.checked)} /> Set as default for new sessions</label>
-        {/* A running codex/cursor session cannot be re-modelled from here (their
-            model switch is an interactive picker inside their own TUI), so this
-            button starts a NEW session. Say that outright: the same button
-            silently launching a second session was a footgun. */}
-        <div className="config-folder" title={folder || undefined}>{reconfiguring
-          ? 'Changes apply to this session'
-          : request.session?.id && provider === runningProvider && provider !== 'claude'
-            ? `${providerIdentity(provider).label} switches model inside its own TUI; this starts a NEW session in ${folderLabel}`
-            : `Start in ${folderLabel}`}</div>
+        {/* A running cursor session cannot be re-modelled from here (its model
+            switch is an interactive picker inside its own TUI), so this button
+            starts a NEW session. Say that outright: the same button silently
+            launching a second session was a footgun. Codex says how Apply will
+            reach it, because "apply" there means resume, or close and resume. */}
+        <div className="config-folder" title={codexPlan?.reason || folder || undefined}>{codexPlan
+          ? codexPlan.kind === 'blocked' ? codexPlan.reason
+            : request.pane?.paneId ? 'Changes stop this Codex pane and resume the session with the new settings'
+              : 'Changes resume this Codex session with the new settings'
+          : reconfiguring
+            ? 'Changes apply to this session'
+            : request.session?.id && provider === runningProvider && provider !== 'claude'
+              ? provider === 'codex'
+                ? `Codex names its session at the first message; until then this starts a NEW session in ${folderLabel}`
+                : `${providerIdentity(provider).label} switches model inside its own TUI; this starts a NEW session in ${folderLabel}`
+              : `Start in ${folderLabel}`}</div>
         {launchError ? <div className="config-launch-error" role="alert">{launchError}</div> : null}
         {!providerOptions && !launchError ? <div className="config-launch-error" role="status">
           {request.unavailable || (options ? 'This provider is disabled. Choose an enabled provider or enable one in Setup.' : 'Loading providers...')}
         </div> : null}
-        <button className="new-session-start" type="submit" disabled={!providerOptions || starting}>{starting ? 'Working…' : actionLabel}</button>
+        <button className="new-session-start" type="submit" disabled={!providerOptions || starting || codexPlan?.kind === 'blocked'}>{starting ? 'Working…' : actionLabel}</button>
       </form>
     </div>, document.body,
   );

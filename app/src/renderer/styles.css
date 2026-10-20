@@ -10644,3 +10644,28 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .tcd-link { padding: 0; border: 0; background: none; color: var(--ac2); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgb(var(--ac-rgb) / 45%); }
 .tcd-rounds { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12.5px; }
 .tcd-rounds li { display: grid; gap: 1px; }
+/* Codex launch choices in the session popover. The permission row reuses the
+   Plan chips' segmented look with four columns and the accent colour (a mode
+   is not a profile, so it has no profile colour). */
+.config-codex-perm { grid-template-columns: repeat(4, 1fr); }
+.config-codex-perm button.active {
+  background: color-mix(in srgb, var(--ac) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ac) 40%, transparent);
+  color: var(--ac);
+}
+.config-codex-opt { padding: 4px 9px; font-size: 12px; }
+.config-codex-dir {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 4px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-soft);
+  font: 500 11px var(--font-mono);
+}
+.config-codex-dir span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.config-codex-dir button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; }
+.config-codex-dir button:hover { color: var(--tx); }

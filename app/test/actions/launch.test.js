@@ -199,6 +199,39 @@ test('provider launches and resumes select only a profile owned by that provider
   }), ['--provider', 'cursor', '--resume-id', 'session-id'], 'Cursor never invents a home flag');
 });
 
+// The new-session popover's codex choices: permission mode, web search and
+// extra writable folders travel to bin/ai; nothing is sent unless picked
+// (bin/ai has its own default), and none of them reach other providers.
+test('buildNewArgv carries codex permission, search and add-dirs, and only for codex', () => {
+  const profiles = [{ id: 'codex-work', provider: 'codex', configHome: `${FIXTURE_HOME}/.codex-work`, isDefault: true }, ...FIXTURE_PROFILES];
+  assert.deepEqual(buildNewArgv({
+    account: 'codex-work', provider: 'codex', profiles, permission: 'read-only', search: true,
+    addDirs: [`${FIXTURE_HOME}/shared`, 'relative/dir', 42, `${FIXTURE_HOME}/docs`], prompt: 'go',
+  }), [
+    '--home', `${FIXTURE_HOME}/.codex-work`, '--provider', 'codex',
+    '--permission', 'read-only', '--search',
+    '--add-dir', `${FIXTURE_HOME}/shared`, '--add-dir', `${FIXTURE_HOME}/docs`, 'go',
+  ]);
+  assert.deepEqual(buildNewArgv({ account: 'codex-work', provider: 'codex', profiles }), [
+    '--home', `${FIXTURE_HOME}/.codex-work`, '--provider', 'codex',
+  ]);
+  assert.deepEqual(buildNewArgv({
+    account: 'personal', provider: 'claude', profiles: FIXTURE_PROFILES, permission: 'full', search: true, addDirs: ['/x'],
+  }), ['--home', `${FIXTURE_HOME}/.claude`]);
+});
+
+test('a dormant codex resume carries only the changed settings; cursor takes none', () => {
+  assert.deepEqual(buildProviderResumeArgv({
+    provider: 'codex', id: 'sid', profiles: [], overrides: { model: 'gpt-6-sol', effort: 'xhigh', permission: 'ask' },
+  }), ['--provider', 'codex', '--resume-id', 'sid', '--model', 'gpt-6-sol', '--effort', 'xhigh', '--permission', 'ask']);
+  assert.deepEqual(buildProviderResumeArgv({
+    provider: 'codex', id: 'sid', profiles: [], overrides: { model: null, effort: 'default', permission: null },
+  }), ['--provider', 'codex', '--resume-id', 'sid']);
+  assert.deepEqual(buildProviderResumeArgv({
+    provider: 'cursor', id: 'sid', profiles: [], overrides: { model: 'x', permission: 'full' },
+  }), ['--provider', 'cursor', '--resume-id', 'sid']);
+});
+
 test('newSession: calls AI_BIN with correct argv and cwd for team', async () => {
   // Profiles are INJECTED (FIXTURE_PROFILES): unwired this falls through to
   // legacyConfig()'s real ~/.claude* discovery, and `team` only resolves to
@@ -279,6 +312,13 @@ test('resumeProviderSession: bin/ai resume argv in the session cwd, claude and c
   assert.equal(result.command, launch.AI_BIN);
   assert.deepEqual(calls[0].argv, ['--provider', 'codex', '--resume-id', 'abc-123']);
   assert.equal(calls[0].options.cwd, realCwd);
+  // The popover's Apply on a dormant codex session rides the same resume.
+  const { execFile: execFile2, calls: calls2 } = makeExecRecorder();
+  const relaunch = createLaunchActions({ execFile: execFile2, readCodexResumeSettings: unreadable });
+  await relaunch.resumeProviderSession({
+    provider: 'codex', cwd: realCwd, id: 'abc-456', overrides: { model: 'gpt-6-sol', permission: 'full' },
+  });
+  assert.deepEqual(calls2[0].argv, ['--provider', 'codex', '--resume-id', 'abc-456', '--model', 'gpt-6-sol', '--permission', 'full']);
   await assert.rejects(
     () => launch.resumeProviderSession({ provider: 'codex', cwd: '/nonexistent/deleted-project', id: 'zz' }),
     /no longer exists/,
@@ -374,10 +414,13 @@ test('the ownership probe never reopens the single-flight window', async () => {
 // zstd, and would then refuse, telling the user to pass flags the rail cannot
 // pass. Main (Electron's Node, zstd built in) reads the record and passes all
 // three flags plus --recorded.
-test('a codex resume passes the recorded model, effort and permission, with --recorded', () => {
+test('a codex resume passes the recorded model, effort and permission, with --recorded; overrides still win', () => {
   const recorded = { model: 'gpt-6-luna', effort: 'low', permission: 'read-only' };
   assert.deepEqual(buildProviderResumeArgv({ provider: 'codex', id: 'sid', profiles: [], recorded }),
     ['--provider', 'codex', '--resume-id', 'sid', '--model', 'gpt-6-luna', '--effort', 'low', '--permission', 'read-only', '--recorded']);
+  assert.deepEqual(buildProviderResumeArgv({
+    provider: 'codex', id: 'sid', profiles: [], recorded, overrides: { model: 'gpt-6-sol', effort: 'default', permission: 'full' },
+  }), ['--provider', 'codex', '--resume-id', 'sid', '--model', 'gpt-6-sol', '--effort', 'low', '--permission', 'full', '--recorded']);
   // A record that names no model, effort or single mode: the default, as bin/ai itself would.
   assert.deepEqual(buildProviderResumeArgv({ provider: 'codex', id: 'sid', profiles: [], recorded: { model: '', effort: '', permission: null } }),
     ['--provider', 'codex', '--resume-id', 'sid', '--permission', 'full', '--recorded']);

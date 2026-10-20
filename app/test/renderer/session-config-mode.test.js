@@ -11,7 +11,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  isReconfigure, currentModel, currentEffort, pendingSwitch,
+  isReconfigure, currentModel, currentEffort, pendingSwitch, currentCodexPermission, codexApplyPlan,
 } = require('../../src/renderer/session-config-mode.cjs');
 
 test('1) a fresh pane-keyed session is RECONFIGURED, because its pane is its identity', () => {
@@ -43,9 +43,9 @@ test('3) a provider change is a new session, and so is no session at all', () =>
   assert.equal(isReconfigure({
     provider: 'codex', runningProvider: 'claude', sessionId: 'abc-123', paneId: 3,
   }), false);
-  // Same provider, but not claude: codex/cursor have no in-session model switch.
+  // Cursor has no in-session model switch and no resume-with-model: new session.
   assert.equal(isReconfigure({
-    provider: 'codex', runningProvider: 'codex', sessionId: 'abc-123', paneId: 3,
+    provider: 'cursor', runningProvider: 'cursor', sessionId: 'abc-123', paneId: 3,
   }), false);
   assert.equal(isReconfigure({
     provider: 'claude', runningProvider: 'claude', sessionId: null, paneId: 3,
@@ -106,4 +106,55 @@ test('6) a minted claude session reconfigures on its real id without pane:', () 
     sessionId: '8e5466c1-960d-4e97-b8e3-999edee069dd',
     paneId: null,
   }), true);
+});
+
+// CODEX RECONFIGURES BY RESUMING. Its model switch is a picker
+// inside its own TUI, but `codex resume -m X -c model_reasoning_effort=Y` takes
+// new settings by id, so a codex session with a real id is CHANGED, not
+// replaced. A provisional window has no id to resume from yet.
+test('6) a codex session with a real id reconfigures; a provisional one still launches', () => {
+  for (const paneId of [3, null]) {
+    assert.equal(isReconfigure({ provider: 'codex', runningProvider: 'codex', sessionId: '01a14000-0000-7000-8000-000000000001', paneId }), true);
+  }
+  for (const sessionId of ['pane:3', 'live:3']) {
+    assert.equal(isReconfigure({ provider: 'codex', runningProvider: 'codex', sessionId, paneId: 3 }), false);
+  }
+  // A codex header's tone is a palette bucket, so codex compares on the slug.
+  assert.equal(currentModel({ model: { id: 'gpt-6-sol', tone: 'other' } }, null, 'codex'), 'gpt-6-sol');
+  assert.equal(currentModel(null, 'gpt-6-luna', 'codex'), 'gpt-6-luna');
+  assert.equal(currentModel(null, null, 'codex'), 'default');
+});
+
+test('7) the header names a codex mode only when it can name exactly one', () => {
+  assert.equal(currentCodexPermission({ sandboxPolicy: 'danger-full-access', approvalPolicy: 'never' }), 'full');
+  assert.equal(currentCodexPermission({ sandboxPolicy: { type: 'read-only' } }), 'read-only');
+  // Workspace-write is auto OR ask depending on the reviewer, which the header
+  // does not carry: unknown, never a guess.
+  assert.equal(currentCodexPermission({ sandboxPolicy: 'workspace-write', approvalPolicy: 'on-request' }), null);
+  assert.equal(currentCodexPermission({ sandboxPolicy: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'user' }), 'ask');
+  assert.equal(currentCodexPermission(null), null);
+});
+
+const IDLE = { model: { id: 'gpt-6-sol' }, effort: 'high', sandboxPolicy: 'danger-full-access', working: false, lastSignal: 'idle' };
+
+test('8) codex Apply: a dormant session resumes, an idle Harbor pane restarts, the rest refuse', () => {
+  const base = { session: { id: 's' }, header: IDLE, model: 'gpt-6-luna', effort: 'high', permission: 'full' };
+  // Only the model changed: the effort and the (recorded) full mode stay home.
+  assert.deepEqual(codexApplyPlan({ ...base, pane: null }), {
+    kind: 'resume', overrides: { model: 'gpt-6-luna', effort: null, permission: null },
+  });
+  assert.equal(codexApplyPlan({ ...base, pane: { paneId: 'p1' }, drivable: true }).kind, 'restart');
+  // Nothing changed: nothing happens, whatever the pane is doing.
+  assert.equal(codexApplyPlan({ ...base, model: 'gpt-6-sol', pane: { paneId: 'p1' }, drivable: true }).kind, 'none');
+  // A permission change alone is a change.
+  assert.deepEqual(codexApplyPlan({ ...base, model: 'gpt-6-sol', permission: 'auto', pane: null }).overrides, { model: null, effort: null, permission: 'auto' });
+  // Picking "Codex default" is no model override: the resume keeps the record.
+  assert.equal(codexApplyPlan({ ...base, model: 'default', pane: null }).kind, 'none');
+  // Mid-turn: the close would cut the turn off.
+  const busy = codexApplyPlan({ ...base, header: { ...IDLE, working: true, lastSignal: 'user-turn' }, pane: { paneId: 'p1' }, drivable: true });
+  assert.equal(busy.kind, 'blocked');
+  assert.match(busy.reason, /wait until this turn finishes/);
+  // Not Harbor's pane, or live outside Harbor with no pane at all.
+  assert.match(codexApplyPlan({ ...base, pane: { paneId: 'p1' }, drivable: false }).reason, /outside Harbor/);
+  assert.match(codexApplyPlan({ ...base, session: { id: 's', isLive: true }, pane: null }).reason, /outside Harbor/);
 });
