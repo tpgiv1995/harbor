@@ -15,6 +15,7 @@ test('unchanged memoized rail rows age their label, turn signal and owner beacon
     runStateCue: require('../../src/shared/session-run-state.cjs').runStateCue,
     railStatus: require('../../src/renderer/sidebar/rail-status.cjs').railStatus,
     subSessionReadOnly: require('../../src/shared/sub-sessions.cjs').subSessionReadOnly,
+    canQuickAnswer: require('../../src/shared/session-run-state.cjs').canQuickAnswer, QuickAnswer: () => null,
   });
   const start = new Date(2026, 0, 1, 10).getTime();
   const session = { lastActive: '2026-01-01 10:00', background: { working: true, lastInTurnMs: start }, ownerEvidence: { beaconMs: start } };
