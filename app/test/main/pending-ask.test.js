@@ -160,3 +160,25 @@ test('a stored request copy of a question is never the live one', () => {
   ]);
   assert.equal(createPendingAskReader().read(realAfterCopy)?.toolId, 'toolu_live');
 });
+
+// Codex 0.160 writes request_user_input as a function_call BEFORE it is
+// answered, and the answer as a function_call_output with the same call_id.
+// Neither record is assistant or user, which the request-copy filter above
+// drops, so the Codex branch has to run first.
+test('a Codex rollout\'s pending request_user_input is the live question until its output lands', () => {
+  const call = (id) => ({
+    timestamp: '2026-10-15T12:00:00Z', type: 'response_item',
+    payload: {
+      type: 'function_call', name: 'request_user_input', call_id: id,
+      arguments: JSON.stringify({ questions: [{ id: 'c', header: 'Color', question: 'Which color?', options: [{ label: 'Red', description: 'Choose red.' }, { label: 'Blue', description: 'Choose blue.' }] }] }),
+    },
+  });
+  const output = (id) => ({ timestamp: '2026-10-15T12:00:05Z', type: 'response_item', payload: { type: 'function_call_output', call_id: id, output: '{}' } });
+  const pending = writeTranscript([{ type: 'session_meta', payload: {} }, call('call_a')]);
+  const ask = createPendingAskReader().read(pending);
+  assert.equal(ask.toolId, 'call_a');
+  assert.equal(ask.provider, 'codex');
+  assert.deepEqual(ask.questions[0].options.map((o) => o.label), ['Red', 'Blue']);
+  assert.equal(ask.questions[0].header, 'Color');
+  assert.equal(createPendingAskReader().read(writeTranscript([call('call_a'), output('call_a')])), null);
+});

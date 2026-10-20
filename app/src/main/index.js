@@ -1351,6 +1351,22 @@ function registerIpc() {
     if (!paneId) return { ok: false, reason: 'no live pane to interrupt' };
     return terminalBridge.sendInput(paneId, '\x1b');
   });
+  // What a Codex pane is holding for its running turn (steers and queued
+  // follow-ups), read off its screen because Codex writes neither to its
+  // rollout until it delivers them. The command bar shows them with Send now,
+  // which is Esc over a pending steer, verified on screen (session-send.js).
+  ipcMain.handle('session:cli-queue', async (_event, payload) => {
+    try {
+      if (sidebarBridge.isDelegated(payload?.sessionId)) return null;
+      return await sessionSend.getCliQueue(payload);
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle('session:send-steer-now', (_event, { paneId, workspaceId } = {}) => {
+    if (sidebarBridge.isDelegatedPane(paneId)) return { ok: false, reason: 'Delegated agents are read-only.' };
+    return sessionSend.sendNowCodex({ pane: { paneId, workspaceId } });
+  });
 
   // Delete a session for good: moves its transcript to a recoverable trash
   // folder (see session-delete.js). The rail's fs-watch drops the row once the
@@ -2808,6 +2824,9 @@ app.whenReady().then(async () => {
     // The CLI's OSC 7501 status as the keeper holds it now (daemon/screen.js),
     // read with the screen: what a one-click answer is checked against.
     readQuickStatus: async (paneId) => quickStatusFromScreen((await sendClient.readPane(paneId, { source: 'visible', lines: 1 }))?.screen),
+    // Codex has no OSC 7501: its prompt seq is the one codex-status.js gave it.
+    readCodexPromptSeq: (paneId) => codexStatus?.seqFor(paneId) ?? null,
+    codexPromptAnswered: (paneId) => codexStatus?.answered(paneId),
     terminalBridge,
     launchActions: {
       ...launchActions,

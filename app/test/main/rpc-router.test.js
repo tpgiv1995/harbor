@@ -28,7 +28,7 @@ LIVE_PUSH_CHANNELS.push('connections:update');
 LIVE_PUSH_CHANNELS.sort();
 LIVE_METHODS.sort();
 const LOCAL_ONLY_METHODS = `artifacts:open-external artifacts:show-in-folder cli-updates:config-diff cli-updates:install cli-updates:restore-config clipboard:image-data-uri clipboard:read-image clipboard:save-image clipboard:write-formatted clipboard:write-image context-menu:add-to-dictionary context-menu:edit-action context-menu:replace-misspelling context-menu:spell-status e2e:emit-launched e2e:get-launch-calls e2e:get-metrics e2e:mark-interactive e2e:quit e2e:session-owner-pid e2e:set-ask-transcript e2e:set-link pick-files pick-folder project-icons:reveal setup:login setup:pick-folder setup:symlink-apply taskbar-badge:set tasks:reveal window:close window:get-bounds window:is-maximized window:menu-action window:minimize window:open-board window:set-bounds window:toggle-maximize`.split(' ');
-const MUTATING_METHODS = `artifacts:thumb ask:answer ask:decline capabilities:cycle-permission-mode cli-updates:check cli-updates:dismiss daemon:retry new-session notes:mutate orchestration:kickoff-execute orchestration:kickoff-research pane:focus resume-session session:cancel-send session:delete session:interrupt session:menu-answer session:menu-state session:send session:takeover setup:save tasks:mutate terminal:blur-pane terminal:close-tab terminal:close-workspace terminal:create-tab terminal:create-workspace terminal:focus-pane terminal:focus-tab terminal:focus-workspace terminal:rename-tab terminal:resize-pane terminal:send-input terminal:set-visible-panes upload:image voice:token whisper:transcribe whiteboard:create whiteboard:delete whiteboard:rename whiteboard:write worker:close workflow:run`.split(' ');
+const MUTATING_METHODS = `artifacts:thumb ask:answer ask:decline capabilities:cycle-permission-mode cli-updates:check cli-updates:dismiss daemon:retry new-session notes:mutate orchestration:kickoff-execute orchestration:kickoff-research pane:focus resume-session session:cancel-send session:delete session:interrupt session:menu-answer session:menu-state session:send session:send-steer-now session:takeover setup:save tasks:mutate terminal:blur-pane terminal:close-tab terminal:close-workspace terminal:create-tab terminal:create-workspace terminal:focus-pane terminal:focus-tab terminal:focus-workspace terminal:rename-tab terminal:resize-pane terminal:send-input terminal:set-visible-panes upload:image voice:token whisper:transcribe whiteboard:create whiteboard:delete whiteboard:rename whiteboard:write worker:close workflow:run`.split(' ');
 
 function mainSources() {
   const root = path.join(__dirname, '../../src/main');
@@ -91,6 +91,9 @@ test('router emits named pushes without a transport dependency', () => {
 LIVE_METHODS.push('session:suggestion', 'session:work-meter');
 // Notification on/off and per-window mute: the desktop's own toasts, local-only.
 LIVE_METHODS.push('notify:get-prefs', 'notify:set-prefs');
+// A Codex pane's pending steers and queued follow-ups (a read), and its Send
+// now (Esc over a pending steer).
+LIVE_METHODS.push('session:cli-queue', 'session:send-steer-now');
 // The Orch view's team chart (2026-11-02): desktop-only reads and pins, plus
 // the one push that carries every change.
 const TEAM_METHODS = ['orchestration:team', 'orchestration:team-watch', 'orchestration:team-unwatch', 'orchestration:team-pins', 'orchestration:team-get-pin', 'orchestration:team-pin', 'orchestration:team-unpin'];
@@ -98,11 +101,11 @@ LIVE_METHODS.push(...TEAM_METHODS);
 LIVE_METHODS.sort();
 LIVE_PUSH_CHANNELS.push('orchestration:team-update');
 LIVE_PUSH_CHANNELS.sort();
-test('channel metadata covers exactly the captured 146 methods and 29 pushes', () => {
+test('channel metadata covers exactly the captured 148 methods and 29 pushes', () => {
   const { METHOD_CHANNELS, PUSH_CHANNELS } = require('../../src/main/rpc/channels.js');
   assert.deepEqual([...METHOD_CHANNELS.map(({ method }) => method)].sort(), LIVE_METHODS);
   assert.deepEqual([...PUSH_CHANNELS].sort(), LIVE_PUSH_CHANNELS);
-  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 146);
+  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 148);
   assert.equal(new Set(PUSH_CHANNELS).size, 29);
   assert.ok(METHOD_CHANNELS.every(({ capability }) => (
     ['local-only', 'remote-safe', 'mutating'].includes(capability)
@@ -113,7 +116,7 @@ test('channel metadata covers exactly the captured 146 methods and 29 pushes', (
       METHOD_CHANNELS.filter((entry) => entry.capability === capability).length,
     ])),
     // session:work-meter moved local-only -> remote-safe 2026-10-11 (phone header).
-    { 'local-only': 58, 'remote-safe': 45, mutating: 43 },
+    { 'local-only': 58, 'remote-safe': 46, mutating: 44 },
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'local-only')

@@ -105,6 +105,8 @@ const MUTATING = new Set([
   'session:send',
   'session:menu-answer',
   'session:interrupt',
+  // Codex's Send now: Esc over a pending steer, checked on screen first.
+  'session:send-steer-now',
   'session:delete',
   'worker:close',
   'terminal:send-input',
@@ -193,6 +195,9 @@ const MUTATING = new Set([
 const REMOTE_SAFE = new Set([
   'sidebar:get-state', 'daemon:get-banner',
   'session:preview', 'session:send-queue',
+  // A Codex pane's pending steers and queued follow-ups, read off its screen
+  // (no resize, no input): the Codex counterpart of the send queue above.
+  'session:cli-queue',
   'session:workflow-runs', 'new-session:options', 'new-session:folder',
   'transcript:open', 'transcript:close', 'links:get', 'usage:get-all',
   // The commit meter: four system-wide numbers, nothing per session.
@@ -289,8 +294,10 @@ const METHOD_NAMES = [
   'notify:set-prefs',
   'session:menu-answer',
   'session:send-queue',
+  'session:cli-queue',
   'session:cancel-send',
   'session:interrupt',
+  'session:send-steer-now',
   'session:delete',
   'capabilities:get',
   'capabilities:permission-mode',

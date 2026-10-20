@@ -495,7 +495,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           onAnswer={(id, payload) => window.harbor.asks.answer({ id, ...payload })}
           onDecline={(id, reason) => window.harbor.asks.decline({ id, reason })}
         />
-      ) : pane && !readOnly && session.provider === 'claude' ? (
+      ) : pane && !readOnly && (session.provider === 'claude' || session.provider === 'codex') ? (
         // Mounted behind the raw terminal too, watching only, so a window left
         // on >_ still turns the taskbar amber when a prompt appears.
         // blockedHint is the evidence OTHER than this card's own verdict: fed
