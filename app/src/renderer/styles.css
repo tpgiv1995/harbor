@@ -10428,6 +10428,14 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .delegation-pill { max-width: none; flex: 0 0 auto; }
 .delegation-group { max-width: 1200px; }
 .delegation-agent-copy p, .delegation-meta, .delegation-project, .delegation-reviewers, .delegation-rounds, .delegation-tasks { color: #a5afbf; }
+.delegation-error { margin: 8px 0 0 34px; font-size: 12px; color: var(--warn, #e5b759); overflow-wrap: anywhere; }
+.delegation-result { margin: 8px 0 0 34px; font-size: 12px; color: #a5afbf; }
+.delegation-result summary { cursor: pointer; }
+.delegation-result pre { margin: 6px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: #d3d9e3; }
+.delegation-state.state-stopped { color: #aab5c6; }
+.delegation-group > .delegation-reviewers { margin: 0; padding: 10px 20px 14px; }
+.delegation-parent-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.delegation-parent-title > img { width: 16px; height: 16px; flex: 0 0 16px; }
 
 /* Sub-session history has its own bounded Orch request and search. */
 .sub-sessions { max-width: 1200px; margin: 24px 0; }
