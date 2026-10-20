@@ -10,6 +10,7 @@
 // servers and env-carrying config are reported by NAME only, never value.
 
 const fsp = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const { createModelCatalog } = require('./model-catalog.js');
 const { legacyConfig } = require('../config/migrate.js');
@@ -41,6 +42,80 @@ const BUILTIN_COMMANDS = [
   ['/login', 'Sign in'],
   ['/logout', 'Sign out'],
   ['/help', 'Show help'],
+];
+
+// Codex's OWN built-in slash commands (2026-10-15). A Codex window used to be
+// offered Claude's list above (/effort, /fast, /output-style, /init "Generate
+// a CLAUDE.md"), none of which Codex understands. Like the Claude list this one
+// is version-pinned, and it was read from the INSTALLED CLI, not recalled:
+// codex-cli 0.160.0's `SlashCommand` enum (codex-rs/tui/src/slash_command.rs at
+// tag rust-v0.160.0; enum order IS the popup's presentation order), whose
+// descriptions appear verbatim, in that order, in the strings of the installed
+// 0.160.0 binary. The rows are exactly what the
+// TUI's own `/` popup lists in a release build (bottom_pane/command_popup.rs):
+// it drops every `debug*` command and `/apps`; `/rollout` and `/test-approval`
+// exist only under debug_assertions; `/quit` and `/btw` are aliases of `/exit`
+// and `/side` the popup hides. Some rows are feature-gated in the CLI (/plan,
+// /plugins, /usage, /goal, /worktree, /voice, /setup-default-sandbox): Codex
+// answers a gated one with its own "unavailable" note, so they stay listed.
+// 0.160 has NO custom-prompt commands: the old `/prompts:<name>` files under
+// `$CODEX_HOME/prompts` are gone from the TUI (its popup items are only
+// Builtin and ServiceTier), so none are offered.
+const CODEX_BUILTIN_COMMANDS = [
+  ['/model', 'choose what model and reasoning effort to use'],
+  ['/ide', 'include current selection, open files, and other context from your IDE'],
+  ['/permissions', 'choose what Codex is allowed to do'],
+  ['/keymap', 'remap TUI shortcuts'],
+  ['/vim', 'toggle Vim mode for the composer'],
+  ['/setup-default-sandbox', 'set up elevated agent sandbox'],
+  ['/experimental', 'toggle experimental features'],
+  ['/approve', 'approve one retry of a recent auto-review denial'],
+  ['/memories', 'configure memory use and generation'],
+  ['/skills', 'use skills to improve how Codex performs specific tasks'],
+  ['/import', 'import setup, this project, and recent chats from Claude Code'],
+  ['/hooks', 'view and manage lifecycle hooks'],
+  ['/review', 'review my current changes and find issues'],
+  ['/rename', 'rename the current thread'],
+  ['/new', 'start a new chat during a conversation'],
+  ['/archive', 'archive this session'],
+  ['/delete', 'permanently delete this session'],
+  ['/resume', 'resume a saved chat'],
+  ['/fork', 'fork the current chat'],
+  ['/worktree', 'start or continue a conversation in a new worktree'],
+  ['/app', 'continue this session in the Desktop app'],
+  ['/init', 'create an AGENTS.md file with instructions for Codex'],
+  ['/compact', 'summarize conversation to prevent hitting the context limit'],
+  ['/recap', 'summarize the current conversation now'],
+  ['/plan', 'switch to Plan mode'],
+  ['/voice', 'start or stop voice; use /voice settings to choose a voice'],
+  ['/goal', 'set or view the goal for a long-running task'],
+  ['/agents', 'open the agent command center'],
+  ['/side', 'start a side conversation in an ephemeral fork'],
+  ['/copy', 'copy the last response or part of it'],
+  ['/export', 'export the conversation as markdown'],
+  ['/raw', 'toggle raw scrollback mode for copy-friendly terminal selection'],
+  ['/tui', 'choose the TUI mode for the next launch'],
+  ['/diff', 'show git diff (including untracked files)'],
+  ['/mention', 'mention a file'],
+  ['/status', 'show current session configuration and token usage'],
+  ['/daemon', 'Manage the local background server'],
+  ['/warnings', 'view retained warnings and diagnostic details'],
+  ['/cd', 'change the current working directory'],
+  ['/pwd', 'show the current working directory'],
+  ['/usage', 'view account usage or use a usage limit reset'],
+  ['/title', 'configure which items appear in the terminal title'],
+  ['/statusline', 'configure which items appear in the status line'],
+  ['/theme', 'choose a syntax highlighting theme'],
+  ['/pets', 'choose or hide the terminal pet'],
+  ['/mcp', 'list configured MCP tools; use /mcp verbose for details'],
+  ['/plugins', 'browse plugins'],
+  ['/logout', 'log out of Codex'],
+  ['/exit', 'exit Codex'],
+  ['/feedback', 'send logs to maintainers'],
+  ['/ps', 'list background terminals'],
+  ['/stop', 'stop all background terminals'],
+  ['/clear', 'clear the terminal and start a new chat'],
+  ['/subagents', "switch between this session's subagents"],
 ];
 
 // The SEED model list: the floor the menus can never fall below. The live
@@ -255,6 +330,11 @@ async function readDir(dir) {
 // tiny; read the whole thing and pull the first `description:` inside the
 // leading `---` fence.
 async function frontmatterDescription(file) {
+  const value = await frontmatterField(file, 'description');
+  return value ? clip(value, 160) : null;
+}
+
+async function frontmatterField(file, field) {
   let raw;
   try {
     raw = await fsp.readFile(file, 'utf8');
@@ -263,10 +343,23 @@ async function frontmatterDescription(file) {
   }
   const fence = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   const body = fence ? fence[1] : raw.slice(0, 600);
-  const line = body.split(/\r?\n/).find((l) => /^description\s*:/i.test(l));
-  if (!line) return null;
-  const value = line.replace(/^description\s*:/i, '').trim().replace(/^['"]|['"]$/g, '');
-  return value ? clip(value, 160) : null;
+  const key = new RegExp(`^${field}\\s*:`, 'i');
+  const lines = body.split(/\r?\n/);
+  const index = lines.findIndex((l) => key.test(l));
+  if (index < 0) return null;
+  let value = lines[index].replace(key, '').trim();
+  // A YAML block scalar (`description: >`) carries its text on the indented
+  // lines that follow, not after the colon.
+  if (/^[>|][+-]?$/.test(value)) {
+    const block = [];
+    for (const next of lines.slice(index + 1)) {
+      if (!/^\s+\S/.test(next)) break;
+      block.push(next.trim());
+    }
+    value = block.join(' ');
+  }
+  value = value.replace(/^['"]|['"]$/g, '');
+  return value || null;
 }
 
 function clip(s, max) {
@@ -315,6 +408,53 @@ async function skillCommands(skillsDir, { namespace = null } = {}) {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Codex skills, inserted the way Codex's own composer inserts them: `$name`
+// (codex-cli 0.160.0, tui/src/bottom_pane/chat_composer.rs builds each skill
+// mention's insert_text as format!("${skill_name}")), never as a slash command.
+// The name is the SKILL.md frontmatter `name`, else the directory name, and a
+// SKILL.md without a description is rejected by Codex's parser, so it is not
+// offered here either (codex-rs/skills/src/parser.rs). Roots follow 0.160's
+// ext/skills/src/host_roots.rs: `$CODEX_HOME/skills` (deprecated but still
+// read), its `.system` cache of bundled skills, `~/.agents/skills`, and the
+// project's `.agents/skills` and `.codex/skills`. Harbor reads one directory
+// level under each root and only the session's own cwd for the project roots
+// (Codex walks deeper and up to the project root); a skill this misses can
+// still be typed.
+async function codexSkillCommands(roots) {
+  const out = [];
+  const seen = new Set();
+  for (const root of roots) {
+    for (const ent of await readDir(root)) {
+      if (!ent.isDirectory() || ent.name.startsWith('.')) continue;
+      const skillFile = path.join(root, ent.name, 'SKILL.md');
+      const description = await frontmatterDescription(skillFile);
+      if (!description) continue;
+      const name = `$${(await frontmatterField(skillFile, 'name')) || ent.name}`;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push({ name, source: 'skill', description });
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// MCP server NAMES from a Codex home's config.toml (`[mcp_servers.<name>]`
+// tables). Names only, the same rule as Claude's: no command, url, env or
+// header value is read into the result.
+async function codexMcpServers(home) {
+  let raw;
+  try {
+    raw = await fsp.readFile(path.join(home, 'config.toml'), 'utf8');
+  } catch {
+    return [];
+  }
+  const names = new Set();
+  for (const match of raw.matchAll(/^\s*\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]\s*$/gm)) {
+    names.add(match[1] || match[2]);
+  }
+  return [...names].sort();
+}
+
 // The active install record for a plugin key. installed_plugins records an
 // array per key; prefer the one that actually points somewhere on disk.
 function activeInstall(records) {
@@ -344,6 +484,7 @@ async function enumeratePlugins(home) {
 
 function createCapabilitiesProvider(deps = {}) {
   const accounts = deps.accounts;
+  const homedir = deps.homedir || os.homedir;
   if (!accounts || typeof accounts.resolveSession !== 'function') {
     throw new TypeError('capabilities provider requires an accounts provider with resolveSession(id)');
   }
@@ -367,19 +508,56 @@ function createCapabilitiesProvider(deps = {}) {
     commands: BUILTIN_COMMANDS.map(([name, description]) => ({ name, source: 'built-in', description })),
   });
 
-  const get = async (sessionId) => {
+  // A non-Claude window gets its OWN surface, never Claude's: none of Claude's
+  // models, effort levels, fast mode, ultracode keyword, plugins, MCP servers
+  // or slash commands mean anything to the Codex or Cursor CLI.
+  const otherProviderShell = () => ({
+    models: { cached: [], families: [], versions: [] },
+    effort: { levels: [], note: null },
+    fastMode: { available: false, reason: 'Fast mode is a Claude Code setting' },
+    dynamicWorkflow: null,
+    plugins: [],
+    mcpServers: [],
+    commands: [],
+  });
+
+  const codexSurface = async (result, home, cwd) => {
+    const roots = [];
+    if (home) roots.push(path.join(home, 'skills'), path.join(home, 'skills', '.system'));
+    roots.push(path.join(homedir(), '.agents', 'skills'));
+    if (cwd) roots.push(path.join(cwd, '.agents', 'skills'), path.join(cwd, '.codex', 'skills'));
+    result.commands = [
+      ...CODEX_BUILTIN_COMMANDS.map(([name, description]) => ({ name, source: 'built-in', description })),
+      ...await codexSkillCommands(roots),
+    ];
+    result.mcpServers = home ? await codexMcpServers(home) : [];
+    return result;
+  };
+
+  // `hints` ({ provider, profileId, cwd }) come from the window asking: the only
+  // place a provisional `pane:` window's provider and launch profile are known
+  // before its first rollout exists. The session's own metadata outranks them.
+  const get = async (sessionId, hints = {}) => {
     let resolved = null;
     try {
-      resolved = await accounts.resolveSession(sessionId);
+      resolved = await accounts.resolveSession(sessionId, hints || {});
     } catch {
       resolved = null;
     }
+    const provider = resolved?.provider || hints?.provider || 'claude';
     const account = resolved?.account || null;
     const home = resolved?.home || null;
-    const cwd = resolved?.meta?.cwd || null;
+    // A provisional window's cwd is only known to the window itself.
+    const cwd = resolved?.meta?.cwd || (typeof hints?.cwd === 'string' && hints.cwd) || null;
+
+    if (provider !== 'claude') {
+      const result = { sessionId, provider, account, home, cwd, ...otherProviderShell() };
+      return provider === 'codex' ? codexSurface(result, home, cwd) : result;
+    }
 
     const result = {
       sessionId,
+      provider,
       account,
       home,
       cwd,
@@ -463,6 +641,7 @@ module.exports = {
   configureModelCatalog,
   createCapabilitiesProvider,
   BUILTIN_COMMANDS,
+  CODEX_BUILTIN_COMMANDS,
   MODEL_FAMILIES,
   MODEL_VERSIONS,
   MODEL_VERSION_SEED,

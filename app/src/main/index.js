@@ -1341,9 +1341,9 @@ function registerIpc() {
 
   // Capability menu: fs-only enumeration (renderer stays fs-free), plus the two
   // pty-touching permission-mode operations (scrape + shift+tab cycle).
-  ipcMain.handle('capabilities:get', async (_event, { sessionId }) => {
+  ipcMain.handle('capabilities:get', async (_event, { sessionId, provider, profileId, cwd } = {}) => {
     try {
-      return { ok: true, capabilities: await capabilitiesProvider.get(sessionId) };
+      return { ok: true, capabilities: await capabilitiesProvider.get(sessionId, { provider, profileId, cwd }) };
     } catch (error) {
       return { ok: false, reason: error.message };
     }
