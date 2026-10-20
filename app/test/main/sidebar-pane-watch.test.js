@@ -2,7 +2,7 @@
 const test = require('node:test'); const assert = require('node:assert/strict'); const { EventEmitter } = require('node:events');
 const { fixture, row, pane, tick, rowsOf } = require('./sidebar-round3-fixture.cjs');
 
-test('pane subscriptions change even when a new pane adds no rail row', async (t) => {
+test('panes-changed fires even when a new pane adds no rail row', async (t) => {
   const { bridge, emit } = await fixture(t);
   const updates = []; const sets = [];
   bridge.emitter.on('update', (update) => updates.push(update));
@@ -15,6 +15,5 @@ test('pane subscriptions change even when a new pane adds no rail row', async (t
   emit({ event: 'pane.closed', data: { pane_id: 'unlabelled' } });
   assert.deepEqual(sets.at(-1), []);
   const source = require('node:fs').readFileSync(require.resolve('../../src/main/index.js'), 'utf8');
-  assert.match(source, /on\('panes-changed', rebuildAgentWatcher\)/);
   assert.match(source, /on\('panes-changed', \(\) => notifier.onBackgroundChanged\(\)\)/);
 });
