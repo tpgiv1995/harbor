@@ -67,9 +67,30 @@ function createPendingAskReader(options = {}) {
       // find two records is the difference between 1ms and 60ms per poll.
       const isAsk = line.includes('"AskUserQuestion"');
       const isResult = line.includes('"tool_result"');
-      if (!isAsk && !isResult) continue;
+      // CODEX (0.160 rollouts): request_user_input is written as a
+      // response_item function_call (arguments = JSON {questions:[{id, header,
+      // question, options:[{label, description}]}]}) the moment it is asked,
+      // and answered by a function_call_output with the same call_id. That is
+      // the shape normalizeAsk reads, so the card merge is shared.
+      const isCodexAsk = line.includes('"request_user_input"');
+      const isCodexResult = line.includes('_call_output"');
+      if (!isAsk && !isResult && !isCodexAsk && !isCodexResult) continue;
       let obj = null;
       try { obj = JSON.parse(line); } catch { continue; }
+      // Before the conversation-record filter below, which drops every record
+      // that is not assistant or user, and so every Codex record.
+      if (obj?.type === 'response_item') {
+        const payload = obj.payload || {};
+        if (payload.type === 'function_call' && payload.name === 'request_user_input') {
+          let args = payload.arguments;
+          if (typeof args === 'string') { try { args = JSON.parse(args); } catch { args = null; } }
+          const questions = normalizeAsk(args);
+          if (questions) asks.push({ toolId: payload.call_id || null, questions, provider: 'codex' });
+        } else if ((payload.type === 'function_call_output' || payload.type === 'custom_tool_call_output') && payload.call_id) {
+          answered.add(payload.call_id);
+        }
+        continue;
+      }
       // Only conversation records count. Claude Code 2.1.300 also stores
       // copies of each API request (`api-request-blob`) whose messages carry the
       // same tool_use and tool_result parts; a copy is neither a question nor

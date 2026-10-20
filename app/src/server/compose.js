@@ -505,6 +505,13 @@ async function composeServer(options = {}) {
     'session:interrupt': ({ paneId } = {}) => sidebar.isDelegatedPane?.(paneId) ? { ok: false, reason: 'Delegated agents are read-only.' } : paneId
       ? terminalBridge.sendInput(paneId, '\x1b')
       : { ok: false, reason: 'no live pane to interrupt' },
+    'session:cli-queue': async (payload = {}) => {
+      if (sidebar.isDelegated?.(payload?.sessionId)) return null;
+      try { return await sessionSend.getCliQueue(payload); } catch { return null; }
+    },
+    'session:send-steer-now': ({ paneId, workspaceId } = {}) => (sidebar.isDelegatedPane?.(paneId)
+      ? { ok: false, reason: 'Delegated agents are read-only.' }
+      : sessionSend.sendNowCodex({ pane: { paneId, workspaceId } })),
     'usage:get-all': async () => Object.fromEntries(await Promise.all(config.profiles.map(async ({ id }) => (
       [id, await usage.getUsage(id)]
     )))),
