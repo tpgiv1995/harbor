@@ -1,6 +1,7 @@
 import { subSessionReadOnly } from '../../shared/sub-sessions.js';
 import { useSidebarState } from './store.js';
-import { runStateCue } from '../../shared/session-run-state.cjs';
+import { runStateCue, canQuickAnswer } from '../../shared/session-run-state.cjs';
+import { QuickAnswer } from '../stage/QuickAnswer.jsx';
 import React, {
   useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
@@ -148,9 +149,11 @@ const SessionRailRow = React.memo(function SessionRailRow({ session, clock, prof
       const runState = runStateCue(session, undefined, undefined, clock);
       const displayTitle = isChild && session.childTitle ? session.childTitle : session.title;
       const status = railStatus({ runState, attention: attentionState, dormant: session.dormant });
+      const quickPane = session.paneId ? { paneId: session.paneId, workspaceId: session.workspaceId } : null;
+      const quick = !disabled && canQuickAnswer(session, quickPane);
       return (
         <div
-          className={`sr-wrap${isArchived ? ' archived' : ''}`}
+          className={`sr-wrap${isArchived ? ' archived' : ''}${quick ? ' quick' : ''}`}
           onContextMenu={(event) => onContextMenu(event, session)}
         >
           <button
@@ -187,6 +190,12 @@ const SessionRailRow = React.memo(function SessionRailRow({ session, clock, prof
               </span>
             ) : null}
           </button>
+          {/* Allow / Deny right on the row while the CLI reports a permission
+              prompt; they sit over the time and account badge (rows are
+              fixed-height). */}
+          {quick ? (
+            <QuickAnswer pane={quickPane} sessionId={session.id} expect={session.agentStatusMsg} expectSeq={session.agentStatusSeq ?? null} className="sr-quick" />
+          ) : null}
           <button
             type="button"
             className="sr-x"
