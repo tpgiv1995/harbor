@@ -202,4 +202,23 @@ function createNotifier(opts = {}) {
   };
 }
 
-module.exports = { createNotifier, COALESCE_MS, NOTIFY_STATUSES, WORKING };
+// Hands status events to `deliver` one at a time, in arrival order, after the
+// scan `scanFor(data)` returns for that event (or none). Without the queue, a
+// `working` that arrived while the idle before it waited on its scan was
+// delivered first: the notifier ended on the stale idle, toasted a finish for
+// a pane that was working again, and missed the real finish after it. A scan
+// that rejects (or throws) still delivers its event.
+function createStatusQueue({ scanFor = () => null, deliver }) {
+  let queue = Promise.resolve();
+  return (event) => {
+    let scan;
+    try { scan = Promise.resolve(scanFor(event?.data || {})).catch(() => {}); }
+    catch { scan = null; }
+    queue = queue.then(() => scan)
+      .finally(() => deliver(event))
+      .catch(() => {});
+    return queue;
+  };
+}
+
+module.exports = { createNotifier, createStatusQueue, COALESCE_MS, NOTIFY_STATUSES, WORKING };
