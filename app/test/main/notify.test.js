@@ -191,3 +191,61 @@ test('notifier: destroy clears pending batch', (t, done) => {
   assert.equal(calls.length, 0);
   done();
 });
+
+// --- one window, two slots per pane ----------------------------------------
+// The window used to keep only the FIRST entry per pane, so a prompt that came
+// within COALESCE_MS of a finish was never announced. A pane now has a slot
+// for a finish and one for a prompt; the newer entry replaces the older in
+// its slot, and at flush a prompt still on screen wins.
+
+test('notifier: a prompt that arrives inside the window of a finish is the one announced', () => {
+  const { notifier, calls } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'done'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'blocked'));
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['Session slot-a needs you']);
+});
+
+test('notifier: a prompt answered inside the window gives way to the finish after it', () => {
+  const { notifier, calls } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'blocked'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'done'));
+  assert.equal(notifier._pendingCount(), 2, 'one prompt slot and one finish slot');
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['Session slot-b finished']);
+});
+
+test('notifier: a prompt answered while the turn goes on toasts nothing and leaves no badge', () => {
+  const { notifier, calls, badgeCounts } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-c', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-c', 'blocked'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-c', 'working'));
+  notifier._flushNow();
+  assert.equal(calls.length, 0);
+  assert.equal(badgeCounts.at(-1), 0);
+});
+
+test('notifier: a newer finish replaces the older one in its slot', () => {
+  const { notifier, calls } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'working', { title: 'Old title' }));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'idle', { title: 'Old title' }));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'working', { title: 'New title' }));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'done', { title: 'New title' }));
+  assert.equal(notifier._pendingCount(), 1);
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['New title finished']);
+});
+
+test('notifier: a coalesced toast counts prompts apart from finishes', () => {
+  const { notifier, calls } = makeNotifier();
+  for (const [paneId, status] of [['mix-a', 'done'], ['mix-b', 'idle'], ['mix-c', 'blocked']]) {
+    notifier.onAgentStatusChanged(agentStatusEvent(paneId, 'working'));
+    notifier.onAgentStatusChanged(agentStatusEvent(paneId, status));
+  }
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['2 sessions finished · 1 needs you']);
+});
