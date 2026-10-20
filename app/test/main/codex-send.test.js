@@ -416,6 +416,17 @@ test('a Codex pane reports the permission mode its rollout records, and refuses 
   assert.deepEqual(h.sent, []);
 });
 
+test('a Codex session another process still owns is not resumed beside it', async () => {
+  const h = harness();
+  h.deps.snapshot = async () => ({ panes: [], workspaces: [] });
+  let resumed = false;
+  h.deps.launchActions.resumeProviderSession = async () => { resumed = true; };
+  h.deps.codexOwnerProbe = async () => ({ ownerGone: false, reason: 'this Codex session is open in the Codex app; reply there' });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(send.send({ sessionId: 'codex-thread-1', text: 'hi', provider: 'codex' }), /open in the Codex app/);
+  assert.equal(resumed, false);
+});
+
 test('"No, and tell Codex what to do differently" carries feedback as a Codex send', async () => {
   const h = harness({ screen: fixture('approval-command-0.160.0.txt') });
   const text = 'use a temp file instead';

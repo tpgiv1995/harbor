@@ -28,6 +28,7 @@
 // until they are resolved; those come from the screen (codex-screen.js).
 
 const fs = require('node:fs');
+const { createRolloutReadStream } = require('./providers/codex-rollout-files.js');
 
 const initialState = () => ({
   turn: 'idle',
@@ -289,7 +290,48 @@ function readCodexState(filePath, options = {}) {
   return foldCodexRecords(readRolloutSlice(filePath, options).records);
 }
 
+// The rollout's session_meta: its FIRST line, which carries the whole system
+// prompt and has no size bound, so it is read whole (in chunks, up to
+// `maxBytes`), never a fixed head. A compressed rollout is decompressed in
+// the stream only as far as that line: never a copy of the whole file on disk
+// just to read line 1. Only the writer's identity is returned: who wrote it
+// (originator, source), when it started, where, and when the file was last
+// written (mtimeMs, of the file named).
+async function readCodexSessionMeta(filePath, { maxBytes = 4 * 1024 * 1024 } = {}) {
+  let stream = null;
+  try {
+    const { mtimeMs } = await fs.promises.stat(filePath);
+    stream = createRolloutReadStream(filePath);
+    const chunks = [];
+    let total = 0;
+    let complete = false;
+    for await (const chunk of stream) {
+      const newline = chunk.indexOf(0x0a);
+      chunks.push(newline >= 0 ? chunk.subarray(0, newline) : chunk);
+      total += newline >= 0 ? newline : chunk.length;
+      if (newline >= 0) { complete = true; break; }
+      if (total >= maxBytes) break;
+    }
+    if (!complete && total >= maxBytes) return null;
+    const row = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (row?.type !== 'session_meta') return null;
+    const p = row.payload || {};
+    return {
+      originator: typeof p.originator === 'string' ? p.originator : null,
+      source: typeof p.source === 'string' ? p.source : (p.source ? JSON.stringify(p.source) : null),
+      timestamp: p.timestamp || row.timestamp || null,
+      cwd: p.cwd || null,
+      mtimeMs,
+    };
+  } catch {
+    return null;
+  } finally {
+    stream?.destroy();
+  }
+}
+
 module.exports = {
+  readCodexSessionMeta,
   initialState,
   foldCodexRecord,
   foldCodexRecords,

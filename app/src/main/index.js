@@ -72,6 +72,10 @@ const {
 } = require('./lifecycle.js');
 const { createNotifier, createStatusQueue } = require('./notify.js');
 const { createCodexStatusSource } = require('./codex-status.js');
+const { readCodexSessionMeta } = require('./codex-state.js');
+const {
+  createCodexOwnerProbe, createCodexTakeoverHandler, createProcessQuestions, harborPanesFromSnapshot, refuseBesideLiveCodexOwner,
+} = require('./actions/codex-owner.js');
 const { createNotifyPrefs } = require('./notify-prefs.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
@@ -333,6 +337,9 @@ let sessionSend = null;
 let capabilitiesProvider = null;
 let connectionsProvider = null;
 let paneLinks = null;
+// Who owns a Codex session Harbor has no pane for (actions/codex-owner.js);
+// built with sessionSend, read by the resume-session handler.
+let codexOwnerProbe = null;
 let stopMainLagMonitor = null;
 let usageTimer = null;
 let daemonWatchdog = null;
@@ -1109,6 +1116,11 @@ function registerIpc() {
     ]);
     // Codex/cursor resume rides bin/ai; claude rides bin/claude-sessions.
     if (meta?.provider && meta.provider !== 'claude') {
+      // TWO WRITERS ON ONE ROLLOUT. The rail's Resume never ran the owner
+      // check the send path runs, so it resumed beside the Codex app, a
+      // terminal codex, or a Harbor pane already on this thread. Same refusal,
+      // by name, before anything is launched; a missing probe refuses too.
+      if (meta.provider === 'codex') await refuseBesideLiveCodexOwner(codexOwnerProbe, id);
       const result = await launchActions.resumeProviderSession({
         provider: meta.provider, cwd: meta.cwd, id,
         ...(meta.profileId ? { profileId: meta.profileId } : {}),
@@ -2808,7 +2820,35 @@ app.whenReady().then(async () => {
     sendToRenderer('links:update', paneLinks.all());
   });
   const sendClient = createControlClient({ env: process.env, sessionStorePolicy });
+  // Who owns a Codex session Harbor has no pane for (actions/codex-owner.js):
+  // the resume paths refuse beside a live owner, and adopt-on-send kills only
+  // an argv-verified codex CLI, never the Codex app.
+  const codexProcessQuestions = createProcessQuestions({
+    platform: process.platform,
+    execFile: require('node:util').promisify(require('node:child_process').execFile),
+    readlink: (p) => require('node:fs/promises').readlink(p),
+  });
+  codexOwnerProbe = createCodexOwnerProbe({
+    listProcesses: codexProcessQuestions.listProcesses,
+    readProcessCwd: codexProcessQuestions.readProcessCwd,
+    // The rollout as it is on disk: a compressed one is read in the stream
+    // only as far as its first line, never decompressed to a copy.
+    readSessionMeta: async (sessionId) => {
+      const meta = await sidebarBridge.getSessionMeta(sessionId).catch(() => null);
+      const file = meta?.rolloutPath || meta?.path || await askTranscript.resolve(sessionId);
+      return file ? readCodexSessionMeta(file) : null;
+    },
+    // Every pane with its pid, agent and linked session ids: the probe sets
+    // aside only a Codex pane's own codex when that pane is on ANOTHER session,
+    // and reports a pane already on this one as the owner. A failed snapshot
+    // is null, "unknown", and the probe refuses rather than guess.
+    harborPanes: async () => {
+      const snap = await sendClient.snapshot().catch(() => null);
+      return harborPanesFromSnapshot(snap, paneLinks?.all() || {});
+    },
+  });
   sessionSend = createSessionSend({
+    codexOwnerProbe,
     snapshot: async () => {
       const res = await sendClient.snapshot();
       return res?.snapshot || res || {};
@@ -2859,7 +2899,7 @@ app.whenReady().then(async () => {
     },
     sleep: () => new Promise((resolve) => setTimeout(resolve, 150)),
   });
-  takeoverHandler = createTakeoverHandler({
+  const claudeTakeover = createTakeoverHandler({
     operationGate: sessionOperationGate,
     takeoverOwner,
     paneIdSet: () => sessionSend.paneIdSet(),
@@ -2877,6 +2917,35 @@ app.whenReady().then(async () => {
     },
     emitLaunched: (payload) => sendToRenderer('session:launched', payload),
   });
+  const codexTakeover = createCodexTakeoverHandler({
+    operationGate: sessionOperationGate,
+    ownerProbe: codexOwnerProbe,
+    assertSignalsAllowed: () => {
+      if (!signalPolicy.allowed) throw new Error(signalPolicy.reason);
+    },
+    killOwner: async (pid) => {
+      const result = await platform.killProcess(pid, 'SIGTERM');
+      if (!result?.died) throw new Error('the codex process survived graceful and forceful termination');
+    },
+    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    paneIdSet: () => sessionSend.paneIdSet(),
+    resumeProviderSession: (args) => launchActions.resumeProviderSession(args),
+    findFreshPane: (args) => sessionSend.findFreshPane(args),
+    setPaneLink: (id, pane) => paneLinks.set(id, pane),
+    requestFocusPane: (pane) => terminalBridge.requestFocusPane(pane),
+    waitForProviderReady: (paneId) => sessionSend.waitForProviderReady(paneId),
+    emitStatus: (payload) => {
+      sessionSend?.logStatus?.(payload);
+      sendToRenderer('send:status', payload);
+    },
+    emitLaunched: (payload) => sendToRenderer('session:launched', payload),
+  });
+  // Adopt-on-send by provider: a Codex session has no statusline tee, so the
+  // Claude adopt could only ever answer "no statusline tee" for it.
+  takeoverHandler = async ({ sessionId }) => {
+    const meta = await Promise.resolve(sidebarBridge.getSessionMeta(sessionId)).catch(() => null);
+    return meta?.provider === 'codex' ? codexTakeover({ sessionId }) : claudeTakeover({ sessionId });
+  };
 
   // Workflow-run visibility: the strip and inspector in each session window
   // read run state straight from the files next to the transcript.

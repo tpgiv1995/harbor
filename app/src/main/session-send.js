@@ -3147,6 +3147,16 @@ function createSessionSend(deps) {
       if (!providerMeta?.cwd || typeof launchActions.resumeProviderSession !== 'function') {
         throw new Error(`this ${provider} session is not running in a pane and its working folder is unknown; cannot resume it`);
       }
+      // TWO WRITERS ON ONE ROLLOUT. A Codex session idle for a few minutes
+      // reads as dead to the renderer, but the Codex app or a codex CLI in
+      // another terminal can still own it, and `codex resume` beside it makes a
+      // second writer. The probe (actions/codex-owner.js) answers from the
+      // process table and the rollout's own originator; a live owner refuses
+      // here, by name, before anything is launched.
+      if (provider === 'codex' && typeof deps.codexOwnerProbe === 'function') {
+        const owner = await deps.codexOwnerProbe(sessionId);
+        if (owner && !owner.ownerGone) throw new Error(owner.reason || 'this Codex session is still open somewhere else; reply there');
+      }
       status(sessionId, 'resuming');
       const providerPreIds = await paneIdSet();
       await launchActions.resumeProviderSession({

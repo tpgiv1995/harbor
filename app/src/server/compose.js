@@ -26,6 +26,10 @@ const { createAskTranscriptResolver } = require('../main/ask-transcript-path.js'
 const { createPendingAskReader } = require('../main/providers/pending-ask.js');
 const { createAskInbox } = require('../main/providers/ask-inbox.js');
 const { createSessionSend, createLinkRegistry, quickStatusFromScreen } = require('../main/session-send.js');
+const { readCodexSessionMeta } = require('../main/codex-state.js');
+const {
+  createCodexOwnerProbe, createCodexTakeoverHandler, createProcessQuestions, harborPanesFromSnapshot, refuseBesideLiveCodexOwner,
+} = require('../main/actions/codex-owner.js');
 const { createHistoryProvider } = require('../main/providers/history.js');
 const { createUsageProvider } = require('../main/providers/usage.js');
 const { createSystemMemoryProvider } = require('../main/providers/system-memory.js');
@@ -314,7 +318,30 @@ async function composeServer(options = {}) {
     getSessionMeta: (id) => sidebar.getSessionMeta(id),
     findTranscript: findProviderTranscript,
   });
+  // Who owns a Codex session Harbor has no pane for (actions/codex-owner.js),
+  // built as index.js builds it: the phone's Resume and dormant send must not
+  // start a second writer beside the Codex app or a codex CLI either. Harbor's
+  // panes come from this server's own daemon snapshot and link registry.
+  const codexProcessQuestions = createProcessQuestions({
+    platform: process.platform,
+    execFile: require('node:util').promisify(execFile),
+    readlink: (target) => fs.readlink(target),
+  });
+  const codexOwnerProbe = options.codexOwnerProbe || createCodexOwnerProbe({
+    listProcesses: codexProcessQuestions.listProcesses,
+    readProcessCwd: codexProcessQuestions.readProcessCwd,
+    readSessionMeta: async (sessionId) => {
+      const meta = await sidebar.getSessionMeta(sessionId).catch(() => null);
+      const file = meta?.rolloutPath || meta?.path || await askTranscript.resolve(sessionId);
+      return file ? readCodexSessionMeta(file) : null;
+    },
+    harborPanes: async () => {
+      const snap = await sendClient.snapshot().catch(() => null);
+      return harborPanesFromSnapshot(snap, links?.all?.() || {});
+    },
+  });
   const sessionSend = options.sessionSend || createSessionSend({
+    codexOwnerProbe,
     snapshot: async () => {
       const result = await sendClient.snapshot();
       return result?.snapshot || result || {};
@@ -367,7 +394,7 @@ async function composeServer(options = {}) {
     },
     sleep: () => new Promise((resolve) => setTimeout(resolve, 150)),
   });
-  const takeoverHandler = options.takeoverHandler || createTakeoverHandler({
+  const claudeTakeover = createTakeoverHandler({
     operationGate,
     takeoverOwner,
     paneIdSet: () => sessionSend.paneIdSet(),
@@ -379,6 +406,31 @@ async function composeServer(options = {}) {
     waitForResumedClaudeReady: (paneId, workspaceId) => sessionSend.waitForResumedClaudeReady(paneId, workspaceId),
     emitStatus: (payload) => { sessionSend.logStatus?.(payload); router.emit('send:status', payload); },
     emitLaunched: (payload) => router.emit('session:launched', payload),
+  });
+  const codexTakeover = createCodexTakeoverHandler({
+    operationGate,
+    ownerProbe: codexOwnerProbe,
+    assertSignalsAllowed: () => {
+      if (!signalPolicy.allowed) throw new Error(signalPolicy.reason);
+    },
+    killOwner: async (pid) => {
+      const result = await platform.killProcess(pid, 'SIGTERM');
+      if (!result?.died) throw new Error('the codex process survived graceful and forceful termination');
+    },
+    getSessionMeta: (id) => sidebar.getSessionMeta(id),
+    paneIdSet: () => sessionSend.paneIdSet(),
+    resumeProviderSession: (args) => launchActions.resumeProviderSession(args),
+    findFreshPane: (args) => sessionSend.findFreshPane(args),
+    setPaneLink: (id, pane) => links.set(id, pane),
+    requestFocusPane: (pane) => terminalBridge.requestFocusPane(pane),
+    waitForProviderReady: (paneId) => sessionSend.waitForProviderReady(paneId),
+    emitStatus: (payload) => { sessionSend.logStatus?.(payload); router.emit('send:status', payload); },
+    emitLaunched: (payload) => router.emit('session:launched', payload),
+  });
+  // Adopt-on-send by provider, as index.js dispatches it.
+  const takeoverHandler = options.takeoverHandler || (async ({ sessionId }) => {
+    const meta = await Promise.resolve(sidebar.getSessionMeta(sessionId)).catch(() => null);
+    return meta?.provider === 'codex' ? codexTakeover({ sessionId }) : claudeTakeover({ sessionId });
   });
   const voice = options.voice || createVoiceRealtime({ env });
   const whisperTranscriber = options.whisperTranscriber || createWhisperTranscriber({ env });
@@ -542,9 +594,17 @@ async function composeServer(options = {}) {
       if (sidebar.isDelegated?.(id)) return { ok: false, reason: 'Delegated agents are read-only.' };
       if (movePlan) return changePlan({ id, detectedHome, movePlan });
       const meta = await sidebar.getSessionMeta(id).catch(() => null);
+      // TWO WRITERS ON ONE ROLLOUT: the refusal index.js's resume-session runs.
+      if (meta?.provider === 'codex') await refuseBesideLiveCodexOwner(codexOwnerProbe, id);
       const preIds = typeof sessionSend.paneIdSet === 'function' ? await sessionSend.paneIdSet() : null;
       const result = meta?.provider && meta.provider !== 'claude'
-        ? await launchActions.resumeProviderSession({ provider: meta.provider, cwd: meta.cwd, id })
+        ? await launchActions.resumeProviderSession({
+          provider: meta.provider, cwd: meta.cwd, id,
+          // The session's own account, as index.js passes it: without these a
+          // second account's session resumed under the default home.
+          ...(meta.profileId ? { profileId: meta.profileId } : {}),
+          ...(meta.configHome ? { configHome: meta.configHome } : {}),
+        })
         : await launchActions.resumeSession({ id, detectedHome });
       if (preIds && typeof sessionSend.findFreshPane === 'function') {
         startResumeFollowup({
