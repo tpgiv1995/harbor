@@ -2753,7 +2753,8 @@ app.whenReady().then(async () => {
   // Conversation-surface plumbing: transcript tailing, the command-bar send
   // engine, and the provisional session<->pane link registry.
   transcriptProvider = createTranscriptProvider({
-    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
     contextCacheDir: contextDir,
     // Slow and failed transcript opens, with the step that took the time: the
     // evidence for the next window stuck on "No transcript yet".
