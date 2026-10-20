@@ -71,6 +71,7 @@ const {
   buildSecondInstancePayload,
 } = require('./lifecycle.js');
 const { createNotifier, createStatusQueue } = require('./notify.js');
+const { createNotifyPrefs } = require('./notify-prefs.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
 const { createArtifactsProvider } = require('./providers/artifacts.js');
@@ -335,6 +336,7 @@ let stopMainLagMonitor = null;
 let usageTimer = null;
 let daemonWatchdog = null;
 let notifier = null;
+let notifyPrefs = null;
 // Set once the app is on its way out, so a renderer dying as part of the quit
 // is not mistaken for a crash worth recovering from.
 let shuttingDown = false;
@@ -1257,6 +1259,8 @@ function registerIpc() {
     try {
       if (sidebarBridge.isDelegated(payload?.sessionId)) throw new Error('Delegated agents are read-only. Send instructions to their parent session.');
       const result = await sessionSend.send(payload);
+      // A message sent into a pane is the user dealing with it, a prompt too.
+      if (result?.ok && !result.cancelled) notifier?.answered(result.paneId || payload?.pane?.paneId);
       // A codex/cursor session first exists on disk when its first prompt
       // lands, and the daemon has not named it: the send IS the moment to look. A
       // window that opened as a bare pane becomes its real session here,
@@ -1302,6 +1306,15 @@ function registerIpc() {
     }
   });
   // Claude's live working meter for a window header (elapsed + tokens so far).
+  // Notification controls: the app menu's on/off and each window's mute.
+  ipcMain.handle('notify:get-prefs', () => notifyPrefs?.get() || { enabled: true, muted: [] });
+  ipcMain.handle('notify:set-prefs', (_event, payload = {}) => {
+    if (!notifyPrefs) return { enabled: true, muted: [] };
+    const next = notifyPrefs.set(payload);
+    // Turning them off clears the dock badge too: nothing is owed any more.
+    if (payload.enabled === false) notifier?.acknowledgeAll();
+    return next;
+  });
   ipcMain.handle('session:work-meter', async (_event, payload) => {
     try { return await sessionSend.getWorkMeter(payload); } catch { return null; }
   });
@@ -1315,7 +1328,11 @@ function registerIpc() {
       const ask = payload?.action?.type === 'sheet'
         ? (await liveAskFor(payload?.sessionId))?.questions || null
         : null;
-      return await sessionSend.answerMenu({ ...payload, ask });
+      const result = await sessionSend.answerMenu({ ...payload, ask });
+      // An answer given in Harbor (a one-click Allow / Deny or the window's
+      // card) is not news: its badge and any "needs you" still queued go.
+      if (result?.ok) notifier?.answered(payload?.pane?.paneId);
+      return result;
     } catch (error) {
       return { ok: false, reason: error.message };
     }
@@ -3134,14 +3151,31 @@ app.whenReady().then(async () => {
   });
 
   // Notification driver (R8): Electron supplies the native implementation.
+  // A clicked notification: show and focus Harbor, then tell the renderer which
+  // session to open (session:reveal). The pane is resolved to its session here
+  // because the renderer's windows are keyed by session id.
+  const revealPane = (paneId) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    mainWindow.focus();
+    const sessionId = paneId ? sidebarBridge?.notificationState(paneId)?.sessionId : null;
+    if (sessionId) sendToRenderer('session:reveal', { sessionId });
+  };
+  notifyPrefs = createNotifyPrefs({ file: path.join(harborConfig.paths.cacheDir, 'notify-prefs.json') });
   notifier = createNotifier({
+    isSuppressed: (paneId) => !notifyPrefs.enabled()
+      || notifyPrefs.isMuted(sidebarBridge.notificationState(paneId)?.sessionId),
     getPaneState: (paneId) => sidebarBridge.notificationState(paneId),
     getFocusedPaneId: () => terminalBridge?.getState().controlledPaneId ?? null,
     isWindowFocused: () => mainWindow?.isFocused() ?? false,
     getWorkspaceLabel: (workspaceId) => terminalBridge?.getState().workspaces
       ?.find((w) => w.workspace_id === workspaceId)?.label || '',
     setBadgeCount: setAppBadgeCount,
-    notify: (title, body) => platform.notify(title, body),
+    // Clicking a toast brings Harbor forward on the window it is about. Only
+    // the user's click does this: nothing here focuses a window on its own.
+    notify: (title, body, meta = {}) => platform.notify(title, body, { onClick: () => revealPane(meta.paneId) }),
   });
   // Read the append before an idle event can claim completion. The history
   // watcher is debounced and can otherwise arrive after the toast window.
