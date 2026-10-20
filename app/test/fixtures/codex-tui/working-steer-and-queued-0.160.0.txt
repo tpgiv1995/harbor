@@ -1,0 +1,56 @@
+╭─────────────────────────────────────────────────╮
+│ ✨ Update available! 0.160.0 -> 0.162.1         │
+│ Run brew upgrade --cask codex to update.        │
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.160.0)
+     /home/user/project
+
+  May the source be with you.
+
+  To get started, describe a task or try one of these commands:
+
+  /init - create an AGENTS.md file with instructions for Codex
+  /status - show current session configuration
+  /permissions - choose what Codex is allowed to do
+  /model - choose what model and reasoning effort to use
+  /review - review any changes and find issues
+
+
+› Create a file named probe2.txt containing the word hello in the current directory by running a shell command (echo
+  hello > probe2.txt). Do not ask me anything first.
+
+
+• I’ll run the command to create probe2.txt.
+
+✔ You approved codex to run echo hello > probe2.txt this time
+
+• Ran echo hello > probe2.txt
+  └ (no output)
+
+• Created probe2.txt containing hello.
+
+  Worked for 10s • 4:13 PM
+
+
+› Run the shell command: sleep 25; echo slept. Then reply with the single word DONE.
+
+
+• I’ll run the command now.
+ 
+• Working (4s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+ 
+• Messages to be submitted after next tool call (press esc to interrupt and send immediately)
+  ↳ second note PEAR
+ 
+• Queued follow-up inputs
+  ↳ also say BANANA at the end
+    shift+← edit last queued message
+ 
+› Ask Codex to do anything
+ 
+  GPT-6-Astra low · /home/user/project…
