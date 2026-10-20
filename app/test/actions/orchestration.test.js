@@ -12,9 +12,13 @@ const {
   buildExecuteCommand,
   launcherFlags,
   checkExecuteMutex,
+  createExecuteReservations,
+  createLruCache,
+  ORCH_LIVENESS_CACHE_MAX,
   createOrchestrationActions,
 } = require('../../src/main/actions/orchestration.js');
 const { createDelegateProvider, queuePath } = require('../../src/main/providers/delegate.js');
+const { snapshotFromSessions } = require('../../src/main/session-daemon/client.js');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,7 +32,7 @@ test('under Electron the shipped launcher is run through the Electron binary as 
   const cmd = buildResearchCommand(LAUNCHER, '/home/u/.claude', '/orchestrate-research', 'goal', {
     electron: true, execPath: '/Harbor.app/Contents/MacOS/Harbor', platform: 'darwin',
   });
-  assert.ok(cmd.startsWith(`ELECTRON_RUN_AS_NODE=1 '/Harbor.app/Contents/MacOS/Harbor' '${LAUNCHER}' --here `),
+  assert.ok(cmd.startsWith(`HARBOR_ORCH_ROLE=research ELECTRON_RUN_AS_NODE=1 '/Harbor.app/Contents/MacOS/Harbor' '${LAUNCHER}' --here `),
     `interpreter head missing: ${cmd}`);
 });
 
@@ -36,11 +40,11 @@ test('outside Electron, and for a foreign launcher, the command string is unchan
   const plain = buildResearchCommand(LAUNCHER, '/home/u/.claude', '/orchestrate-research', 'goal', {
     electron: false, execPath: '/usr/bin/node', platform: 'darwin',
   });
-  assert.ok(plain.startsWith(`${LAUNCHER} --here `), plain);
+  assert.ok(plain.startsWith(`HARBOR_ORCH_ROLE=research ${LAUNCHER} --here `), plain);
   const foreign = buildExecuteCommand('/home/u/bin/my-ai', '/home/u/.claude', '/orchestrate-execution', {
     electron: true, execPath: '/Harbor.app/Contents/MacOS/Harbor', platform: 'darwin',
   });
-  assert.ok(foreign.startsWith('/home/u/bin/my-ai '), 'a launcher that is not ours is not reinterpreted');
+  assert.ok(foreign.startsWith('HARBOR_ORCH_ROLE=execution /home/u/bin/my-ai '), 'a launcher that is not ours is not reinterpreted');
   assert.ok(!foreign.includes('ELECTRON_RUN_AS_NODE'), foreign);
 });
 
@@ -82,7 +86,7 @@ test('buildResearchCommand: produces correct command string', () => {
   const cmd = buildResearchCommand(LAUNCHER, ORCH_HOME, RESEARCH_COMMAND, 'Build the widget');
   assert.equal(
     cmd,
-    `${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-research Build the widget'`,
+    `HARBOR_ORCH_ROLE=research ${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-research Build the widget'`,
   );
 });
 
@@ -93,21 +97,49 @@ test('buildResearchCommand: escapes single quotes in goal', () => {
 
 test('buildExecuteCommand: produces correct command string', () => {
   const cmd = buildExecuteCommand(LAUNCHER, ORCH_HOME, EXECUTION_COMMAND);
-  assert.equal(cmd, `${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-execution'`);
+  assert.equal(cmd, `HARBOR_ORCH_ROLE=execution ${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-execution'`);
 });
 
 // ---------------------------------------------------------------------------
 // checkExecuteMutex
 // ---------------------------------------------------------------------------
 
-test('checkExecuteMutex: blocked when orchestrate-execution tab exists in project workspace', () => {
-  const terminalState = {
-    workspaces: [{ workspace_id: 'w1', label: 'myproject' }],
-    tabs: [{ tab_id: 't1', workspace_id: 'w1', label: 'orchestrate-execution' }],
-  };
-  const result = checkExecuteMutex({ projectLabel: 'myproject', terminalState, queue: { batches: [] } });
+// The terminal state is built by the REAL sessiond labelling
+// (snapshotFromSessions): a tab's label is its joined argv, `$SHELL -lc
+// <command>`, never a friendly name. Fixtures that labelled a tab
+// 'orchestrate-execution' described a pane no real session ever is, so the
+// mutex passed its tests and never fired in the app.
+const PROJECT_ROOT = `${TEST_HOME}/dev/myproject`;
+function paneState(...sessions) {
+  return snapshotFromSessions(sessions.map(([id, cwd, command]) => ({ id, cwd, argv: ['/bin/zsh', '-lc', command] })), TEST_HOME);
+}
+const executeCmd = () => buildExecuteCommand(LAUNCHER, ORCH_HOME, EXECUTION_COMMAND);
+const researchCmd = (goal) => buildResearchCommand(LAUNCHER, ORCH_HOME, RESEARCH_COMMAND, goal);
+
+test('checkExecuteMutex: a live execution pane blocks, found by its real sessiond label', () => {
+  const terminalState = paneState(['s1', PROJECT_ROOT, executeCmd()]);
+  assert.match(terminalState.tabs[0].label, /^\/bin\/zsh -lc HARBOR_ORCH_ROLE=execution /);
+  const result = checkExecuteMutex({ projectLabel: 'myproject', projectRoot: PROJECT_ROOT, terminalState, queue: { batches: [] } });
   assert.equal(result.blocked, true);
   assert.ok(result.reason.includes('orchestrate-execution'));
+});
+
+test('checkExecuteMutex: every workspace of the project is checked, not only the first', () => {
+  // sessiond makes one workspace per session; the execution pane is rarely first.
+  const terminalState = paneState(
+    ['s1', PROJECT_ROOT, '/usr/local/bin/claude'],
+    ['s2', PROJECT_ROOT, researchCmd('Build the widget')],
+    ['s3', PROJECT_ROOT, executeCmd()],
+  );
+  assert.equal(checkExecuteMutex({ projectLabel: 'myproject', terminalState, queue: { batches: [] } }).blocked, true);
+  // A caller whose label differs still finds it by the project root.
+  assert.equal(checkExecuteMutex({ projectLabel: 'renamed', projectRoot: PROJECT_ROOT, terminalState, queue: { batches: [] } }).blocked, true);
+});
+
+test('checkExecuteMutex: a pane started before the role marker still blocks by its command word', () => {
+  const legacy = `${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-execution'`;
+  const terminalState = paneState(['s1', PROJECT_ROOT, legacy]);
+  assert.equal(checkExecuteMutex({ projectLabel: 'myproject', terminalState, queue: { batches: [] } }).blocked, true);
 });
 
 test('checkExecuteMutex: blocked when queue has active batch', () => {
@@ -118,35 +150,30 @@ test('checkExecuteMutex: blocked when queue has active batch', () => {
   assert.ok(result.reason.includes('active'));
 });
 
-test('checkExecuteMutex: not blocked when no execution tab and no active batches', () => {
-  const terminalState = {
-    workspaces: [{ workspace_id: 'w1', label: 'myproject' }],
-    tabs: [{ tab_id: 't1', workspace_id: 'w1', label: 'orchestrate-research' }],
-  };
+test('checkExecuteMutex: research panes never block, even a goal that names the execution command', () => {
+  // A goal is one quoted shell word, so it can be neither the role word nor
+  // the bare command word, whatever it says.
+  const terminalState = paneState(
+    ['s1', PROJECT_ROOT, researchCmd("then run '/orchestrate-execution' HARBOR_ORCH_ROLE=execution")],
+    ['s2', PROJECT_ROOT, '/usr/local/bin/claude'],
+  );
   const queue = { batches: [{ id: 'b1', status: 'pending' }, { id: 'b2', status: 'done' }] };
-  const result = checkExecuteMutex({ projectLabel: 'myproject', terminalState, queue });
+  const result = checkExecuteMutex({ projectLabel: 'myproject', projectRoot: PROJECT_ROOT, terminalState, queue });
   assert.equal(result.blocked, false);
   assert.equal(result.reason, null);
 });
 
-test('checkExecuteMutex: not blocked when workspace exists but has no orch-execute tab', () => {
-  const terminalState = {
-    workspaces: [{ workspace_id: 'w1', label: 'myproject' }],
-    tabs: [],
-  };
-  const result = checkExecuteMutex({ projectLabel: 'myproject', terminalState, queue: { batches: [] } });
-  assert.equal(result.blocked, false);
+test('checkExecuteMutex: not blocked when the project has panes but none is an execution pane', () => {
+  const terminalState = paneState(['s1', PROJECT_ROOT, '/usr/local/bin/claude']);
+  assert.equal(checkExecuteMutex({ projectLabel: 'myproject', projectRoot: PROJECT_ROOT, terminalState, queue: { batches: [] } }).blocked, false);
 });
 
-test('checkExecuteMutex: tab in a different workspace does not block', () => {
-  const terminalState = {
-    workspaces: [
-      { workspace_id: 'w1', label: 'myproject' },
-      { workspace_id: 'w2', label: 'other' },
-    ],
-    tabs: [{ tab_id: 't1', workspace_id: 'w2', label: 'orchestrate-execution' }],
-  };
-  const result = checkExecuteMutex({ projectLabel: 'myproject', terminalState, queue: { batches: [] } });
+test('checkExecuteMutex: an execution pane in a different project does not block', () => {
+  const terminalState = paneState(
+    ['s1', PROJECT_ROOT, '/usr/local/bin/claude'],
+    ['s2', `${TEST_HOME}/dev/other`, executeCmd()],
+  );
+  const result = checkExecuteMutex({ projectLabel: 'myproject', projectRoot: PROJECT_ROOT, terminalState, queue: { batches: [] } });
   assert.equal(result.blocked, false);
 });
 
@@ -164,7 +191,7 @@ test('kickoffResearch: exact sessiond spawn, cwd, tab name, and command string',
 
   const result = await actions.kickoffResearch({ projectRoot, projectLabel, goal });
 
-  const expectedCmd = `${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-research ${goal}'`;
+  const expectedCmd = `HARBOR_ORCH_ROLE=research ${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-research ${goal}'`;
   assert.deepEqual(calls, [{ cwd: projectRoot, command: expectedCmd }]);
 
   // Return shape
@@ -184,7 +211,7 @@ test('kickoffExecute: exact sessiond spawn, cwd, tab name, and command string', 
 
   const result = await actions.kickoffExecute({ projectRoot, projectLabel });
 
-  const expectedCmd = `${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-execution'`;
+  const expectedCmd = `HARBOR_ORCH_ROLE=execution ${LAUNCHER} --here --home '${ORCH_HOME}' '/orchestrate-execution'`;
   assert.deepEqual(calls, [{ cwd: projectRoot, command: expectedCmd }]);
 
   assert.equal(result.tabLabel, 'orchestrate-execution');
@@ -214,20 +241,78 @@ test('kickoffExecute rejects on missing projectRoot', async () => {
 // Mutex integration: second Execute refused (using checkExecuteMutex directly)
 // ---------------------------------------------------------------------------
 
-test('mutex: second Execute is refused when first execution tab is alive', () => {
-  // Simulate: first kickoff completed, leaving an orchestrate-execution tab
-  const stateAfterFirstKickoff = {
-    workspaces: [{ workspace_id: 'w1', label: 'myproject' }],
-    tabs: [{ tab_id: 't-exec', workspace_id: 'w1', label: 'orchestrate-execution' }],
-  };
+test('mutex: second Execute is refused once the first kickoff pane exists', async () => {
+  // Drive the real kickoff, then label its spawn exactly as sessiond would.
+  const { controlClient, calls } = makeClientFake();
+  const actions = createOrchestrationActions({ controlClient, config: ORCH_CONFIG });
   const queue = { batches: [] };
 
-  const firstCheck = checkExecuteMutex({ projectLabel: 'myproject', terminalState: { workspaces: [], tabs: [] }, queue });
+  const firstCheck = checkExecuteMutex({ projectLabel: 'myproject', projectRoot: PROJECT_ROOT, terminalState: paneState(), queue });
   assert.equal(firstCheck.blocked, false, 'first kickoff should not be blocked');
+  await actions.kickoffExecute({ projectRoot: PROJECT_ROOT, projectLabel: 'myproject' });
+  const stateAfterFirstKickoff = paneState(['other', PROJECT_ROOT, '/usr/local/bin/claude'], ['exec', calls[0].cwd, calls[0].command]);
 
-  const secondCheck = checkExecuteMutex({ projectLabel: 'myproject', terminalState: stateAfterFirstKickoff, queue });
+  const secondCheck = checkExecuteMutex({ projectLabel: 'myproject', projectRoot: PROJECT_ROOT, terminalState: stateAfterFirstKickoff, queue });
   assert.equal(secondCheck.blocked, true, 'second kickoff must be refused');
   assert.ok(secondCheck.reason, 'must provide a reason');
+});
+
+// The pane kickoffExecute starts reaches terminalBridge.getState() only on the
+// bridge's next poll, so for about a second the mutex read an empty project.
+test('an execute reservation blocks a second kickoff until the bridge shows the pane, or it times out', () => {
+  let clock = 1_000;
+  const reservations = createExecuteReservations({ ttlMs: 15_000, now: () => clock });
+  const root = '/tmp/harbor-orch-fixture';
+  const empty = { workspaces: [], tabs: [], layouts: {} };
+  assert.equal(reservations.blockedReason(root, empty), null, 'nothing reserved yet');
+  reservations.reserve(root, { tab_id: 't-1', pane_id: 'p-1' });
+  // The gap the bug lived in: the mutex sees nothing, the reservation does.
+  assert.equal(checkExecuteMutex({ projectLabel: 'proj', projectRoot: root, terminalState: empty, queue: { batches: [] } }).blocked, false);
+  assert.match(reservations.blockedReason(root, empty), /just started/);
+  assert.match(reservations.blockedReason(`${root}/`, empty), /just started/, 'keyed by canonical root');
+  assert.equal(reservations.blockedReason('/tmp/other-project', empty), null, 'other projects are not blocked');
+  // The bridge reports the pane: the reservation hands over to the mutex.
+  const shown = { workspaces: [], tabs: [], layouts: { 't-1': { tab_id: 't-1', panes: [{ pane_id: 'p-1' }] } } };
+  assert.equal(reservations.blockedReason(root, shown), null);
+  assert.equal(reservations.size(), 0);
+  // A pane that never shows up does not lock Execute forever.
+  reservations.reserve(root, { tab_id: 't-2', pane_id: 'p-2' });
+  clock += 14_999;
+  assert.match(reservations.blockedReason(root, empty), /just started/);
+  clock += 1;
+  assert.equal(reservations.blockedReason(root, empty), null);
+  // Shown by tab id alone also clears it.
+  reservations.reserve(root, { tab_id: 't-3', pane_id: 'p-3' });
+  assert.equal(reservations.blockedReason(root, { tabs: [{ tab_id: 't-3' }] }), null);
+});
+
+test('the execute IPC handler consults the reservation and reserves after a successful kickoff', () => {
+  const source = require('node:fs').readFileSync(path.join(__dirname, '../../src/main/index.js'), 'utf8');
+  const start = source.indexOf("ipcMain.handle('orchestration:kickoff-execute'");
+  assert.ok(start > 0);
+  const body = source.slice(start, source.indexOf('ipcMain.handle(', start + 10));
+  const mutex = body.indexOf('checkExecuteMutex(');
+  const check = body.indexOf('executeReservations.blockedReason(projectRoot');
+  const kickoff = body.indexOf('orchActions.kickoffExecute(');
+  const reserve = body.indexOf('executeReservations.reserve(projectRoot, launched)');
+  assert.ok(mutex > 0 && check > mutex && kickoff > check && reserve > kickoff, 'mutex, reservation, kickoff, then reserve');
+});
+
+test('the orch liveness cache is a bounded LRU', () => {
+  assert.equal(ORCH_LIVENESS_CACHE_MAX, 200);
+  const cache = createLruCache(3);
+  cache.set('a', 1).set('b', 2).set('c', 3);
+  assert.equal(cache.get('a'), 1, 'touching a makes b the oldest');
+  cache.set('d', 4);
+  assert.equal(cache.size, 3);
+  assert.equal(cache.has('b'), false, 'least recently used is evicted');
+  assert.deepEqual(['a', 'c', 'd'].map((k) => cache.get(k)), [1, 3, 4]);
+  assert.equal(cache.get('missing'), undefined);
+  const big = createLruCache();
+  for (let i = 0; i < 1_000; i += 1) big.set(`/t/${i}.jsonl`, { size: i, mtimeMs: i, finished: false });
+  assert.equal(big.size, 200);
+  const source = require('node:fs').readFileSync(path.join(__dirname, '../../src/main/index.js'), 'utf8');
+  assert.match(source, /const orchLivenessCache = createLruCache\(\);/);
 });
 
 // ---------------------------------------------------------------------------
@@ -332,10 +417,10 @@ test('the --here flag is emitted for Harbor own launcher and withheld from a use
 
   assert.equal(
     buildExecuteCommand(ours, ORCH_HOME, EXECUTION_COMMAND),
-    `${ours} --here --home '${ORCH_HOME}' '/orchestrate-execution'`,
+    `HARBOR_ORCH_ROLE=execution ${ours} --here --home '${ORCH_HOME}' '/orchestrate-execution'`,
   );
   assert.equal(
     buildExecuteCommand(theirs, ORCH_HOME, EXECUTION_COMMAND),
-    `${theirs} --home '${ORCH_HOME}' '/orchestrate-execution'`,
+    `HARBOR_ORCH_ROLE=execution ${theirs} --home '${ORCH_HOME}' '/orchestrate-execution'`,
   );
 });
