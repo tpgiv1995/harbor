@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createNotifier, COALESCE_MS, NOTIFY_STATUSES, WORKING } = require('../../src/main/notify.js');
+const { createNotifier, createStatusQueue, COALESCE_MS, NOTIFY_STATUSES, WORKING } = require('../../src/main/notify.js');
 
 function makeNotifier({ focusedPaneId = null, windowFocused = false } = {}) {
   const calls = [];
@@ -248,4 +248,58 @@ test('notifier: a coalesced toast counts prompts apart from finishes', () => {
   }
   notifier._flushNow();
   assert.deepEqual(calls.map((call) => call.body), ['2 sessions finished · 1 needs you']);
+});
+
+// --- status queue ----------------------------------------------------------
+
+test('status queue: a working never overtakes the idle that is waiting on its scan', async () => {
+  const delivered = [];
+  let release;
+  const queue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'idle' ? new Promise((resolve) => { release = resolve; }) : null),
+    deliver: (event) => delivered.push(event.data.agent_status),
+  });
+  queue(agentStatusEvent('q', 'working'));
+  queue(agentStatusEvent('q', 'idle'));
+  const last = queue(agentStatusEvent('q', 'working'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered, ['working'], 'the second working waits behind the idle');
+  release();
+  await last;
+  assert.deepEqual(delivered, ['working', 'idle', 'working']);
+});
+
+test('status queue: a failed scan still delivers its event', async () => {
+  const delivered = [];
+  const queue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'done' ? Promise.reject(new Error('scan failed')) : null),
+    deliver: (event) => delivered.push(event.data.agent_status),
+  });
+  queue(agentStatusEvent('q', 'working'));
+  await queue(agentStatusEvent('q', 'done'));
+  const thrown = createStatusQueue({ scanFor: () => { throw new Error('sync'); }, deliver: (event) => delivered.push(event.data.agent_status) });
+  await thrown(agentStatusEvent('q', 'idle'));
+  assert.deepEqual(delivered, ['working', 'done', 'idle']);
+});
+
+test('status queue: the notifier ends on the real state, so the next finish still toasts', async () => {
+  const { notifier, calls } = makeNotifier();
+  let release;
+  const queue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'idle' ? new Promise((resolve) => { release = resolve; }) : null),
+    deliver: (event) => notifier.onAgentStatusChanged(event),
+  });
+  queue(agentStatusEvent('real', 'working'));
+  queue(agentStatusEvent('real', 'idle'));
+  const resumed = queue(agentStatusEvent('real', 'working'));
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  await resumed;
+  notifier._flushNow();
+  assert.equal(calls.length, 1, 'the first turn finished');
+  // Out of order, the late idle would have been the last word and this done
+  // (idle -> done) would not count as a finish.
+  await queue(agentStatusEvent('real', 'done'));
+  notifier._flushNow();
+  assert.equal(calls.length, 2, 'the second turn finished too');
 });
