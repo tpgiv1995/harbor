@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useNotifyPrefs, setNotificationsEnabled } from './notify-prefs-store.js';
 
 // The clean single app menu that replaces the removed OS menu bar. Grouped
 // File / View / Help sections in one dropdown off a titlebar button. Hints
@@ -29,6 +30,9 @@ const ITEMS = [
   { id: 'zoom-reset', label: 'Reset zoom', hint: 'Ctrl 0' },
   { id: 'fullscreen', label: 'Toggle full screen', hint: 'F11' },
   { id: 'devtools', label: 'Toggle developer tools', hint: 'Ctrl+Shift+I' },
+  // A window that finishes or needs you raises a notification and the dock
+  // badge; this turns them all off, and each window's bell mutes just it.
+  { notifications: true },
   { section: 'Help' },
   { id: 'help', label: 'Quick guide', hint: 'F1' },
   { id: 'about', label: 'About Harbor' },
@@ -36,6 +40,7 @@ const ITEMS = [
 
 export function AppMenu({ onOpenHelp, onNewSession, profiles = [] }) {
   const [open, setOpen] = useState(false);
+  const notifyPrefs = useNotifyPrefs();
   const [pos, setPos] = useState(null);
   const btnRef = useRef(null);
   const menuRef = useRef(null);
@@ -73,6 +78,10 @@ export function AppMenu({ onOpenHelp, onNewSession, profiles = [] }) {
     }
     if (id === 'help') {
       onOpenHelp?.();
+      return;
+    }
+    if (id === 'notifications') {
+      await setNotificationsEnabled(!notifyPrefs.enabled);
       return;
     }
     window.harbor.win?.menuAction?.(id);
@@ -116,6 +125,22 @@ export function AppMenu({ onOpenHelp, onNewSession, profiles = [] }) {
             {ITEMS.map((item, index) => {
               if (item.section) return <div key={`s-${item.section}`} className="app-menu-section">{item.section}</div>;
               if (item.sep) return <div key={`sep-${index}`} className="app-menu-sep" />;
+              if (item.notifications) {
+                return (
+                  <button
+                    key="notifications"
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={notifyPrefs.enabled}
+                    className="app-menu-item"
+                    data-action="notifications"
+                    onClick={() => run('notifications')}
+                  >
+                    <span>{notifyPrefs.enabled ? 'Notifications: on' : 'Notifications: off'}</span>
+                    <span className="app-menu-hint">{notifyPrefs.enabled ? 'Turn off' : 'Turn on'}</span>
+                  </button>
+                );
+              }
               if (item.profiles) {
                 // Zero profiles is a real state (a codex-only or cursor-only
                 // install, or a first run before the wizard), so this renders
