@@ -428,3 +428,30 @@ test('a Claude window is unchanged by the provider split', async () => {
   assert.ok(caps.commands.some((c) => c.name === '/effort'));
   assert.equal(caps.models.families.length, 4);
 });
+
+test('codex model menus read EVERY configured codex home, the default home winning a shared slug', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-codex-homes-'));
+  try {
+    const first = path.join(dir, '.codex');
+    const second = path.join(dir, '.codex-pro');
+    await writeFile(path.join(first, 'models_cache.json'), JSON.stringify({ models: [
+      { slug: 'gpt-6-sol', display_name: 'GPT-6-Sol', visibility: 'list', priority: 2, supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }] },
+    ] }));
+    await writeFile(path.join(second, 'models_cache.json'), JSON.stringify({ models: [
+      { slug: 'gpt-6-sol', display_name: 'Other label', visibility: 'list', priority: 2, supported_reasoning_levels: [{ effort: 'ultra' }] },
+      { slug: 'gpt-6-astra', display_name: 'GPT-6-Astra', visibility: 'list', priority: 1, supported_reasoning_levels: [{ effort: 'medium' }, { effort: 'ultra' }] },
+    ] }));
+    const options = newSessionOptions({ profiles: [
+      { id: 'personal', provider: 'claude', configHome: '/home/testuser/.claude', isDefault: true },
+      { id: 'cx', provider: 'codex', configHome: first },
+      { id: 'cx-pro', provider: 'codex', configHome: second },
+    ] }).providers.codex;
+    assert.deepEqual(options.models.map((m) => m.value), ['default', 'gpt-6-sol', 'gpt-6-astra']);
+    assert.equal(options.models[1].label, 'GPT-6-Sol');
+    assert.deepEqual(options.effortsByModel['gpt-6-sol'], ['low', 'high']);
+    // The highest-priority model across every home supplies Default.
+    assert.deepEqual(options.efforts, ['medium', 'ultra']);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

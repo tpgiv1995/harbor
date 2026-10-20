@@ -51,6 +51,7 @@ const { createPlanUsageProvider } = require('./providers/plan-usage.js');
 const { resolveLeanFile, readLean, writeLean } = require('./providers/provider-lean.js');
 const { createWorkflowRuns } = require('./providers/workflow-runs.js');
 const { readAccountEmails, createAccountsProvider } = require('./providers/accounts.js');
+const { codexHomes } = require('./providers/codex-model-catalog.js');
 const { createSingleFlight } = require('./single-flight.js');
 const {
   configureModelCatalog, createCapabilitiesProvider, newSessionOptions, modelCatalog, MODEL_VERSION_SEED,
@@ -2771,6 +2772,7 @@ app.whenReady().then(async () => {
   });
   const sendClient = createControlClient({ env: process.env, sessionStorePolicy });
   sessionSend = createSessionSend({
+    codexHomes: () => codexHomes(harborConfig?.profiles || []),
     snapshot: async () => {
       const res = await sendClient.snapshot();
       return res?.snapshot || res || {};

@@ -171,10 +171,22 @@ const CODEX_MODEL_FALLBACK = [{ value: 'gpt-6-sol', label: 'GPT-6-Sol' }];
 // posture as the model list.
 const CODEX_EFFORT_FLOOR = ['low', 'medium', 'high', 'xhigh'];
 
+// Every configured Codex home is read, not just the first (2026-10-15): a
+// second account's cache can list a model the first has not fetched yet. The
+// default home is read first (codexHomes orders it so) and its row wins a slug
+// both list, so each model keeps one home's own levels, never a union of them.
 function codexOptions(profiles, deps) {
-  const cache = readCodexCache(codexHomes(profiles, deps)[0]);
-  const listed = (Array.isArray(cache?.models) ? cache.models : [])
-    .filter((m) => m && typeof m.slug === 'string' && m.visibility === 'list');
+  const caches = codexHomes(profiles, deps).map(readCodexCache).filter(Boolean);
+  const anyCatalog = caches.some((cache) => Array.isArray(cache?.models));
+  const listed = [];
+  const seen = new Set();
+  for (const cache of caches) {
+    for (const m of Array.isArray(cache.models) ? cache.models : []) {
+      if (!m || typeof m.slug !== 'string' || m.visibility !== 'list' || seen.has(m.slug)) continue;
+      seen.add(m.slug);
+      listed.push(m);
+    }
+  }
   const effortsByModel = {};
   for (const model of listed) {
     const levels = (Array.isArray(model.supported_reasoning_levels) ? model.supported_reasoning_levels : [])
@@ -187,7 +199,7 @@ function codexOptions(profiles, deps) {
   return {
     // An explicit provider can invalidate its catalog to an empty models array.
     // Preserve that absence instead of offering a bundled OpenAI model there.
-    models: Array.isArray(cache?.models) ? listed.map((m) => ({ value: m.slug, label: m.display_name || m.slug })) : [...CODEX_MODEL_FALLBACK],
+    models: anyCatalog ? listed.map((m) => ({ value: m.slug, label: m.display_name || m.slug })) : [...CODEX_MODEL_FALLBACK],
     efforts, effortsByModel: { ...effortsByModel, default: efforts },
   };
 }
