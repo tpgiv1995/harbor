@@ -33,7 +33,8 @@ derived defaults in memory, and logs where the copy went.
   "paths":     { /* all optional, all derived when null */ },
   "workflows": [ /* quick commands, ships empty */ ],
   "orchestration": { "enabled": false, "launcher": "...", "researchCommand": "...", "executionCommand": "...", "stateDir": null },
-  "newSessionDefaults": { "provider": "claude", "model": "opus", "effort": "xhigh" }
+  "newSessionDefaults": { "provider": "claude", "model": "opus", "effort": "xhigh" },
+  "sessiond": { "dormantAfterMinutes": 60, "maxLiveSessions": 0 }
 }
 ```
 
@@ -151,6 +152,25 @@ For Claude, prefer a family alias such as `opus`, `sonnet` or `haiku` so the
 CLI resolves the current family version. Codex and Cursor use their own model
 identifiers. `"default"` selects the provider default and omits the model flag.
 
+## `sessiond`: when idle sessions are put to sleep
+
+Optional. The session daemon reads this block itself (it is not part of the
+setup wizard), re-reading it on every sweep, about once a minute, so an edit
+takes effect without restarting anything.
+
+```jsonc
+{ "dormantAfterMinutes": 240, "maxLiveSessions": 32 }
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `dormantAfterMinutes` | `60` | A session nobody has typed into for this long, with no pty output in the last 10 minutes, no cpu, no fresh transcript writes and nothing on screen waiting for an answer, is ended cleanly and can be resumed from the rail. `0` turns dormancy off entirely, including the cap. For hours, multiply: 4 hours is `240`. |
+| `maxLiveSessions` | `0` (off) | When more sessions than this are live, the longest-idle ones beyond the most recent `maxLiveSessions` are put to sleep the same way, once they have been idle for 30 minutes (or the threshold, if lower) and are at least an hour old, and only under the same safety checks. A session that is in use is never ended to meet the number. |
+
+The environment variables `HARBOR_SESSIOND_DORMANT_AFTER_MS` and
+`HARBOR_SESSIOND_MAX_LIVE_SESSIONS` outrank these keys. Each sweep writes a
+one-line summary to `sessiond.log` (`dormancy sweep: live=... slept=...`).
+
 ## Settings that are environment variables, not config keys
 
 These overrides are environment variables. The only supported backend is
@@ -163,6 +183,8 @@ Harbor's own session daemon, `sessiond`.
 | `HARBOR_CLAUDE_BIN` / `HARBOR_CODEX_BIN` / `HARBOR_CURSOR_BIN` | Pin a provider binary, outranking `providers.<id>.bin`. |
 | `HARBOR_NO_TRUST_PREACCEPT` | Set to `1` to stop Harbor pre-accepting Claude Code's per-folder trust dialog, and answer it by hand instead. |
 | `HARBOR_PROJECT_ICONS_DIR`, `HARBOR_TASKS_FILE`, `HARBOR_NOTES_FILE`, `HARBOR_BOARDS_DIR` | Relocate the corresponding store, outranking `paths.*`. |
+| `HARBOR_SESSIOND_DORMANT_AFTER_MS` | Idle threshold in milliseconds, outranking `sessiond.dormantAfterMinutes`; `0` turns dormancy off. |
+| `HARBOR_SESSIOND_MAX_LIVE_SESSIONS` | Live-session cap, outranking `sessiond.maxLiveSessions`; `0` is off. |
 
 There is no backend-switching procedure. An ordinary GUI restart leaves the
 separate session keeper processes running.
