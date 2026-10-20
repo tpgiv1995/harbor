@@ -1,7 +1,8 @@
 'use strict';
 // Codex rollout parsing in the conversation window: turns end where codex
 // says they end, tool rows take their status from real exit codes, token
-// counts drive the gauge and the per-task meter. Every fixture here is
+// counts drive the gauge and the per-task meter, apply_patch renders as an
+// edit, and request_user_input renders as a question. Every fixture here is
 // SYNTHETIC, built from the record shapes codex 0.160 CLI and desktop
 // rollouts write (record types and keys only, no real rollout content).
 
@@ -15,7 +16,12 @@ const { realTmpDir } = require('../support/real-tmpdir.js');
 const {
   createTranscriptProvider: createTranscriptProviderImpl,
   TranscriptParser,
+  actionForApplyPatch,
+  parseApplyPatch,
   codexActionFor,
+  readPrefixImageBlocks,
+  readLocalImage,
+  localImageCacheStats,
   readTranscriptLastSignal,
   MAX_BLOCKS,
 } = require('../../src/main/providers/transcript.js');
@@ -25,6 +31,9 @@ const createTranscriptProvider = (options) => createTranscriptProviderImpl({
   contextCacheDir: TEST_CONTEXT_DIR,
   ...options,
 });
+
+const TINY_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const TINY_PNG_URI = `data:image/png;base64,${TINY_PNG_B64}`;
 
 const CTS = (sec) => `2026-10-15T12:00:${String(sec).padStart(2, '0')}.000Z`;
 const cx = {
@@ -314,6 +323,264 @@ test('codex: the last command in an exec call decides its row, so a handled grep
   assert.equal(handled.pill, undefined);
   assert.equal(failed.status, 'err');
   assert.deepEqual(failed.pill, { text: 'exit 2', tone: 'err' });
+});
+
+const PATCH = [
+  '*** Begin Patch',
+  '*** Update File: src/app/limiter.js',
+  '@@ function limit',
+  ' const a = 1;',
+  '-const b = 2;',
+  '+const b = 3;',
+  '+const c = 4;',
+  '*** End Patch',
+].join('\n');
+
+test('codex: apply_patch renders like a Claude Edit row, whichever way it was sent', () => {
+  const freeform = codexActionFor({ type: 'custom_tool_call', name: 'apply_patch', input: PATCH });
+  assert.equal(freeform.verb, 'Edited');
+  assert.equal(freeform.chip, 'limiter.js');
+  assert.equal(freeform.chipTitle, 'src/app/limiter.js');
+  assert.deepEqual(freeform.pill, { text: '+2 −1', tone: 'ok' });
+  assert.deepEqual(freeform.diff, [{ t: 'del', s: 'const b = 2;' }, { t: 'add', s: 'const b = 3;' }, { t: 'add', s: 'const c = 4;' }]);
+  const json = codexActionFor({ type: 'function_call', name: 'apply_patch', arguments: JSON.stringify({ input: PATCH }) });
+  assert.deepEqual(json, freeform);
+  const snippet = codexActionFor({ type: 'custom_tool_call', name: 'exec', input: `const r = await tools.apply_patch(${JSON.stringify(PATCH)});\nreturn r;` });
+  assert.deepEqual(snippet, freeform);
+  const heredoc = codexActionFor({ type: 'custom_tool_call', name: 'exec', input: `await tools.exec_command(${JSON.stringify({ cmd: `apply_patch <<'EOF'\n${PATCH}\nEOF` })})` });
+  assert.deepEqual(heredoc, freeform);
+  // In a session the row resolves like any other call.
+  const { p } = codexParser([{ timestamp: CTS(0), type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'p1', name: 'apply_patch', input: PATCH } }, cx.output(1, 'p1', outArray('Success. Updated the following files:\nM src/app/limiter.js'))]);
+  assert.equal(p.blocks[0].status, 'ok');
+});
+
+test('codex: a multi-file patch names every file; add-only writes and delete-only deletes', () => {
+  const multi = actionForApplyPatch([
+    '*** Begin Patch',
+    '*** Add File: docs/new.md',
+    '+# New',
+    '+body',
+    '*** Update File: C:\\dev\\harbor\\a.js',
+    '*** Move to: C:\\dev\\harbor\\b.js',
+    '-x',
+    '+y',
+    '*** Delete File: old.txt',
+    '*** End Patch',
+  ].join('\n'));
+  assert.equal(multi.verb, 'Edited');
+  assert.equal(multi.chip, 'new.md +2 more');
+  assert.equal(multi.chipTitle, 'docs/new.md\nC:\\dev\\harbor\\a.js → C:\\dev\\harbor\\b.js\nold.txt');
+  assert.equal(multi.pill.text, '+3 −1');
+  assert.equal(multi.diff[0].t, 'ctx', 'each file is headed in the preview');
+  assert.equal(multi.diff[0].s, 'new.md');
+  assert.equal(actionForApplyPatch('*** Begin Patch\n*** Add File: a.txt\n+one\n*** End Patch').verb, 'Wrote');
+  const del = actionForApplyPatch('*** Begin Patch\n*** Delete File: gone.txt\n*** End Patch');
+  assert.equal(del.verb, 'Deleted');
+  assert.deepEqual(del.pill, { text: 'deleted', tone: 'ok' });
+  // A pure rename has no lines to count: it says so instead of "+0 −0".
+  const moved = actionForApplyPatch('*** Begin Patch\n*** Update File: src/old.js\n*** Move to: src/new.js\n*** End Patch');
+  assert.equal(moved.verb, 'Edited');
+  assert.equal(moved.chip, 'new.js');
+  assert.equal(moved.chipTitle, 'src/old.js → src/new.js');
+  assert.deepEqual(moved.pill, { text: 'renamed', tone: 'ok' });
+  assert.equal(actionForApplyPatch('no patch here'), null);
+  // A long patch previews a bounded slice and says how much more there is.
+  const long = actionForApplyPatch(`*** Begin Patch\n*** Update File: big.js\n${Array.from({ length: 40 }, (_, i) => `+line ${i}`).join('\n')}\n*** End Patch`);
+  assert.equal(long.pill.text, '+40 −0');
+  assert.equal(long.diff.at(-1).s, '… 26 more lines');
+  assert.deepEqual(parseApplyPatch('*** Begin Patch\n*** Update File: a\n+b\n*** End Patch')[0].added, 1);
+});
+
+test('codex: local_image parts render as the image in the live window, and as a marker elsewhere', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-codex-image-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const png = path.join(dir, 'shot.png');
+  await fsp.writeFile(png, Buffer.from(TINY_PNG_B64, 'base64'));
+  const missing = path.join(dir, 'gone.png');
+  const line = cx.user(1, 'what is this?', [{ type: 'local_image', path: png }, { type: 'local_image', path: missing }]);
+  const live = codexParser([line], { loadLocalImages: true }).p;
+  assert.equal(live.blocks.length, 1);
+  assert.equal(live.blocks[0].text, 'what is this?');
+  assert.deepEqual(live.blocks[0].images, [{ mediaType: 'image/png', dataUri: TINY_PNG_URI }]);
+  assert.deepEqual(live.blocks[0].attachments, [{ path: missing, name: 'gone.png' }], 'a vanished file stays a marker, never a broken image');
+  const plain = codexParser([line]).p;
+  assert.equal(plain.blocks[0].images, undefined);
+  assert.deepEqual(plain.blocks[0].attachments.map((a) => a.name), ['shot.png', 'gone.png']);
+  // An image with no text is still the user's turn.
+  const imageOnly = codexParser([cx.user(2, '', [{ type: 'local_image', path: png }])], { loadLocalImages: true }).p;
+  assert.equal(imageOnly.blocks[0].kind, 'user');
+  assert.equal(imageOnly.blocks[0].images.length, 1);
+});
+
+test('codex: request_user_input questions become a question block and header.pendingQuestion until answered', () => {
+  const asked = cx.agent(3, 'Two quick questions before I start.', 'final_answer', {
+    delivery: 'async',
+    questions: [
+      { title: 'Which environment?', options: ['staging', 'production'] },
+      { title: 'Anything else I should know?', options: null },
+    ],
+  });
+  const { p } = codexParser([cx.taskStarted(0), cx.user(1, 'deploy it'), asked, cx.complete(4)]);
+  const block = p.blocks.find((b) => b.kind === 'question');
+  assert.ok(block, 'the question renders as a question block, not plain prose');
+  assert.equal(block.text, 'Two quick questions before I start.');
+  assert.deepEqual(block.questions, [
+    { title: 'Which environment?', options: ['staging', 'production'] },
+    { title: 'Anything else I should know?', options: null },
+  ]);
+  assert.equal(block.answered, false);
+  assert.deepEqual(p.header.pendingQuestion, { id: 'a3', ts: CTS(3), questions: block.questions });
+  assert.equal(p.header.lastSignal, 'idle');
+  const changed = p.applyLine(cx.user(5, 'staging'));
+  assert.equal(p.header.pendingQuestion, null);
+  assert.equal(block.answered, true);
+  assert.ok(changed.includes(block.key));
+});
+
+// The 0.160 TUI writes a question as
+// `function_call request_user_input` and the answer as that call's
+// function_call_output; shapes as measured on real 0.160 rollouts.
+const cliAsk = (sec, callId) => ({ timestamp: CTS(sec), type: 'response_item', payload: {
+  type: 'function_call', id: `fc_${callId}`, name: 'request_user_input', call_id: callId,
+  arguments: JSON.stringify({ questions: [
+    { header: 'Color', id: 'color', question: 'Which color?', options: [{ label: 'Red', description: 'Choose red.' }, { label: 'Blue', description: 'Choose blue.' }] },
+    { header: 'Fruit', id: 'fruit', question: 'Which fruit?', options: [{ label: 'Apple', description: 'Choose apple.' }, { label: 'Pear', description: 'Choose pear.' }] },
+  ] }),
+} });
+const cliAnswer = (sec, callId) => cx.output(sec, callId, JSON.stringify({ answers: { color: { answers: ['Blue'] }, fruit: { answers: ['Pear'] } } }), 'function_call_output');
+
+test('codex: a CLI request_user_input call is a question block, not a running tool, until its output lands', () => {
+  const { p } = codexParser([cx.taskStarted(0), cx.user(1, 'ask me two things'), cliAsk(2, 'call_q')]);
+  assert.equal(p.blocks.filter((b) => b.kind === 'action').length, 0, 'no "Running request user input" row');
+  const block = p.blocks.find((b) => b.kind === 'question');
+  assert.ok(block, 'the question renders as a question block');
+  assert.deepEqual(block.questions, [
+    { title: 'Which color?', options: ['Red', 'Blue'] },
+    { title: 'Which fruit?', options: ['Apple', 'Pear'] },
+  ]);
+  assert.equal(block.answered, false);
+  assert.deepEqual(p.header.pendingQuestion, { id: 'call_q', ts: CTS(2), questions: block.questions });
+  assert.equal(p.workingState(Date.now(), Date.now(), true).working, false, 'waiting on the user is not working');
+  const changed = p.applyLine(cliAnswer(3, 'call_q'));
+  assert.equal(block.answered, true);
+  assert.ok(changed.includes(block.key), 'the answered block re-renders in place');
+  assert.equal(p.header.pendingQuestion, null);
+  assert.equal(p.header.lastSignal, 'user-turn', 'answered: the model owes the next step');
+  p.applyLine(cx.agent(4, 'Blue, Pear', 'final_answer'));
+  p.applyLine(cx.complete(5));
+  assert.equal(p.header.lastSignal, 'idle');
+  assert.deepEqual(p.blocks.map((b) => b.kind), ['user', 'question', 'assistant']);
+});
+
+test('codex: a CLI question left open when its turn died is no longer pending once the next turn starts', () => {
+  const { p } = codexParser([cx.taskStarted(0), cx.user(1, 'ask me'), cliAsk(2, 'call_dead')]);
+  assert.ok(p.header.pendingQuestion);
+  p.applyLine(cx.taskStarted(10));
+  assert.equal(p.header.pendingQuestion, null);
+});
+
+test('codex: the live provider reads local images into the window', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-codex-live-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const png = path.join(dir, 'paste.png');
+  await fsp.writeFile(png, Buffer.from(TINY_PNG_B64, 'base64'));
+  const file = path.join(dir, 'rollout.jsonl');
+  const lines = [cx.taskStarted(0, 200_000), cx.user(1, 'see image', [{ type: 'local_image', path: png }]), cx.tokens(2, { last: 30_000, totalOut: 10, lastOut: 10, window: 200_000 })];
+  await fsp.writeFile(file, `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`);
+  const provider = createTranscriptProvider({
+    getSessionMeta: async () => ({ path: file, provider: 'codex' }),
+    watchFactory: () => ({ on: () => {}, close: () => {} }),
+  });
+  t.after(() => provider.closeAll());
+  const updates = [];
+  provider.emitter.on('update', (update) => updates.push(update));
+  await provider.open('codex-live');
+  const last = updates.at(-1);
+  assert.equal(last.replace[0].images[0].dataUri, TINY_PNG_URI);
+});
+
+test('codex: a local image is read and encoded once per path+size+mtime, not on every parse', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-codex-imgcache-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const png = path.join(dir, 'shot.png');
+  await fsp.writeFile(png, Buffer.from(TINY_PNG_B64, 'base64'));
+  const before = localImageCacheStats();
+  const first = readLocalImage(png);
+  const second = readLocalImage(png);
+  assert.deepEqual(first, { mediaType: 'image/png', dataUri: TINY_PNG_URI });
+  assert.deepEqual(second, first);
+  assert.equal(second.dataUri, first.dataUri, 'one shared string');
+  let after = localImageCacheStats();
+  assert.equal(after.reads - before.reads, 1, 'read once');
+  assert.equal(after.hits - before.hits, 1, 'the second parse hit the cache');
+  // Two parsers (the opening scan and the live tail) share it too.
+  codexParser([cx.user(1, 'see', [{ type: 'local_image', path: png }])], { loadLocalImages: true });
+  codexParser([cx.user(1, 'see', [{ type: 'local_image', path: png }])], { loadLocalImages: true });
+  after = localImageCacheStats();
+  assert.equal(after.reads - before.reads, 1);
+  // A changed file is read again.
+  await fsp.writeFile(png, Buffer.concat([Buffer.from(TINY_PNG_B64, 'base64'), Buffer.from([0])]));
+  assert.notEqual(readLocalImage(png).dataUri, TINY_PNG_URI);
+  assert.equal(localImageCacheStats().reads - before.reads, 2);
+  // A vanished file is a marker again, never the stale cached image.
+  await fsp.rm(png);
+  assert.equal(readLocalImage(png), null);
+  // Bounded by entry count.
+  for (let i = 0; i < 40; i += 1) {
+    const file = path.join(dir, `n${i}.png`);
+    await fsp.writeFile(file, Buffer.from(TINY_PNG_B64, 'base64'));
+    readLocalImage(file);
+  }
+  assert.ok(localImageCacheStats().entries <= 32);
+});
+
+test('codex: the prefix image seeder brings back local_image prompts from before the tail window', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-codex-prefix-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const png = path.join(dir, 'early.png');
+  await fsp.writeFile(png, Buffer.from(TINY_PNG_B64, 'base64'));
+  const file = path.join(dir, 'rollout.jsonl');
+  const lines = [
+    cx.taskStarted(0),
+    cx.user(1, 'what is on screen?', [{ type: 'local_image', path: png }]),
+    cx.agent(2, 'A button.', 'final_answer'),
+    { timestamp: CTS(3), type: 'event_msg', payload: { type: 'user_message', message: 'and this', local_images: [png] } },
+  ];
+  const text = `${lines.map((l) => JSON.stringify(l)).join('\n')}\n`;
+  await fsp.writeFile(file, text);
+  const blocks = await readPrefixImageBlocks(file, Buffer.byteLength(text), 'codex');
+  assert.equal(blocks.length, 2, 'both codex image shapes are seeded');
+  assert.equal(blocks[0].text, 'what is on screen?');
+  assert.equal(blocks[0].images[0].dataUri, TINY_PNG_URI);
+  assert.equal(blocks[1].images[0].dataUri, TINY_PNG_URI);
+});
+
+test('codex: a CLI question whose turn ended unanswered stops saying it is waiting', () => {
+  for (const end of [cx.aborted(9), cx.complete(9, { error: { message: 'boom' } }), cx.taskStarted(9)]) {
+    const p = codexParser([cx.taskStarted(0), cx.user(1, 'ask me'), cliAsk(2, 'call_gone')]).p;
+    const block = p.blocks.find((b) => b.kind === 'question');
+    const changed = p.applyLine(end);
+    assert.equal(p.header.pendingQuestion, null);
+    assert.equal(block.answered, false, 'nobody answered it');
+    assert.equal(block.closed, true, `settled by ${end.payload.type}`);
+    assert.ok(changed.includes(block.key), 'the card re-renders in place');
+  }
+  // An answered one stays answered, not closed.
+  const p = codexParser([cx.taskStarted(0), cx.user(1, 'ask'), cliAsk(2, 'call_ok'), cliAnswer(3, 'call_ok'), cx.complete(4)]).p;
+  const answered = p.blocks.find((b) => b.kind === 'question');
+  assert.equal(answered.answered, true);
+  assert.equal(answered.closed, undefined);
+});
+
+test('codex: a TUI question whose block the cap evicted still settles when its answer lands', () => {
+  const lines = [cx.taskStarted(0), cx.user(1, 'ask me'), cliAsk(2, 'call_far')];
+  for (let i = 0; i < MAX_BLOCKS + 5; i += 1) lines.push(cx.agent(3, `note ${i}`, 'commentary'));
+  const { p } = codexParser(lines);
+  assert.ok(!p.blocks.some((b) => b.kind === 'question'), 'the question block was evicted');
+  assert.ok(p.header.pendingQuestion, 'the session still waits on it');
+  p.applyLine(cliAnswer(4, 'call_far'));
+  assert.equal(p.header.pendingQuestion, null);
+  assert.equal(p.codexQuestionCalls.size, 0);
 });
 
 // Main asks a transcript's END whether its session finished
