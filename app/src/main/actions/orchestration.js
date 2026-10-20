@@ -1,6 +1,7 @@
 'use strict';
 const { legacyConfig } = require('../config/migrate.js');
 const { createControlClient } = require('../session-daemon/factory.js');
+const { shellWords, canonicalCwd } = require('../providers/delegations.js');
 
 function sanitizeGoal(goal) {
   // Control characters (\r, \n, C0) could break out of the pane's prompt
@@ -63,27 +64,51 @@ function launcherCommand(launcher, {
   return `${head} ${flags.map((flag) => `${flag} `).join('')}`;
 }
 
+// THE ROLE IS IN THE ARGV, BECAUSE THAT IS THE ONLY LABEL A PANE HAS. sessiond
+// labels a tab with its joined argv (`session-daemon/client.js`
+// snapshotFromSessions), so a mutex looking for a tab LABELLED
+// `orchestrate-execution` never matched a real pane, and two Execute clicks
+// started two orchestrators against one queue. Every kickoff leads its shell
+// string with an inert env assignment naming its role, and the mutex reads the
+// label back as shell words: a goal cannot forge the marker, because a goal is
+// always inside one quoted word.
+const ROLE_ENV = 'HARBOR_ORCH_ROLE';
+const roleAssignment = (role) => `${ROLE_ENV}=${role}`;
+
 function buildResearchCommand(launcher, home, researchCommand, goal, overrides = {}) {
   const escaped = sanitizeGoal(goal).replace(/'/g, "'\\''");
-  return `${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} '${researchCommand} ${escaped}'`;
+  return `${roleAssignment('research')} ${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} '${researchCommand} ${escaped}'`;
 }
 
 function buildExecuteCommand(launcher, home, executionCommand, overrides = {}) {
-  return `${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} ${shellQuote(executionCommand)}`;
+  return `${roleAssignment('execution')} ${launcherCommand(launcher, overrides)}--home ${shellQuote(home)} ${shellQuote(executionCommand)}`;
 }
 
-function checkExecuteMutex({ projectLabel, terminalState, queue }) {
-  const ws = (terminalState?.workspaces || []).find((w) => w.label === projectLabel);
-  if (ws) {
-    const orchTab = (terminalState?.tabs || []).find(
-      (t) => t.workspace_id === ws.workspace_id && t.label === 'orchestrate-execution',
-    );
-    if (orchTab) {
-      return {
-        blocked: true,
-        reason: 'An orchestrate-execution session is already open in this workspace.',
-      };
-    }
+function isExecutionTabLabel(label, executionCommand = '/orchestrate-execution') {
+  const words = shellWords(String(label || ''));
+  // The role word is the marker; the bare command word still catches an
+  // execution pane started before the marker existed.
+  return words.includes(roleAssignment('execution'))
+    || Boolean(executionCommand && words.includes(executionCommand));
+}
+
+function checkExecuteMutex({ projectLabel, projectRoot = null, terminalState, queue, executionCommand }) {
+  // EVERY workspace of the project, not the first: sessiond makes one
+  // workspace per session, so with any other pane open in the project the
+  // execution pane sat in a workspace `.find` never reached. The root is
+  // matched too, because two folders can share a label and a label can change.
+  const root = projectRoot ? canonicalCwd(projectRoot) : null;
+  const workspaceIds = new Set((terminalState?.workspaces || [])
+    .filter((w) => (projectLabel && w.label === projectLabel) || (root && w.cwd && canonicalCwd(w.cwd) === root))
+    .map((w) => w.workspace_id));
+  const orchTab = (terminalState?.tabs || []).find(
+    (t) => workspaceIds.has(t.workspace_id) && isExecutionTabLabel(t.label, executionCommand),
+  );
+  if (orchTab) {
+    return {
+      blocked: true,
+      reason: 'An orchestrate-execution session is already open in this workspace.',
+    };
   }
   const activeBatches = (queue?.batches || []).filter((b) => b.status === 'active');
   if (activeBatches.length > 0) {
@@ -97,6 +122,66 @@ function checkExecuteMutex({ projectLabel, terminalState, queue }) {
     };
   }
   return { blocked: false, reason: null };
+}
+
+// The pane kickoffExecute creates is the durable reservation, but main only
+// learns of it on the terminal bridge's next poll (~1 s). Until then the mutex
+// reads an empty project, so a second Execute in that gap started a second
+// orchestrator. A reservation per project root covers the gap: it holds until
+// the bridge shows the launched tab or pane, or until ttlMs passes (a pane
+// that never shows up must not lock Execute forever).
+const EXECUTE_RESERVATION_MS = 15_000;
+
+function createExecuteReservations({ ttlMs = EXECUTE_RESERVATION_MS, now = Date.now } = {}) {
+  const held = new Map();
+  const keyOf = (projectRoot) => canonicalCwd(projectRoot);
+  const bridgeShows = (entry, terminalState) => (
+    (entry.tabId && (terminalState?.tabs || []).some((tab) => tab.tab_id === entry.tabId))
+    || (entry.paneId && Object.values(terminalState?.layouts || {})
+      .some((layout) => (layout?.panes || []).some((pane) => pane.pane_id === entry.paneId)))
+  );
+  function blockedReason(projectRoot, terminalState) {
+    if (!projectRoot) return null;
+    const at = now();
+    for (const [key, entry] of held) {
+      if (at - entry.at >= ttlMs || bridgeShows(entry, terminalState)) held.delete(key);
+    }
+    return held.has(keyOf(projectRoot))
+      ? 'An orchestrate-execution session was just started in this workspace and is still opening.'
+      : null;
+  }
+  function reserve(projectRoot, launched = {}) {
+    if (!projectRoot) return;
+    held.set(keyOf(projectRoot), { at: now(), tabId: launched?.tab_id || null, paneId: launched?.pane_id || null });
+  }
+  return { blockedReason, reserve, size: () => held.size };
+}
+
+// The Orch view's parsed-liveness cache (index.js) is keyed by transcript
+// path, and the corpus of orch workers only grows, so a plain Map kept one
+// entry for every worker transcript any poll ever read. Least recently used,
+// capped.
+const ORCH_LIVENESS_CACHE_MAX = 200;
+
+function createLruCache(max = ORCH_LIVENESS_CACHE_MAX) {
+  const map = new Map();
+  return {
+    get(key) {
+      if (!map.has(key)) return undefined;
+      const value = map.get(key);
+      map.delete(key);
+      map.set(key, value);
+      return value;
+    },
+    set(key, value) {
+      map.delete(key);
+      map.set(key, value);
+      while (map.size > max) map.delete(map.keys().next().value);
+      return this;
+    },
+    has: (key) => map.has(key),
+    get size() { return map.size; },
+  };
 }
 
 function createOrchestrationActions(options = {}) {
@@ -147,15 +232,22 @@ function createOrchestrationActions(options = {}) {
     kickoffResearch,
     kickoffExecute,
     LAUNCHER: launcher,
+    EXECUTION_COMMAND: config.orchestration.executionCommand,
     CONTROL_CLIENT: controlClient,
   };
 }
 
 module.exports = {
   LAUNCHER: legacyConfig().orchestration.launcher,
+  ROLE_ENV,
   buildResearchCommand,
   buildExecuteCommand,
+  isExecutionTabLabel,
   launcherFlags,
   checkExecuteMutex,
+  createExecuteReservations,
+  EXECUTE_RESERVATION_MS,
+  createLruCache,
+  ORCH_LIVENESS_CACHE_MAX,
   createOrchestrationActions,
 };
