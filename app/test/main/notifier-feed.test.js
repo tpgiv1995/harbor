@@ -21,7 +21,12 @@ const { SessionDaemonClient } = require('../../src/main/session-daemon/client.js
 test('main/index.js feeds the notifier from the bridge subscription only', () => {
   const source = fs.readFileSync(path.join(__dirname, '../../src/main/index.js'), 'utf8');
   assert.doesNotMatch(source, /subscribeAgentStatus/);
-  assert.equal((source.match(/\.onPaneAgentStatus\(/g) || []).length, 0, 'nothing outside the bridge feeds its status door');
+  // The one other caller is Codex's synthesized status (codex-status.js), for
+  // panes the daemon reports no status for at all: not a second feed of the
+  // same events.
+  const callers = source.match(/^.*\.onPaneAgentStatus\(.*$/gm) || [];
+  assert.deepEqual(callers.map((line) => line.trim()), ['emit: (event) => sidebarBridge?.onPaneAgentStatus(event),'],
+    'nothing outside the bridge feeds its status door but the Codex status source');
   assert.match(source, /sidebarBridge\.emitter\.on\('daemon-snapshot', \(snapshot\) => notifier\?\.seedFromSnapshot\(snapshot\)\)/);
   assert.equal(typeof SessionDaemonClient.prototype.subscribeAgentStatus, 'undefined');
 });

@@ -76,18 +76,25 @@ function createNotifier(opts = {}) {
   }
 
   // A pane that stopped on a prompt is waiting for the user, not finished, and
-  // says what it waits on in the CLI's own words ("approve Write: <path>").
+  // says what it waits on in the CLI's own words ("approve Write: <path>"). A
+  // turn that ended in an error (kind 'error': a Codex rollout's task_complete
+  // carried one, see codex-status.js) says it failed, with the error.
+  const failed = (entry) => entry.status !== 'blocked' && entry.kind === 'error';
   function fireToast(entries) {
     let title = 'Harbor';
     let body;
     if (entries.length === 1) {
       const { sessionTitle, project, status, msg } = entries[0];
       const name = project ? `${sessionTitle} (${project})` : sessionTitle;
-      body = status === 'blocked' ? `${name} needs you${msg ? `: ${msg}` : ''}` : `${name} finished`;
+      body = status === 'blocked' ? `${name} needs you${msg ? `: ${msg}` : ''}`
+        : failed(entries[0]) ? `${name} failed${msg ? `: ${msg}` : ''}`
+          : `${name} finished`;
     } else {
       const blocked = entries.filter((entry) => entry.status === 'blocked').length;
-      const finished = entries.length - blocked;
+      const errors = entries.filter(failed).length;
+      const finished = entries.length - blocked - errors;
       body = [finished ? `${finished} session${finished === 1 ? '' : 's'} finished` : null,
+        errors ? `${errors} failed` : null,
         blocked ? `${blocked} need${blocked === 1 ? 's' : ''} you` : null].filter(Boolean).join(' · ');
     }
     // Clicking it opens the window that needs you first, else the first one.
@@ -173,11 +180,13 @@ function createNotifier(opts = {}) {
 
     // Status events carry no title; the bridge knows the session's.
     const sessionTitle = data.title || getPaneState(paneId)?.title || `pane ${String(paneId).slice(0, 8)}`;
-    const msg = newStatus === 'blocked' && typeof data.agent_status_msg === 'string' && data.agent_status_msg ? data.agent_status_msg : null;
+    const kind = typeof data.agent_status_kind === 'string' ? data.agent_status_kind : null;
+    const msg = (newStatus === 'blocked' || kind === 'error') && typeof data.agent_status_msg === 'string' && data.agent_status_msg
+      ? data.agent_status_msg : null;
     // Wire events carry workspace_id, not a label (schema-verified); resolve
     // through the injected lookup.
     const project = getWorkspaceLabel(data.workspace_id) || '';
-    const entry = { paneId, sessionTitle, project, status: newStatus, msg, prompt };
+    const entry = { paneId, sessionTitle, project, status: newStatus, kind, msg, prompt };
     if (heldEntry(entry)) { deferred.set(paneId, entry); return; }
     deferred.delete(paneId);
     if (!unacknowledgedPanes.has(paneId)) {

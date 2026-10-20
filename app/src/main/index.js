@@ -71,6 +71,7 @@ const {
   buildSecondInstancePayload,
 } = require('./lifecycle.js');
 const { createNotifier, createStatusQueue } = require('./notify.js');
+const { createCodexStatusSource } = require('./codex-status.js');
 const { createNotifyPrefs } = require('./notify-prefs.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
@@ -336,6 +337,8 @@ let stopMainLagMonitor = null;
 let usageTimer = null;
 let daemonWatchdog = null;
 let notifier = null;
+// Codex panes' program status (codex-status.js); started with the notifier.
+let codexStatus = null;
 let notifyPrefs = null;
 // Set once the app is on its way out, so a renderer dying as part of the quit
 // is not mistaken for a crash worth recovering from.
@@ -3214,6 +3217,26 @@ app.whenReady().then(async () => {
   // subscription was seeded with, at boot and on every reconnect.
   sidebarBridge.emitter.on('daemon-snapshot', (snapshot) => notifier?.seedFromSnapshot(snapshot));
 
+  // Codex panes have no OSC 7501, so their status is synthesized from the
+  // rollout and the screen and fed through the same door a Claude status takes
+  // (see codex-status.js): the rail cue, the toast, the badge, the one-click
+  // answer and the notification click all follow without a Codex branch.
+  codexStatus = createCodexStatusSource({
+    listPanes: () => (sidebarBridge?.getState()?.model?.projects || [])
+      .flatMap((project) => project.sessions || [])
+      .filter((session) => session.isLive && session.paneId && session.provider === 'codex'
+        && session.id && !String(session.id).startsWith('live:') && !String(session.id).startsWith('pane:'))
+      .map((session) => ({ paneId: session.paneId, workspaceId: session.workspaceId, sessionId: session.id, agentStatus: session.agentStatus ?? null })),
+    transcriptPath: (sessionId) => askTranscript.resolve(sessionId),
+    forgetPath: (sessionId) => askTranscript.forget(sessionId),
+    readScreen: async (paneId) => {
+      const res = await sendClient.readPane(paneId, { source: 'visible', lines: 90, strip_ansi: true });
+      return res?.read?.text || '';
+    },
+    emit: (event) => sidebarBridge?.onPaneAgentStatus(event),
+  });
+  if (!e2eMode) codexStatus.start();
+
   terminalBridge.emitter.on('update', broadcastTerminalUpdate);
   terminalBridge.emitter.on('frame', (payload) => sendToRenderer('terminal:frame', payload));
   terminalBridge.emitter.on('backfill', (payload) => sendToRenderer('terminal:backfill', payload));
@@ -3364,6 +3387,7 @@ function shutdownApp() {
   askInbox?.stop();
   daemonWatchdog?.stop();
   notifier?.destroy();
+  codexStatus?.stop();
   transcriptProvider?.closeAll();
   if (orchWatcher) {
     orchWatcher();
