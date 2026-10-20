@@ -98,7 +98,8 @@ export function PlanUsageButton() {
     setError('');
     const version = generation.current;
     try {
-      const next = await window.harbor.usage.getPlans();
+      // Opening this menu or pressing Refresh is an explicit user refresh.
+      const next = await window.harbor.usage.getPlans({ manual: true });
       if (!Array.isArray(next?.plans)) throw new Error('Missing usage data');
       if (version === generation.current) setData(next);
     } catch {
