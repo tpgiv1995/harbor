@@ -303,3 +303,17 @@ test('status queue: the notifier ends on the real state, so the next finish stil
   notifier._flushNow();
   assert.equal(calls.length, 2, 'the second turn finished too');
 });
+
+test('notifier: a turn that ended in an error says failed, alone and in a batch', () => {
+  const { notifier, calls } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('pane-e1', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('pane-e1', 'done', { agent_status_kind: 'error', agent_status_msg: 'usage limit reached' }));
+  notifier._flushNow();
+  assert.match(calls[0].body, /failed: usage limit reached$/);
+  for (const [pane, extra] of [['pane-e2', { agent_status_kind: 'error' }], ['pane-e3', {}]]) {
+    notifier.onAgentStatusChanged(agentStatusEvent(pane, 'working'));
+    notifier.onAgentStatusChanged(agentStatusEvent(pane, 'done', extra));
+  }
+  notifier._flushNow();
+  assert.equal(calls[1].body, '1 session finished · 1 failed');
+});
