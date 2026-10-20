@@ -48,12 +48,13 @@ import gridNav from './stage/grid-nav.cjs';
 import unseenCompletions from './stage/unseen-completions.cjs';
 import taskbarBadge from './stage/taskbar-badge.cjs';
 import { useQuickAnswerKeys } from './stage/use-quick-answer-keys.js';
+import { useSessionReveal } from './stage/use-session-reveal.js';
 import handoffChainLib from './stage/handoff-chain.cjs';
 import * as sidebarModelShared from '../shared/sidebar-model.js';
 import './styles.css';
 
 const {
-  loadSeenStore, seedSeenStore, markSeen, attentionFor, badgeCounts,
+  loadSeenStore, seedSeenStore, markSeen, attentionFor, badgeCounts, needsYouIds,
 } = unseenCompletions;
 const { planTaskbarBadge, createTaskbarBadgeScheduler } = taskbarBadge;
 // One scheduler for the renderer's lifetime: it remembers what the taskbar
@@ -961,6 +962,21 @@ function App() {
     [attentionDescriptors],
   );
 
+  // "N need you" in the title bar, and the rail filter it opens: the same
+  // blocked evidence as waitingIds, minus machine-made sessions, and whatever
+  // is selected (needsYouIds). Keyed by its ids so a transcript update that
+  // changes nothing hands the rail the same Set.
+  const needsYouKey = needsYouIds(attentionDescriptors).join('\n');
+  const needsYou = useMemo(() => new Set(needsYouKey ? needsYouKey.split('\n') : []), [needsYouKey]);
+  const [needsYouOnly, setNeedsYouOnly] = useState(false);
+  // Nothing left waiting: the filter has nothing to show, so it lets go.
+  useEffect(() => { if (needsYouOnly && needsYou.size === 0) setNeedsYouOnly(false); }, [needsYouOnly, needsYou]);
+  const toggleNeedsYou = useCallback(() => {
+    if (!needsYouOnly) setView('agents');
+    setNeedsYouOnly(!needsYouOnly);
+  }, [needsYouOnly, setView]);
+  const clearNeedsYou = useCallback(() => setNeedsYouOnly(false), []);
+
   // Taskbar status projects the same descriptors as the rail pips, with one
   // deliberate difference (badgeCounts): blocked is a LIVE state that ignores
   // selection and the seen store, because the badge exists for when Pat is
@@ -1011,6 +1027,8 @@ function App() {
   const selectedPaneId = selectedSession ? resolvePane(selectedSession)?.paneId || null : null;
   // Cmd/Ctrl+Shift+Y / N answer the selected window's permission prompt.
   useQuickAnswerKeys(selectedSession, selectedSession ? resolvePane(selectedSession) : null);
+  // A clicked notification opens (or selects) the window it was about.
+  useSessionReveal(sessionsWithSynthetic, openSession);
   useEffect(() => {
     const session = selectedSession;
     const pane = session ? resolvePane(session) : null;
@@ -1652,6 +1670,9 @@ function App() {
         onNewSession={openNewSession}
         profiles={profiles}
         liveCount={liveCount}
+        needsYouCount={needsYou.size}
+        needsYouActive={needsYouOnly}
+        onToggleNeedsYou={toggleNeedsYou}
         stageLayout={stageLayout}
         onToggleStageLayout={toggleStageLayout}
         workers={workers}
@@ -1675,6 +1696,9 @@ function App() {
           openSessionIds={openSessionIds}
           selectedSessionId={selectedId}
           attention={attention}
+          needsYou={needsYou}
+          needsYouOnly={needsYouOnly}
+          onClearNeedsYou={clearNeedsYou}
           searchRef={searchRef}
           onNewSession={openNewSession}
           view={view}
