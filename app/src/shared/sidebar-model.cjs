@@ -3,6 +3,7 @@
 const { isSubSession } = require('./sub-sessions.cjs');
 const {
   parseLocalDateTime,
+  formatLocalDateTime,
   cutoffForFilter,
   displayDayFor,
 } = require('./date-roll.cjs');
@@ -259,6 +260,15 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
     const workspace = workspaceById.get(pane.workspace_id);
     const project = workspace?.label || null;
     const sessionId = sessionAgentId(pane.agent_session);
+    // A pane with no history row yet (never prompted, or started without a
+    // known session id) ages by the keeper's own clock. Stamping it with the
+    // render time pinned every such pane to "just now" at the top of its
+    // project forever, and made the row differ on every rebuild, so the rail
+    // re-sent it in every delta. `now` is only the fallback for a pane record
+    // that carries neither field.
+    const activeMs = Date.parse(pane.last_activity_at || '')
+      || Date.parse(pane.created_at || '')
+      || currentTime.getTime();
     const live = {
       paneId: pane.pane_id,
       workspaceId: pane.workspace_id,
@@ -269,8 +279,8 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       agentStatus: pane.agent_status || null,
       isLiveInteractive: pane.isLiveInteractive === true,
       title: pane.terminal_title || pane.label || 'Live session',
-      lastActiveMs: currentTime.getTime(),
-      lastActive: currentTime.toISOString(),
+      lastActiveMs: activeMs,
+      lastActive: formatLocalDateTime(new Date(activeMs)),
       cwd: resolvableCwd(workspace?.cwd)
         || resolvableCwd(pane.cwd)
         || resolvableCwd(pane.foreground_cwd),
