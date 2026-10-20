@@ -1,26 +1,58 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import model from '../wizard-model.cjs';
+import homeCheck from '../codex-home-check.cjs';
 import { Field, PathInput, TextInput, Toggle, errorFor } from './controls.jsx';
 
-// Step 3. Codex (up to two accounts) and Cursor, same shape as the Claude step:
-// detect the binary, confirm the account where it can be read, allow zero.
+// Step 3. Codex (any number of accounts) and Cursor, same shape as the Claude
+// step: detect the binary, confirm the account where it can be read, allow zero.
 //
-// The honest part of this screen is what it does NOT show. Neither codex nor
-// cursor records an account email anywhere Harbor can read, so there is no
-// confirmation line to render for them. Inventing one, or quietly showing the
-// Claude email next to a Codex account, would be exactly the confident guess
-// this wizard refuses to make; instead each says where to confirm it.
+// A Codex account IS readable (2026-10-15): its home's auth.json carries the
+// ChatGPT login's id_token, and main reads back only that token's email claim,
+// the same confirmation the Claude step shows from .claude.json. An API-key
+// login has no email and says so. Cursor still records no account email Harbor
+// can read, so it shows no confirmation line rather than a guessed one.
 function CodexAccounts({ state, patch, errors }) {
   const accounts = state.codex.accounts || [];
   const [note, setNote] = useState(null);
+  // Rows being read back, by account id (never by index: a removed row shifts
+  // every index after it).
+  const [checking, setChecking] = useState({});
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
+  const checkerRef = useRef(null);
+  // Debounced, tagged by account id and path; an answer for a row that is gone
+  // or whose home changed since is dropped.
+  // Built lazily and dropped on unmount, so a remount (StrictMode) gets a live one.
+  const checker = () => {
+    if (!checkerRef.current) {
+      checkerRef.current = homeCheck.createCodexHomeChecker({
+        readHome: (payload) => window.harbor.setup.readHome(payload),
+        apply: (accountId, home, fields) => patchRef.current((prev) => homeCheck.applyCodexHomeResult(prev, accountId, home, fields)),
+        onChecking: (accountId, busy) => setChecking((prev) => {
+          if (Boolean(prev[accountId]) === busy) return prev;
+          const next = { ...prev };
+          if (busy) next[accountId] = true;
+          else delete next[accountId];
+          return next;
+        }),
+      });
+    }
+    return checkerRef.current;
+  };
+  useEffect(() => () => {
+    checkerRef.current?.dispose();
+    checkerRef.current = null;
+  }, []);
 
-  const setAccount = (index, patchObj) => patch((prev) => ({
+  const setAccount = (accountId, patchObj) => patch((prev) => ({
     ...prev,
     codex: {
       ...prev.codex,
-      accounts: prev.codex.accounts.map((account, i) => (i === index ? { ...account, ...patchObj } : account)),
+      accounts: prev.codex.accounts.map((account) => (account.id === accountId ? { ...account, ...patchObj } : account)),
     },
   }));
+
+  const recheck = (accountId, home, options) => checker().check(accountId, home, options);
 
   const signIn = async (account) => {
     const result = await window.harbor.setup.login({
@@ -44,10 +76,13 @@ function CodexAccounts({ state, patch, errors }) {
               <button
                 type="button"
                 className="setup-btn ghost setup-remove"
-                onClick={() => patch((prev) => ({
-                  ...prev,
-                  codex: { ...prev.codex, accounts: prev.codex.accounts.filter((_, i) => i !== index) },
-                }))}
+                onClick={() => {
+                  checker().cancel(account.id);
+                  patch((prev) => ({
+                    ...prev,
+                    codex: { ...prev.codex, accounts: prev.codex.accounts.filter((row) => row.id !== account.id) },
+                  }));
+                }}
               >
                 Remove
               </button>
@@ -55,7 +90,7 @@ function CodexAccounts({ state, patch, errors }) {
           </div>
           <div className="setup-grid">
             <Field label="Name" error={errorFor(errors, `codex.accounts.${index}.label`)}>
-              <TextInput value={account.label} onChange={(value) => setAccount(index, { label: value })} />
+              <TextInput value={account.label} onChange={(value) => setAccount(account.id, { label: value })} />
             </Field>
             <Field
               label="Codex home"
@@ -64,17 +99,24 @@ function CodexAccounts({ state, patch, errors }) {
             >
               <PathInput
                 value={account.configHome}
-                onChange={(value) => setAccount(index, { configHome: value })}
+                onChange={(value) => { setAccount(account.id, { configHome: value, email: null, emailReason: null }); recheck(account.id, value); }}
                 placeholder="/home/you/.codex"
                 title="Choose the codex home"
               />
             </Field>
           </div>
-          <div className="setup-account" data-authed="0">
+          <div className="setup-account" data-authed={account.email ? '1' : '0'}>
             <span className="setup-account-dot" aria-hidden="true" />
             <span className="setup-account-note">
-              Codex does not record an account email Harbor can read. Confirm the account in the codex CLI.
+              {checking[account.id] ? 'Checking…'
+                : account.email ? <>Signed in as <strong>{account.email}</strong></>
+                  : (account.emailReason || 'No account email read from this home yet. Sign in, then check again.')}
             </span>
+            {!account.email ? (
+              <button type="button" className="setup-btn ghost setup-recheck" onClick={() => recheck(account.id, account.configHome, { immediate: true })}>
+                Check again
+              </button>
+            ) : null}
             <button type="button" className="setup-btn ghost setup-signin" onClick={() => signIn(account)}>
               Sign in
             </button>
@@ -88,21 +130,19 @@ function CodexAccounts({ state, patch, errors }) {
             <div className="setup-cmd"><code>{note.command}</code></div></> : null}
         </div>
       ) : null}
-      {accounts.length < 2 ? (
-        <button
-          type="button"
-          className="setup-btn ghost setup-add-codex"
-          onClick={() => patch((prev) => ({
-            ...prev,
-            codex: {
-              ...prev.codex,
-              accounts: [...prev.codex.accounts, model.seedCodexAccount({}, prev.codex.accounts.length)],
-            },
-          }))}
-        >
-          + Add a second Codex account
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className="setup-btn ghost setup-add-codex"
+        onClick={() => patch((prev) => ({
+          ...prev,
+          codex: {
+            ...prev.codex,
+            accounts: [...prev.codex.accounts, model.seedCodexAccount({}, prev.codex.accounts.length, prev.codex.accounts)],
+          },
+        }))}
+      >
+        {accounts.length ? '+ Add another Codex account' : '+ Add a Codex account'}
+      </button>
     </>
   );
 }

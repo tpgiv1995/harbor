@@ -2,9 +2,27 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { jwtClaims } = require('./plan-usage.js');
 
 function profilesToHomes(profiles = []) {
   return Object.fromEntries(profiles.map((profile) => [profile.id, profile.configHome]));
+}
+
+// A Codex home's signed-in account. Codex keeps no email in config.toml, but
+// its `auth.json` carries the ChatGPT login's OpenID `id_token`, whose claims
+// name the account (the same read plan-usage.js already does for the title-bar
+// menu). Only the `email` claim leaves this function: the token is decoded in
+// memory and never logged, returned or forwarded. An API-key login has no
+// id_token and honestly answers null.
+async function readCodexAccountEmail(home, readFile = fs.readFile) {
+  if (!home) return null;
+  try {
+    const auth = JSON.parse(await readFile(path.join(home, 'auth.json'), 'utf8'));
+    const email = jwtClaims(auth?.tokens?.id_token).email;
+    return typeof email === 'string' && email ? email : null;
+  } catch {
+    return null;
+  }
 }
 
 // A brand-new session has no transcript yet, so the indexer cannot find it and
@@ -39,9 +57,19 @@ function createAccountsProvider({ history, homes, profiles = [], launchedHome = 
 
 async function readAccountEmails(options = {}) {
   const homes = options.homes || profilesToHomes(options.profiles);
+  const providerOf = new Map((options.profiles || []).map((profile) => [profile.id, profile.provider || 'claude']));
   const readFile = options.readFile || fs.readFile;
   const result = {};
   for (const [account, home] of Object.entries(homes)) {
+    const provider = providerOf.get(account) || 'claude';
+    if (provider === 'codex') {
+      result[account] = await readCodexAccountEmail(home, readFile);
+      continue;
+    }
+    if (provider !== 'claude') {
+      result[account] = null;
+      continue;
+    }
     try {
       const raw = await readFile(path.join(home, '.claude.json'), 'utf8');
       result[account] = JSON.parse(raw)?.oauthAccount?.emailAddress || null;
@@ -52,4 +80,4 @@ async function readAccountEmails(options = {}) {
   return result;
 }
 
-module.exports = { createAccountsProvider, profilesToHomes, readAccountEmails };
+module.exports = { createAccountsProvider, profilesToHomes, readAccountEmails, readCodexAccountEmail };
