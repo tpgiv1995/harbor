@@ -29,9 +29,18 @@ function withElectronCapabilities(adapter, initial = null) {
       throw new Error('could not verify Electron clipboard image; image was NOT attached');
     }
   };
-  adapter.notify = (title, body) => {
+  // A notification is held until it is clicked or closed: one the garbage
+  // collector reclaims drops its click handler, so a click on a toast still on
+  // screen would do nothing.
+  const shown = new Set();
+  adapter.notify = (title, body, { onClick } = {}) => {
     if (!electron?.Notification) throw new Error('Electron notification capability unavailable');
-    new electron.Notification({ title, body }).show();
+    const notification = new electron.Notification({ title, body });
+    shown.add(notification);
+    const release = () => shown.delete(notification);
+    notification.on?.('click', () => { release(); try { onClick?.(); } catch { /* the window is gone */ } });
+    notification.on?.('close', release);
+    notification.show();
   };
   return adapter;
 }

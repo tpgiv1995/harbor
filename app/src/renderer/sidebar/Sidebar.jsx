@@ -433,7 +433,7 @@ function FilterChip({ label, active, onClick, dataFilter }) {
 // The rail: Harbor's one and only session browser. Clicking a row OPENS the
 // session as a window on the stage (read instantly; resume happens later, from
 // the command bar, only when Pat actually sends something).
-export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessionIds, selectedSessionId, attention, searchRef, view, onViewChange, orchEnabled = true, taskAlert = 0 }) {
+export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessionIds, selectedSessionId, attention, needsYou = null, needsYouOnly = false, onClearNeedsYou, searchRef, view, onViewChange, orchEnabled = true, taskAlert = 0 }) {
   const [clock, setClock] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 15_000);
@@ -515,6 +515,10 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
   const toggleHidden = useCallback(() => {
     updateRailState((previous) => ({ ...previous, hidden: !previous.hidden }));
   }, [updateRailState]);
+  // The needs-you list lives in the rail, so asking for it shows the rail.
+  useEffect(() => {
+    if (needsYouOnly) updateRailState((previous) => (previous.hidden ? { ...previous, hidden: false } : previous));
+  }, [needsYouOnly, updateRailState]);
 
   useEffect(() => {
     try {
@@ -629,13 +633,26 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
   // purpose: the project menu's own options are read from the pass BEFORE the
   // project filter, so choosing one project never empties the menu you chose
   // it from.
-  const timeFiltered = useMemo(
-    () => filterProjects(groupedModel, {
+  const timeFiltered = useMemo(() => {
+    // "Needs you" (the title bar's count) shows every session waiting on an
+    // answer whatever the time chips say: a blocked session older than the
+    // window is exactly the one that would otherwise be missed. The set comes
+    // from the App (needsYouIds), so a selected session stays listed while
+    // it is answered.
+    if (needsYouOnly) {
+      const all = filterProjects(groupedModel, { filter: { kind: 'all' }, query });
+      return {
+        ...all,
+        projects: all.projects
+          .map((project) => ({ ...project, sessions: (project.sessions || []).filter((session) => needsYou?.has?.(session.id)) }))
+          .filter((project) => project.sessions.length),
+      };
+    }
+    return filterProjects(groupedModel, {
       filter: filter.kind === 'since' && !customSince ? { kind: 'all' } : filter,
       query,
-    }),
-    [groupedModel, filter, query, customSince],
-  );
+    });
+  }, [groupedModel, filter, query, customSince, needsYouOnly, needsYou]);
   const projectOptions = useMemo(
     () => projectFilterOptions(timeFiltered, { selected: projectFilter }),
     [timeFiltered, projectFilter],
@@ -652,7 +669,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
   const projectFilterActive = projectFilter.length > 0;
   // Drives the rail head's "shown / total" count, so a project filter reads as
   // a narrowing rather than as sessions having gone missing.
-  const narrowing = searching || timeFilterActive || projectFilterActive;
+  const narrowing = searching || timeFilterActive || projectFilterActive || needsYouOnly;
   const filteredSessionIds = useMemo(() => filtered.projects
     .flatMap((project) => project.sessions || [])
     // Match the rail's orchestration-worker rule: workers only participate in
@@ -675,13 +692,15 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
       // because a hit inside a collapsed project reads as no hit at all; the
       // time chips do NOT, which is what made the caret dead in the default
       // 48h view. The whole rule, and why, is in collapse-policy.cjs.
-      collapsedProjects: collapseForView({ collapsedProjects, searching }),
+      // The needs-you list opens every project too: a collapsed group would
+      // hide the very row it was opened for.
+      collapsedProjects: collapseForView({ collapsedProjects, searching: searching || needsYouOnly }),
       expandedOlder,
       // Orchestration workers are excluded from the browser by default; an active
       // search re-includes matching ones so a specific worker can still be found.
       includeChildren: searching,
     }),
-    [filtered, collapsedProjects, expandedOlder, searching],
+    [filtered, collapsedProjects, expandedOlder, searching, needsYouOnly],
   );
 
   const toggleProject = (label) => {
@@ -995,7 +1014,12 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
         )}
       </div>
       <div className="sidebar-controls">
-        <div className="sidebar-filters" role="group" aria-label="Time filters">
+        <div
+          className={`sidebar-filters${needsYouOnly ? ' overridden' : ''}`}
+          role="group"
+          aria-label="Time filters"
+          title={needsYouOnly ? 'Waiting on you lists every time range' : undefined}
+        >
           <FilterChip label="Today" dataFilter="today" active={filter.kind === 'today'} onClick={() => setFilter({ kind: 'today' })} />
           <FilterChip label="48h" dataFilter="48h" active={filter.kind === 'rolling' && filter.days === 2} onClick={() => setFilter({ kind: 'rolling', days: 2 })} />
           <FilterChip label="7d" dataFilter="7d" active={filter.kind === 'rolling' && filter.days === 7} onClick={() => setFilter({ kind: 'rolling', days: 7 })} />
@@ -1017,6 +1041,12 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
             already been overflowed onto a wasted line once (2026-07-27), and
             these three are the "what shape is this list" controls while that
             row's Archive pills are actions. */}
+        {needsYouOnly ? (
+          <div className="needs-banner" role="status">
+            <span><span className="needs-dot" aria-hidden="true" />{`Waiting on you · ${filteredSessionIds.length}`}</span>
+            <button type="button" className="needs-banner-clear" onClick={onClearNeedsYou}>Show all</button>
+          </div>
+        ) : null}
         <div className="rail-list-controls">
           <button
             ref={sortButtonRef}
