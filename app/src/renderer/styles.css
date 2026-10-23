@@ -2413,6 +2413,70 @@ button { font-family: inherit; }
   font-variant-numeric: tabular-nums;
 }
 
+/* Files a message named by path but cannot show inline (a codex local_image
+   that is gone or too large): the composer's file chip, without its remove. */
+.conv-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.conv-attachments:first-child {
+  margin-top: 0;
+}
+
+.conv-attachment {
+  padding-right: 9px;
+}
+
+/* A codex request_user_input question: the choices the model is waiting on,
+   read-only. Open questions carry the amber answer cue; settled ones go quiet. */
+.conv-question-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--warn);
+  border-radius: 9px;
+}
+
+.conv-question.answered .conv-question-list {
+  border-color: var(--ln);
+}
+
+.conv-question-title {
+  font-weight: 600;
+  color: var(--tx);
+}
+
+.conv-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.conv-question-option {
+  padding: 2px 8px;
+  border: 1px solid var(--ln2, var(--ln));
+  border-radius: 6px;
+  color: var(--sub);
+  font-size: 11.5px;
+}
+
+.conv-question-state {
+  margin-top: 5px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--warn);
+}
+
+.conv-question.answered .conv-question-state {
+  color: var(--fnt);
+}
+
 .conv-images {
   display: flex;
   flex-direction: column;
