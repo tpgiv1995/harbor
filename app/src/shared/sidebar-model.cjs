@@ -248,6 +248,21 @@ function sleptSince(entry, lastActiveMs) {
   return Number.isFinite(at) && at >= lastActiveMs - DORMANT_GRACE_MS;
 }
 
+// The rail row fields a pane's agent status drives: the CLI's own state and,
+// from OSC 7501 (daemon/screen.js), its words (`msg`: the current step, or
+// what a prompt asks), the prompt kind, and the keeper's per-change seq. The
+// sidebar bridge's status fast path patches exactly these with this function,
+// and the merge below derives them with it, so the two paths cannot disagree.
+function paneStatusFields(pane) {
+  const status = pane?.agent_status || null;
+  return {
+    agentStatus: status,
+    agentStatusKind: status ? pane.agent_status_kind || null : null,
+    agentStatusMsg: status ? pane.agent_status_msg || null : null,
+    agentStatusSeq: status && Number.isInteger(pane.agent_status_seq) ? pane.agent_status_seq : null,
+  };
+}
+
 function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = [], homes = {}, dormantSessions = {}, grouping = 'project', now = new Date() } = {}) {
   const groupMode = grouping === 'date' ? 'date' : 'project';
   const currentTime = new Date(now);
@@ -266,7 +281,7 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       sessionId,
       provider: paneProvider(pane),
       model: pane.model || pane.metadata?.tokens?.model || null,
-      agentStatus: pane.agent_status || null,
+      ...paneStatusFields(pane),
       isLiveInteractive: pane.isLiveInteractive === true,
       title: pane.terminal_title || pane.label || 'Live session',
       lastActiveMs: currentTime.getTime(),
@@ -313,6 +328,9 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       paneId: live?.paneId ?? null,
       workspaceId: live?.workspaceId ?? null,
       agentStatus: live?.agentStatus ?? null,
+      agentStatusKind: live?.agentStatusKind ?? null,
+      agentStatusMsg: live?.agentStatusMsg ?? null,
+      agentStatusSeq: live?.agentStatusSeq ?? null,
       isWindowsEra: isWindowsEra(row.project),
       isInternalSession: Boolean(row.isInternalSession),
       entrypoint: row.entrypoint || null,
@@ -341,6 +359,9 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       paneId: live.paneId,
       workspaceId: live.workspaceId,
       agentStatus: live.agentStatus,
+      agentStatusKind: live.agentStatusKind,
+      agentStatusMsg: live.agentStatusMsg,
+      agentStatusSeq: live.agentStatusSeq,
       isWindowsEra: isWindowsEra(live.project),
       isChildTask: isChildTask(live.title),
       childTitle: isChildTask(live.title) ? childTaskTitle(live.title) : null,
@@ -461,6 +482,7 @@ module.exports = {
   isScratchSession,
   childTaskTitle,
   mergeSidebarModel,
+  paneStatusFields,
   regroupSidebarModel,
   filterProjects,
   flattenSidebarRows,

@@ -14,7 +14,10 @@
 
 function railStatus({ runState = null, attention = null, dormant = false } = {}) {
   if (runState?.kind === 'blocked' || attention === 'blocked') {
-    return { kind: 'blocked', label: 'Waiting on your answer' };
+    // The CLI's own words when it reported them (OSC 7501, run-state's
+    // blockedLabel): "Waiting on you: approve Write", the full ask beneath.
+    const asks = runState?.kind === 'blocked' && runState.label && runState.label !== 'needs your answer' ? runState.label : null;
+    return { kind: 'blocked', label: asks ? `Waiting on you: ${asks}` : 'Waiting on your answer', detail: runState?.tooltip || null };
   }
   if (runState?.kind === 'running') {
     const verb = String(runState.label || '').trim();

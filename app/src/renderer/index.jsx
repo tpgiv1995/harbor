@@ -922,7 +922,9 @@ function App() {
         background: backgroundBusy(session, header),
         // A question waiting in the hook lane is the strongest blocked signal
         // there is: Claude is inside the tool call until the form answers.
-        blocked: asksBySession.has(session.id) || terminalDialogs.has(id) || (header ? Boolean(header.blocked) : session.agentStatus === 'blocked'),
+        // The CLI's own OSC 7501 status counts even with a transcript open: the
+        // transcript never says "waiting on a permission prompt", the CLI does.
+        blocked: asksBySession.has(session.id) || terminalDialogs.has(id) || Boolean(header?.blocked) || session.agentStatus === 'blocked',
         isSelected: id === selectedId,
         // Orchestration workers and BATCH TITLE children finish all day; they
         // are not waiting for Pat, and counting them pinned the badge at 9+.
