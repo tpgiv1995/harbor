@@ -8,6 +8,12 @@ const { createHistoryIndex } = require('../app/src/main/providers/history-index.
 const { SessionClient } = require('../app/src/daemon/client.js');
 const { defaultConfigFile } = require('../app/src/shared/tasks-file.cjs');
 const { cursorAuthEnv } = require('../app/src/shared/cursor-auth.cjs');
+const {
+  lastCodexTurnContext, codexRecordedSettings, readCodexResumeSettings,
+} = require('../app/src/main/providers/codex-resume-settings.js');
+const {
+  DEFAULT_CODEX_PERMISSION, isCodexPermission, codexPermissionArgs,
+} = require('../app/src/shared/codex-permission.cjs');
 
 const BIN_DIR = __dirname;
 const ROOT = path.dirname(BIN_DIR);
@@ -640,13 +646,43 @@ function codexPaneControls({ version, codexHome }) {
   return controls;
 }
 
-// The controls go straight after the bypass flag, ahead of --model, the resume
-// id and any prompt, so the positional arguments stay last.
+// The controls go straight after the permission flags, ahead of --model, the
+// resume id and any prompt, so the positional arguments stay last. The
+// permission flags are one of codexPermissionArgs' four shapes: a lone
+// --approve-for-me or bypass flag, or `-a X -s Y -c approvals_reviewer=user`.
+function codexPermissionEnd(argv) {
+  for (const flag of ['--approve-for-me', '--dangerously-bypass-approvals-and-sandbox']) {
+    const at = argv.indexOf(flag);
+    if (at >= 0) return at + 1;
+  }
+  const sandbox = argv.indexOf('-s');
+  if (sandbox < 0) return -1;
+  const reviewer = sandbox + 2;
+  return argv[reviewer] === '-c' && /^approvals_reviewer=/.test(argv[reviewer + 1] || '') ? reviewer + 2 : reviewer;
+}
+
 function withCodexPaneControls(argv, controls) {
   if (!controls.length) return argv;
-  const at = argv.indexOf('--dangerously-bypass-approvals-and-sandbox');
+  const at = codexPermissionEnd(argv);
   if (at < 0) return argv;
-  return [...argv.slice(0, at + 1), ...controls, ...argv.slice(at + 1)];
+  return [...argv.slice(0, at), ...controls, ...argv.slice(at)];
+}
+
+// What a resumed codex session ran with is read by
+// app/src/main/providers/codex-resume-settings.js, shared with Harbor's main
+// process, which passes all three flags plus --recorded so a compressed
+// rollout never depends on the system node having zstd.
+function codexArgv({ resumeId = '', model = '', effort = '', permission = DEFAULT_CODEX_PERMISSION, search = false, addDirs = [] }) {
+  return [
+    providerBin('codex'),
+    ...(resumeId ? ['resume'] : []),
+    ...codexPermissionArgs(permission),
+    ...(model ? ['--model', model] : []),
+    ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : []),
+    ...(search ? ['--search'] : []),
+    ...addDirs.flatMap((dir) => ['--add-dir', dir]),
+    ...(resumeId ? [resumeId] : []),
+  ];
 }
 
 function parseAi(args) {
@@ -658,10 +694,20 @@ function parseAi(args) {
   let here = false;
   let configHome = '';
   let prompt = '';
+  let providerGiven = false;
+  let permission = '';
+  let search = false;
+  let recorded = false;
+  const addDirs = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--here') here = true;
-    else if (['--provider', '--model', '--effort', '--resume-id', '--session-id', '--home'].includes(arg)) {
+    else if (arg === '--search') search = true;
+    // The caller (Harbor's main process) has already read the rollout's record
+    // and passes what it names as --model/--effort/--permission: do not read
+    // it again here.
+    else if (arg === '--recorded') recorded = true;
+    else if (['--provider', '--model', '--effort', '--resume-id', '--session-id', '--home', '--permission', '--add-dir'].includes(arg)) {
       const next = args[i + 1];
       if (!next) throw new Error(`${arg} requires a value`);
       // A value that is itself a flag means the caller left one out. Accepting
@@ -669,7 +715,9 @@ function parseAi(args) {
       // the session's opening prompt, both silently.
       if (next.startsWith('-')) throw new Error(`${arg} requires a value, got the flag ${next}`);
       const value = args[++i];
-      if (arg === '--provider') provider = value;
+      if (arg === '--provider') { provider = value; providerGiven = true; }
+      if (arg === '--permission') permission = value;
+      if (arg === '--add-dir') addDirs.push(value);
       if (arg === '--model') model = value;
       if (arg === '--effort') effort = value;
       if (arg === '--resume-id') resumeId = value;
@@ -682,14 +730,40 @@ function parseAi(args) {
     else if (!arg.startsWith('-') && !prompt) prompt = arg;
     else throw new Error(`unknown option: ${arg} (see --help)`);
   }
+  // THE HOME NAMES THE PROVIDER when the caller did not. The Orch view
+  // launches the DEFAULT profile with `--home <its configHome>` and no
+  // --provider, so a default CODEX profile used to resolve as a claude home:
+  // claude started with CLAUDE_CONFIG_DIR pointed at ~/.codex. A configured
+  // profile carries its provider, so a home that matches one decides it. An
+  // explicit --provider that disagrees with the profile it names is refused:
+  // a codex home handed to claude (or the reverse) is never what was meant.
+  if (configHome) {
+    const owners = (runtime().config.profiles || []).filter((item) => item?.id === configHome || item?.configHome === configHome);
+    const owner = owners.find((item) => (item.provider || 'claude') === provider) || owners[0];
+    const ownerProvider = owner ? (owner.provider || 'claude') : null;
+    if (ownerProvider && !providerGiven) provider = ownerProvider;
+    else if (ownerProvider && ownerProvider !== provider && !owners.some((item) => (item.provider || 'claude') === provider)) {
+      throw new Error(`--home ${configHome} is a ${ownerProvider} profile, not ${provider}`);
+    }
+  }
   if (!['claude', 'codex', 'cursor'].includes(provider)) throw new Error(`unknown provider: ${provider}`);
   if (provider === 'claude' && resumeId) throw new Error('--resume-id is codex/cursor only; claude resumes via claude-sessions');
   if (provider !== 'claude' && sessionId) throw new Error('--session-id is claude only');
+  if (provider !== 'codex' && (permission || search || addDirs.length)) {
+    throw new Error('--permission, --search and --add-dir are codex only');
+  }
+  if (recorded && (provider !== 'codex' || !resumeId)) throw new Error('--recorded is for a codex --resume-id only');
+  if (permission && !isCodexPermission(permission)) {
+    throw new Error(`unknown --permission ${permission} (auto, ask, read-only, full)`);
+  }
   let argv;
   if (provider === 'claude') argv = [claudeBin(), '--dangerously-skip-permissions', ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), ...(sessionId ? ['--session-id', sessionId] : [])];
-  else if (provider === 'codex') argv = resumeId
-    ? [providerBin('codex'), 'resume', '--dangerously-bypass-approvals-and-sandbox', resumeId]
-    : [providerBin('codex'), '--dangerously-bypass-approvals-and-sandbox', ...(model ? ['--model', model] : []), ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : [])];
+  // A fresh codex starts in the default mode (the bypass flag) unless
+  // --permission names another. A resume is composed again in ai() once the
+  // rollout has said what the session ran with; this is the explicit-only form.
+  else if (provider === 'codex') argv = codexArgv({
+    resumeId, model, effort, permission: permission || DEFAULT_CODEX_PERMISSION, search, addDirs,
+  });
   // --trust (2026-09-26): the interactive TUI opens "Workspace Trust Required"
   // in any folder it has not recorded, --force or not, and its first option is
   // "Trust this workspace", so the Enter that ends Harbor's first send would
@@ -709,14 +783,14 @@ function parseAi(args) {
     ? [providerBin('cursor'), '--force', '--trust', '--disable-auto-update', '--resume', resumeId]
     : [providerBin('cursor'), '--force', '--trust', '--disable-auto-update', ...(model ? ['--model', model] : [])];
   if (prompt) argv.push(prompt);
-  return { argv, here, configHome, provider, resumeId, sessionId, prompt };
+  return { argv, here, configHome, provider, resumeId, sessionId, prompt, model, effort, permission, search, addDirs, recorded };
 }
 
 async function ai(args) {
   resolveSessionBackend();
   const parsed = parseAi(args);
   if (parsed.help) {
-    process.stdout.write('ai [--home PROFILE|CONFIG_HOME] [--provider claude|codex|cursor] [--model MODEL] [--effort LEVEL] [--resume-id ID] [--session-id UUID] [--here] [PROMPT]\n');
+    process.stdout.write('ai [--home PROFILE|CONFIG_HOME] [--provider claude|codex|cursor] [--model MODEL] [--effort LEVEL] [--resume-id ID] [--session-id UUID] [--permission auto|ask|read-only|full] [--search] [--add-dir DIR]... [--recorded] [--here] [PROMPT]\n');
     return 0;
   }
   const childEnv = { ...process.env };
@@ -742,9 +816,30 @@ async function ai(args) {
   // Against the home the child will read (the profile's, else an inherited
   // CODEX_HOME, else ~/.codex: the same order codex-model-catalog.js reads).
   if (parsed.provider === 'codex') {
+    const codexHome = childEnv.CODEX_HOME || path.join(os.homedir(), '.codex');
+    // A resume comes back on what the session last ran with, read off its
+    // rollout; an explicit flag (the popover's Apply) wins over the record. A
+    // rollout that names no single mode resumes on the launch default; a
+    // rollout that cannot be found or read REFUSES the resume (it throws),
+    // unless the caller named all three, or read the record itself
+    // (--recorded), and needs nothing from it here.
+    if (parsed.resumeId) {
+      const recorded = parsed.recorded || (parsed.model && parsed.effort && parsed.permission)
+        ? codexRecordedSettings(null)
+        : await readCodexResumeSettings(parsed.resumeId, codexHome);
+      parsed.argv = codexArgv({
+        resumeId: parsed.resumeId,
+        model: parsed.model || recorded.model,
+        effort: parsed.effort || recorded.effort,
+        permission: parsed.permission || recorded.permission || DEFAULT_CODEX_PERMISSION,
+        search: parsed.search,
+        addDirs: parsed.addDirs,
+      });
+      if (parsed.prompt) parsed.argv.push(parsed.prompt);
+    }
     parsed.argv = withCodexPaneControls(parsed.argv, codexPaneControls({
       version: codexCliVersion(parsed.argv[0], childEnv),
-      codexHome: childEnv.CODEX_HOME || path.join(os.homedir(), '.codex'),
+      codexHome,
     }));
   }
   if (process.env.HARBOR_AI_DRY_RUN === '1') {
@@ -942,4 +1037,5 @@ module.exports = {
   trustKeysFor,
   resolveSessionBackend, sessiondChildEnv, spawnSessiond,
   resolveWindowsLaunch, codexCliVersion, codexMigrationAcks, codexPaneControls, withCodexPaneControls,
+  lastCodexTurnContext, codexRecordedSettings, readCodexResumeSettings,
 };

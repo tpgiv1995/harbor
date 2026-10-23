@@ -37,6 +37,7 @@ const { EventEmitter } = require('node:events');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { walkRollouts, rolloutRank, isCompressed } = require('./codex-rollout-files.js');
 
 // One prompt line is small; this tail covers weeks of interactive codex use
 // and bounds the read on a history file that only ever grows.
@@ -106,23 +107,31 @@ async function readCodexHistory(historyPath, { maxBytes = HISTORY_TAIL_BYTES } =
 
 // The rollout carries the session's cwd in its first line. Filenames embed a
 // launch stamp, so the id alone cannot name the path: the dated directories
-// are scanned newest-first.
+// are walked newest-first. Codex can compress an old rollout to .jsonl.zst and
+// moves an archived chat to archived_sessions/; a lookup that knew only plain
+// files under sessions/ found no record for those, so a resume came back on
+// the home's defaults whatever the session had run with. A plain rollout under
+// sessions/ is answered the moment it is seen: it is the file codex appends
+// to and outranks every copy. Otherwise the best-ranked match wins
+// (compressed under sessions/, then archived plain, then archived compressed),
+// newest directory first on a tie. A .zst is returned even when this runtime
+// cannot decompress it, so the caller reports it as unreadable rather than as
+// absent.
 async function findCodexRollout(sessionId, { home = os.homedir(), codexHome = null } = {}) {
-  const root = path.join(codexHome || path.join(home, '.codex'), 'sessions');
-  const years = (await fsp.readdir(root).catch(() => [])).sort().reverse();
-  for (const year of years) {
-    const months = (await fsp.readdir(path.join(root, year)).catch(() => [])).sort().reverse();
-    for (const month of months) {
-      const days = (await fsp.readdir(path.join(root, year, month)).catch(() => [])).sort().reverse();
-      for (const day of days) {
-        const dir = path.join(root, year, month, day);
-        const names = await fsp.readdir(dir).catch(() => []);
-        const name = names.find((item) => item.endsWith(`${sessionId}.jsonl`));
-        if (name) return path.join(dir, name);
-      }
-    }
-  }
-  return null;
+  const configHome = codexHome || path.join(home, '.codex');
+  const wanted = String(sessionId || '').toLowerCase();
+  if (!wanted) return null;
+  let best = null;
+  const visitFor = (archived) => (file, id) => {
+    if (id.toLowerCase() !== wanted) return false;
+    const rank = rolloutRank({ archived, compressed: isCompressed(file) });
+    if (!best || rank < best.rank) best = { file, rank };
+    return rank === 0;
+  };
+  const options = { includeUndecompressable: true };
+  if (await walkRollouts(path.join(configHome, 'sessions'), 3, visitFor(false), options)) return best.file;
+  await walkRollouts(path.join(configHome, 'archived_sessions'), 3, visitFor(true), options);
+  return best?.file || null;
 }
 
 // The session_meta line has no size Harbor controls: codex 0.147.0 ships the

@@ -283,3 +283,52 @@ test('a pane herdr already named is left alone, and claude panes are never touch
   assert.deepEqual(linker.all(), {});
   linker.close();
 });
+
+// COMPRESSED AND ARCHIVED ROLLOUTS. Codex can compress an old rollout to
+// <id>.jsonl.zst and moves an archived chat to <home>/archived_sessions/.
+// findCodexRollout matched sessions/**/<id>.jsonl only, so a resume answered
+// "no rollout" for those and came back on the home's defaults. It now prefers
+// the file codex itself appends to, then the compressed copy, then archived.
+const zlib = require('node:zlib');
+const NO_ZSTD = typeof zlib.zstdCompressSync !== 'function' && 'runtime has no zstd';
+
+function rolloutText(id, cwd) {
+  return `${JSON.stringify({ timestamp: '2026-07-25T21:09:57.000Z', type: 'session_meta', payload: { session_id: id, cwd } })}\n`;
+}
+
+test('a compressed rollout under sessions/ is found by id', { skip: NO_ZSTD }, async () => {
+  const home = makeHome();
+  const dir = path.join(home, '.codex', 'sessions', '2026', '07', '10');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `rollout-2026-07-10T12-00-00-${ID_A}.jsonl.zst`);
+  fs.writeFileSync(file, zlib.zstdCompressSync(Buffer.from(rolloutText(ID_A, '/work'))));
+  assert.equal(await findCodexRollout(ID_A, { home }), file);
+  assert.equal(await findCodexRollout(ID_B, { home }), null);
+});
+
+test('an archived rollout, plain or compressed, is found by id', { skip: NO_ZSTD }, async () => {
+  const home = makeHome();
+  const archived = path.join(home, '.codex', 'archived_sessions');
+  fs.mkdirSync(archived, { recursive: true });
+  const plain = path.join(archived, `rollout-2026-07-10T12-00-00-${ID_A}.jsonl`);
+  const packed = path.join(archived, `rollout-2026-07-11T12-00-00-${ID_B}.jsonl.zst`);
+  fs.writeFileSync(plain, rolloutText(ID_A, '/work'));
+  fs.writeFileSync(packed, zlib.zstdCompressSync(Buffer.from(rolloutText(ID_B, '/work'))));
+  assert.equal(await findCodexRollout(ID_A, { home }), plain);
+  assert.equal(await findCodexRollout(ID_B, { home, codexHome: path.join(home, '.codex') }), packed);
+});
+
+test('the active plain rollout wins over a compressed or archived copy of the same id', { skip: NO_ZSTD }, async () => {
+  const home = makeHome();
+  const active = writeRollout(home, { id: ID_A, cwd: '/work', day: '20', stamp: '2026-07-20T10-00-00' });
+  const coldDir = path.join(home, '.codex', 'sessions', '2026', '07', '25');
+  fs.writeFileSync(path.join(coldDir, `rollout-2026-07-25T10-00-00-${ID_A}.jsonl.zst`), zlib.zstdCompressSync(Buffer.from(rolloutText(ID_A, '/work'))));
+  const archived = path.join(home, '.codex', 'archived_sessions');
+  fs.mkdirSync(archived, { recursive: true });
+  fs.writeFileSync(path.join(archived, `rollout-2026-07-26T10-00-00-${ID_A}.jsonl`), rolloutText(ID_A, '/work'));
+  assert.equal(await findCodexRollout(ID_A, { home }), active);
+  // With the active copy gone, the compressed one under sessions/ outranks the
+  // archived copy.
+  fs.rmSync(active);
+  assert.match(await findCodexRollout(ID_A, { home }), /sessions[\\/]2026[\\/]07[\\/]25[\\/].*\.jsonl\.zst$/);
+});
