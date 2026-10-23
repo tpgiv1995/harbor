@@ -18,6 +18,9 @@ const path = require('node:path');
 const readline = require('node:readline');
 const { readSessionBeacon, readOwnerProcessAlive } = require('./session-owner.js');
 const { processAliveFromEvidence } = require('../../shared/session-run-state.cjs');
+const {
+  createEditRows, addEdits, snapshotEditRows, TURN_DIFF_LINE_BUDGET,
+} = require('../../shared/turn-edits.cjs');
 
 
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
@@ -385,14 +388,41 @@ function actionForToolUse(block) {
       return mk('Edited', basename(file), {
         pill: { text: `+${added} −${removed}`, tone: 'ok' },
         diff: buildDiffPreview(input.old_string, input.new_string),
+        files: editedFiles(file, added, removed),
       });
     }
-    case 'Write':
+    case 'Write': {
+      const lines = countLines(input.content ?? input.contents);
       return mk('Wrote', basename(file), {
-        pill: { text: `${countLines(input.content ?? input.contents)} lines`, tone: 'ok' },
+        pill: { text: `${lines} lines`, tone: 'ok' },
+        files: editedFiles(file, lines, 0),
       });
-    case 'NotebookEdit':
-      return mk('Edited', basename(file));
+    }
+    case 'NotebookEdit': {
+      // The old cell source is not in the call, so only an insert/replace's new
+      // lines are countable; removed stays unknown (null), never a made-up 0.
+      const added = input.edit_mode === 'delete' ? 0 : countLines(input.new_source);
+      return mk('Edited', basename(file), { files: editedFiles(file, added, null) });
+    }
+    case 'MultiEdit': {
+      // The row itself is unchanged (the prettified default); only the
+      // per-file totals ride along for the turn's "Edited N files" card.
+      const edits = Array.isArray(input.edits) ? input.edits : [];
+      const added = edits.reduce((n, e) => n + countLines(e?.new_string), 0);
+      const removed = edits.reduce((n, e) => n + countLines(e?.old_string), 0);
+      const diff = [];
+      for (const e of edits) {
+        if (diff.length >= MAX_DIFF_LINES * 2) break;
+        const preview = buildDiffPreview(e?.old_string, e?.new_string) || [];
+        for (const line of preview) {
+          if (diff.length >= MAX_DIFF_LINES * 2) break;
+          diff.push(line);
+        }
+      }
+      return mk(prettyToolName(name), primaryInputValue(input), {
+        files: editedFiles(file, added, removed, diff.length ? diff : null),
+      });
+    }
     case 'Read':
       return mk('Read', basename(file), {
         cv: input.pages ? `p. ${input.pages}` : (input.offset ? `from :${input.offset}` : null),
@@ -428,6 +458,77 @@ function actionForToolUse(block) {
       return mk(prettyToolName(name), primaryInputValue(input));
     }
   }
+}
+
+// What one file-changing call did to each file it touched, for the per-turn
+// "Edited N files" card (renderer/stage/turn-cards.cjs). The full path is the
+// aggregation key; `diff` is only carried when the row's own `diff` cannot
+// stand in for it (MultiEdit).
+function editedFiles(file, added, removed, diff = null) {
+  if (!file) return null;
+  const entry = { path: String(file), added, removed };
+  if (diff) entry.diff = diff;
+  return [entry];
+}
+
+// The diff Claude Code actually applied, from an Edit/Write/MultiEdit
+// result's toolUseResult.structuredPatch (hunks of '+'/'-'/' ' lines). The
+// call's own counts are only a guess: an Edit counts every line of
+// old_string/new_string, context included (5 lines with one changed read
+// +5 -5), and a Write over an existing file read +N -0. A Write that CREATES
+// a file carries an empty patch and keeps the call's count (all of it is new).
+function patchCounts(structuredPatch) {
+  if (!Array.isArray(structuredPatch) || !structuredPatch.length) return null;
+  let added = 0;
+  let removed = 0;
+  for (const hunk of structuredPatch) {
+    for (const line of Array.isArray(hunk?.lines) ? hunk.lines : []) {
+      if (typeof line !== 'string') continue;
+      if (line.startsWith('+')) added += 1;
+      else if (line.startsWith('-')) removed += 1;
+    }
+  }
+  return { added, removed };
+}
+
+// The same patch as a diff preview: only its changed lines, the way
+// buildDiffPreview leaves context out, so the preview agrees with the counts.
+function patchPreview(structuredPatch) {
+  const lines = [];
+  let total = 0;
+  for (const hunk of structuredPatch) {
+    for (const line of Array.isArray(hunk?.lines) ? hunk.lines : []) {
+      if (typeof line !== 'string' || !(line.startsWith('+') || line.startsWith('-'))) continue;
+      total += 1;
+      if (lines.length < MAX_DIFF_LINES) lines.push({ t: line.startsWith('+') ? 'add' : 'del', s: clip(line.slice(1), 160) });
+    }
+  }
+  if (total > lines.length) lines.push({ t: 'ctx', s: `… ${total - lines.length} more lines` });
+  return lines.length ? lines : null;
+}
+
+function recountFromPatch(action, toolUseResult) {
+  if (!Array.isArray(action?.files) || action.files.length !== 1) return;
+  if (!toolUseResult || typeof toolUseResult !== 'object') return;
+  const counts = patchCounts(toolUseResult.structuredPatch);
+  if (!counts) return;
+  const file = { ...action.files[0], added: counts.added, removed: counts.removed };
+  // A preview the call already had is redrawn from the patch, which drops the
+  // unchanged context old_string/new_string carried as -/+ lines.
+  const preview = patchPreview(toolUseResult.structuredPatch);
+  if (preview && file.diff) file.diff = preview;
+  else if (preview && action.diff) action.diff = preview;
+  action.files = [file];
+  if (action.verb === 'Edited' || (action.verb === 'Wrote' && toolUseResult.type === 'update')) {
+    action.pill = { text: `+${counts.added} −${counts.removed}`, tone: 'ok' };
+  }
+}
+
+function toolResultText(part) {
+  const content = part?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((c) => (typeof c?.text === 'string' ? c.text : '')).join('\n');
+  return '';
 }
 
 function prettyToolName(name) {
@@ -609,6 +710,33 @@ const PRESENT_TENSE = {
   Skill: 'Running skill',
 };
 
+// THE TASK CHECKLIST (2026-10-19). Claude Code's task tools (TaskCreate /
+// TaskUpdate / TaskList / TaskGet, and the legacy TodoWrite) draw ONE checklist
+// card per turn instead of an action row per call. TaskStop and TaskOutput are
+// background-shell tools, unrelated to the checklist, and keep their rows.
+const TASK_LIST_TOOLS = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TodoWrite']);
+const TASK_STATUSES = new Set(['pending', 'in_progress', 'completed']);
+const MAX_TASKS = 100;
+const MAX_TASK_CALLS = 200;
+
+function taskStatus(value) {
+  const status = String(value || '').toLowerCase();
+  return TASK_STATUSES.has(status) ? status : 'pending';
+}
+
+function taskText(value, max = 200) {
+  return typeof value === 'string' && value.trim() ? clip(value.trim(), max) : null;
+}
+
+// TaskCreate's id is assigned in its RESULT: the record's toolUseResult
+// ({"task":{"id":"1",...}}) when that record carries this one result, else the
+// result text ("Task #1 created successfully: ...").
+function createdTaskId(part, record, onlyResult) {
+  const fromRecord = onlyResult ? record?.toolUseResult?.task?.id : null;
+  if (fromRecord != null && String(fromRecord)) return String(fromRecord);
+  return /Task #([\w-]+) created/.exec(toolResultText(part))?.[1] || null;
+}
+
 class TranscriptParser {
   constructor(provider = 'claude', seedModel = null) {
     this.provider = provider;
@@ -625,6 +753,28 @@ class TranscriptParser {
     // transcript FILE on demand instead; see providers/pending-ask.js. There is
     // deliberately no second copy of that state here to drift from it.
     this.queuedByText = new Map(); // normalized text -> queued user block (to attach its images)
+    // The session's task checklist (see TASK_LIST_TOOLS): [{ id, subject,
+    // activeForm, status }]. taskSeq is the highest numeric id seen, the base
+    // for a provisional id while a TaskCreate's result is still out.
+    // taskCalls holds every task call still waiting for its result:
+    // { kind: 'create', task } | { kind: 'update', input } | { kind: 'list' }.
+    // A create takes its real id from the result; an update is applied only
+    // when its result says it worked (a refused delete must not remove the
+    // task); a TaskList result resyncs the whole list from the one Claude Code
+    // returned. tasksBlock is the current turn's card.
+    this.tasks = [];
+    this.taskSeq = 0;
+    this.taskCalls = new Map();
+    this.tasksBlock = null;
+    this.tasksTurn = undefined;
+    // "Edited N files" totals, kept per turn on the turn's prompt block
+    // (shared/turn-edits.cjs). editTurn is the block the conversation starts
+    // the current turn at (the same rule as renderer/stage/turn-cards.cjs
+    // startsTurn); actionTurn remembers which turn each action row belongs to,
+    // so a result that lands later still counts toward the right turn.
+    this.editTurn = null;
+    this.actionTurn = new WeakMap(); // action block -> its turn's prompt block
+    this.turnEditState = new WeakMap(); // prompt block -> { rows, credited }
     this.header = {
       model: seedModel && seedModel !== 'default' ? modelDisplay(seedModel) : null,
       effort: null,
@@ -662,6 +812,8 @@ class TranscriptParser {
   push(block) {
     block.key = `b${this.seq++}`;
     this.blocks.push(block);
+    if (block.kind === 'user' && !block.queued) this.editTurn = block;
+    else if (block.kind === 'action' && this.editTurn) this.actionTurn.set(block, this.editTurn);
     while (this.blocks.length > MAX_BLOCKS) {
       // Trim priority, keep longest: images, then the user's OWN turns, then
       // everything else. This stops the cap from dropping Pat's text messages to
@@ -720,6 +872,226 @@ class TranscriptParser {
   startTurn(block, ts) {
     const startMs = Date.parse(ts);
     this.turn = { block, startMs: Number.isFinite(startMs) ? startMs : null, outputs: new Map() };
+  }
+
+  // One task tool call, applied to the checklist. Returns true when the call
+  // is a checklist call (so it draws no action row of its own).
+  applyTaskTool(name, input, toolId, ts, changed) {
+    if (!TASK_LIST_TOOLS.has(name)) return false;
+    input = input && typeof input === 'object' ? input : {};
+    if (name === 'TaskCreate') {
+      const task = {
+        id: String(this.taskSeq + 1),
+        subject: taskText(input.subject) || taskText(input.description) || 'Task',
+        activeForm: taskText(input.activeForm),
+        status: 'pending',
+      };
+      this.taskSeq += 1;
+      if (this.tasks.length < MAX_TASKS) this.tasks.push(task);
+      if (toolId) this.rememberTaskCall(toolId, { kind: 'create', task });
+    } else if (name === 'TaskUpdate') {
+      const id = input.taskId != null ? String(input.taskId) : null;
+      const known = Boolean(id) && this.tasks.some((t) => t.id === id);
+      // Last resort for a task this parse never saw (no seed reached it): the
+      // plain action row it drew before the checklist existed, rather than
+      // nothing at all. A delete of an unknown task has nothing to show.
+      if (!known && !taskText(input.subject) && input.status !== 'deleted') return false;
+      if (toolId) this.rememberTaskCall(toolId, { kind: 'update', input: { ...input } });
+      else this.applyTaskUpdate(input);
+    } else if (name === 'TaskList') {
+      if (toolId) this.rememberTaskCall(toolId, { kind: 'list' });
+    } else if (name === 'TodoWrite') {
+      const todos = Array.isArray(input.todos) ? input.todos : [];
+      this.replaceTasks(todos.map((t) => ({ subject: taskText(t?.content), activeForm: taskText(t?.activeForm), status: t?.status })));
+    }
+    // TaskGet changes nothing, and an update or a list waits for its result;
+    // the call still shows the card.
+    this.syncTasksBlock(ts, changed);
+    return true;
+  }
+
+  rememberTaskCall(toolId, call) {
+    this.taskCalls.set(toolId, call);
+    if (this.taskCalls.size > MAX_TASK_CALLS) this.taskCalls.delete(this.taskCalls.keys().next().value);
+  }
+
+  applyTaskUpdate(input) {
+    const id = input.taskId != null ? String(input.taskId) : null;
+    const at = id ? this.tasks.findIndex((t) => t.id === id) : -1;
+    if (input.status === 'deleted') {
+      if (at !== -1) this.tasks.splice(at, 1);
+    } else if (at !== -1) {
+      // Mutated in place: taskCalls holds these same objects, and the card
+      // only ever receives copies (syncTasksBlock).
+      const task = this.tasks[at];
+      if (input.status) task.status = taskStatus(input.status);
+      if (taskText(input.subject)) task.subject = taskText(input.subject);
+      if (taskText(input.activeForm)) task.activeForm = taskText(input.activeForm);
+    } else if (id && taskText(input.subject) && this.tasks.length < MAX_TASKS) {
+      // A task known only by what the update names.
+      this.tasks.push({ id, subject: taskText(input.subject), activeForm: taskText(input.activeForm), status: taskStatus(input.status) });
+      if (/^\d+$/.test(id)) this.taskSeq = Math.max(this.taskSeq, Number(id));
+    }
+  }
+
+  // TodoWrite sends the FULL list every call.
+  replaceTasks(items) {
+    this.tasks = items
+      .filter((t) => t.subject)
+      .slice(0, MAX_TASKS)
+      .map((t, i) => ({ id: String(i + 1), subject: t.subject, activeForm: t.activeForm || null, status: taskStatus(t.status) }));
+    this.taskSeq = this.tasks.length;
+    this.taskCalls.clear();
+  }
+
+  // A TaskList result is Claude Code's own full list ({ tasks: [{ id,
+  // subject, status, owner, blockedBy }] }): the card takes it as it is, which
+  // also picks up what a subagent changed. activeForm is not in it and is kept
+  // from what this parse knew; a create still waiting for its result stays.
+  resyncTasks(list) {
+    const before = new Map(this.tasks.map((t) => [t.id, t]));
+    const pending = new Set();
+    for (const call of this.taskCalls.values()) if (call.kind === 'create') pending.add(call.task);
+    const next = [];
+    for (const item of list) {
+      if (item?.id == null || !String(item.id) || !TASK_STATUSES.has(item.status)) continue;
+      const id = String(item.id);
+      const prev = before.get(id);
+      const task = prev && !pending.has(prev) ? prev : { id, subject: null, activeForm: null, status: 'pending' };
+      task.subject = taskText(item.subject) || task.subject || 'Task';
+      task.status = item.status;
+      next.push(task);
+      if (/^\d+$/.test(id)) this.taskSeq = Math.max(this.taskSeq, Number(id));
+    }
+    for (const task of this.tasks) if (pending.has(task) && !next.includes(task)) next.push(task);
+    this.tasks = next.slice(0, MAX_TASKS);
+  }
+
+  // A task call's result. A create takes its real id, or is dropped when it
+  // failed; a provisional id another unconfirmed task holds is swapped, so two
+  // ids never collide, and a real id the list already holds (a seeded task the
+  // tail creates again) is that same task, not a second one. An update is
+  // applied only now, and only if it worked; a list resyncs.
+  resolveTaskCall(part, record, onlyResult, ts, changed) {
+    const call = this.taskCalls.get(part.tool_use_id);
+    if (!call) return false;
+    this.taskCalls.delete(part.tool_use_id);
+    const toolResult = onlyResult && record?.toolUseResult && typeof record.toolUseResult === 'object' ? record.toolUseResult : null;
+    const failed = Boolean(part.is_error) || toolResult?.success === false;
+    if (call.kind === 'create') {
+      const task = call.task;
+      const at = this.tasks.indexOf(task);
+      if (failed) {
+        if (at !== -1) this.tasks.splice(at, 1);
+      } else {
+        const realId = createdTaskId(part, record, onlyResult);
+        if (realId && at !== -1 && task.id !== realId) {
+          const clash = this.tasks.find((t) => t !== task && t.id === realId);
+          if (clash && !this.isProvisionalTask(clash)) {
+            this.tasks.splice(at, 1);
+            if (!clash.activeForm && task.activeForm) clash.activeForm = task.activeForm;
+            this.dropFromEarlierCards(realId, changed);
+          } else {
+            if (clash) clash.id = task.id;
+            task.id = realId;
+          }
+        }
+        if (realId && /^\d+$/.test(realId)) this.taskSeq = Math.max(this.taskSeq, Number(realId));
+      }
+    } else if (call.kind === 'update') {
+      // A refused update answers "Task #N not found" with no error flag.
+      if (!failed && !/^Task #\S+ not found/.test(toolResultText(part))) this.applyTaskUpdate(call.input);
+    } else if (call.kind === 'list') {
+      if (!failed && Array.isArray(toolResult?.tasks)) this.resyncTasks(toolResult.tasks);
+    }
+    this.syncTasksBlock(ts, changed);
+    return true;
+  }
+
+  isProvisionalTask(task) {
+    for (const call of this.taskCalls.values()) if (call.kind === 'create' && call.task === task) return true;
+    return false;
+  }
+
+  // A seeded (on-disk) list is the CURRENT one, so a card this parse drew
+  // before the tail created one of its tasks showed that task too early.
+  dropFromEarlierCards(id, changed) {
+    for (const block of this.blocks) {
+      if (block.kind !== 'tasks' || block === this.tasksBlock || !block.tasks.some((t) => t.id === id)) continue;
+      block.tasks = block.tasks.filter((t) => t.id !== id);
+      changed.push(block.key);
+    }
+  }
+
+  // The task list as of where this parse stands, to seed another parser that
+  // starts here (a large transcript's tail, or an older page of it). Calls
+  // still waiting for their result travel with it, so a result past the cut
+  // still lands.
+  taskSeedState() {
+    const tasks = this.tasks.map((t) => ({ ...t }));
+    const calls = [];
+    for (const [toolId, call] of this.taskCalls) {
+      if (call.kind === 'create') {
+        const index = this.tasks.indexOf(call.task);
+        if (index !== -1) calls.push([toolId, { kind: 'create', index }]);
+      } else {
+        calls.push([toolId, { ...call }]);
+      }
+    }
+    return { tasks, taskSeq: this.taskSeq, calls };
+  }
+
+  seedTasks(seed) {
+    if (!seed || !Array.isArray(seed.tasks)) return;
+    this.tasks = seed.tasks.slice(0, MAX_TASKS).map((t) => ({
+      id: String(t.id), subject: t.subject, activeForm: t.activeForm || null, status: taskStatus(t.status),
+    }));
+    this.taskSeq = Math.max(this.taskSeq, Number(seed.taskSeq) || 0);
+    this.taskCalls = new Map();
+    for (const [toolId, call] of seed.calls || []) {
+      if (call.kind === 'create') {
+        const task = this.tasks[call.index];
+        if (task) this.taskCalls.set(toolId, { kind: 'create', task });
+      } else {
+        this.taskCalls.set(toolId, { ...call });
+      }
+    }
+  }
+
+  // This turn's checklist card: made at the turn's first task call, then kept
+  // at the latest FULL list in place (a `changed` key). An earlier turn's card
+  // keeps its last snapshot, and a new turn's card starts with whatever carried
+  // over. A card the window trimmed away is drawn again as a new block.
+  syncTasksBlock(ts, changed) {
+    const tasks = this.tasks.map((t) => ({ id: t.id, subject: t.subject, activeForm: t.activeForm || null, status: t.status }));
+    const block = this.tasksBlock;
+    if (block && this.tasksTurn === this.turn && this.blocks.includes(block)) {
+      block.tasks = tasks;
+      changed.push(block.key);
+      return;
+    }
+    if (!tasks.length) return;
+    this.tasksBlock = this.push({ kind: 'tasks', tasks, ts });
+    this.tasksTurn = this.turn;
+  }
+
+  // A file-changing action resolved OK: count it toward its turn's "Edited N
+  // files" totals on the turn's prompt block (shared/turn-edits.cjs). Prompts
+  // outlive action rows in the window, so the totals do too.
+  creditEdits(action, changed) {
+    if (!Array.isArray(action?.files) || !action.files.length) return;
+    const prompt = this.actionTurn.get(action);
+    if (!prompt) return;
+    let state = this.turnEditState.get(prompt);
+    if (!state) {
+      state = { rows: createEditRows({ diffBudget: TURN_DIFF_LINE_BUDGET }), credited: new Set() };
+      this.turnEditState.set(prompt, state);
+    }
+    if (state.credited.has(action.key)) return;
+    state.credited.add(action.key);
+    addEdits(state.rows, { key: action.key, files: action.files, diff: action.diff });
+    prompt.edits = snapshotEditRows(state.rows);
+    if (changed && this.blocks.includes(prompt)) changed.push(prompt.key);
   }
 
   noteTurnUsage(message, ts, changed) {
@@ -796,8 +1168,15 @@ class TranscriptParser {
       }
       if (Array.isArray(content)) {
         let lastUserInLine = null;
+        // A record's toolUseResult belongs to its result only when it carries
+        // exactly one.
+        const onlyResult = content.filter((part) => part?.type === 'tool_result').length === 1;
         for (const part of content) {
           if (!part || typeof part !== 'object') continue;
+          if (part.type === 'tool_result' && this.resolveTaskCall(part, obj, onlyResult, ts, changed)) {
+            if (this.header.lastSignal !== 'idle') this.header.lastSignal = 'user-turn';
+            continue;
+          }
           if (part.type === 'text' && !obj.isMeta) {
             if (isCompactContinuation(obj, part.text)) {
               this.push({ kind: 'note', text: 'Session compacted: earlier context was summarized.', ts });
@@ -828,6 +1207,10 @@ class TranscriptParser {
               if (part.is_error && !action.pill) action.pill = { text: 'error', tone: 'err' };
               this.pendingTools.delete(part.tool_use_id);
               changed.push(action.key);
+              if (!part.is_error) {
+                if (onlyResult) recountFromPatch(action, obj.toolUseResult);
+                this.creditEdits(action, changed);
+              }
             }
             const resultImages = imagesFromContent(part.content);
             if (resultImages.length) {
@@ -928,6 +1311,7 @@ class TranscriptParser {
             }
           }
         } else if (part.type === 'tool_use') {
+          if (this.applyTaskTool(String(part.name || ''), part.input, part.id || null, ts, changed)) continue;
           const action = this.push({
             kind: 'action',
             toolId: part.id || null,
@@ -1043,7 +1427,12 @@ class TranscriptParser {
         if (part.id) this.pendingTools.set(part.id, action);
       } else if (part?.type === 'tool_result') {
         const action = this.pendingTools.get(part.tool_use_id);
-        if (action) { action.status = part.is_error ? 'err' : 'ok'; this.pendingTools.delete(part.tool_use_id); changed.push(action.key); }
+        if (action) {
+          action.status = part.is_error ? 'err' : 'ok';
+          this.pendingTools.delete(part.tool_use_id);
+          changed.push(action.key);
+          if (!part.is_error) this.creditEdits(action, changed);
+        }
       }
     }
     this.header.lastSignal = this.pendingTools.size ? 'tool-pending' : 'idle';
@@ -1105,6 +1494,162 @@ async function readPrefixImageBlocks(filePath, endOffset, provider = 'claude') {
     }
   }
   return images;
+}
+
+// THE TASK CHECKLIST BEFORE THE TAIL (2026-10-19). A large transcript is
+// parsed from its last MAX_INITIAL_BYTES, and the usual TaskUpdate is
+// `{taskId, status}` with nothing else, so an update to a task created before
+// that window has nothing to apply to: in any session over 1 MB the checklist
+// would never appear. The list is seeded before the tail is parsed, from:
+//   1. Claude Code's own store: one JSON file per task in
+//      <config home>/tasks/<sessionId>/<id>.json ({id, subject, description,
+//      activeForm, status, blocks, blockedBy}). The config home is the one
+//      that holds the transcript (<home>/projects/<project>/<sessionId>.jsonl).
+//      It is the CURRENT list, subagents' updates included. It is not always
+//      there: a session on a team or named task list, a list Claude Code reset
+//      after every task completed, or a home whose projects directory is
+//      shared from another home keep no such directory beside the transcript.
+//   2. Otherwise, a scan of the skipped prefix for task-tool lines only,
+//      replayed through a throwaway parser: the list exactly as it stood where
+//      the tail begins. The same scan seeds the archive pages, each of which is
+//      parsed by a fresh parser of its own.
+// An update for a task neither one knows still draws its old action row.
+//
+// The scan is not a whole-transcript read (test/main/no-whole-transcript-read
+// .test.js): like readPrefixImageBlocks it streams the prefix in fixed chunks
+// and keeps only the matching records, and unlike it the result is cached per
+// file, so it runs once per transcript, not once per open.
+function taskListDir(transcriptPath, sessionId) {
+  if (!transcriptPath || !sessionId) return null;
+  const projectsDir = path.dirname(path.dirname(transcriptPath));
+  if (path.basename(projectsDir) !== 'projects') return null;
+  return path.join(path.dirname(projectsDir), 'tasks', String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '-'));
+}
+
+async function readTaskDirSeed(transcriptPath, sessionId) {
+  const dir = taskListDir(transcriptPath, sessionId);
+  if (!dir) return null;
+  let names;
+  try { names = await fsp.readdir(dir); } catch { return null; }
+  const tasks = [];
+  for (const name of names) {
+    if (!name.endsWith('.json') || name.startsWith('.')) continue;
+    let task;
+    try { task = JSON.parse(await fsp.readFile(path.join(dir, name), 'utf8')); } catch { continue; }
+    if (!task || typeof task !== 'object' || task.id == null || !String(task.id)) continue;
+    // Claude Code's own TaskList hides internal tasks; so does the card.
+    if (task.metadata?._internal || !TASK_STATUSES.has(task.status)) continue;
+    const subject = taskText(task.subject) || taskText(task.description);
+    if (!subject) continue;
+    tasks.push({ id: String(task.id), subject, activeForm: taskText(task.activeForm), status: task.status });
+  }
+  if (!tasks.length) return null;
+  const numeric = (id) => (/^\d+$/.test(id) ? Number(id) : Infinity);
+  tasks.sort((a, b) => numeric(a.id) - numeric(b.id) || a.id.localeCompare(b.id));
+  const taskSeq = tasks.reduce((n, t) => (/^\d+$/.test(t.id) ? Math.max(n, Number(t.id)) : n), 0);
+  return { tasks: tasks.slice(0, MAX_TASKS), taskSeq, calls: [] };
+}
+
+// The task-tool lines of a transcript's prefix, with the byte offset each line
+// starts at, read once per file and kept: a transcript only grows at its end,
+// so the records before any offset already scanned never change. Matching is
+// on raw bytes, and a line is decoded and parsed only when it is a task call
+// (a tool_use named Task*/TodoWrite) or the result of one still waiting (its
+// tool_use_id, read from the line's head). Claude Code 2.1.300's api-request
+// records repeat the whole tool list (every Task* name) and are skipped by
+// their type, which the CLI writes at the start of the line.
+const TASK_SCAN_CHUNK_BYTES = 1024 * 1024;
+const TASK_SCAN_CACHE_MAX = 16;
+const taskScanCache = new Map(); // filePath -> { dev, ino, upTo, records }
+const taskScanStats = { scans: 0, bytes: 0 }; // for tests and measurement
+const TASK_NEEDLES = [Buffer.from('"name":"Task'), Buffer.from('"name":"TodoWrite"')];
+const TOOL_USE_ID_NEEDLE = Buffer.from('"tool_use_id":"');
+const REQUEST_RECORD_NEEDLE = Buffer.from('"type":"api-request');
+
+// Bounded to the line: Buffer#indexOf from an offset would search on to the
+// end of the chunk for every line.
+function lineHas(data, start, end, needle) {
+  return data.subarray(start, end).indexOf(needle) !== -1;
+}
+
+// Every record whose line STARTS at or before `throughOffset` (a tail or a
+// page skips the line it starts in, so that line belongs to the seed).
+async function readPrefixTaskRecords(filePath, throughOffset) {
+  if (!(throughOffset > 0)) return [];
+  let stat;
+  try { stat = await fsp.stat(filePath); } catch { return []; }
+  const cached = taskScanCache.get(filePath);
+  if (cached && cached.dev === stat.dev && cached.ino === stat.ino
+    && cached.upTo >= throughOffset && stat.size >= cached.upTo) {
+    taskScanCache.delete(filePath);
+    taskScanCache.set(filePath, cached);
+    return cached.records;
+  }
+  const scanner = new TranscriptParser('claude');
+  const records = [];
+  const handle = await fsp.open(filePath, 'r');
+  let carry = Buffer.alloc(0);
+  let carryStart = 0; // file offset of carry[0]
+  let position = 0;
+  let done = false;
+  taskScanStats.scans += 1;
+  try {
+    while (!done) {
+      const chunk = Buffer.alloc(TASK_SCAN_CHUNK_BYTES);
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, position);
+      if (!bytesRead) break;
+      position += bytesRead;
+      taskScanStats.bytes += bytesRead;
+      const data = carry.length ? Buffer.concat([carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead);
+      let lineStart = 0;
+      for (let i = data.indexOf(0x0a); i !== -1; i = data.indexOf(0x0a, lineStart)) {
+        const offset = carryStart + lineStart;
+        if (offset > throughOffset) { done = true; break; }
+        let wanted = TASK_NEEDLES.some((needle) => lineHas(data, lineStart, i, needle));
+        if (!wanted && scanner.taskCalls.size) {
+          const head = data.subarray(lineStart, Math.min(i, lineStart + 8192));
+          const at = head.indexOf(TOOL_USE_ID_NEEDLE);
+          if (at !== -1) {
+            const idStart = at + TOOL_USE_ID_NEEDLE.length;
+            const idEnd = head.indexOf(0x22, idStart);
+            wanted = idEnd !== -1 && scanner.taskCalls.has(head.toString('utf8', idStart, idEnd));
+          }
+        }
+        if (wanted && lineHas(data, lineStart, Math.min(i, lineStart + 256), REQUEST_RECORD_NEEDLE)) wanted = false;
+        if (wanted) {
+          let obj = null;
+          try { obj = JSON.parse(data.toString('utf8', lineStart, i)); } catch { /* foreign line */ }
+          if (obj && typeof obj === 'object') {
+            scanner.applyLine(obj);
+            records.push({ offset, obj });
+          }
+        }
+        lineStart = i + 1;
+      }
+      if (done) break;
+      carryStart += lineStart;
+      carry = Buffer.from(data.subarray(lineStart));
+    }
+  } finally {
+    await handle.close();
+  }
+  taskScanCache.set(filePath, { dev: stat.dev, ino: stat.ino, upTo: throughOffset, records });
+  while (taskScanCache.size > TASK_SCAN_CACHE_MAX) taskScanCache.delete(taskScanCache.keys().next().value);
+  return records;
+}
+
+// The checklist as it stood at `throughOffset`, or null when the prefix used
+// no task tool. Claude only: codex and cursor have no task tools here.
+async function readPrefixTaskSeed(filePath, provider, throughOffset) {
+  if (provider !== 'claude') return null;
+  const records = await readPrefixTaskRecords(filePath, throughOffset);
+  if (!records.length) return null;
+  const parser = new TranscriptParser(provider);
+  for (const record of records) {
+    if (record.offset > throughOffset) break;
+    parser.applyLine(record.obj);
+  }
+  return parser.tasks.length || parser.taskCalls.size ? parser.taskSeedState() : null;
 }
 
 // THE SESSION'S OPENING PROMPT IS NEVER OUT OF REACH (2026-08-13). A large
@@ -1180,6 +1725,9 @@ async function readOpeningBlock(filePath, provider = 'claude', limitBytes = OPEN
 async function readChunkEndingAt(filePath, provider, endOffset, chunkSize) {
   const start = Math.max(0, endOffset - chunkSize);
   if (start >= endOffset) return { blocks: [], reachedStart: true };
+  // The checklist as it stood where this chunk begins: a fresh parser
+  // otherwise starts from no tasks and draws every bare update as a plain row.
+  const taskSeed = start > 0 ? await readPrefixTaskSeed(filePath, provider, start).catch(() => null) : null;
   const handle = await fsp.open(filePath, 'r');
   let buffer;
   try {
@@ -1197,6 +1745,7 @@ async function readChunkEndingAt(filePath, provider, endOffset, chunkSize) {
     }
   }
   const parser = new TranscriptParser(provider);
+  parser.seedTasks(taskSeed);
   const firstLineIsPartial = start > 0;
   // Track by parser.seq, NOT parser.blocks.length: once a chunk pushes past
   // the class's own MAX_BLOCKS cap, push() evicts an old block for every new
@@ -1325,6 +1874,17 @@ function createTranscriptProvider(options = {}) {
     }
   };
 
+  // The task checklist before the tail (readTaskDirSeed, else
+  // readPrefixTaskSeed). Windowed (phone) opens are seeded too: the card is
+  // the newest thing on screen, not history, and the prefix scan is cached
+  // per file, so a reopen or an archive page does not repeat it.
+  const seedTaskList = async (entry) => {
+    if (entry.offset <= 0 || entry.provider !== 'claude') return;
+    let seed = await readTaskDirSeed(entry.path, entry.sessionId).catch(() => null);
+    if (!seed) seed = await readPrefixTaskSeed(entry.path, entry.provider, entry.offset).catch(() => null);
+    if (seed) entry.parser.seedTasks(seed);
+  };
+
   const emitUpdate = (entry, payload) => {
     if (closed) return;
     const stat = entry.lastMtimeMs;
@@ -1390,6 +1950,7 @@ function createTranscriptProvider(options = {}) {
           entry.tailStartOffset = entry.offset;
           entry.skipFirstPartial = true;
           await seedPrefixImages(entry, await seedOpeningBlock(entry));
+          await seedTaskList(entry);
         }
       }
       // L1 ground truth: trust the statusline tee while the transcript has not
@@ -1681,6 +2242,7 @@ function createTranscriptProvider(options = {}) {
         entry.tailStartOffset = entry.offset;
         entry.skipFirstPartial = true; // first read lands mid-line
         await seedPrefixImages(entry, await seedOpeningBlock(entry));
+        await seedTaskList(entry);
       }
     } catch { /* not on disk yet */ }
     armWatch(entry);
@@ -1823,6 +2385,10 @@ module.exports = {
   extractHandoffPath,
   waitForHandoffPath,
   readArchiveBlocksBeforeOffset,
+  readTaskDirSeed,
+  readPrefixTaskSeed,
+  taskScanStats: () => ({ ...taskScanStats }),
+  patchCounts,
   DEFAULT_WINDOW_BLOCKS,
   MAX_BLOCKS,
   MAX_IMAGE_BLOCKS,

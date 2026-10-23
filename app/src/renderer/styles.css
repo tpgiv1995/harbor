@@ -2756,6 +2756,189 @@ button { font-family: inherit; }
   padding-left: 6px;
 }
 
+/* Task checklist card (one per turn; Conversation.jsx TaskCard). Static by
+   design: nothing in this sheet animates, so "in progress" is a blue arc
+   while the turn runs and a plain ring once it has ended. */
+.conv-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: rgba(10, 13, 20, 0.4);
+}
+
+.conv-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 3px 0;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--tx);
+}
+
+.conv-task-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.conv-task.completed .conv-task-text { color: var(--fnt); }
+.conv-task.in_progress .conv-task-text { font-weight: 600; }
+
+.conv-task-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin-top: 1px;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.conv-task-icon.todo circle {
+  stroke: var(--fnt);
+  stroke-width: 1.5;
+  stroke-dasharray: 2.4 2.3;
+}
+
+.conv-task-icon.doing .track {
+  stroke: var(--sub);
+  stroke-width: 2;
+}
+
+.conv-task-icon.doing.live .track { stroke: rgb(var(--ac-rgb) / 28%); }
+
+.conv-task-icon.doing .arc {
+  stroke: var(--ac2);
+  stroke-width: 2;
+}
+
+.conv-task-icon.done circle { fill: rgba(255, 255, 255, 0.2); }
+
+.conv-task-icon.done path {
+  stroke: var(--tx);
+  stroke-width: 1.6;
+}
+
+/* "Edited N files" card (end of a finished turn; Conversation.jsx EditsCard) */
+.conv-edits {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: rgba(10, 13, 20, 0.4);
+  overflow: hidden;
+}
+
+.conv-edits-head {
+  padding: 9px 12px 7px;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--tx);
+}
+
+.conv-edit + .conv-edit,
+.conv-edits-head + .conv-edit {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.conv-edit-row,
+.conv-edits-more {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--tx);
+  font: 500 12px var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.conv-edit-row:hover,
+.conv-edits-more:hover { background: rgba(255, 255, 255, 0.04); }
+
+.conv-edit-row.static { cursor: default; }
+.conv-edit-row.static:hover { background: transparent; }
+
+.conv-edit-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 11.5px var(--font-mono);
+}
+
+.conv-edit-counts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+  font: 600 11px var(--font-mono);
+}
+
+.conv-edit-add { color: var(--live); }
+.conv-edit-del { color: var(--err); }
+
+.conv-edit-badge {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font: 700 8.5px var(--font-mono);
+  letter-spacing: 0.02em;
+  color: var(--sub);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.conv-edit-badge.tone-js { color: #f0d36a; background: rgba(240, 211, 106, 0.13); }
+.conv-edit-badge.tone-ts { color: #7fb2ff; background: rgba(127, 178, 255, 0.14); }
+.conv-edit-badge.tone-py { color: #8fd0a8; background: rgba(143, 208, 168, 0.13); }
+.conv-edit-badge.tone-md { color: #c6cfdd; background: rgba(198, 207, 221, 0.11); }
+.conv-edit-badge.tone-json { color: #e3a96b; background: rgba(227, 169, 107, 0.13); }
+.conv-edit-badge.tone-css { color: #d79bf0; background: rgba(215, 155, 240, 0.13); }
+.conv-edit-badge.tone-sh { color: #9fe0d2; background: rgba(159, 224, 210, 0.12); }
+
+.conv-edit-badge.generic { background: transparent; }
+
+.conv-edit-badge.generic svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--sub);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+
+.conv-edits-more {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--sub);
+}
+
+.conv-edits-more:hover { color: var(--tx); }
+
+.conv-edits-more-label { flex: 1 1 auto; }
+
+.conv-edit-diff { margin: 0; }
+.conv-edit-hunk + .conv-edit-hunk {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
 /* Working shimmer */
 .conv-working {
   display: flex;

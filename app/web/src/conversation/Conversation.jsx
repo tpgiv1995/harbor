@@ -2,7 +2,11 @@ import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, 
 import { createPortal } from 'react-dom';
 import { Markdown } from '../md/index.jsx';
 import { providerIdentity } from '../../../src/renderer/providers.js';
+import { TaskCard } from '../../../src/renderer/stage/TaskCard.jsx';
+import turnCards from '../../../src/renderer/stage/turn-cards.cjs';
 import './conversation.css';
+
+const { startsTurn, turnRunning } = turnCards;
 
 // The phone's conversation surface: prompt bubbles, assistant prose, and
 // tool-action rows, parsed by the server's transcript provider and delivered
@@ -216,7 +220,11 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   );
 });
 
-const Block = memo(function Block({ block, provider, onImageLoad, leadsTurn = true }) {
+const Block = memo(function Block({ block, provider, onImageLoad, leadsTurn = true, live = false }) {
+  // The task checklist, the same card the desktop draws (stage/TaskCard.jsx).
+  // Before this the phone drew nothing at all for it, and since the task
+  // tools no longer draw action rows, the phone lost them entirely.
+  if (block.kind === 'tasks') return <TaskCard tasks={block.tasks} live={live} />;
   if (block.kind === 'note') {
     return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`}>{block.text}</div>;
   }
@@ -283,6 +291,19 @@ export const Conversation = memo(function Conversation({
   }, []);
 
   const items = useMemo(() => groupConversationBlocks(blocks), [blocks]);
+  // Only the last turn's checklist is live (its in-progress task draws the
+  // arc), and only while that turn is still going.
+  const running = turnRunning(header);
+  const liveFrom = useMemo(() => {
+    if (!running) return Infinity;
+    for (let i = blocks.length - 1; i >= 0; i -= 1) if (startsTurn(blocks[i])) return i;
+    return 0;
+  }, [blocks, running]);
+  const liveTasksKeys = useMemo(() => {
+    const keys = new Set();
+    for (let i = Math.max(0, liveFrom); i < blocks.length; i += 1) if (blocks[i].kind === 'tasks') keys.add(blocks[i].key);
+    return keys;
+  }, [blocks, liveFrom]);
 
   const scrollToTail = useCallback(() => {
     const node = scrollRef.current;
@@ -369,6 +390,7 @@ export const Conversation = memo(function Conversation({
                 provider={provider}
                 leadsTurn={item.leadsTurn !== false}
                 onImageLoad={scrollToTail}
+                live={liveTasksKeys.has(item.block.key)}
               />
             );
           })

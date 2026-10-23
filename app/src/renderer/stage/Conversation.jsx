@@ -2,11 +2,14 @@ import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, 
 import { createPortal } from 'react-dom';
 import { Markdown } from './md.jsx';
 import turnMeta from './turn-meta.cjs';
+import turnCards from './turn-cards.cjs';
+import { TaskCard } from './TaskCard.jsx';
 import { providerIdentity, ProfileBadge } from '../providers.js';
 import { clipboardImageDataURL } from '../image-clipboard.js';
 import './conversation-image-copy.css';
 
 const { turnMetaLabel } = turnMeta;
+const { planTurns, turnRunning, editTotals, fileBadge, filesLabel } = turnCards;
 
 // The designed conversation surface (Slate): user bubbles, assistant prose,
 // tool-action rows, and the working shimmer. Pure presentation; blocks arrive
@@ -229,7 +232,107 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   );
 });
 
-const Block = memo(function Block({ block, provider, home, profiles, onImageLoad }) {
+function FileBadge({ path }) {
+  const badge = fileBadge(path);
+  if (!badge) {
+    return (
+      <span className="conv-edit-badge generic" aria-hidden="true">
+        <svg viewBox="0 0 16 16"><path d="M4 1.5h5.2L12.5 4.8V14a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5V2a.5.5 0 0 1 .5-.5z" /><path d="M9 1.5V5h3.5" /></svg>
+      </span>
+    );
+  }
+  return <span className={`conv-edit-badge tone-${badge.tone}`} aria-hidden="true">{badge.label}</span>;
+}
+
+const EDITS_SHOWN = 3;
+
+// "Edited N files": what a finished turn changed, one row per file (summed
+// across every edit to it), the first three shown. A row with diff previews
+// opens them inline; a Write has none and stays a plain row. `files` is the
+// parser's per-turn array (turn-cards planTurns), the same object until that
+// turn's totals change, so this memo holds across appends.
+const EditsCard = memo(function EditsCard({ files }) {
+  const [showAll, setShowAll] = useState(false);
+  const [open, setOpen] = useState(() => new Set());
+  const toggle = useCallback((filePath) => {
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(filePath)) next.delete(filePath);
+      else next.add(filePath);
+      return next;
+    });
+  }, []);
+  if (!files?.length) return null;
+  const shown = showAll ? files : files.slice(0, EDITS_SHOWN);
+  const totals = editTotals(files);
+  return (
+    <div className="conv-edits">
+      <div className="conv-edits-head">{filesLabel(files.length)}</div>
+      {shown.map((row) => {
+        const expandable = row.diffs.length > 0;
+        const isOpen = expandable && open.has(row.path);
+        return (
+          <div key={row.path} className={`conv-edit${isOpen ? ' open' : ''}`}>
+            <button
+              type="button"
+              className={`conv-edit-row${expandable ? '' : ' static'}`}
+              title={row.path}
+              aria-expanded={expandable ? isOpen : undefined}
+              onClick={expandable ? () => toggle(row.path) : undefined}
+            >
+              <FileBadge path={row.path} />
+              <span className="conv-edit-name">{row.name}</span>
+              <span className="conv-edit-counts">
+                <span className="conv-edit-add">+{row.added}</span>
+                {row.removed !== null ? <span className="conv-edit-del">−{row.removed}</span> : null}
+              </span>
+            </button>
+            {isOpen ? (
+              <div className="conv-act-code conv-edit-diff">
+                {row.diffs.map((hunk) => (
+                  <div className="conv-edit-hunk" key={hunk.key}>
+                    {hunk.lines.map((line, i) => (
+                      <div key={i} className={`diff-${line.t}`} title={line.s}>{line.s}</div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+      {files.length > EDITS_SHOWN ? (
+        <button type="button" className="conv-edits-more" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+          <span className="conv-edits-more-label">{showAll ? 'Show less' : `Show ${files.length - EDITS_SHOWN} more`}</span>
+          <span className="conv-edit-counts">
+            <span className="conv-edit-add">+{totals.added}</span>
+            <span className="conv-edit-del">−{totals.removed}</span>
+          </span>
+        </button>
+      ) : null}
+    </div>
+  );
+});
+
+// Conversation items, turn by turn: the blocks (action runs grouped as
+// before), then, once a turn has finished, its "Edited N files" card. Only the
+// last turn can still be running; its checklist is the only live one. The
+// card is keyed by its turn (planTurns `key`), which does not change when the
+// window slides, so an open card keeps its Show-more and diff state.
+function conversationItems(blocks, running) {
+  const items = [];
+  for (const turn of planTurns(blocks, running)) {
+    for (const item of groupConversationBlocks(turn.blocks)) {
+      if (item.type === 'block' && item.block.kind === 'tasks') item.live = turn.running;
+      items.push(item);
+    }
+    if (turn.edits.length) items.push({ type: 'edits', key: `edits-${turn.key}`, files: turn.edits });
+  }
+  return items;
+}
+
+const Block = memo(function Block({ block, provider, home, profiles, onImageLoad, live = false }) {
+  if (block.kind === 'tasks') return <TaskCard tasks={block.tasks} live={live} />;
   if (block.kind === 'note') {
     return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`}>{block.text}</div>;
   }
@@ -301,7 +404,10 @@ export const Conversation = memo(function Conversation({
     });
   }, []);
 
-  const items = useMemo(() => groupConversationBlocks(blocks), [blocks]);
+  // The last turn is still going while the session works (turnRunning); its
+  // Edited card waits for the turn to end.
+  const running = turnRunning(header);
+  const items = useMemo(() => conversationItems(blocks, running), [blocks, running]);
 
   // expandedGroups is keyed by group key (a monotonic block key). Once the
   // underlying blocks slide out of the bounded window those keys can never
@@ -375,6 +481,7 @@ export const Conversation = memo(function Conversation({
           </div>
         ) : (
           items.map((item) => {
+            if (item.type === 'edits') return <EditsCard key={item.key} files={item.files} />;
             if (item.type === 'action-group') {
               return (
                 <ActionGroup
@@ -394,6 +501,7 @@ export const Conversation = memo(function Conversation({
                 home={home}
                 profiles={profiles}
                 onImageLoad={scrollToTail}
+                live={item.live}
               />
             );
           })

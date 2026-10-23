@@ -486,7 +486,9 @@ test('parses the user -> action -> result -> reply arc', () => {
   p.applyLine(assistantLine([{ type: 'tool_use', id: 'tu1', name: 'Edit', input: { file_path: '/a/b/banner.jsx', old_string: 'x\ny', new_string: 'x\ny\nz' } }]));
   assert.equal(p.header.lastSignal, 'tool-pending');
   const changed = p.applyLine(userLine([{ type: 'tool_result', tool_use_id: 'tu1', content: 'ok' }]));
-  assert.equal(changed.length, 1);
+  // The action row resolves, and its turn's prompt takes the edit into its
+  // "Edited N files" totals (shared/turn-edits.cjs).
+  assert.deepEqual(changed, [p.blocks[1].key, p.blocks[0].key]);
   p.applyLine(assistantLine([{ type: 'text', text: 'Done.' }], { stop_reason: 'end_turn', usage: { input_tokens: 4, cache_read_input_tokens: 90_000, cache_creation_input_tokens: 6_000 } }));
 
   assert.deepEqual(p.blocks.map((b) => b.kind), ['user', 'action', 'assistant']);
