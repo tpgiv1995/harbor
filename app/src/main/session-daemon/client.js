@@ -34,6 +34,8 @@ class SessionSubscription extends EventEmitter {
           if (previous.agent !== pane.agent || beforeId !== afterId) {
             this.emit('event', { event: 'pane.updated', data: { pane } });
           }
+          const status = agentStatusEvent(pane, previous);
+          if (status) this.emit('event', status);
           continue;
         }
         const workspace = snapshot.workspaces.find((item) => item.workspace_id === pane.workspace_id);
@@ -43,6 +45,8 @@ class SessionSubscription extends EventEmitter {
         this.emit('event', { event: 'tab.created', data: { tab } });
         this.emit('event', { event: 'pane.created', data: { pane } });
         this.emit('event', { event: 'layout.updated', data: { layout } });
+        const status = agentStatusEvent(pane, null);
+        if (status) this.emit('event', status);
       }
       for (const id of this.panes.keys()) {
         if (!next.has(id)) this.emit('event', { event: 'pane.closed', data: { pane_id: id } });
@@ -89,6 +93,45 @@ function paneFor(session) {
     // When the daemon spawned it. session-send reads this to tell a pane that
     // is still starting from one that has run for hours.
     created_at: session.created_at ?? null,
+    // The CLI's OSC 7501 status as the keeper last persisted it
+    // (daemon/screen.js). Absent in an older keeper's state file: null.
+    agent_status: session.agent_status ?? null,
+    agent_status_kind: session.agent_status_kind ?? null,
+    agent_status_msg: session.agent_status_msg ?? null,
+    agent_status_seq: Number.isInteger(session.agent_status_seq) ? session.agent_status_seq : null,
+  };
+}
+
+// The keeper's status, as the event the sidebar bridge and the notifier
+// already consume: working | blocked | done | idle from the CLI. A status that
+// went away (`clear`, the CLI exiting) reads as idle, never 'unknown', which
+// downstream means "no agent in this pane" and drops the session. That idle
+// says where it came from (agent_status_cleared): the CLI writes `clear` as it
+// exits, so killing a WORKING session reads working -> idle on the poll that
+// lands between the `clear` and the exit record, and that is not a finish.
+// A new step inside one status (working stays working while msg moves from
+// tool to tool) and a new prompt with the same elided text (a new seq) are
+// changes too.
+function agentStatusEvent(pane, previous = null) {
+  const previousStatus = previous?.agent_status || null;
+  const cleared = !pane.agent_status && Boolean(previousStatus);
+  const status = pane.agent_status || (cleared ? 'idle' : null);
+  if (!status) return null;
+  if (status === previousStatus
+    && (pane.agent_status_kind ?? null) === (previous?.agent_status_kind ?? null)
+    && (pane.agent_status_msg ?? null) === (previous?.agent_status_msg ?? null)
+    && (pane.agent_status_seq ?? null) === (previous?.agent_status_seq ?? null)) return null;
+  return {
+    event: 'pane.agent_status_changed',
+    data: {
+      pane_id: pane.pane_id,
+      workspace_id: pane.workspace_id,
+      agent_status: status,
+      agent_status_kind: pane.agent_status_kind ?? null,
+      agent_status_msg: pane.agent_status_msg ?? null,
+      agent_status_seq: pane.agent_status_seq ?? null,
+      ...(cleared ? { agent_status_cleared: true } : {}),
+    },
   };
 }
 

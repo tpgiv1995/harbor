@@ -25,7 +25,7 @@ const { createTranscriptProvider, findProviderTranscript } = require('../main/pr
 const { createAskTranscriptResolver } = require('../main/ask-transcript-path.js');
 const { createPendingAskReader } = require('../main/providers/pending-ask.js');
 const { createAskInbox } = require('../main/providers/ask-inbox.js');
-const { createSessionSend, createLinkRegistry } = require('../main/session-send.js');
+const { createSessionSend, createLinkRegistry, quickStatusFromScreen } = require('../main/session-send.js');
 const { createHistoryProvider } = require('../main/providers/history.js');
 const { createUsageProvider } = require('../main/providers/usage.js');
 const { createSystemMemoryProvider } = require('../main/providers/system-memory.js');
@@ -295,6 +295,8 @@ async function composeServer(options = {}) {
       const result = await sendClient.readPane(paneId, { source, lines, strip_ansi: true });
       return result?.read?.text || '';
     },
+    // What the phone's one-click Allow / Deny is checked against (main/index.js).
+    readQuickStatus: async (paneId) => quickStatusFromScreen((await sendClient.readPane(paneId, { source: 'visible', lines: 1 }))?.screen),
     terminalBridge,
     launchActions,
     getSessionMeta: (id) => sidebar.getSessionMeta(id),

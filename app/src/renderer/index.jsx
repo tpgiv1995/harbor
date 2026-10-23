@@ -46,6 +46,7 @@ const { emptyDraft, resolveDraftAlias } = draftStore;
 import gridNav from './stage/grid-nav.cjs';
 import unseenCompletions from './stage/unseen-completions.cjs';
 import taskbarBadge from './stage/taskbar-badge.cjs';
+import { useQuickAnswerKeys } from './stage/use-quick-answer-keys.js';
 import handoffChainLib from './stage/handoff-chain.cjs';
 import * as sidebarModelShared from '../shared/sidebar-model.js';
 import './styles.css';
@@ -922,7 +923,9 @@ function App() {
         background: backgroundBusy(session, header),
         // A question waiting in the hook lane is the strongest blocked signal
         // there is: Claude is inside the tool call until the form answers.
-        blocked: asksBySession.has(session.id) || terminalDialogs.has(id) || (header ? Boolean(header.blocked) : session.agentStatus === 'blocked'),
+        // The CLI's own OSC 7501 status counts even with a transcript open: the
+        // transcript never says "waiting on a permission prompt", the CLI does.
+        blocked: asksBySession.has(session.id) || terminalDialogs.has(id) || Boolean(header?.blocked) || session.agentStatus === 'blocked',
         isSelected: id === selectedId,
         // Orchestration workers and BATCH TITLE children finish all day; they
         // are not waiting for Pat, and counting them pinned the badge at 9+.
@@ -994,6 +997,8 @@ function App() {
   const prevControlRef = useRef(null);
   const selectedSession = sessionsWithSynthetic.get(selectedId) || null;
   const selectedPaneId = selectedSession ? resolvePane(selectedSession)?.paneId || null : null;
+  // Cmd/Ctrl+Shift+Y / N answer the selected window's permission prompt.
+  useQuickAnswerKeys(selectedSession, selectedSession ? resolvePane(selectedSession) : null);
   useEffect(() => {
     const session = selectedSession;
     const pane = session ? resolvePane(session) : null;

@@ -13,7 +13,8 @@ import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
 import { terminalView } from './terminal-view.cjs';
 import { copyText } from './md.jsx';
-import { runStateCue } from '../../shared/session-run-state.cjs';
+import { runStateCue, canQuickAnswer } from '../../shared/session-run-state.cjs';
+import { QuickAnswer } from './QuickAnswer.jsx';
 import { createPortal } from 'react-dom';
 
 const EFFORT_LABEL = { low: 'low', medium: 'med', high: 'high', xhigh: 'xhigh', max: 'max' };
@@ -367,6 +368,11 @@ export const SessionTile = memo(forwardRef(function SessionTile({
               <span className="runstate-dot" aria-hidden="true" />
               <span className="runstate-verb">{runState.label}</span>
             </span>
+          ) : null}
+          {/* Allow / Deny right on the header while the CLI reports a permission
+              prompt; a question held by the hook lane is answered on its form. */}
+          {canQuickAnswer(session, pane, readOnly) && !pendingAsk ? (
+            <QuickAnswer pane={pane} sessionId={session.id} expect={session.agentStatusMsg} expectSeq={session.agentStatusSeq ?? null} listenKeys={selected} />
           ) : null}
           {workMeter ? (
             <span className="work-meter" title={workMeter.title}>{workMeter.label}</span>

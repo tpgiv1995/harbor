@@ -60,7 +60,7 @@ const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath } = 
 const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptLastSignal } = require('./providers/transcript.js');
 const { createAskTranscriptResolver } = require('./ask-transcript-path.js');
 const { createPendingAskReader } = require('./providers/pending-ask.js');
-const { createSessionSend, createLinkRegistry } = require('./session-send.js');
+const { createSessionSend, createLinkRegistry, quickStatusFromScreen } = require('./session-send.js');
 const { revealNewSessionWindow } = require('./new-session-window.cjs');
 const { resolveWorkflowLaunch } = require('./workflows.js');
 const {
@@ -2699,6 +2699,9 @@ app.whenReady().then(async () => {
       const res = await sendClient.readPane(paneId, { source: 'visible', lines: 1 });
       return res?.screen?.suggestion || null;
     },
+    // The CLI's OSC 7501 status as the keeper holds it now (daemon/screen.js),
+    // read with the screen: what a one-click answer is checked against.
+    readQuickStatus: async (paneId) => quickStatusFromScreen((await sendClient.readPane(paneId, { source: 'visible', lines: 1 }))?.screen),
     terminalBridge,
     launchActions: {
       ...launchActions,

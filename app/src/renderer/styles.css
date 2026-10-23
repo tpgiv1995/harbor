@@ -10226,3 +10226,40 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .sub-session-pages button { padding: 6px 10px; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
 .sub-session-pages button:disabled { opacity: .4; cursor: default; }
 @media (max-width: 800px) { .sub-sessions-head { align-items: flex-start; flex-direction: column; gap: 8px; } }
+
+/* One-click answers to a permission prompt the CLI reported (QuickAnswer.jsx):
+   beside the run-state chip in a window header, and over the right end of a
+   rail row, where the time, account badge and archive x give way while it
+   shows. */
+.quick-answer { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; min-width: 0; }
+.qa-btn {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--ln);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--tx);
+  font: 600 11px var(--font-ui);
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.qa-btn:disabled { opacity: 0.6; cursor: default; }
+.qa-allow { border-color: rgb(212 165 55 / 60%); background: rgb(212 165 55 / 16%); }
+.qa-allow:hover:not(:disabled) { background: rgb(212 165 55 / 28%); }
+.qa-deny:hover:not(:disabled) { background: rgb(255 90 90 / 18%); }
+.qa-error { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--warn); font-size: 11px; }
+.sr-quick {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  z-index: 1;
+}
+.sr-quick .qa-btn { height: 18px; padding: 0 6px; font-size: 10.5px; }
+.sr-quick .qa-error { display: none; }
+.sr-wrap.quick .sr-tm,
+.sr-wrap.quick .sr-b,
+.sr-wrap.quick .sr-x { display: none; }
+/* Room for the two buttons, so the title ellipsizes before them. */
+.sr-wrap.quick .sr { padding-right: 100px; }
