@@ -68,7 +68,7 @@ const {
   parseSecondInstanceArgs,
   buildSecondInstancePayload,
 } = require('./lifecycle.js');
-const { createNotifier } = require('./notify.js');
+const { createNotifier, createStatusQueue } = require('./notify.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
 const { createArtifactsProvider } = require('./providers/artifacts.js');
@@ -3026,6 +3026,15 @@ app.whenReady().then(async () => {
     setBadgeCount: setAppBadgeCount,
     notify: (title, body) => platform.notify(title, body),
   });
+  // Read the append before an idle event can claim completion. The history
+  // watcher is debounced and can otherwise arrive after the toast window.
+  // Only a completion needs the fresh background verdict. Tool-transition
+  // chatter must not scan the entire delegation corpus on every status.
+  const notifierQueue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'idle' || data.agent_status === 'done'
+      ? sidebarBridge.refreshDelegations() : null),
+    deliver: (event) => notifier.onAgentStatusChanged(event),
+  });
   sidebarBridge.emitter.on('pane-agent-status', (event) => {
     // agent_status 'unknown' means no foreground agent owns the pane: the CLI
     // exited or crashed back to the shell. A provisional session link kept
@@ -3033,54 +3042,21 @@ app.whenReady().then(async () => {
     // 2026-07-22), so the link dies with the agent.
     const data = event?.data || {};
     if (data.agent_status === 'unknown' && data.pane_id) paneLinks?.dropPane(data.pane_id);
-    // Read the append before an idle event can claim completion. The history
-    // watcher is debounced and can otherwise arrive after the toast window.
-    // Only a completion needs the fresh background verdict. Tool-transition
-    // chatter must not scan the entire delegation corpus on every status.
-    if (data.agent_status === 'idle' || data.agent_status === 'done') {
-      sidebarBridge.refreshDelegations().then(() => notifier.onAgentStatusChanged(event)).catch(() => {});
-    } else notifier.onAgentStatusChanged(event);
+    notifierQueue(event);
   });
   sidebarBridge.emitter.on('update', () => notifier.onBackgroundChanged());
   sidebarBridge.emitter.on('panes-changed', () => notifier.onBackgroundChanged());
 
-  // Agent-status watcher: the daemon only delivers pane.agent_status_changed
-  // with a per-pane subscription entry (verified live), so maintain one
-  // subscription covering the current set of live agent panes and rebuild it
-  // (debounced) whenever that set changes.
-  const agentClient = createControlClient({ env: process.env, sessionStorePolicy });
-  let agentSub = null;
-  let agentSubKey = '';
-  let agentSubTimer = null;
-  const rebuildAgentWatcher = () => {
-    clearTimeout(agentSubTimer);
-    agentSubTimer = setTimeout(() => {
-      try {
-        const paneIds = [...new Set(sidebarBridge?.getLivePaneIds() || [])].sort();
-        const key = paneIds.join(',');
-        if (key === agentSubKey) return;
-        agentSubKey = key;
-        agentSub?.close?.();
-        agentSub = null;
-        if (!paneIds.length) return;
-        agentSub = agentClient.subscribeAgentStatus(paneIds);
-        agentSub.ready().catch(() => {}); // daemon-down subscribe must not reject unhandled
-        // This subscription is the authoritative status source for both the
-        // window working state and notifications. The sidebar bridge updates
-        // the owning session, then re-emits the unchanged event to notifier.
-        agentSub.on('event', (event) => sidebarBridge?.onPaneAgentStatus(event));
-        agentSub.on('error', () => {});
-        agentSub.on('close', () => {
-          agentSubKey = '';
-          rebuildAgentWatcher(); // notifications must not stay dead until the next sidebar update
-        });
-      } catch (e) {
-        console.error('agent watcher rebuild failed:', e.message);
-      }
-    }, 2000);
-    agentSubTimer.unref?.();
-  };
-  sidebarBridge.emitter.on('panes-changed', rebuildAgentWatcher);
+  // ONE status feed. The sidebar bridge's bootstrap subscription already
+  // polls every session, is reconnected by the bridge, and hands
+  // pane.agent_status_changed to onPaneAgentStatus -> 'pane-agent-status' ->
+  // the notifier. A second subscription per live-pane set used to feed the
+  // same door: on sessiond it ignored its pane list and was another 1 s poll
+  // of every session, rebuilt unseeded on each pane-set change, so it
+  // replayed every pane's events into the bridge and would deliver each
+  // status twice. The notifier is seeded from the snapshot the bridge's
+  // subscription was seeded with, at boot and on every reconnect.
+  sidebarBridge.emitter.on('daemon-snapshot', (snapshot) => notifier?.seedFromSnapshot(snapshot));
 
   terminalBridge.emitter.on('update', broadcastTerminalUpdate);
   terminalBridge.emitter.on('frame', (payload) => sendToRenderer('terminal:frame', payload));
@@ -3193,15 +3169,6 @@ app.whenReady().then(async () => {
   // as before. Serialized and idempotent; a pane with the ">_" view open is
   // left at the size that xterm fitted.
   if (!e2eMode) terminalBridge.startPaneSizeSweep();
-  // Seed notifier with current agent statuses so the first event is
-  // interpreted correctly (a completion right after boot must still toast).
-  try {
-    const snap = await agentClient.snapshot();
-    notifier?.seedFromSnapshot(snap.snapshot);
-  } catch {
-    // daemon may be unavailable; notifier starts cold
-  }
-  rebuildAgentWatcher();
   broadcastSidebarUpdate(sidebarBridge.getState());
   broadcastTerminalUpdate(terminalBridge.getState());
   createWindow();

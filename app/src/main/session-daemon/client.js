@@ -143,7 +143,6 @@ class SessionDaemonClient {
   // verb; the caller decides what that means.
   async dormantSessions() { return (await this.request('dormant'))?.sessions || {}; }
   subscribe(_subscriptions, options) { return new SessionSubscription(this, options); }
-  subscribeAgentStatus() { return new SessionSubscription(this); }
   async bootstrap(options = {}) {
     const result = await this.snapshot();
     const subscription = this.subscribe(null, options.subscriptionOptions);

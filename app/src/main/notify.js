@@ -51,14 +51,19 @@ function createNotifier(opts = {}) {
     updateBadge();
   }
 
+  // A pane that stopped on a prompt is waiting for the user, not finished.
   function fireToast(entries) {
     let title = 'Harbor';
     let body;
     if (entries.length === 1) {
-      const { sessionTitle, project } = entries[0];
-      body = project ? `${sessionTitle} (${project}) finished` : `${sessionTitle} finished`;
+      const { sessionTitle, project, status } = entries[0];
+      const name = project ? `${sessionTitle} (${project})` : sessionTitle;
+      body = status === 'blocked' ? `${name} needs you` : `${name} finished`;
     } else {
-      body = `${entries.length} sessions finished`;
+      const blocked = entries.filter((entry) => entry.status === 'blocked').length;
+      const finished = entries.length - blocked;
+      body = [finished ? `${finished} session${finished === 1 ? '' : 's'} finished` : null,
+        blocked ? `${blocked} need${blocked === 1 ? 's' : ''} you` : null].filter(Boolean).join(' · ');
     }
     notify(title, body);
   }
@@ -66,18 +71,42 @@ function createNotifier(opts = {}) {
   function flushPending() {
     coalesceTimer = null;
     if (!pending.length) return;
-    const batch = pending.splice(0).filter((entry) => {
+    const entries = pending.splice(0);
+    // A prompt is only worth a toast while the pane is still sitting on it.
+    // One answered inside the window has moved on, and the finish that may
+    // have followed it speaks for the pane instead.
+    const prompting = new Set(entries
+      .filter((entry) => entry.status === 'blocked' && prevStatus.get(entry.paneId) === 'blocked')
+      .map((entry) => entry.paneId));
+    const batch = entries.filter((entry) => {
+      const prompt = entry.status === 'blocked';
+      if (prompt && !prompting.has(entry.paneId)) return false;
+      // A prompt still on screen says more than the turn before it ending.
+      if (!prompt && prompting.has(entry.paneId)) return false;
       if (!held(entry.paneId)) return true;
       deferred.set(entry.paneId, entry);
       unacknowledgedPanes.delete(entry.paneId);
       return false;
     });
+    // An answered prompt no longer counts toward the badge, unless the pane
+    // has something else to show (a finish in this batch, or a deferral).
+    const shown = new Set(batch.map((entry) => entry.paneId));
+    for (const entry of entries) {
+      if (entry.status !== 'blocked' || prompting.has(entry.paneId)) continue;
+      if (!shown.has(entry.paneId) && !deferred.has(entry.paneId)) unacknowledgedPanes.delete(entry.paneId);
+    }
     updateBadge();
     if (batch.length) fireToast(batch);
   }
 
+  // One slot per pane for a prompt and one for a finish, the newer entry
+  // replacing the older in its slot. Keeping only the FIRST entry per pane
+  // meant a prompt that arrived within the window of a finish was never
+  // announced. The two slots are settled at flush (flushPending).
   function enqueue(entry) {
-    if (!pending.some((item) => item.paneId === entry.paneId)) pending.push(entry);
+    const blocked = entry.status === 'blocked';
+    pending = pending.filter((item) => item.paneId !== entry.paneId || (item.status === 'blocked') !== blocked);
+    pending.push(entry);
     if (!coalesceTimer) {
       coalesceTimer = setTimeout(flushPending, COALESCE_MS);
     }
@@ -106,13 +135,13 @@ function createNotifier(opts = {}) {
     // Wire events carry workspace_id, not a label (schema-verified); resolve
     // through the injected lookup.
     const project = getWorkspaceLabel(data.workspace_id) || '';
-    if (held(paneId)) { deferred.set(paneId, { paneId, sessionTitle, project }); return; }
+    if (held(paneId)) { deferred.set(paneId, { paneId, sessionTitle, project, status: newStatus }); return; }
     deferred.delete(paneId);
     if (!unacknowledgedPanes.has(paneId)) {
       unacknowledgedPanes.add(paneId);
       updateBadge();
     }
-    enqueue({ paneId, sessionTitle, project });
+    enqueue({ paneId, sessionTitle, project, status: newStatus });
   }
 
   function onBackgroundChanged() {
@@ -170,4 +199,23 @@ function createNotifier(opts = {}) {
   };
 }
 
-module.exports = { createNotifier, COALESCE_MS, NOTIFY_STATUSES, WORKING };
+// Hands status events to `deliver` one at a time, in arrival order, after the
+// scan `scanFor(data)` returns for that event (or none). Without the queue, a
+// `working` that arrived while the idle before it waited on its scan was
+// delivered first: the notifier ended on the stale idle, toasted a finish for
+// a pane that was working again, and missed the real finish after it. A scan
+// that rejects (or throws) still delivers its event.
+function createStatusQueue({ scanFor = () => null, deliver }) {
+  let queue = Promise.resolve();
+  return (event) => {
+    let scan;
+    try { scan = Promise.resolve(scanFor(event?.data || {})).catch(() => {}); }
+    catch { scan = null; }
+    queue = queue.then(() => scan)
+      .finally(() => deliver(event))
+      .catch(() => {});
+    return queue;
+  };
+}
+
+module.exports = { createNotifier, createStatusQueue, COALESCE_MS, NOTIFY_STATUSES, WORKING };
