@@ -731,3 +731,11 @@ test('3f. freshness is proven by a written record, not by a touched mtime', asyn
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('a Codex pane parked on an approval or a question is awaiting an answer (0.160 captures)', () => {
+  const read = (name) => fs.readFileSync(path.join(__dirname, '../fixtures/codex-tui', name), 'utf8');
+  for (const name of ['approval-command-0.160.0.txt', 'question-batch-q1-0.160.0.txt', 'question-notes-typed-0.160.0.txt']) {
+    assert.equal(awaitingAnswer(read(name), 'codex'), true, name);
+  }
+  assert.equal(awaitingAnswer(read('idle-composer-0.160.0.txt'), 'codex'), false);
+});

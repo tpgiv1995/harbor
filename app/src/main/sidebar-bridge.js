@@ -5,8 +5,9 @@ const fsp = require('node:fs/promises');
 const { createControlClient } = require('./session-daemon/factory.js');
 const { createHistoryProvider } = require('./providers/history.js');
 const { createProviderHistory } = require('./providers/provider-history.js');
+const { buildProviderPreview } = require('./providers/provider-preview.js');
 const { createProviderSessionLinker } = require('./providers/provider-session-link.js');
-const { mergeSidebarModel, sleptSince } = require('../shared/sidebar-model.cjs');
+const { mergeSidebarModel, sleptSince, paneStatusFields } = require('../shared/sidebar-model.cjs');
 const { parseLocalDateTime } = require('../shared/date-roll.cjs');
 const { freshWorking } = require('../shared/claude-turn-state.cjs');
 const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, delegationSummaries, mergeDelegationLinks } = require('./providers/delegations.js');
@@ -29,6 +30,10 @@ function withLaunchedHomes(homes, launched) {
   }
   return merged || homes;
 }
+
+// The most a step-only status update (a new `working` msg) waits for its
+// sidebar patch; see scheduleStatusPublish.
+const STEP_PUBLISH_MS = 300;
 
 function extractLiveState(snapshot) {
   const snap = snapshot?.snapshot || snapshot || {};
@@ -95,8 +100,16 @@ function applyPaneEvent(state, event) {
       // bash (live-caught 2026-07-22).
       return { workspaces, panes: panes.filter((p) => p.pane_id !== paneId) };
     }
-    if (panes[idx].agent_status === agentStatus) return state;
-    panes[idx] = { ...panes[idx], agent_status: agentStatus };
+    // The CLI's own words ride along (OSC 7501 via the keeper): a new step
+    // inside `working`, or a new prompt with the same text (its seq), is a
+    // change the rail shows.
+    const kind = data.agent_status_kind ?? null;
+    const msg = data.agent_status_msg ?? null;
+    const seq = Number.isInteger(data.agent_status_seq) ? data.agent_status_seq : null;
+    const pane = panes[idx];
+    if (pane.agent_status === agentStatus && (pane.agent_status_kind ?? null) === kind
+      && (pane.agent_status_msg ?? null) === msg && (pane.agent_status_seq ?? null) === seq) return state;
+    panes[idx] = { ...pane, agent_status: agentStatus, agent_status_kind: kind, agent_status_msg: msg, agent_status_seq: seq };
     return { workspaces, panes };
   }
 
@@ -365,14 +378,29 @@ function createSidebarBridge(options = {}) {
 
   // Agent status can chatter during tool transitions. Collapse a same-frame
   // burst into one sidebar render while still forwarding every raw event to
-  // the notification driver.
+  // the notification driver. The fast path patches ONLY the fields named
+  // here, so every row field a status event changes must be in this patch
+  // (paneStatusFields, which mergeSidebarModel uses for the same fields on a
+  // full publish). A step-only update (working -> working with a new msg,
+  // one per tool call) waits up to STEP_PUBLISH_MS; a real transition pulls a
+  // pending patch in.
   const pendingStatuses = new Map();
   let statusNeedsMerge = false;
-  const scheduleStatusPublish = (event) => {
+  let statusPublishDue = 0;
+  const scheduleStatusPublish = (event, { stepOnly = false } = {}) => {
     const { pane_id: paneId, agent_status: status } = event.data;
     if (status === 'unknown' || !paneRows.has(paneId)) statusNeedsMerge = true;
-    else pendingStatuses.set(paneRows.get(paneId), { agentStatus: status });
-    if (statusPublishTimer) return;
+    else {
+      const pane = liveState.panes.find((p) => p.pane_id === paneId);
+      pendingStatuses.set(paneRows.get(paneId), paneStatusFields(pane || { agent_status: status }));
+    }
+    const delay = stepOnly ? STEP_PUBLISH_MS : 16;
+    const due = Date.now() + delay;
+    if (statusPublishTimer) {
+      if (due >= statusPublishDue) return;
+      clearTimeout(statusPublishTimer);
+    }
+    statusPublishDue = due;
     statusPublishTimer = setTimeout(() => {
       statusPublishTimer = null;
       if (statusNeedsMerge) publish();
@@ -385,15 +413,18 @@ function createSidebarBridge(options = {}) {
       }
       pendingStatuses.clear();
       statusNeedsMerge = false;
-    }, 16);
+    }, delay);
     statusPublishTimer.unref?.();
   };
 
   const onPaneAgentStatus = (event) => {
     const previousState = liveState;
+    const paneId = event?.data?.pane_id;
+    const before = previousState.panes.find((p) => p.pane_id === paneId)?.agent_status ?? null;
     liveState = applyPaneEvent(liveState, event);
     emitter.emit('pane-agent-status', event);
-    if (liveState !== previousState) scheduleStatusPublish(event);
+    if (liveState === previousState) return;
+    scheduleStatusPublish(event, { stepOnly: before === 'working' && event?.data?.agent_status === 'working' });
   };
 
   // Where the last refresh spent its time, for the lifecycle log's
@@ -548,6 +579,11 @@ function createSidebarBridge(options = {}) {
       subscription.on('error', (e) => emitter.emit('error', e));
       subscription.on('close', () => { if (!closed) scheduleReconnect(); });
       liveState = extractLiveState(boot.snapshot);
+      // The subscription was seeded with this snapshot, so it reports only
+      // what changes after it. Whoever reads its status events (the notifier)
+      // needs the same starting point, on a reconnect as much as at boot, or a
+      // pane already working when it connected never toasts its finish.
+      emitter.emit('daemon-snapshot', boot.snapshot);
       publish();
       {
         dormantTimer = setInterval(() => { if (dormantSupported) refreshDormant(); refreshInteractivePanes(); }, DORMANT_POLL_MS);
@@ -628,6 +664,32 @@ function createSidebarBridge(options = {}) {
     daemonClient = null;
   };
 
+  // Claude ids resolve through the indexer; codex/cursor ids through the
+  // provider scan (path + provider, so transcript open needs no hints).
+  const getSessionMeta = async (id) => {
+    const indexed = historyById.get(id);
+    // The bulk index refresh already has these facts. Orch summary polls
+    // and send lookups must not enqueue one worker RPC per historical row.
+    if (indexed?.meta) return { ...indexed.meta, home: indexed.home ?? null };
+    const providerMeta = providerHistory?.metaFor(id);
+    if (providerMeta) return providerMeta;
+    try {
+      return await history.sessionMeta(id);
+    } catch (error) {
+      const providerMeta = providerHistory?.metaFor(id);
+      if (providerMeta) return providerMeta;
+      throw error;
+    }
+  };
+  // The same answer for a reader of the conversation: a compressed codex
+  // rollout comes back with its decompressed copy as `path`. Everything else
+  // (identity, cwd, the Orch join) asks getSessionMeta, which never
+  // decompresses anything.
+  const getReadableSessionMeta = async (id) => {
+    const readable = await providerHistory?.readableMetaFor?.(id);
+    return readable || getSessionMeta(id);
+  };
+
   return {
     emitter,
     start,
@@ -674,7 +736,10 @@ function createSidebarBridge(options = {}) {
       const id = typeof pane.agent_session === 'string' ? pane.agent_session : pane.agent_session?.value;
       const row = historyById.get(id);
       const readOnly = subSessionReadOnly({ ...row, isLive: true, isLiveInteractive: pane.isLiveInteractive });
-      return { alive: true, delegatedBy: readOnly ? (row?.delegatedBy || 'sub-session') : null, working: pane.agent_status === 'working' || freshWorking(row?.background),
+      // sessionId is the rail row's id (a pane with no session yet rides its
+      // live: key), which is what a window's mute and a toast's click name.
+      return { alive: true, sessionId: id || `live:${paneId}`, title: row?.title || pane.terminal_title || pane.label || null,
+        delegatedBy: readOnly ? (row?.delegatedBy || 'sub-session') : null, working: pane.agent_status === 'working' || freshWorking(row?.background),
         background: Boolean(row?.background?.outstanding?.length || row?.background?.awaitingFinal) };
     },
     // Called by the launch flow with the profile it actually passed to the CLI
@@ -695,28 +760,34 @@ function createSidebarBridge(options = {}) {
     onPaneAgentStatus,
     focusLivePane,
     close,
-    // Claude ids resolve through the indexer; codex/cursor ids through the
-    // provider scan (path + provider, so transcript open needs no hints).
-    getSessionMeta: async (id) => {
-      const indexed = historyById.get(id);
-      // The bulk index refresh already has these facts. Orch summary polls
-      // and send lookups must not enqueue one worker RPC per historical row.
-      if (indexed?.meta) return { ...indexed.meta, home: indexed.home ?? null };
-      const providerMeta = providerHistory?.metaFor(id);
-      if (providerMeta) return providerMeta;
-      try {
-        return await history.sessionMeta(id);
-      } catch (error) {
-        const providerMeta = providerHistory?.metaFor(id);
-        if (providerMeta) return providerMeta;
-        throw error;
+    getSessionMeta,
+    getReadableSessionMeta,
+    // The claude index never holds a codex or cursor id, so asking it alone
+    // answered "session ... not in index yet" for every codex batch worker's
+    // preview. Ids the provider scan knows get a preview built from their own
+    // rollout, from a bounded head and tail.
+    getSessionPreview: async (id) => {
+      const providerMeta = await providerHistory?.readableMetaFor?.(id);
+      if (providerMeta?.path && providerMeta.provider && providerMeta.provider !== 'claude') {
+        return buildProviderPreview({ id, meta: providerMeta, row: historyById.get(id) || null });
       }
+      return history.sessionPreview(id);
     },
-    getSessionPreview: (id) => history.sessionPreview(id),
     // A send is the moment a codex pane's first prompt hits disk; resolving
     // right then names the session in seconds instead of at the next tick.
     resolveProviderSessions: () => providerLinker?.resolveNow() ?? false,
     providerSessionForPane: (paneId) => providerLinker?.get(paneId) ?? null,
+    // Is a live pane running this provider's agent on this session? The
+    // daemon detects the pane's foreground agent from its process tree, and a
+    // link exists only while that pane and agent do, so this is the codex
+    // owner-liveness answer the transcript provider has no tee or beacon for.
+    providerPaneAlive: (sessionId, provider) => {
+      const panes = providerLinker ? providerLinker.apply(liveState.panes) : liveState.panes;
+      return panes.some((pane) => {
+        const named = typeof pane?.agent_session === 'string' ? pane.agent_session : pane?.agent_session?.value;
+        return pane?.agent === provider && named === sessionId;
+      });
+    },
     getLivePaneIds: () => liveState.panes.map((pane) => pane.pane_id),
     getHistoryRow: (id) => historyById.get(id),
     getState: () => publisher.getState(),

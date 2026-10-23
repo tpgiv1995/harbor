@@ -469,6 +469,13 @@ const PROVIDER_ANSWER_MARKERS = {
     /Do you trust the contents of this directory/i,
     /Yes, continue/i,
     /Press enter to continue and create a sandbox/i,
+    // Codex 0.160 approval and request_user_input footers (captured in a pty;
+    // test/fixtures/codex-tui/). A pane parked on either waits on a person.
+    // The approval footer already matches "esc to cancel" above; the
+    // question footers ("… | esc to interrupt") match nothing shared.
+    /Press enter to confirm or esc to cancel/i,
+    /enter to submit (?:answer|all)/i,
+    /tab or esc to clear notes/i,
   ],
   cursor: [
     /Workspace Trust Required/i,

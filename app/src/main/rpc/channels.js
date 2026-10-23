@@ -4,6 +4,10 @@ const LOCAL_ONLY = new Set([
   // Claude's composer suggestion for the desktop command bar's Tab-to-accept.
   // The phone has no use for it, so it never leaves this machine.
   'session:suggestion',
+  // Notification on/off and per-window mute (notify-prefs.js): the desktop's
+  // own toasts and badge, so only the desktop reads or changes them.
+  'notify:get-prefs',
+  'notify:set-prefs',
   // Account usage is shown only in the desktop title bar.
   'usage:get-plans',
   // The heavy-lifting setting beside it decides whether Claude sessions may
@@ -267,6 +271,8 @@ const METHOD_NAMES = [
   'session:menu-state',
   'session:suggestion',
   'session:work-meter',
+  'notify:get-prefs',
+  'notify:set-prefs',
   'session:menu-answer',
   'session:send-queue',
   'session:cancel-send',
@@ -380,6 +386,7 @@ const PUSH_CHANNELS = Object.freeze([
   'project-icons:update',
   'send:status',
   'session:launched',
+  'session:reveal',
   'setup:open',
   'sidebar:update',
   'tasks:changed',
