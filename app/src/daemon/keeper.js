@@ -33,6 +33,7 @@ const { ScreenModel } = require('./screen.js');
 const { writeStateResilient } = require('./persist-state.js');
 const { readRecords, writeRecord } = require('./ndjson.js');
 const { ObserverWriter } = require('./observer-writer.js');
+const { isTerminalReply } = require('./input-intent.js');
 const { listenAddress } = require('./paths.js');
 const { currentBootId } = require('./boot-id.js');
 const { resolveJobPolicy, openSessionJob, terminateJob, closeJob, armKillOnClose } = require('./win-job.js');
@@ -101,6 +102,22 @@ let lastActivityAt = Date.now();
 let lastActivityPersistedAt = Date.now();
 const ACTIVITY_PERSIST_MS = Number(process.env.HARBOR_SESSIOND_ACTIVITY_PERSIST_MS || 30000);
 
+// OUTPUT IS NOT ATTENTION (2026-10-19). `last_activity_at` moves on every pty
+// byte, and a CLI redraws its whole screen whenever the app reattaches (a
+// daemon handover, an app restart, a resize), so every live session looked
+// freshly active after each one even when nobody had typed into it for days.
+// `last_input_at` moves only when a PERSON writes into the pane (see
+// input-intent.js for what is not a person), and dormancy measures idleness
+// from it. It starts at spawn: a session opened and never used has been idle
+// since it was opened. Persisted on the same throttle as the activity stamp,
+// with the same bounded, one-directional staleness.
+let lastInputAt = Date.now();
+
+function noteInput(text) {
+  if (!isTerminalReply(text)) lastInputAt = Date.now();
+  noteActivity();
+}
+
 // Set by a `terminate` that is deliberate rather than a death, so the exit
 // record can say WHY. Stamped by the keeper rather than written by the daemon
 // afterwards because persist() rebuilds state from `config` every time and
@@ -156,6 +173,7 @@ function persist(extra = {}) {
     // cannot: a SIGKILLed keeper never reaches onExit to write one.
     boot_id: bootId,
     last_activity_at: new Date(lastActivityAt).toISOString(),
+    last_input_at: new Date(lastInputAt).toISOString(),
     exit,
     ...extra,
   };
@@ -366,8 +384,9 @@ const server = net.createServer((socket) => {
       } else if (record.verb === 'input') {
         if (exit) throw new Error(`session ${config.id} has exited`);
         if (typeof params.text !== 'string' && typeof params.bytes !== 'string') throw new Error('input requires text or base64 bytes');
-        noteActivity();
-        terminal.write(typeof params.text === 'string' ? params.text : Buffer.from(params.bytes, 'base64').toString('utf8'));
+        const text = typeof params.text === 'string' ? params.text : Buffer.from(params.bytes, 'base64').toString('utf8');
+        noteInput(text);
+        terminal.write(text);
         result = { accepted: true };
       } else if (record.verb === 'resize') {
         if (!Number.isInteger(params.cols) || params.cols < 1) throw new Error('cols must be a positive integer');

@@ -65,12 +65,33 @@ function number(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+// A config value is honoured only when it is a real non-negative number.
+// `Number(null)` is 0, and 0 means OFF here, so a hand-written
+// `"dormantAfterMinutes": null` must read as "not set", never as "disable".
+function configNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 // Off is a real, supported answer and it is spelled `0`, matching
 // HARBOR_SESSIOND_RECONCILE_INTERVAL_MS one file over. A machine with enough
 // RAM, or a run that must not lose a long-idle session, turns it off wholesale
 // rather than editing a threshold to something absurd.
-function resolveDormancyPolicy(env = process.env) {
-  const afterMs = number(env.HARBOR_SESSIOND_DORMANT_AFTER_MS, HOUR_MS);
+//
+// TWO SOURCES, ONE ORDER (2026-10-19). The environment outranks Harbor's
+// config.json `sessiond` block, which outranks the default: the same
+// precedence HARBOR_TASKS_FILE has over `paths.tasksFile`. The config block
+// exists because a GUI-launched daemon has no environment anyone can set: the
+// CLI start path forwards an allowlist, and on macOS an app opened from the
+// Dock inherits launchd's environment, not a shell's. `config` is the parsed
+// `sessiond` object (or nothing); the daemon re-reads it every sweep, so an
+// edit takes effect within a minute without a daemon handover.
+function resolveDormancyPolicy(env = process.env, config = {}) {
+  const sessiond = config && typeof config === 'object' ? config : {};
+  const configAfterMinutes = configNumber(sessiond.dormantAfterMinutes);
+  const afterMs = number(env.HARBOR_SESSIOND_DORMANT_AFTER_MS,
+    configAfterMinutes === undefined ? HOUR_MS : configAfterMinutes * 60_000);
+  const maxLive = Math.floor(number(env.HARBOR_SESSIOND_MAX_LIVE_SESSIONS,
+    configNumber(sessiond.maxLiveSessions) ?? 0));
   return {
     enabled: afterMs > 0,
     afterMs,
@@ -99,6 +120,25 @@ function resolveDormancyPolicy(env = process.env) {
     // A floor so that a very short interval cannot make the fraction absurdly
     // sensitive (at 400ms, 5% is 20ms, which one GC pause would exceed).
     cpuBusyFloorUsec: number(env.HARBOR_SESSIOND_DORMANT_CPU_BUSY_FLOOR_USEC, 50_000),
+    // IDLE IS MEASURED FROM THE USER, NOT FROM THE PTY (2026-10-19). A keeper
+    // that stamps `last_input_at` lets the threshold run from the last thing a
+    // person typed, because pty output is moved by things that are not work: a
+    // CLI redrawing its whole screen when the app reattaches after a daemon
+    // handover or a window resize stamps `last_activity_at` on every live
+    // session at once. Output still VETOES: a session that drew anything in
+    // this window is left alone (a spinner is a working turn). Never longer
+    // than the threshold itself, so with input stamps a session can only
+    // become eligible sooner, never later, than it did on output alone.
+    outputQuietMs: Math.min(afterMs, number(env.HARBOR_SESSIOND_DORMANT_OUTPUT_QUIET_MS, 10 * 60_000)),
+    // THE LIVE-SESSION CAP (2026-10-19). Off at 0, the default. When more than
+    // `maxLive` sessions are live, the longest-idle-by-input ones beyond the
+    // `maxLive` most recent are put to sleep through the same terminate path,
+    // under the same vetoes, but at a shorter idle floor than the threshold:
+    // a cap that waited for the threshold would only ever repeat the idle
+    // sweep. Never a session younger than `capMinAgeMs`.
+    maxLive,
+    capMinIdleMs: Math.min(afterMs, number(env.HARBOR_SESSIOND_CAP_MIN_IDLE_MS, 30 * 60_000)),
+    capMinAgeMs: number(env.HARBOR_SESSIOND_CAP_MIN_AGE_MS, HOUR_MS),
   };
 }
 
@@ -227,6 +267,144 @@ function winCpuSnapshot({ execFileImpl = execFile, timeoutMs = 15000 } = {}) {
   });
 }
 
+// THE macOS ANSWER, AND THE LINUX ONE WITHOUT A SCOPE (2026-10-19). On darwin
+// there is no /proc, so `cgroupCpuUsec` answered null for every session,
+// evaluate() honestly called every session busy, and dormancy was inert while
+// the boot log said "dormancy on ... (cpu signal: cgroup usage_usec)": the
+// win32 incident above, on the third platform. Measured on a Mac the day this
+// was written: 97 live Claude sessions, 84 with no user message for 3+ days,
+// and not one `dormant` line in the daemon log, ever.
+//
+// The per-session scope is the same as on Windows, the process tree under the
+// keeper, read from ONE `ps -A` per sweep (about 34ms for ~1,800 processes on
+// that Mac). The pty child is a session leader (node-pty setsid's it), so the
+// session's process GROUP is also counted: a background child that reparented
+// to launchd/init but stayed in the group still vouches for its session.
+// `time` is cumulative user+system cpu of the process itself, so the tree sum
+// is a monotonic counter that can go DOWN when a child exits, which evaluate()
+// already reads as "counter reset; restarting observation". Every misread is in
+// the safe direction: a stranger's subtree (a recycled pid) only adds cpu, and
+// extra cpu reads as busy.
+const POSIX_PROCESS_TABLE_COMMAND = ['ps', ['-A', '-o', 'pid=,ppid=,pgid=,time=']];
+
+// `time` is `[[dd-]hh:]mm:ss[.cc]`. macOS prints unbounded minutes with
+// centiseconds (`121:07.01`); procps prints `[dd-]hh:mm:ss` (whole seconds).
+// Returns microseconds, or null for anything else.
+function parsePsCpuTime(text) {
+  const match = /^(?:(\d+)-)?(\d+(?::\d+){0,2})(?:\.(\d+))?$/.exec(String(text).trim());
+  if (!match) return null;
+  const parts = match[2].split(':').map(Number);
+  let seconds = 0;
+  for (const part of parts) seconds = seconds * 60 + part;
+  seconds += (Number(match[1]) || 0) * 86400;
+  const fraction = match[3] ? Number(`0.${match[3]}`) : 0;
+  const usec = Math.round((seconds + fraction) * 1_000_000);
+  return Number.isFinite(usec) ? usec : null;
+}
+
+function parsePosixProcessTable(stdout) {
+  const table = new Map();
+  for (const line of String(stdout || '').split('\n')) {
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 4) continue;
+    const [pid, ppid, pgid] = fields.slice(0, 3).map(Number);
+    const cpuUsec = parsePsCpuTime(fields[3]);
+    if (!Number.isInteger(pid) || pid <= 0 || cpuUsec === null) continue;
+    table.set(pid, {
+      ppid: Number.isInteger(ppid) && ppid > 0 ? ppid : 0,
+      pgid: Number.isInteger(pgid) && pgid > 0 ? pgid : 0,
+      cpuUsec,
+    });
+  }
+  return table.size ? table : null;
+}
+
+// Pure. The keeper-rooted tree plus every process in the session's group (and
+// THEIR descendants). A keeper the table has never heard of is the same honest
+// refusal as on Windows: null, which evaluate() reads as busy.
+function posixProcessTreeCpuUsec(table, rootPid, { groupPid = null } = {}) {
+  if (!(table instanceof Map)) return null;
+  if (!Number.isInteger(rootPid) || rootPid <= 0 || !table.has(rootPid)) return null;
+  const children = new Map();
+  const queue = [rootPid];
+  for (const [pid, row] of table) {
+    if (!children.has(row.ppid)) children.set(row.ppid, []);
+    children.get(row.ppid).push(pid);
+    if (Number.isInteger(groupPid) && groupPid > 1 && row.pgid === groupPid) queue.push(pid);
+  }
+  let total = 0;
+  const seen = new Set();
+  while (queue.length) {
+    const pid = queue.pop();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    total += table.get(pid).cpuUsec;
+    for (const child of children.get(pid) || []) queue.push(child);
+  }
+  return total;
+}
+
+// One `ps` per sweep. Any failure resolves null (every session reads busy).
+function posixCpuSnapshot({ execFileImpl = execFile, timeoutMs = 15000 } = {}) {
+  return new Promise((resolve) => {
+    const [command, args] = POSIX_PROCESS_TABLE_COMMAND;
+    execFileImpl(command, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+      if (error) { resolve(null); return; }
+      resolve(parsePosixProcessTable(String(stdout)));
+    });
+  });
+}
+
+// When did a person last touch this session? `last_input_at` when the keeper
+// stamps it (keepers from 2026-10-19 on), else the pty stamp, which is all an
+// older keeper has. NaN when neither exists.
+function lastTouchedAt(state) {
+  const input = Date.parse(state?.last_input_at || '');
+  return Number.isFinite(input) ? input : Date.parse(state?.last_activity_at || '');
+}
+
+// The cpu half of the decision, shared by the idle sweep and the cap. `checks`
+// is the caller's consecutive-quiet counter; the result says what to store.
+function cpuQuiet({ now, policy, previous, cpuUsec, checks }) {
+  // Unreadable cgroup = treated as busy. See the header: a wrong sleep costs
+  // work, a missed sleep costs memory, and those are not the same price.
+  if (cpuUsec === null || cpuUsec === undefined) {
+    return { quiet: false, code: 'cpu-unreadable', reason: 'cpu usage unreadable; treating as busy', checks: 0 };
+  }
+  const priorCpu = previous?.cpuUsec;
+  const priorAt = previous?.at;
+  if (priorCpu === null || priorCpu === undefined || !Number.isFinite(priorAt)) {
+    return { quiet: false, code: 'measuring', reason: 'first idle observation; measuring cpu over the next interval', checks: 0 };
+  }
+  // A cgroup that was recreated (or a counter that went backwards, which should
+  // be impossible and therefore must be handled) restarts the observation
+  // rather than reading a negative delta as deep idleness.
+  const deltaUsec = cpuUsec - priorCpu;
+  if (deltaUsec < 0) return { quiet: false, code: 'measuring', reason: 'cpu counter reset; restarting observation', checks: 0 };
+  // A zero or backwards wall interval (two sweeps in the same millisecond, a
+  // clock adjustment) can prove nothing about a RATE, so it measures again
+  // instead of dividing by zero and calling the answer idle.
+  const wallUsec = (now - priorAt) * 1000;
+  if (wallUsec <= 0) return { quiet: false, code: 'measuring', reason: 'no elapsed time to measure cpu over; restarting observation', checks: 0 };
+  const busyUsec = Math.max(policy.cpuBusyFloorUsec, wallUsec * policy.cpuBusyFraction);
+  if (deltaUsec > busyUsec) {
+    // Busy resets the counter to zero rather than merely not incrementing it.
+    // A session that alternates quiet and busy intervals must never creep to
+    // the threshold one stray quiet pass at a time.
+    return {
+      quiet: false,
+      code: 'busy',
+      checks: 0,
+      reason: `burning cpu in the background (${Math.round(deltaUsec / 1000)}ms of cpu in ${Math.round(wallUsec / 1000)}ms)`,
+    };
+  }
+  const next = (checks || 0) + 1;
+  if (next < policy.minChecks) {
+    return { quiet: false, code: 'measuring', reason: `idle observation ${next}/${policy.minChecks}`, checks: next };
+  }
+  return { quiet: true, code: 'quiet', reason: 'quiet', checks: next };
+}
+
 // Pure, so the whole decision is testable without a cgroup, a keeper or a
 // clock. Everything impure (reading /proc, reading the state file) is resolved
 // by the caller and handed in.
@@ -236,67 +414,62 @@ function winCpuSnapshot({ execFileImpl = execFile, timeoutMs = 15000 } = {}) {
 // this function stays pure and the caller owns all the state, which is what
 // makes the whole decision testable with a plain object and a fake clock.
 function evaluate(state, { now, policy, previous, cpuUsec }) {
-  if (!policy.enabled) return { sleep: false, reason: 'dormancy disabled', idleMs: 0, idleChecks: 0 };
-  if (state.exit) return { sleep: false, reason: 'already exited', idleMs: 0, idleChecks: 0 };
+  if (!policy.enabled) return { sleep: false, code: 'disabled', reason: 'dormancy disabled', idleMs: 0, idleChecks: 0 };
+  if (state.exit) return { sleep: false, code: 'exited', reason: 'already exited', idleMs: 0, idleChecks: 0 };
 
   // A state file written before this feature existed has no activity stamp, and
   // a session running under an OLD keeper never grows one. Falling back to
   // created_at would put every one of those to sleep an hour after the daemon
   // came up, no matter how busy, which is the single worst thing this file
   // could do on the day it ships. No stamp means no opinion.
-  const stampedAt = Date.parse(state.last_activity_at || '');
-  if (!Number.isFinite(stampedAt)) {
-    return { sleep: false, reason: 'no activity stamp (pre-dormancy keeper)', idleMs: 0, idleChecks: 0 };
+  const outputAt = Date.parse(state.last_activity_at || '');
+  if (!Number.isFinite(outputAt)) {
+    return { sleep: false, code: 'no-stamp', reason: 'no activity stamp (pre-dormancy keeper)', idleMs: 0, idleChecks: 0 };
   }
 
-  const idleMs = now - stampedAt;
-  if (idleMs < policy.afterMs) return { sleep: false, reason: 'active', idleMs, idleChecks: 0 };
-
-  // Unreadable cgroup = treated as busy. See the header: a wrong sleep costs
-  // work, a missed sleep costs memory, and those are not the same price.
-  if (cpuUsec === null || cpuUsec === undefined) {
-    return { sleep: false, reason: 'cpu usage unreadable; treating as busy', idleMs, idleChecks: 0 };
+  const idleMs = now - lastTouchedAt(state);
+  if (!(idleMs >= policy.afterMs)) return { sleep: false, code: 'active', reason: 'active', idleMs, idleChecks: 0 };
+  // Input-idle long enough, but the pty drew something recently: a working
+  // turn animates a spinner, so recent output keeps the session awake. (With no
+  // input stamp, idle IS output idle and this cannot trip.)
+  if (now - outputAt < policy.outputQuietMs) {
+    return { sleep: false, code: 'output-recent', reason: 'pty output in the last few minutes', idleMs, idleChecks: 0 };
   }
 
-  const priorCpu = previous?.cpuUsec;
-  const priorAt = previous?.at;
-  if (priorCpu === null || priorCpu === undefined || !Number.isFinite(priorAt)) {
-    return { sleep: false, reason: 'first idle observation; measuring cpu over the next interval', idleMs, idleChecks: 0 };
-  }
-  // A cgroup that was recreated (or a counter that went backwards, which should
-  // be impossible and therefore must be handled) restarts the observation
-  // rather than reading a negative delta as deep idleness.
-  const deltaUsec = cpuUsec - priorCpu;
-  if (deltaUsec < 0) return { sleep: false, reason: 'cpu counter reset; restarting observation', idleMs, idleChecks: 0 };
-  // A zero or backwards wall interval (two sweeps in the same millisecond, a
-  // clock adjustment) can prove nothing about a RATE, so it measures again
-  // instead of dividing by zero and calling the answer idle.
-  const wallUsec = (now - priorAt) * 1000;
-  if (wallUsec <= 0) return { sleep: false, reason: 'no elapsed time to measure cpu over; restarting observation', idleMs, idleChecks: 0 };
-  const busyUsec = Math.max(policy.cpuBusyFloorUsec, wallUsec * policy.cpuBusyFraction);
-  if (deltaUsec > busyUsec) {
-    return {
-      sleep: false,
-      idleMs,
-      // Busy resets the counter to zero rather than merely not incrementing it.
-      // A session that alternates quiet and busy intervals must never creep to
-      // the threshold one stray quiet pass at a time.
-      idleChecks: 0,
-      reason: `burning cpu in the background (${Math.round(deltaUsec / 1000)}ms of cpu in ${Math.round(wallUsec / 1000)}ms)`,
-    };
-  }
-
-  const checks = (previous?.idleChecks || 0) + 1;
-  if (checks < policy.minChecks) {
-    return { sleep: false, reason: `idle observation ${checks}/${policy.minChecks}`, idleMs, idleChecks: checks };
-  }
+  const cpu = cpuQuiet({ now, policy, previous, cpuUsec, checks: previous?.idleChecks });
+  if (!cpu.quiet) return { sleep: false, code: cpu.code, reason: cpu.reason, idleMs, idleChecks: cpu.checks };
 
   return {
     sleep: true,
+    code: 'idle',
     idleMs,
-    idleChecks: checks,
+    idleChecks: cpu.checks,
     reason: `idle for ${Math.round(idleMs / 60000)}m with no cpu; put to sleep to free memory. Resume it from the rail.`,
   };
+}
+
+// Could the live-session cap put this session to sleep? The same evidence as
+// evaluate(), at the cap's shorter idle floor, plus an age floor: a session
+// opened in the last hour is never the one evicted. Pure, with its own
+// consecutive-quiet counter (`capChecks`) so the two decisions never share
+// hysteresis state. Whether the cap is exceeded, and which sessions are
+// protected as the most recent, is the sweep's business, not this function's.
+function evaluateCap(state, { now, policy, previous, cpuUsec }) {
+  const no = (code, reason, idleMs = 0, capChecks = 0) => ({ eligible: false, code, reason, idleMs, capChecks });
+  if (!policy.enabled || !(policy.maxLive > 0)) return no('disabled', 'live-session cap off');
+  if (state.exit) return no('exited', 'already exited');
+  const outputAt = Date.parse(state.last_activity_at || '');
+  if (!Number.isFinite(outputAt)) return no('no-stamp', 'no activity stamp (pre-dormancy keeper)');
+  const createdAt = Date.parse(state.created_at || '');
+  if (!Number.isFinite(createdAt) || now - createdAt < policy.capMinAgeMs) {
+    return no('too-new', 'opened too recently to be evicted by the cap');
+  }
+  const idleMs = now - lastTouchedAt(state);
+  if (!(idleMs >= policy.capMinIdleMs)) return no('active', 'active', idleMs);
+  if (now - outputAt < policy.outputQuietMs) return no('output-recent', 'pty output in the last few minutes', idleMs);
+  const cpu = cpuQuiet({ now, policy, previous, cpuUsec, checks: previous?.capChecks });
+  if (!cpu.quiet) return no(cpu.code, cpu.reason, idleMs, cpu.checks);
+  return { eligible: true, code: 'eligible', reason: 'idle with no cpu', idleMs, capChecks: cpu.checks };
 }
 
 // A TOUCHED FILE IS NOT A WRITTEN FILE (2026-08-25).
@@ -628,20 +801,29 @@ async function providerTranscriptFresh(state, options = {}) {
 // deliberately NOT escalated here: `reconcileStaleSessions` owns killing
 // keepers, it has the hysteresis and the verified-dead requirement, and a
 // second place that kills keepers is a second place that can kill a live one.
+// The last word a sweep logged, per watch map, so an unchanged minute after
+// minute does not write the same summary line 1,440 times a day.
+const lastSweepSummary = new WeakMap();
+
+function countsText(counts) {
+  return Object.entries(counts).filter(([, n]) => n > 0).map(([k, n]) => `${k}=${n}`).join(' ');
+}
+
 async function sweepDormancy({ states, now, policy, watch, readCpu, readScreen, terminate, log, workFresh = null }) {
   if (!policy.enabled) return 0;
   const seen = new Set();
-  let slept = 0;
-  for (const state of states) {
-    if (state.exit) continue;
-    seen.add(state.id);
-    const cpuUsec = readCpu(state);
-    const verdict = evaluate(state, { now, policy, previous: watch.get(state.id), cpuUsec });
-    // `at` is stored with the sample because the busy test is a RATE: without
-    // the timestamp of the previous reading there is no interval to divide by.
-    watch.set(state.id, { cpuUsec, at: now, idleChecks: verdict.idleChecks });
-    if (!verdict.sleep) continue;
+  const slept = new Set();
+  const kept = {};
+  const keep = (code) => { kept[code] = (kept[code] || 0) + 1; };
+  const capOn = policy.maxLive > 0;
+  const capVerdicts = new Map();
+  let idleSlept = 0;
+  let capSlept = 0;
 
+  // The two expensive vetoes, shared by the idle sweep and the cap. Returns a
+  // code naming why the session must be left alone, or null to proceed. Both
+  // fail CLOSED: an unreadable answer keeps the session.
+  const vetoed = async (state, { freshMs, quiet }) => {
     // A SESSION HOLDING FOR ITS OWN BACKGROUND WORK IS NOT IDLE (2026-08-21).
     // A session that spawned subagent reviewers and ended its turn to wait
     // sits at a silent composer with near-zero local cpu while the agents'
@@ -653,19 +835,16 @@ async function sweepDormancy({ states, now, policy, watch, readCpu, readScreen, 
     if (workFresh) {
       let fresh = false;
       try {
-        fresh = await workFresh(state);
+        fresh = await workFresh(state, freshMs);
       } catch (error) {
-        log(`could not read ${state.id}'s transcript freshness; leaving it alone: ${error.message}`);
-        watch.set(state.id, { cpuUsec, at: now, idleChecks: 0 });
-        continue;
+        if (!quiet) log(`could not read ${state.id}'s transcript freshness; leaving it alone: ${error.message}`);
+        return 'freshness-unreadable';
       }
       if (fresh) {
-        log(`${state.id} is pty-idle but its transcript or subagents are fresh; leaving it alone`);
-        watch.set(state.id, { cpuUsec, at: now, idleChecks: 0 });
-        continue;
+        if (!quiet) log(`${state.id} is pty-idle but its transcript or subagents are fresh; leaving it alone`);
+        return 'transcript-fresh';
       }
     }
-
     // THE LAST CHECK BEFORE THE KILL, and deliberately the most expensive one:
     // it costs a round trip to the keeper, so it is paid only for a session
     // already condemned by both cheap signals, at most once per sweep.
@@ -676,33 +855,111 @@ async function sweepDormancy({ states, now, policy, watch, readCpu, readScreen, 
       } catch (error) {
         // A keeper that will not answer is not a session to put down on a
         // guess; reconciliation owns that case.
-        log(`could not read ${state.id}'s screen; leaving it alone: ${error.message}`);
-        watch.set(state.id, { cpuUsec, at: now, idleChecks: 0 });
-        continue;
+        if (!quiet) log(`could not read ${state.id}'s screen; leaving it alone: ${error.message}`);
+        return 'screen-unreadable';
       }
       if (awaitingAnswer(screen, state.agent)) {
-        log(`${state.id} is idle but showing something that needs an answer; leaving it alone`);
-        watch.set(state.id, { cpuUsec, at: now, idleChecks: 0 });
-        continue;
+        if (!quiet) log(`${state.id} is idle but showing something that needs an answer; leaving it alone`);
+        return 'needs-answer';
       }
     }
+    return null;
+  };
 
+  const end = async (state, verdict) => {
     try {
       await terminate(state, verdict);
       watch.delete(state.id);
-      slept += 1;
+      slept.add(state.id);
       log(`dormant ${state.id}: ${verdict.reason}`);
+      return true;
     } catch (error) {
       log(`could not put ${state.id} to sleep (leaving it to reconciliation): ${error.message}`);
+      keep('terminate-failed');
+      return false;
+    }
+  };
+
+  for (const state of states) {
+    if (state.exit) continue;
+    seen.add(state.id);
+    const cpuUsec = readCpu(state);
+    const previous = watch.get(state.id);
+    const verdict = evaluate(state, { now, policy, previous, cpuUsec });
+    const cap = capOn ? evaluateCap(state, { now, policy, previous, cpuUsec }) : null;
+    if (cap) capVerdicts.set(state.id, cap);
+    // `at` is stored with the sample because the busy test is a RATE: without
+    // the timestamp of the previous reading there is no interval to divide by.
+    const sample = { cpuUsec, at: now, idleChecks: verdict.idleChecks, ...(cap ? { capChecks: cap.capChecks } : {}) };
+    watch.set(state.id, sample);
+    if (!verdict.sleep) { keep(verdict.code); continue; }
+
+    const veto = await vetoed(state, { freshMs: policy.afterMs, quiet: false });
+    if (veto) {
+      watch.set(state.id, { ...sample, idleChecks: 0 });
+      keep(veto);
+      continue;
+    }
+    if (await end(state, verdict)) idleSlept += 1;
+  }
+
+  // THE LIVE-SESSION CAP. Ranked by when a person last touched each session;
+  // the `maxLive` most recent are never candidates, and a session with no
+  // stamp at all ranks as most recent (no evidence is never grounds to evict).
+  // Candidates are visited oldest first and each must pass the same evidence
+  // and the same vetoes as an idle sleep, at the cap's shorter floor, so the
+  // cap can leave the machine OVER its limit when every surplus session is
+  // genuinely in use. That is the intended outcome: a cap that ended working
+  // sessions to hit a number would be the bug this file exists to avoid.
+  let capLine = '';
+  if (capOn) {
+    const live = states.filter((s) => !s.exit && !slept.has(s.id));
+    let excess = live.length - policy.maxLive;
+    if (excess > 0) {
+      const rank = (s) => { const at = lastTouchedAt(s); return Number.isFinite(at) ? at : Infinity; };
+      const ordered = [...live].sort((a, b) => rank(b) - rank(a));
+      const candidates = ordered.slice(policy.maxLive).reverse();
+      const capKept = {};
+      const capKeep = (code) => { capKept[code] = (capKept[code] || 0) + 1; };
+      const over = excess;
+      for (const state of candidates) {
+        if (excess <= 0) break;
+        const cap = capVerdicts.get(state.id);
+        if (!cap?.eligible) { capKeep(cap?.code || 'unknown'); continue; }
+        const veto = await vetoed(state, { freshMs: policy.capMinIdleMs, quiet: true });
+        if (veto) {
+          const sample = watch.get(state.id);
+          if (sample) watch.set(state.id, { ...sample, capChecks: 0 });
+          capKeep(veto);
+          continue;
+        }
+        const reason = `over the live-session cap (${live.length} live, cap ${policy.maxLive}); idle for ${Math.round(cap.idleMs / 60000)}m with no cpu; put to sleep to free memory. Resume it from the rail.`;
+        if (await end(state, { sleep: true, code: 'cap', reason, idleMs: cap.idleMs })) { capSlept += 1; excess -= 1; }
+      }
+      const capKeptText = countsText(capKept);
+      capLine = ` cap=${policy.maxLive} over=${over} still_over=${Math.max(0, excess)}${capKeptText ? ` cap_kept: ${capKeptText}` : ''}`;
     }
   }
+
   for (const id of [...watch.keys()]) if (!seen.has(id)) watch.delete(id);
-  return slept;
+
+  // ONE COMPACT LINE PER SWEEP, counts and reason codes only (never screen or
+  // prompt text), written when something slept or the picture changed. "Why
+  // is nothing ever sleeping" was unanswerable from the log for the whole
+  // life of the macOS bug; this line answers it (`cpu-unreadable=97`).
+  const keptText = countsText(kept);
+  const summary = `dormancy sweep: live=${seen.size} slept=${slept.size} (idle=${idleSlept} cap=${capSlept})${keptText ? ` kept: ${keptText}` : ''}${capLine}`;
+  if (slept.size > 0 || lastSweepSummary.get(watch) !== summary) {
+    lastSweepSummary.set(watch, summary);
+    log(summary);
+  }
+  return slept.size;
 }
 
 module.exports = {
-  resolveDormancyPolicy, evaluate, cgroupCpuUsec, awaitingAnswer, sweepDormancy, HOUR_MS,
+  resolveDormancyPolicy, evaluate, evaluateCap, lastTouchedAt, cgroupCpuUsec, awaitingAnswer, sweepDormancy, HOUR_MS,
   parseWinProcessTable, winProcessTreeCpuUsec, winCpuSnapshot,
+  parsePsCpuTime, parsePosixProcessTable, posixProcessTreeCpuUsec, posixCpuSnapshot,
   lastRecordAtMs, transcriptWrittenWithin, transcriptTreeFresh,
   findProviderTranscript, newestCompleteRecord, codexTranscriptFresh, cursorTranscriptFresh,
   providerTranscriptFresh, PROVIDER_ANSWER_MARKERS,

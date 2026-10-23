@@ -93,7 +93,11 @@ function cleanDaemonEnv() {
     // Job policy (win-job.js): the keepers inherit THIS env, so a policy setting
     // the CLI drops is a setting that silently does nothing (2026-10-11, Astra's
     // review: the documented per-process ceiling override never reached a session).
-    'HARBOR_SESSIOND_PROCESS_MEMORY_MAX', 'HARBOR_SESSIOND_SESSION_JOB_MEMORY_MAX', 'HARBOR_SESSIOND_NO_JOB']) {
+    'HARBOR_SESSIOND_PROCESS_MEMORY_MAX', 'HARBOR_SESSIOND_SESSION_JOB_MEMORY_MAX', 'HARBOR_SESSIOND_NO_JOB',
+    // Dormancy and the live-session cap (2026-10-19): the documented env
+    // overrides, plus what the daemon needs to find the same config.json the
+    // app reads (its `sessiond` block is the GUI-reachable knob).
+    'HARBOR_SESSIOND_DORMANT_AFTER_MS', 'HARBOR_SESSIOND_MAX_LIVE_SESSIONS', 'HARBOR_CONFIG_FILE', 'XDG_CONFIG_HOME']) {
     if (process.env[name]) env[name] = process.env[name];
   }
   return env;

@@ -19,8 +19,10 @@ const { resolveHarnessWatchPid } = require('./harness-watch.js');
 const { resolveScopePolicy, ensureSliceUnit, probeScopeSupport, scopeCommand } = require('./session-scope.js');
 const {
   resolveDormancyPolicy, cgroupCpuUsec, sweepDormancy, winCpuSnapshot, winProcessTreeCpuUsec,
+  posixCpuSnapshot, posixProcessTreeCpuUsec, lastTouchedAt,
   transcriptTreeFresh, providerTranscriptFresh,
 } = require('./dormancy.js');
+const { defaultConfigFile } = require('../shared/tasks-file.cjs');
 const { resolveOrphanPolicy, sweepOrphans, snapshotProcessTable } = require('./orphan-sweep.js');
 const { createProcessIntel } = require('./process-intel.js');
 const { createStateFileCache } = require('./state-cache.js');
@@ -606,7 +608,7 @@ async function dispatch(socket, record) {
     // is a real condition an operator must be able to SEE, not infer from the
     // absence of log lines.
     const dormancy = dormancyPolicy.enabled
-      ? { enabled: true, after_ms: dormancyPolicy.afterMs, watching: dormancyWatch.size }
+      ? { enabled: true, after_ms: dormancyPolicy.afterMs, max_live: dormancyPolicy.maxLive, watching: dormancyWatch.size }
       : { enabled: false };
     const jobs = jobPolicy.enabled
       ? { enabled: true, sessions: sessionJobs.size, processMemoryMax: jobPolicy.processMemoryMax || null }
@@ -967,8 +969,49 @@ async function reconcileStaleSessions({ periodic = false } = {}) {
 // dormant session is just a clean exit rather than a third lifecycle state, is
 // in the header of dormancy.js. This function is only the plumbing: the whole
 // decision is `evaluateDormancy`, which is pure.
-const dormancyPolicy = resolveDormancyPolicy();
-const dormancyWatch = new Map(); // id -> { cpuUsec, idleChecks }
+// THE POLICY IS RE-READ EVERY SWEEP (2026-10-19). The `sessiond` block of
+// Harbor's config.json is the only knob a GUI-launched daemon can be given (see
+// resolveDormancyPolicy), and a knob that needs a daemon handover to take
+// effect is one nobody turns. The file is found by the same shared rule the app
+// and the CLI use. A RELOCATED store (a harness, a test) never reads the real
+// installation's config unless it names one with HARBOR_CONFIG_FILE: the same
+// rule config/store.js applies to a relocated userData.
+function sessiondConfigFile() {
+  if (process.env.HARBOR_CONFIG_FILE) return path.resolve(process.env.HARBOR_CONFIG_FILE);
+  if (process.env.HARBOR_SESSIOND_DIR || process.env.HARBOR_SESSIOND_SOCKET) return null;
+  return defaultConfigFile({ env: process.env });
+}
+let sessiondConfigCache = { file: null, mtimeMs: null, size: null, value: {} };
+function readSessiondConfig() {
+  const file = sessiondConfigFile();
+  if (!file) return {};
+  let stat;
+  try { stat = fs.statSync(file); } catch { sessiondConfigCache = { file, mtimeMs: null, size: null, value: {} }; return {}; }
+  if (sessiondConfigCache.file === file && sessiondConfigCache.mtimeMs === stat.mtimeMs && sessiondConfigCache.size === stat.size) {
+    return sessiondConfigCache.value;
+  }
+  let value = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (parsed && typeof parsed.sessiond === 'object' && parsed.sessiond) value = parsed.sessiond;
+  } catch { /* an unreadable config is the app's to report; the defaults stand */ }
+  sessiondConfigCache = { file, mtimeMs: stat.mtimeMs, size: stat.size, value };
+  return value;
+}
+let dormancyPolicy = resolveDormancyPolicy(process.env, readSessiondConfig());
+function describeDormancyPolicy(policy) {
+  return policy.enabled
+    ? `idle after ${Math.round(policy.afterMs / 60000)}m, live cap ${policy.maxLive > 0 ? policy.maxLive : 'off'}`
+    : 'off';
+}
+function refreshDormancyPolicy() {
+  const next = resolveDormancyPolicy(process.env, readSessiondConfig());
+  const before = describeDormancyPolicy(dormancyPolicy);
+  const after = describeDormancyPolicy(next);
+  dormancyPolicy = next;
+  if (before !== after) log(`dormancy policy changed: ${before} -> ${after}`);
+}
+const dormancyWatch = new Map(); // id -> { cpuUsec, at, idleChecks, capChecks }
 // Tests and the unscoped fallback can opt out of requiring a per-session cgroup;
 // see the comment on cgroupCpuUsec for why requiring it is the default.
 const dormancyRequireScope = process.env.HARBOR_SESSIOND_DORMANT_REQUIRE_SCOPE !== '0';
@@ -985,16 +1028,52 @@ const dormancyRequireScope = process.env.HARBOR_SESSIOND_DORMANT_REQUIRE_SCOPE !
 // when at least one session is past the pty-idle threshold, so a machine with
 // nothing to evaluate spawns nothing.
 let winSnapshotFailedLogged = false;
-async function resolveDormancyCpuReader(states) {
-  if (process.platform !== 'win32') {
-    return (state) => cgroupCpuUsec(state.keeper_pid, { sessionId: state.id, requireScope: dormancyRequireScope });
-  }
-  const now = Date.now();
-  const wantsCpu = states.some((state) => {
-    if (state.exit) return false;
-    const stampedAt = Date.parse(state.last_activity_at || '');
-    return Number.isFinite(stampedAt) && now - stampedAt >= dormancyPolicy.afterMs;
+let posixSnapshotFailedLogged = false;
+// Is any session close enough to a decision that its cpu is worth a process
+// snapshot? Past the idle threshold, or, with the cap on and exceeded, past
+// the cap's idle floor. A machine with nothing to evaluate spawns nothing.
+function dormancyWantsCpu(states, now = Date.now()) {
+  const live = states.filter((state) => !state.exit);
+  const capActive = dormancyPolicy.maxLive > 0 && live.length > dormancyPolicy.maxLive;
+  const floor = capActive ? Math.min(dormancyPolicy.afterMs, dormancyPolicy.capMinIdleMs) : dormancyPolicy.afterMs;
+  return live.some((state) => {
+    const touchedAt = lastTouchedAt(state);
+    return Number.isFinite(touchedAt) && now - touchedAt >= floor;
   });
+}
+
+// macOS has no cgroups and Linux may have no scope; both read the keeper's
+// process tree from one `ps -A` per sweep (see posixProcessTreeCpuUsec). On
+// Linux a session's own scope stays the first answer, because it also counts
+// children that have already exited; the tree answers only where the scope
+// cannot, which is a per-session constant (a scope is set at spawn), so one
+// session's readings never alternate between the two sources.
+async function resolvePosixCpuReader(states) {
+  const scoped = process.platform === 'linux'
+    ? (state) => cgroupCpuUsec(state.keeper_pid, { sessionId: state.id, requireScope: dormancyRequireScope })
+    : () => null;
+  const cgroupReadings = new Map();
+  let needsTree = false;
+  for (const state of states) {
+    if (state.exit) continue;
+    const reading = scoped(state);
+    if (reading === null) needsTree = true;
+    else cgroupReadings.set(state.id, reading);
+  }
+  const table = needsTree && dormancyWantsCpu(states) ? await posixCpuSnapshot() : null;
+  if (needsTree && dormancyWantsCpu(states) && !table && !posixSnapshotFailedLogged) {
+    posixSnapshotFailedLogged = true;
+    log('dormancy: ps process-table snapshot failed; every session reads as busy until it succeeds');
+  }
+  if (table) posixSnapshotFailedLogged = false;
+  return (state) => (cgroupReadings.has(state.id)
+    ? cgroupReadings.get(state.id)
+    : posixProcessTreeCpuUsec(table, state.keeper_pid, { groupPid: state.pid }));
+}
+
+async function resolveDormancyCpuReader(states) {
+  if (process.platform !== 'win32') return resolvePosixCpuReader(states);
+  const wantsCpu = dormancyWantsCpu(states);
   const jobReadings = new Map();
   let needsFallback = false;
   if (wantsCpu) {
@@ -1065,7 +1144,7 @@ const providerTranscriptRoots = {
     .split(path.delimiter).filter(Boolean),
 };
 
-function sessionWorkFresh(state) {
+function sessionWorkFresh(state, freshMs = dormancyPolicy.afterMs) {
   const agent = state.agent === 'cursor-agent' ? 'cursor' : state.agent;
   if (agent === 'codex' || agent === 'cursor') {
     // Rejections (unresolved identity, transcript not found) propagate to the
@@ -1075,7 +1154,7 @@ function sessionWorkFresh(state) {
       codexRoots: providerTranscriptRoots.codex,
       cursorRoots: providerTranscriptRoots.cursor,
       now: Date.now(),
-      freshMs: dormancyPolicy.afterMs,
+      freshMs,
     });
   }
   const agentSession = state.agent_session;
@@ -1090,12 +1169,13 @@ function sessionWorkFresh(state) {
   return transcriptTreeFresh({
     projectDir: project,
     agentSession,
-    freshMs: dormancyPolicy.afterMs,
+    freshMs,
     now: Date.now(),
   });
 }
 
 async function runDormancySweep() {
+  refreshDormancyPolicy();
   if (!dormancyPolicy.enabled) return 0;
   // A foreign-boot state file is `reconcileStaleSessions`'s business, and its
   // keeper_pid belongs to some unrelated process this boot. Reading a cgroup
@@ -1308,7 +1388,7 @@ async function start() {
   // platform where the cgroup read could never answer and nobody could tell
   // from the log that the feature was inert (2026-08-20).
   log(dormancyPolicy.enabled
-    ? `dormancy on: sessions idle for ${Math.round(dormancyPolicy.afterMs / 60000)}m with no cpu are ended cleanly and can be resumed from the rail (cpu signal: ${process.platform === 'win32' ? (jobPolicy.enabled ? `job accounting with ${processIntel.available ? 'NT process-intel' : 'CIM'} fallback` : (processIntel.available ? 'NT process-intel tree times' : 'CIM keeper process-tree times')) : 'cgroup usage_usec'})`
+    ? `dormancy on: sessions idle for ${Math.round(dormancyPolicy.afterMs / 60000)}m (since the last input) with no cpu are ended cleanly and can be resumed from the rail; live cap ${dormancyPolicy.maxLive > 0 ? dormancyPolicy.maxLive : 'off'} (cpu signal: ${process.platform === 'win32' ? (jobPolicy.enabled ? `job accounting with ${processIntel.available ? 'NT process-intel' : 'CIM'} fallback` : (processIntel.available ? 'NT process-intel tree times' : 'CIM keeper process-tree times')) : process.platform === 'linux' ? 'cgroup usage_usec with ps keeper process-tree fallback' : 'ps keeper process-tree cpu time'})`
     : 'dormancy off: idle sessions are kept alive indefinitely');
   startOrphanSweep();
   startPeriodicReconcile();
