@@ -512,7 +512,7 @@ function createPlanUsageProvider({
       signInNotice: login.notice,
     };
   }
-  async function collect() {
+  async function collect({ manual = false } = {}) {
     if (env.HARBOR_PLAN_USAGE_FIXTURE) {
       const fixture = await readJson(env.HARBOR_PLAN_USAGE_FIXTURE);
       if (!Array.isArray(fixture?.plans) || !fixture.plans.every((p) => p && ['claude', 'codex', 'cursor'].includes(p.provider)
@@ -527,7 +527,9 @@ function createPlanUsageProvider({
     const plans = Promise.all(profiles.filter((p) => !p.provider || p.provider === 'claude').map(async (p) => {
       let sample;
       try {
-        sample = await usageProvider.getUsage(p.id);
+        // Opening this menu or pressing its Refresh is the user's own
+        // refresh: it may retry a failing or refused read (usage.js).
+        sample = await usageProvider.getUsage(p.id, { manual });
       } catch {
         sample = { unavailable: true, reason: 'Claude usage could not be read.' };
       }
@@ -540,7 +542,7 @@ function createPlanUsageProvider({
           resetsAt: sample[`${kind}ResetsAt`] || null,
           rolled: !!sample[`${kind}Rolled`],
         }));
-      let reason = sample?.reason || null;
+      let reason = sample?.reason || sample?.notice || null;
       if (!reason) {
         if (!windows.length) reason = 'No Claude plan windows reported.';
         else if (!stamp(sample.updatedAt)) reason = 'Usage sample has no timestamp.';
@@ -596,9 +598,9 @@ function createPlanUsageProvider({
       if (env.HARBOR_PLAN_USAGE_FIXTURE) return (await collect()).plans.find((p) => p.provider === 'cursor') || null;
       return cursorPlan();
     },
-    getPlans() {
+    getPlans(options = {}) {
       if (!flight) {
-        flight = collect().finally(() => {
+        flight = collect({ manual: options?.manual === true }).finally(() => {
           flight = null;
         });
       }

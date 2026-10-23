@@ -93,6 +93,7 @@ const { createRouter } = require('./rpc/router.js');
 const { bindIpcMain } = require('./rpc/ipc-transport.js');
 const { isShellNavigation, navigationReplacesPage } = require('./shell-navigation.js');
 const { safeExternalUrl } = require('../shared/elicitation.cjs');
+const { normalizeHome } = require('../shared/sidebar-model.cjs');
 
 const rpcRouter = createRouter();
 const ipcMain = {
@@ -1428,7 +1429,7 @@ function registerIpc() {
     ))));
   });
 
-  ipcMain.handle('usage:get-plans', () => planUsageProvider.getPlans());
+  ipcMain.handle('usage:get-plans', (_event, options) => planUsageProvider.getPlans({ manual: options?.manual === true }));
   // The heavy-lifting setting (shared/provider-lean.cjs). Resolved per call so
   // a relocated profile keeps its own file (providers/provider-lean.js).
   const leanFile = () => resolveLeanFile({
@@ -3097,6 +3098,16 @@ app.whenReady().then(async () => {
     broadcastDaemonBanner();
   });
 
+  // Usage cadence: the endpoint is asked at live-session freshness only while
+  // the window is visible AND that account has a live pane; otherwise it
+  // waits longer (usage.js IDLE_STALE_AFTER_MS, HIDDEN_STALE_AFTER_MS).
+  usageProvider.setActivity((account) => {
+    const visible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized());
+    if (!visible) return { visible, live: false };
+    const live = (sidebarBridge?.getState?.()?.model?.projects || []).some((project) => (project.sessions || [])
+      .some((session) => session.isLive && session.paneId && normalizeHome(session.home, harborConfig.profiles) === account));
+    return { visible, live };
+  });
   usageTimer = setInterval(broadcastUsageUpdate, 60_000);
 
   // The commit meter (2026-09-04): the number Windows enforces, sampled every

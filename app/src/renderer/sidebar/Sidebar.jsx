@@ -270,6 +270,8 @@ function RailMeters({ profiles: allProfiles }) {
           typeof data?.cost === 'number' ? `last session $${data.cost.toFixed(2)}` : null,
           data?.updatedAt ? `updated ${formatRelative(data.updatedAt)}` : null,
           data?.unavailable ? (data?.reason || 'no data yet') : null,
+          // The numbers shown stopped refreshing (a 429, a refused prompt).
+          !data?.unavailable ? data?.notice || null : null,
         ].filter(Boolean).join(' · ') || undefined;
         const fiveHourBadge = resetBadge(data?.fiveHourResetsAt, { window: 'fiveHour' });
         const weeklyBadge = resetBadge(data?.weeklyResetsAt, { window: 'weekly' });
