@@ -1,0 +1,37 @@
+╭─────────────────────────────────────────────────╮
+│ ✨ Update available! 0.160.0 -> 0.162.1         │
+│ Run brew upgrade --cask codex to update.        │
+│                                                 │
+│ See full release notes:                         │
+│ https://github.com/openai/codex/releases/latest │
+╰─────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.160.0)
+     /home/user/project
+
+  Your move, teammate.
+
+  To get started, describe a task or try one of these commands:
+
+  /init - create an AGENTS.md file with instructions for Codex
+  /status - show current session configuration
+  /permissions - choose what Codex is allowed to do
+  /model - choose what model and reasoning effort to use
+  /review - review any changes and find issues
+
+
+› Use the request_user_input tool right now to ask me two questions in one call: question one header Color, question
+  'Which color?' with options Red and Blue; question two header Fruit, question 'Which fruit?' with options Apple and
+  Pear. After I answer, reply with my answers and nothing else.
+
+ 
+ 
+  Question 1/2 (2 unanswered) · auto-resolves in 54s
+  Which color?
+ 
+  › 1. Red                Choose Red.                                                                                 
+    2. Blue               Choose Blue.
+    3. None of the above  Optionally, add details in notes (tab)
+ 
+  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt

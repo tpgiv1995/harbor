@@ -3,6 +3,7 @@
 const { isDividerLine } = require('../shared/divider.cjs');
 const { parseModelSwitch } = require('./model-switch.js');
 const { parsePermissionMenu } = require('./permission-menu.js');
+const { parseCodexMenu } = require('./codex-screen.js');
 
 // Parse Claude Code's interactive SELECT MENU out of an ANSI-stripped pane
 // scrape so the command bar can render and answer it without dropping to the
@@ -587,6 +588,13 @@ function parseMenuScreen(screen) {
 }
 
 function parseMenu(screen) {
+  // Codex first: its approval footer "Press enter to confirm or esc to cancel"
+  // satisfies FOOTER_RE case-insensitively, and its `›`-pointed row 1 fails
+  // OPTION_RE, so the Claude parse read rows 2..3 as a CLIPPED menu with
+  // nothing selected. The Codex grammar is strict (its own footers, its own
+  // pointer), so it never claims a Claude dialog. See codex-screen.js.
+  const codex = parseCodexMenu(screen);
+  if (codex) return codex;
   const menu = parseMenuScreen(screen);
   if (menu?.kind === 'model-switch') return menu;
   const permission = parsePermissionMenu(screen);

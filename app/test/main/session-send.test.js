@@ -923,6 +923,12 @@ test('a message already sitting in the prompt from an earlier attempt is submitt
   assert.deepEqual(typed(h), ['\r']);
 });
 
+// An idle Codex 0.160 pane: its composer is a column-0 `›` line, and a Codex
+// send refuses any screen without one, so the codex specs below stand on a
+// real composer rather than a Claude-ish `> `.
+const CODEX_IDLE = 'codex\n\n› Ask Codex to do anything\n\n  gpt-5.6 low · /tmp/x';
+const codexWorking = (n) => `codex\n\n• Working (${n}s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  gpt-5.6 low · /tmp/x`;
+
 // Live-caught 2026-08-08. A brand-new codex session took a message and the
 // rollout recorded it with the LEADING characters missing, because Harbor typed
 // into the pane while codex was still starting its TUI. waitForProviderReady
@@ -935,7 +941,7 @@ test('a FRESH codex pane is allowed to settle before anything is typed into it',
   const order = [];
   let reads = 0;
   // A stable, non-shell screen: two identical reads is what "settled" means.
-  h.deps.readPane = async () => { reads += 1; order.push('read'); return 'codex\n> '; };
+  h.deps.readPane = async () => { reads += 1; order.push('read'); return CODEX_IDLE; };
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 'pane:fresh-codex',
@@ -1003,7 +1009,7 @@ test('a fresh pane that is drawing but never settles still gives up on the old 1
   let frame = 0;
   let typedAt = null;
   // Mid-turn output: never two identical reads.
-  h.deps.readPane = async () => `codex\nworking ${frame += 1}`;
+  h.deps.readPane = async () => codexWorking(frame += 1);
   const input = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => { if (typedAt === null) typedAt = t; return input(paneId, text); };
   const send = createSessionSend(h.deps);
@@ -1047,7 +1053,7 @@ test('an unresolved provider is taken from the session, not defaulted to claude'
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   h.deps.getSessionMeta = async () => ({ provider: 'codex', cwd: '/tmp/x' });
   let reads = 0;
-  h.deps.readPane = async () => { reads += 1; return 'codex\n> '; };
+  h.deps.readPane = async () => { reads += 1; return CODEX_IDLE; };
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 'pane:unresolved',
@@ -1065,7 +1071,7 @@ test('an unresolved provider is taken from the session, not defaulted to claude'
 // message always goes in as one; claude keeps its measured raw single line.
 test('a single-line codex message is pasted, so a banner over the empty composer cannot take its first key', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  h.deps.readPane = async () => 'codex\n> ';
+  h.deps.readPane = async () => CODEX_IDLE;
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 'pane:codex-banner', text: '1. fix the header', provider: 'codex',
@@ -1079,7 +1085,7 @@ test('a single-line codex message is pasted, so a banner over the empty composer
 test('an established codex pane is NOT re-settled on every send', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   let reads = 0;
-  h.deps.readPane = async () => { reads += 1; return 'codex\n> '; };
+  h.deps.readPane = async () => { reads += 1; return CODEX_IDLE; };
   const send = createSessionSend(h.deps);
   const payload = (text) => ({
     sessionId: 'pane:fresh-codex', text, provider: 'codex',
@@ -1520,7 +1526,7 @@ test('a non-Claude provider send refuses the dead shell and resumes through bin/
     panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1' }],
     controlled: 'pane-1',
   });
-  h.deps.readPane = async (paneId) => (paneId === 'pane-1' ? CRASHED_SHELL_SCREEN : '──────\n❯\n──────');
+  h.deps.readPane = async (paneId) => (paneId === 'pane-1' ? CRASHED_SHELL_SCREEN : CODEX_IDLE);
   const providerResumes = [];
   h.deps.launchActions.resumeProviderSession = async (args) => {
     providerResumes.push(args);
@@ -2017,8 +2023,8 @@ test('Claude /model refuses honestly when its post-send confirmation does not cl
 
 test('non-Claude /model never auto-answers a matching pane dialog', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  const panes = ['conversation\n❯', MODEL_SWITCH_DIALOG];
-  h.deps.readPane = async () => panes.shift() ?? MODEL_SWITCH_DIALOG;
+  // The Codex composer until the command's Enter, then the matching dialog.
+  h.deps.readPane = async () => (h.sent.some(({ text }) => text === '\r') ? MODEL_SWITCH_DIALOG : CODEX_IDLE);
   const send = createSessionSend(h.deps);
 
   await send.send({

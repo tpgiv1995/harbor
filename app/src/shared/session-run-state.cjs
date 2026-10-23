@@ -1,5 +1,6 @@
 'use strict';
 const { freshWorking } = require('./claude-turn-state.cjs');
+const { subSessionReadOnly } = require('./sub-sessions.cjs');
 
 function processAliveFromEvidence(evidence = {}, now = Date.now()) {
   if (evidence.processAlive != null) return evidence.processAlive;
@@ -18,12 +19,50 @@ function backgroundBusy(session, header, pane, now = Date.now()) {
   return Boolean(sessionLiveOwned(session, pane, header, now) && background
     && (background.outstanding?.length || background.awaitingFinal));
 }
+// The CLI's own words for a blocked session (OSC 7501 `msg`, measured on CLI
+// 2.1.301): "approve Write: /path/to/file" reads as "approve Write" on the chip
+// with the whole message in the tooltip, "Not logged in · Please run /login"
+// as "Not logged in", and AskUserQuestion's "answer: <the question>" as
+// "answer a question" (the bare verb alone reads as nothing).
+function blockedLabel(session) {
+  const msg = typeof session?.agentStatusMsg === 'string' ? session.agentStatusMsg.trim() : '';
+  if (!msg || session.agentStatus !== 'blocked') return null;
+  const short = msg.split(/:\s|\s·\s/)[0].trim();
+  if (/^answer$/i.test(short)) return 'answer a question';
+  return short && short.length <= 40 ? short : null;
+}
+
+// One-click Allow / Deny (renderer/stage/QuickAnswer.jsx, the phone's rows):
+// offered only while the CLI ITSELF reports a permission prompt with its words
+// (OSC 7501 blocked/permission plus a msg), on a pane Harbor runs, for a
+// session the user may write to. The words are what the click names (`expect`),
+// so a prompt with none gets no buttons. Main re-checks all of it against the
+// live screen before pressing anything (session-send.js permission-quick).
+function canQuickAnswer(session, pane, readOnly = false) {
+  return Boolean(pane?.paneId && !readOnly && !subSessionReadOnly(session)
+    && session?.agentStatus === 'blocked' && session.agentStatusKind === 'permission'
+    && typeof session.agentStatusMsg === 'string' && session.agentStatusMsg.trim());
+}
+// Plan approval is reported as a permission prompt too ("approve plan"), but it
+// has no one-time Yes (each Yes also picks a mode for the edits after it), so
+// it gets Deny only.
+function quickAllowOffered(msg) {
+  return typeof msg === 'string' && Boolean(msg.trim()) && !/^approve plan\b/i.test(msg.trim());
+}
+
 function runStateCue(session = {}, pane, header, now = Date.now()) {
   session ||= {};
   const alive = sessionLiveOwned(session, pane, header, now);
-  if (header?.blocked || alive && session.agentStatus === 'blocked') return { kind: 'blocked', label: 'needs your answer', ariaLabel: 'blocked: needs your answer' };
+  if (header?.blocked || alive && session.agentStatus === 'blocked') {
+    const label = (alive && blockedLabel(session)) || 'needs your answer';
+    const tooltip = alive && session.agentStatus === 'blocked' && session.agentStatusMsg ? session.agentStatusMsg : null;
+    return { kind: 'blocked', label, ariaLabel: `blocked: ${label}`, ...(tooltip ? { tooltip } : {}) };
+  }
   if (alive && (header?.working || session.agentStatus === 'working' || freshWorking(session.background, now))) {
-    const verb = header?.workingText || header?.text || 'Working';
+    // The CLI says what step it is on ("Running tests"); that beats the
+    // transcript's generic verb whenever the CLI is reporting one.
+    const step = session.agentStatus === 'working' && typeof session.agentStatusMsg === 'string' ? session.agentStatusMsg.trim() : '';
+    const verb = step || header?.workingText || header?.text || 'Working';
     return { kind: 'running', label: verb, ariaLabel: `running: ${verb}` };
   }
   if (alive && backgroundBusy(session, header, pane, now)) {
@@ -37,4 +76,4 @@ function runStateCue(session = {}, pane, header, now = Date.now()) {
   }
   return alive ? { kind: 'ready', label: 'ready', ariaLabel: 'ready' } : null;
 }
-module.exports = { processAliveFromEvidence, sessionLiveOwned, backgroundBusy, runStateCue };
+module.exports = { processAliveFromEvidence, sessionLiveOwned, backgroundBusy, runStateCue, blockedLabel, canQuickAnswer, quickAllowOffered };

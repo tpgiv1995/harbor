@@ -337,11 +337,16 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
   const total = sheet.questions.length;
   const done = staged ? answeredCount(sheet, state) : 0;
   const complete = staged && isComplete(sheet, state);
-  const eyebrow = sheet.kind === 'permission' ? 'Permission' : sheet.kind === 'resume' ? 'Resume' : sheet.kind === 'review' ? 'Review' : 'Claude is asking';
+  const codex = sheet.provider === 'codex';
+  const eyebrow = sheet.kind === 'permission' ? 'Permission' : sheet.kind === 'resume' ? 'Resume' : sheet.kind === 'review' ? 'Review'
+    : codex ? 'Codex is asking' : 'Claude is asking';
   const hints = keyHints(sheet, state);
-  const declineTitle = total > 1
-    ? 'Decline (Esc): Claude continues with NO answers to any of these questions, and everything staged here is dropped'
-    : 'Decline (Esc): Claude continues without an answer';
+  // Codex's Esc on a question is "esc to interrupt": the whole turn stops.
+  const declineTitle = codex
+    ? 'Decline (Esc): interrupts Codex\'s turn; nothing staged here is sent'
+    : total > 1
+      ? 'Decline (Esc): Claude continues with NO answers to any of these questions, and everything staged here is dropped'
+      : 'Decline (Esc): Claude continues without an answer';
 
   return (
     <div

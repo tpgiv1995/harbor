@@ -60,7 +60,7 @@ const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath } = 
 const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptLastSignal } = require('./providers/transcript.js');
 const { createAskTranscriptResolver } = require('./ask-transcript-path.js');
 const { createPendingAskReader } = require('./providers/pending-ask.js');
-const { createSessionSend, createLinkRegistry } = require('./session-send.js');
+const { createSessionSend, createLinkRegistry, quickStatusFromScreen } = require('./session-send.js');
 const { revealNewSessionWindow } = require('./new-session-window.cjs');
 const { resolveWorkflowLaunch } = require('./workflows.js');
 const {
@@ -68,10 +68,16 @@ const {
   parseSecondInstanceArgs,
   buildSecondInstancePayload,
 } = require('./lifecycle.js');
-const { createNotifier } = require('./notify.js');
+const { createNotifier, createStatusQueue } = require('./notify.js');
+const { createCodexStatusSource } = require('./codex-status.js');
+const { readCodexSessionMeta } = require('./codex-state.js');
+const {
+  createCodexOwnerProbe, createCodexTakeoverHandler, createProcessQuestions, harborPanesFromSnapshot, refuseBesideLiveCodexOwner,
+} = require('./actions/codex-owner.js');
+const { createNotifyPrefs } = require('./notify-prefs.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
-const { createArtifactsProvider } = require('./providers/artifacts.js');
+const { createArtifactsProvider, codexHomesFromProfiles } = require('./providers/artifacts.js');
 const { createTaskStore } = require('./providers/tasks.js');
 const { createNoteStore } = require('./providers/notes.js');
 const { createWhiteboardStore } = require('./providers/whiteboard.js');
@@ -322,10 +328,16 @@ async function liveAskFor(sessionId) {
 let sessionSend = null;
 let capabilitiesProvider = null;
 let paneLinks = null;
+// Who owns a Codex session Harbor has no pane for (actions/codex-owner.js);
+// built with sessionSend, read by the resume-session handler.
+let codexOwnerProbe = null;
 let stopMainLagMonitor = null;
 let usageTimer = null;
 let daemonWatchdog = null;
 let notifier = null;
+// Codex panes' program status (codex-status.js); started with the notifier.
+let codexStatus = null;
+let notifyPrefs = null;
 // Set once the app is on its way out, so a renderer dying as part of the quit
 // is not mistaken for a crash worth recovering from.
 let shuttingDown = false;
@@ -1095,6 +1107,11 @@ function registerIpc() {
     ]);
     // Codex/cursor resume rides bin/ai; claude rides bin/claude-sessions.
     if (meta?.provider && meta.provider !== 'claude') {
+      // TWO WRITERS ON ONE ROLLOUT. The rail's Resume never ran the owner
+      // check the send path runs, so it resumed beside the Codex app, a
+      // terminal codex, or a Harbor pane already on this thread. Same refusal,
+      // by name, before anything is launched; a missing probe refuses too.
+      if (meta.provider === 'codex') await refuseBesideLiveCodexOwner(codexOwnerProbe, id);
       const result = await launchActions.resumeProviderSession({
         provider: meta.provider, cwd: meta.cwd, id,
         ...(meta.profileId ? { profileId: meta.profileId } : {}),
@@ -1248,6 +1265,8 @@ function registerIpc() {
     try {
       if (sidebarBridge.isDelegated(payload?.sessionId)) throw new Error('Delegated agents are read-only. Send instructions to their parent session.');
       const result = await sessionSend.send(payload);
+      // A message sent into a pane is the user dealing with it, a prompt too.
+      if (result?.ok && !result.cancelled) notifier?.answered(result.paneId || payload?.pane?.paneId);
       // A codex/cursor session first exists on disk when its first prompt
       // lands, and the daemon has not named it: the send IS the moment to look. A
       // window that opened as a bare pane becomes its real session here,
@@ -1293,6 +1312,15 @@ function registerIpc() {
     }
   });
   // Claude's live working meter for a window header (elapsed + tokens so far).
+  // Notification controls: the app menu's on/off and each window's mute.
+  ipcMain.handle('notify:get-prefs', () => notifyPrefs?.get() || { enabled: true, muted: [] });
+  ipcMain.handle('notify:set-prefs', (_event, payload = {}) => {
+    if (!notifyPrefs) return { enabled: true, muted: [] };
+    const next = notifyPrefs.set(payload);
+    // Turning them off clears the dock badge too: nothing is owed any more.
+    if (payload.enabled === false) notifier?.acknowledgeAll();
+    return next;
+  });
   ipcMain.handle('session:work-meter', async (_event, payload) => {
     try { return await sessionSend.getWorkMeter(payload); } catch { return null; }
   });
@@ -1306,7 +1334,11 @@ function registerIpc() {
       const ask = payload?.action?.type === 'sheet'
         ? (await liveAskFor(payload?.sessionId))?.questions || null
         : null;
-      return await sessionSend.answerMenu({ ...payload, ask });
+      const result = await sessionSend.answerMenu({ ...payload, ask });
+      // An answer given in Harbor (a one-click Allow / Deny or the window's
+      // card) is not news: its badge and any "needs you" still queued go.
+      if (result?.ok) notifier?.answered(payload?.pane?.paneId);
+      return result;
     } catch (error) {
       return { ok: false, reason: error.message };
     }
@@ -1321,6 +1353,22 @@ function registerIpc() {
     if (sidebarBridge.isDelegatedPane(paneId)) return { ok: false, reason: 'Delegated agents are read-only.' };
     if (!paneId) return { ok: false, reason: 'no live pane to interrupt' };
     return terminalBridge.sendInput(paneId, '\x1b');
+  });
+  // What a Codex pane is holding for its running turn (steers and queued
+  // follow-ups), read off its screen because Codex writes neither to its
+  // rollout until it delivers them. The command bar shows them with Send now,
+  // which is Esc over a pending steer, verified on screen (session-send.js).
+  ipcMain.handle('session:cli-queue', async (_event, payload) => {
+    try {
+      if (sidebarBridge.isDelegated(payload?.sessionId)) return null;
+      return await sessionSend.getCliQueue(payload);
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle('session:send-steer-now', (_event, { paneId, workspaceId } = {}) => {
+    if (sidebarBridge.isDelegatedPane(paneId)) return { ok: false, reason: 'Delegated agents are read-only.' };
+    return sessionSend.sendNowCodex({ pane: { paneId, workspaceId } });
   });
 
   // Delete a session for good: moves its transcript to a recoverable trash
@@ -2674,7 +2722,9 @@ app.whenReady().then(async () => {
   // Conversation-surface plumbing: transcript tailing, the command-bar send
   // engine, and the provisional session<->pane link registry.
   transcriptProvider = createTranscriptProvider({
-    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
+    providerPaneAlive: (id, provider) => sidebarBridge.providerPaneAlive(id, provider),
     contextCacheDir: contextDir,
   });
   transcriptProvider.emitter.on('update', (payload) => {
@@ -2686,7 +2736,35 @@ app.whenReady().then(async () => {
     sendToRenderer('links:update', paneLinks.all());
   });
   const sendClient = createControlClient({ env: process.env, sessionStorePolicy });
+  // Who owns a Codex session Harbor has no pane for (actions/codex-owner.js):
+  // the resume paths refuse beside a live owner, and adopt-on-send kills only
+  // an argv-verified codex CLI, never the Codex app.
+  const codexProcessQuestions = createProcessQuestions({
+    platform: process.platform,
+    execFile: require('node:util').promisify(require('node:child_process').execFile),
+    readlink: (p) => require('node:fs/promises').readlink(p),
+  });
+  codexOwnerProbe = createCodexOwnerProbe({
+    listProcesses: codexProcessQuestions.listProcesses,
+    readProcessCwd: codexProcessQuestions.readProcessCwd,
+    // The rollout as it is on disk: a compressed one is read in the stream
+    // only as far as its first line, never decompressed to a copy.
+    readSessionMeta: async (sessionId) => {
+      const meta = await sidebarBridge.getSessionMeta(sessionId).catch(() => null);
+      const file = meta?.rolloutPath || meta?.path || await askTranscript.resolve(sessionId);
+      return file ? readCodexSessionMeta(file) : null;
+    },
+    // Every pane with its pid, agent and linked session ids: the probe sets
+    // aside only a Codex pane's own codex when that pane is on ANOTHER session,
+    // and reports a pane already on this one as the owner. A failed snapshot
+    // is null, "unknown", and the probe refuses rather than guess.
+    harborPanes: async () => {
+      const snap = await sendClient.snapshot().catch(() => null);
+      return harborPanesFromSnapshot(snap, paneLinks?.all() || {});
+    },
+  });
   sessionSend = createSessionSend({
+    codexOwnerProbe,
     snapshot: async () => {
       const res = await sendClient.snapshot();
       return res?.snapshot || res || {};
@@ -2699,6 +2777,12 @@ app.whenReady().then(async () => {
       const res = await sendClient.readPane(paneId, { source: 'visible', lines: 1 });
       return res?.screen?.suggestion || null;
     },
+    // The CLI's OSC 7501 status as the keeper holds it now (daemon/screen.js),
+    // read with the screen: what a one-click answer is checked against.
+    readQuickStatus: async (paneId) => quickStatusFromScreen((await sendClient.readPane(paneId, { source: 'visible', lines: 1 }))?.screen),
+    // Codex has no OSC 7501: its prompt seq is the one codex-status.js gave it.
+    readCodexPromptSeq: (paneId) => codexStatus?.seqFor(paneId) ?? null,
+    codexPromptAnswered: (paneId) => codexStatus?.answered(paneId),
     terminalBridge,
     launchActions: {
       ...launchActions,
@@ -2731,7 +2815,7 @@ app.whenReady().then(async () => {
     },
     sleep: () => new Promise((resolve) => setTimeout(resolve, 150)),
   });
-  takeoverHandler = createTakeoverHandler({
+  const claudeTakeover = createTakeoverHandler({
     operationGate: sessionOperationGate,
     takeoverOwner,
     paneIdSet: () => sessionSend.paneIdSet(),
@@ -2749,6 +2833,35 @@ app.whenReady().then(async () => {
     },
     emitLaunched: (payload) => sendToRenderer('session:launched', payload),
   });
+  const codexTakeover = createCodexTakeoverHandler({
+    operationGate: sessionOperationGate,
+    ownerProbe: codexOwnerProbe,
+    assertSignalsAllowed: () => {
+      if (!signalPolicy.allowed) throw new Error(signalPolicy.reason);
+    },
+    killOwner: async (pid) => {
+      const result = await platform.killProcess(pid, 'SIGTERM');
+      if (!result?.died) throw new Error('the codex process survived graceful and forceful termination');
+    },
+    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    paneIdSet: () => sessionSend.paneIdSet(),
+    resumeProviderSession: (args) => launchActions.resumeProviderSession(args),
+    findFreshPane: (args) => sessionSend.findFreshPane(args),
+    setPaneLink: (id, pane) => paneLinks.set(id, pane),
+    requestFocusPane: (pane) => terminalBridge.requestFocusPane(pane),
+    waitForProviderReady: (paneId) => sessionSend.waitForProviderReady(paneId),
+    emitStatus: (payload) => {
+      sessionSend?.logStatus?.(payload);
+      sendToRenderer('send:status', payload);
+    },
+    emitLaunched: (payload) => sendToRenderer('session:launched', payload),
+  });
+  // Adopt-on-send by provider: a Codex session has no statusline tee, so the
+  // Claude adopt could only ever answer "no statusline tee" for it.
+  takeoverHandler = async ({ sessionId }) => {
+    const meta = await Promise.resolve(sidebarBridge.getSessionMeta(sessionId)).catch(() => null);
+    return meta?.provider === 'codex' ? codexTakeover({ sessionId }) : claudeTakeover({ sessionId });
+  };
 
   // Workflow-run visibility: the strip and inspector in each session window
   // read run state straight from the files next to the transcript.
@@ -2765,6 +2878,9 @@ app.whenReady().then(async () => {
   const artifactsProvider = createArtifactsProvider({
     getSessionLabel: (id) => sidebarBridge.getSessionLabel(id),
     roots: [harborConfig.paths.projectsDir],
+    // Codex outputs too: the same codex homes the rail lists sessions from,
+    // asked per collection (harborConfig is reassigned when the wizard saves).
+    codexHomes: () => codexHomesFromProfiles(harborConfig.profiles),
     cacheFile: path.join(harborConfig.paths.cacheDir, 'artifacts-index.json'),
   });
   // Grid previews: HTML artifacts render in a short-lived OFFSCREEN window
@@ -3017,14 +3133,40 @@ app.whenReady().then(async () => {
   capabilitiesProvider = createCapabilitiesProvider({ accounts: accountsProvider });
 
   // Notification driver (R8): Electron supplies the native implementation.
+  // A clicked notification: show and focus Harbor, then tell the renderer which
+  // session to open (session:reveal). The pane is resolved to its session here
+  // because the renderer's windows are keyed by session id.
+  const revealPane = (paneId) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    mainWindow.focus();
+    const sessionId = paneId ? sidebarBridge?.notificationState(paneId)?.sessionId : null;
+    if (sessionId) sendToRenderer('session:reveal', { sessionId });
+  };
+  notifyPrefs = createNotifyPrefs({ file: path.join(harborConfig.paths.cacheDir, 'notify-prefs.json') });
   notifier = createNotifier({
+    isSuppressed: (paneId) => !notifyPrefs.enabled()
+      || notifyPrefs.isMuted(sidebarBridge.notificationState(paneId)?.sessionId),
     getPaneState: (paneId) => sidebarBridge.notificationState(paneId),
     getFocusedPaneId: () => terminalBridge?.getState().controlledPaneId ?? null,
     isWindowFocused: () => mainWindow?.isFocused() ?? false,
     getWorkspaceLabel: (workspaceId) => terminalBridge?.getState().workspaces
       ?.find((w) => w.workspace_id === workspaceId)?.label || '',
     setBadgeCount: setAppBadgeCount,
-    notify: (title, body) => platform.notify(title, body),
+    // Clicking a toast brings Harbor forward on the window it is about. Only
+    // the user's click does this: nothing here focuses a window on its own.
+    notify: (title, body, meta = {}) => platform.notify(title, body, { onClick: () => revealPane(meta.paneId) }),
+  });
+  // Read the append before an idle event can claim completion. The history
+  // watcher is debounced and can otherwise arrive after the toast window.
+  // Only a completion needs the fresh background verdict. Tool-transition
+  // chatter must not scan the entire delegation corpus on every status.
+  const notifierQueue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'idle' || data.agent_status === 'done'
+      ? sidebarBridge.refreshDelegations() : null),
+    deliver: (event) => notifier.onAgentStatusChanged(event),
   });
   sidebarBridge.emitter.on('pane-agent-status', (event) => {
     // agent_status 'unknown' means no foreground agent owns the pane: the CLI
@@ -3033,54 +3175,41 @@ app.whenReady().then(async () => {
     // 2026-07-22), so the link dies with the agent.
     const data = event?.data || {};
     if (data.agent_status === 'unknown' && data.pane_id) paneLinks?.dropPane(data.pane_id);
-    // Read the append before an idle event can claim completion. The history
-    // watcher is debounced and can otherwise arrive after the toast window.
-    // Only a completion needs the fresh background verdict. Tool-transition
-    // chatter must not scan the entire delegation corpus on every status.
-    if (data.agent_status === 'idle' || data.agent_status === 'done') {
-      sidebarBridge.refreshDelegations().then(() => notifier.onAgentStatusChanged(event)).catch(() => {});
-    } else notifier.onAgentStatusChanged(event);
+    notifierQueue(event);
   });
   sidebarBridge.emitter.on('update', () => notifier.onBackgroundChanged());
   sidebarBridge.emitter.on('panes-changed', () => notifier.onBackgroundChanged());
 
-  // Agent-status watcher: the daemon only delivers pane.agent_status_changed
-  // with a per-pane subscription entry (verified live), so maintain one
-  // subscription covering the current set of live agent panes and rebuild it
-  // (debounced) whenever that set changes.
-  const agentClient = createControlClient({ env: process.env, sessionStorePolicy });
-  let agentSub = null;
-  let agentSubKey = '';
-  let agentSubTimer = null;
-  const rebuildAgentWatcher = () => {
-    clearTimeout(agentSubTimer);
-    agentSubTimer = setTimeout(() => {
-      try {
-        const paneIds = [...new Set(sidebarBridge?.getLivePaneIds() || [])].sort();
-        const key = paneIds.join(',');
-        if (key === agentSubKey) return;
-        agentSubKey = key;
-        agentSub?.close?.();
-        agentSub = null;
-        if (!paneIds.length) return;
-        agentSub = agentClient.subscribeAgentStatus(paneIds);
-        agentSub.ready().catch(() => {}); // daemon-down subscribe must not reject unhandled
-        // This subscription is the authoritative status source for both the
-        // window working state and notifications. The sidebar bridge updates
-        // the owning session, then re-emits the unchanged event to notifier.
-        agentSub.on('event', (event) => sidebarBridge?.onPaneAgentStatus(event));
-        agentSub.on('error', () => {});
-        agentSub.on('close', () => {
-          agentSubKey = '';
-          rebuildAgentWatcher(); // notifications must not stay dead until the next sidebar update
-        });
-      } catch (e) {
-        console.error('agent watcher rebuild failed:', e.message);
-      }
-    }, 2000);
-    agentSubTimer.unref?.();
-  };
-  sidebarBridge.emitter.on('panes-changed', rebuildAgentWatcher);
+  // ONE status feed. The sidebar bridge's bootstrap subscription already
+  // polls every session, is reconnected by the bridge, and hands
+  // pane.agent_status_changed to onPaneAgentStatus -> 'pane-agent-status' ->
+  // the notifier. A second subscription per live-pane set used to feed the
+  // same door: on sessiond it ignored its pane list and was another 1 s poll
+  // of every session, rebuilt unseeded on each pane-set change, so it
+  // replayed every pane's events into the bridge and would deliver each
+  // status twice. The notifier is seeded from the snapshot the bridge's
+  // subscription was seeded with, at boot and on every reconnect.
+  sidebarBridge.emitter.on('daemon-snapshot', (snapshot) => notifier?.seedFromSnapshot(snapshot));
+
+  // Codex panes have no OSC 7501, so their status is synthesized from the
+  // rollout and the screen and fed through the same door a Claude status takes
+  // (see codex-status.js): the rail cue, the toast, the badge, the one-click
+  // answer and the notification click all follow without a Codex branch.
+  codexStatus = createCodexStatusSource({
+    listPanes: () => (sidebarBridge?.getState()?.model?.projects || [])
+      .flatMap((project) => project.sessions || [])
+      .filter((session) => session.isLive && session.paneId && session.provider === 'codex'
+        && session.id && !String(session.id).startsWith('live:') && !String(session.id).startsWith('pane:'))
+      .map((session) => ({ paneId: session.paneId, workspaceId: session.workspaceId, sessionId: session.id, agentStatus: session.agentStatus ?? null })),
+    transcriptPath: (sessionId) => askTranscript.resolve(sessionId),
+    forgetPath: (sessionId) => askTranscript.forget(sessionId),
+    readScreen: async (paneId) => {
+      const res = await sendClient.readPane(paneId, { source: 'visible', lines: 90, strip_ansi: true });
+      return res?.read?.text || '';
+    },
+    emit: (event) => sidebarBridge?.onPaneAgentStatus(event),
+  });
+  if (!e2eMode) codexStatus.start();
 
   terminalBridge.emitter.on('update', broadcastTerminalUpdate);
   terminalBridge.emitter.on('frame', (payload) => sendToRenderer('terminal:frame', payload));
@@ -3193,15 +3322,6 @@ app.whenReady().then(async () => {
   // as before. Serialized and idempotent; a pane with the ">_" view open is
   // left at the size that xterm fitted.
   if (!e2eMode) terminalBridge.startPaneSizeSweep();
-  // Seed notifier with current agent statuses so the first event is
-  // interpreted correctly (a completion right after boot must still toast).
-  try {
-    const snap = await agentClient.snapshot();
-    notifier?.seedFromSnapshot(snap.snapshot);
-  } catch {
-    // daemon may be unavailable; notifier starts cold
-  }
-  rebuildAgentWatcher();
   broadcastSidebarUpdate(sidebarBridge.getState());
   broadcastTerminalUpdate(terminalBridge.getState());
   createWindow();
@@ -3240,6 +3360,7 @@ function shutdownApp() {
   askInbox?.stop();
   daemonWatchdog?.stop();
   notifier?.destroy();
+  codexStatus?.stop();
   transcriptProvider?.closeAll();
   if (orchWatcher) {
     orchWatcher();

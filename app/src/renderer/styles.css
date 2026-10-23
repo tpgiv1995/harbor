@@ -2413,6 +2413,70 @@ button { font-family: inherit; }
   font-variant-numeric: tabular-nums;
 }
 
+/* Files a message named by path but cannot show inline (a codex local_image
+   that is gone or too large): the composer's file chip, without its remove. */
+.conv-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.conv-attachments:first-child {
+  margin-top: 0;
+}
+
+.conv-attachment {
+  padding-right: 9px;
+}
+
+/* A codex request_user_input question: the choices the model is waiting on,
+   read-only. Open questions carry the amber answer cue; settled ones go quiet. */
+.conv-question-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--warn);
+  border-radius: 9px;
+}
+
+.conv-question.answered .conv-question-list {
+  border-color: var(--ln);
+}
+
+.conv-question-title {
+  font-weight: 600;
+  color: var(--tx);
+}
+
+.conv-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.conv-question-option {
+  padding: 2px 8px;
+  border: 1px solid var(--ln2, var(--ln));
+  border-radius: 6px;
+  color: var(--sub);
+  font-size: 11.5px;
+}
+
+.conv-question-state {
+  margin-top: 5px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--warn);
+}
+
+.conv-question.answered .conv-question-state {
+  color: var(--fnt);
+}
+
 .conv-images {
   display: flex;
   flex-direction: column;
@@ -3071,6 +3135,18 @@ button { font-family: inherit; }
 }
 
 .queued-mini button:hover { background: rgba(255, 255, 255, 0.09); color: var(--fnt); }
+
+.queued-mini button.send-now {
+  width: auto;
+  height: 18px;
+  padding: 0 7px;
+  margin-left: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+  color: var(--fnt);
+  font: inherit;
+  white-space: nowrap;
+}
 
 .ubar .field {
   flex: 1;
@@ -10226,3 +10302,90 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .sub-session-pages button { padding: 6px 10px; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
 .sub-session-pages button:disabled { opacity: .4; cursor: default; }
 @media (max-width: 800px) { .sub-sessions-head { align-items: flex-start; flex-direction: column; gap: 8px; } }
+
+/* One-click answers to a permission prompt the CLI reported (QuickAnswer.jsx):
+   beside the run-state chip in a window header, and over the right end of a
+   rail row, where the time, account badge and archive x give way while it
+   shows. */
+.quick-answer { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; min-width: 0; }
+.qa-btn {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--ln);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--tx);
+  font: 600 11px var(--font-ui);
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.qa-btn:disabled { opacity: 0.6; cursor: default; }
+.qa-allow { border-color: rgb(212 165 55 / 60%); background: rgb(212 165 55 / 16%); }
+.qa-allow:hover:not(:disabled) { background: rgb(212 165 55 / 28%); }
+.qa-deny:hover:not(:disabled) { background: rgb(255 90 90 / 18%); }
+.qa-error { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--warn); font-size: 11px; }
+.sr-quick {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  z-index: 1;
+}
+.sr-quick .qa-btn { height: 18px; padding: 0 6px; font-size: 10.5px; }
+.sr-quick .qa-error { display: none; }
+.sr-wrap.quick .sr-tm,
+.sr-wrap.quick .sr-b,
+.sr-wrap.quick .sr-x { display: none; }
+/* Room for the two buttons, so the title ellipsizes before them. */
+.sr-wrap.quick .sr { padding-right: 100px; }
+
+/* "N need you" in the title bar, and the rail banner it opens. Amber is the
+   needs-your-answer colour everywhere (rail light, chip, badge). */
+.needs-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  margin-right: 10px;
+  padding: 0 9px;
+  border: 1px solid rgb(212 165 55 / 45%);
+  border-radius: 999px;
+  background: rgb(212 165 55 / 12%);
+  color: var(--tx);
+  font: 600 11px var(--font-ui);
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.needs-pill:hover { background: rgb(212 165 55 / 20%); }
+.needs-pill.on { background: var(--warn); border-color: var(--warn); color: #1d1608; }
+.needs-pill.on .needs-dot { background: #1d1608; }
+/* The time chips do not apply while the rail lists what is waiting on you. */
+.sidebar-filters.overridden { opacity: 0.45; }
+.needs-dot { display: inline-block; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--warn); }
+.needs-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0 2px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: rgb(212 165 55 / 12%);
+  color: var(--tx);
+  font: 600 11px var(--font-ui);
+}
+.needs-banner .needs-dot { margin-right: 6px; vertical-align: 1px; }
+.needs-banner-clear {
+  border: 0;
+  background: transparent;
+  color: var(--sub);
+  font: 500 11px var(--font-ui);
+  cursor: pointer;
+}
+.needs-banner-clear:hover { color: var(--tx); }
+/* A window's notification bell: struck through and dimmed when muted (or
+   when notifications are off for every window). */
+.wh .ico.tile-bell svg { display: block; }
+.wh .ico.tile-bell.off { opacity: 0.55; }
