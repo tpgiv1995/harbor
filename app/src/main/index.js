@@ -46,6 +46,7 @@ const { startLagMonitor } = require('./lag-monitor.js');
 const { createGpuTelemetry } = require('./gpu-telemetry.js');
 const { createCrashCapture } = require('./crash-capture.js');
 const { createUsageProvider } = require('./providers/usage.js');
+const { normalizePreferences } = require('../shared/preferences.cjs');
 const { createPlanUsageProvider } = require('./providers/plan-usage.js');
 const { resolveLeanFile, readLean, writeLean } = require('./providers/provider-lean.js');
 const { createWorkflowRuns } = require('./providers/workflow-runs.js');
@@ -2464,7 +2465,11 @@ app.whenReady().then(async () => {
   usageProvider = createUsageProvider(
     (e2eMode || process.env.HARBOR_NO_USAGE_FETCH === '1')
       ? { fetchRemoteUsage: null, profiles: harborConfig.profiles, cacheDir: harborConfig.paths.cacheDir }
-      : { profiles: harborConfig.profiles, cacheDir: harborConfig.paths.cacheDir },
+      : {
+        profiles: harborConfig.profiles,
+        cacheDir: harborConfig.paths.cacheDir,
+        log: normalizePreferences(harborConfig.preferences).usageDebugLog,
+      },
   );
   planUsageProvider = createPlanUsageProvider({ usageProvider, profiles: harborConfig.profiles });
   // One decision, made once, for every path that can touch state belonging to

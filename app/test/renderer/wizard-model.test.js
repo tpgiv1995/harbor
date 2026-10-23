@@ -567,3 +567,22 @@ test('setup accepts discovered Codex Ultra and rejects it for a model without it
   state.defaults.model='older';
   assert.equal(model.stepValidation('defaults',state).ok,false);
 });
+
+// Opt-in preferences: a first run opens with every one off, a re-run on what
+// was saved, and Finish writes them normalized.
+test('preferences start off, survive a re-run, and are written normalized', () => {
+  const first = model.initialState(detectedLinux(), null);
+  assert.deepEqual(first.preferences, {
+    claudeAutoMode: false, codexAutoMode: false, promptSuggestions: false, theme: 'default', usageDebugLog: false,
+  });
+  // Before setup completes the config holds defaults, not anybody's decision.
+  assert.equal(model.initialState(detectedLinux(), { preferences: { claudeAutoMode: true } }).preferences.claudeAutoMode, false);
+  const saved = { setup: { completed: true }, preferences: { claudeAutoMode: true, theme: 'reading' } };
+  const rerun = model.initialState(detectedLinux(), saved);
+  assert.equal(rerun.preferences.claudeAutoMode, true);
+  assert.equal(rerun.preferences.theme, 'reading');
+  const written = model.configFromWizard({ ...rerun, preferences: { ...rerun.preferences, usageDebugLog: 'yes', theme: 'neon' } }, {});
+  assert.deepEqual(written.preferences, {
+    claudeAutoMode: true, codexAutoMode: false, promptSuggestions: false, theme: 'default', usageDebugLog: false,
+  });
+});

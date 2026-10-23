@@ -49,6 +49,8 @@ import taskbarBadge from './stage/taskbar-badge.cjs';
 import handoffChainLib from './stage/handoff-chain.cjs';
 import * as sidebarModelShared from '../shared/sidebar-model.js';
 import './styles.css';
+import './reading-theme.css';
+import { applyPreferences } from './app-preferences.cjs';
 
 const {
   loadSeenStore, seedSeenStore, markSeen, attentionFor, badgeCounts,
@@ -1766,6 +1768,13 @@ function App() {
 // whiteboard, filling the OS window: no rail, no titlebar, no session plumbing.
 // Board data is file-backed over IPC, so it needs none of the app shell.
 const isBoardWindow = new URLSearchParams(window.location.search).get('window') === 'board';
+
+// The opt-in preferences (theme, resume-command flags) belong to the document,
+// not to App, and are asked for before the first render so a chosen theme does
+// not flash the default palette first. A missing channel keeps the defaults.
+window.harbor?.setup?.state?.()
+  .then((state) => applyPreferences(state?.preferences))
+  .catch(() => { /* defaults stay applied */ });
 
 createRoot(document.getElementById('root')).render(
   isBoardWindow ? (

@@ -96,3 +96,10 @@ test('Orch polls independently of sidebar pushes and coalesces repeated refreshe
   assert.equal(queueCalls, 2); assert.equal(delegationCalls, 2);
   release([]); cleanup();
 });
+
+test('setup:state carries the opt-in preferences, normalized, for the renderer', () => {
+  assert.equal(setupState({}).preferences.theme, 'default');
+  assert.equal(setupState(null).preferences.claudeAutoMode, false);
+  assert.equal(setupState({ preferences: { theme: 'reading', claudeAutoMode: 'true' } }).preferences.theme, 'reading');
+  assert.equal(setupState({ preferences: { theme: 'reading', claudeAutoMode: 'true' } }).preferences.claudeAutoMode, false);
+});

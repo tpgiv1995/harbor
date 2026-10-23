@@ -8,6 +8,9 @@ const { createHistoryIndex } = require('../app/src/main/providers/history-index.
 const { SessionClient } = require('../app/src/daemon/client.js');
 const { defaultConfigFile } = require('../app/src/shared/tasks-file.cjs');
 const { cursorAuthEnv } = require('../app/src/shared/cursor-auth.cjs');
+const {
+  normalizePreferences, claudePermissionArgs, codexDefaultPermissionArgs, CODEX_PERMISSION_FLAGS,
+} = require('../app/src/shared/preferences.cjs');
 
 const BIN_DIR = __dirname;
 const ROOT = path.dirname(BIN_DIR);
@@ -28,6 +31,12 @@ function configSnapshot() {
   const file = defaultConfigFile();
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* derived defaults below */ }
   return {};
+}
+
+// The opt-in preferences (app/src/shared/preferences.cjs), read from the same
+// config file on every launch: all off unless the user turned one on.
+function harborPreferences() {
+  return normalizePreferences(configSnapshot().preferences);
 }
 
 function runtime() {
@@ -54,7 +63,8 @@ function runtime() {
 //
 // The wrapper did exactly three things and all three are portable Node:
 // choose the config home, pre-accept the per-folder trust dialog in THAT home,
-// exec `claude --dangerously-skip-permissions`. They are done here now, so the
+// exec `claude --dangerously-skip-permissions` (or auto mode when the user opts
+// in, claudePermissionArgs). They are done here now, so the
 // per-account flags it invented, one literal flag per account, have nothing left
 // to do and are gone: an account is a config home, and a config home is a path.
 //
@@ -95,7 +105,8 @@ function claudeConfigFile(configHome) {
 // runs in a directory. Harbor launches into a pty whose window may not be on
 // screen yet, so that dialog is an invisible blocker on the one action the user
 // just asked for. Pre-accepting it is strictly weaker than the
-// `--dangerously-skip-permissions` the launch already carries, and the folder is
+// `--dangerously-skip-permissions` the launch already carries (or keeps one
+// Shift+Tab away, in the opt-in auto mode), and the folder is
 // one the user picked by hand. `HARBOR_NO_TRUST_PREACCEPT=1` turns it off.
 //
 // Never destructive: an unparseable config is left alone (a trust prompt is a
@@ -336,6 +347,17 @@ function sessiondChildEnv(sourceEnv = process.env, { agent = null } = {}) {
   // choice has to be carried explicitly.
   if (sourceEnv.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION !== undefined) {
     env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = sourceEnv.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION;
+  }
+  return env;
+}
+
+// The opt-in "Always show prompt suggestions" preference is the same choice
+// made in Harbor's config instead of its environment: a Claude child gets the
+// variable when the user turned it on, and a value already in the environment
+// (0 to turn them off, say) still wins.
+function withPreferredPromptSuggestions(env, preferences) {
+  if (normalizePreferences(preferences).promptSuggestions && env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION === undefined) {
+    env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = '1';
   }
   return env;
 }
@@ -640,16 +662,19 @@ function codexPaneControls({ version, codexHome }) {
   return controls;
 }
 
-// The controls go straight after the bypass flag, ahead of --model, the resume
-// id and any prompt, so the positional arguments stay last.
+// The controls go straight after the permission flag (the bypass, or
+// --approve-for-me in the opt-in auto mode), ahead of --model, the resume id
+// and any prompt, so the positional arguments stay last.
 function withCodexPaneControls(argv, controls) {
   if (!controls.length) return argv;
-  const at = argv.indexOf('--dangerously-bypass-approvals-and-sandbox');
+  const at = argv.findIndex((arg) => CODEX_PERMISSION_FLAGS.includes(arg));
   if (at < 0) return argv;
   return [...argv.slice(0, at + 1), ...controls, ...argv.slice(at + 1)];
 }
 
-function parseAi(args) {
+// `preferences` are the opt-in config.preferences; omitted, every launch keeps
+// Harbor's defaults (bypass for claude and codex).
+function parseAi(args, { preferences } = {}) {
   let provider = 'claude';
   let model = '';
   let effort = '';
@@ -686,10 +711,10 @@ function parseAi(args) {
   if (provider === 'claude' && resumeId) throw new Error('--resume-id is codex/cursor only; claude resumes via claude-sessions');
   if (provider !== 'claude' && sessionId) throw new Error('--session-id is claude only');
   let argv;
-  if (provider === 'claude') argv = [claudeBin(), '--dangerously-skip-permissions', ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), ...(sessionId ? ['--session-id', sessionId] : [])];
+  if (provider === 'claude') argv = [claudeBin(), ...claudePermissionArgs(preferences), ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), ...(sessionId ? ['--session-id', sessionId] : [])];
   else if (provider === 'codex') argv = resumeId
-    ? [providerBin('codex'), 'resume', '--dangerously-bypass-approvals-and-sandbox', resumeId]
-    : [providerBin('codex'), '--dangerously-bypass-approvals-and-sandbox', ...(model ? ['--model', model] : []), ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : [])];
+    ? [providerBin('codex'), 'resume', ...codexDefaultPermissionArgs(preferences), resumeId]
+    : [providerBin('codex'), ...codexDefaultPermissionArgs(preferences), ...(model ? ['--model', model] : []), ...(effort ? ['-c', `model_reasoning_effort=${effort}`] : [])];
   // --trust (2026-09-26): the interactive TUI opens "Workspace Trust Required"
   // in any folder it has not recorded, --force or not, and its first option is
   // "Trust this workspace", so the Enter that ends Harbor's first send would
@@ -714,7 +739,8 @@ function parseAi(args) {
 
 async function ai(args) {
   resolveSessionBackend();
-  const parsed = parseAi(args);
+  const preferences = harborPreferences();
+  const parsed = parseAi(args, { preferences });
   if (parsed.help) {
     process.stdout.write('ai [--home PROFILE|CONFIG_HOME] [--provider claude|codex|cursor] [--model MODEL] [--effort LEVEL] [--resume-id ID] [--session-id UUID] [--here] [PROMPT]\n');
     return 0;
@@ -739,6 +765,7 @@ async function ai(args) {
   // A cursor pane or resume carries a stored API key: cursor-agent DELETES an
   // API-key sign-in on any run that does not pass the key (2026-10-13).
   if (parsed.provider === 'cursor') Object.assign(childEnv, cursorAuthEnv(childEnv));
+  if (parsed.provider === 'claude') withPreferredPromptSuggestions(childEnv, preferences);
   // Against the home the child will read (the profile's, else an inherited
   // CODEX_HOME, else ~/.codex: the same order codex-model-catalog.js reads).
   if (parsed.provider === 'codex') {
@@ -798,8 +825,8 @@ function index(args, options = {}) {
 //
 // That is also what removes the last functional reason a profile id had to be
 // one of three specific words, one of which was a person's first name.
-function resumeArgv(id, prompt = null) {
-  const argv = [claudeBin(), '--dangerously-skip-permissions', '--resume', id];
+function resumeArgv(id, prompt = null, preferences = undefined) {
+  const argv = [claudeBin(), ...claudePermissionArgs(preferences), '--resume', id];
   if (prompt != null) argv.push(String(prompt));
   return argv;
 }
@@ -891,7 +918,8 @@ async function claudeSessions(args) {
     const meta = JSON.parse(metadata.stdout);
     const selected = resolveProfileHome(home === 'auto' ? (meta.home || defaultProfileId()) : home);
     home = selected.id;
-    const resumeEnv = { ...process.env };
+    const preferences = harborPreferences();
+    const resumeEnv = withPreferredPromptSuggestions({ ...process.env }, preferences);
     if (selected.configHome) resumeEnv.CLAUDE_CONFIG_DIR = selected.configHome;
     if (!meta.cwd || !fs.existsSync(meta.cwd) || !fs.statSync(meta.cwd).isDirectory()) {
       throw new Error(`project directory is gone or unknown for ${resumeId}`);
@@ -903,7 +931,7 @@ async function claudeSessions(args) {
     // The same Windows resolution a launch gets: a bare `claude` is npm's
     // claude.cmd, which sessiond's CreateProcess cannot start. A full path (what
     // the wizard saves) passes through untouched.
-    const argv = resolveWindowsLaunch(resumeArgv(resumeId, prompt), { env: resumeEnv });
+    const argv = resolveWindowsLaunch(resumeArgv(resumeId, prompt, preferences), { env: resumeEnv });
     if (here) {
       const result = spawnSync(argv[0], argv.slice(1), { cwd: meta.cwd, env: resumeEnv, stdio: 'inherit', windowsHide: true });
       return result.status ?? 1;
@@ -939,7 +967,7 @@ async function claudeSessions(args) {
 module.exports = {
   ROOT, ai, parseAi, claudeSessions, claudeBin, claudeConfigFile, cleanDaemonEnv, commandString,
   preacceptFolderTrust, runtime, resolveUnitPolicy,
-  trustKeysFor,
+  trustKeysFor, harborPreferences, resumeArgv, withPreferredPromptSuggestions,
   resolveSessionBackend, sessiondChildEnv, spawnSessiond,
   resolveWindowsLaunch, codexCliVersion, codexMigrationAcks, codexPaneControls, withCodexPaneControls,
 };

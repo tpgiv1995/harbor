@@ -276,3 +276,37 @@ test('keychainServicesFor names each config home its own Claude Code credential 
   assert.deepEqual(keychainServicesFor('/Users/x/.claude', '/Users/x'),
     ['Claude Code-credentials', `Claude Code-credentials-${sha8('/Users/x/.claude')}`]);
 });
+
+// ---- the opt-in usage debug log (preferences.usageDebugLog) ---------------
+
+test('the usage debug log is written only when asked for, carries no token, and is capped', async (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-usage-log-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const make = (log, logCapBytes) => createUsageProvider({
+    homes: { a: '/a' },
+    teeDir: dir,
+    log,
+    logCapBytes,
+    readFile: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); },
+    remoteCooldownMs: 0,
+    fetchRemoteUsage: async () => ({ unavailable: true, reason: 'Claude usage request failed: HTTP 401' }),
+  });
+  const file = path.join(dir, 'usage-debug.log');
+  await make(false).getUsage('a');
+  assert.equal(fs.existsSync(file), false, 'off by default: nothing is written');
+
+  await make(true).getUsage('a');
+  const lines = fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((line) => line.event), ['remote', 'unavailable']);
+  assert.equal(lines[0].ok, false);
+  assert.match(lines[0].reason, /HTTP 401/);
+  assert.equal(lines[0].account, 'a');
+
+  // Past the cap the file rotates to .1 once instead of growing.
+  const capped = make(true, 64);
+  for (let i = 0; i < 5; i += 1) await capped.getUsage('a');
+  assert.ok(fs.existsSync(`${file}.1`));
+  assert.ok(fs.statSync(file).size < 64 + 400);
+});

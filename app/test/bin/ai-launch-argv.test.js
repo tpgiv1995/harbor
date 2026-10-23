@@ -745,3 +745,20 @@ test('the installed claude CLI really does accept --session-id at launch', (t) =
   const help = execFileSync('claude', ['--help'], { encoding: 'utf8' });
   assert.match(help, /--session-id <uuid>/, 'claude --help advertises --session-id');
 });
+
+// The opt-in preferences reach a real bin/ai run through the config file, and
+// an empty config (every other spec here) keeps the bypass flags.
+test('config preferences switch claude and codex launches to auto mode', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-prefs-'));
+  const configFile = path.join(root, 'config.json');
+  fs.writeFileSync(configFile, JSON.stringify({ preferences: { claudeAutoMode: true, codexAutoMode: true } }));
+  try {
+    assert.equal(argv([], { HARBOR_CONFIG_FILE: configFile }), 'claude --permission-mode auto --allow-dangerously-skip-permissions');
+    const codex = argv(['--provider', 'codex', '--resume-id', 'synthetic-session'], { HARBOR_CONFIG_FILE: configFile, HARBOR_CODEX_VERSION: '0.163.0' });
+    assert.match(codex, /^codex resume --approve-for-me --no-daemon /);
+    assert.doesNotMatch(codex, /dangerously-bypass/);
+    assert.equal(argv([]), CLAUDE);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

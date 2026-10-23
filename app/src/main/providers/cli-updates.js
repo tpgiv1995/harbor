@@ -246,8 +246,8 @@ const IMPACT_FLAGS = {
     // "mode" after it, so the name alone counts.
     {
       id: 'bypass-mode',
-      re: /dangerously-skip-permissions|bypass[ _-]?permissions?\b|bypass mode|permission mode|defaultMode/i,
-      why: 'Harbor launches every claude session with --dangerously-skip-permissions. A prompt that appears in that mode is a dialog the ask card must surface, and a mode change alters what every pane does unattended.',
+      re: /dangerously-skip-permissions|bypass[ _-]?permissions?\b|bypass mode|auto mode|permission mode|defaultMode/i,
+      why: 'Harbor launches every claude session with --dangerously-skip-permissions, or in auto mode with bypass one Shift+Tab away when the "Start Claude sessions in auto mode" preference is on. A prompt that appears in either mode is a dialog the ask card must surface, and a mode change alters what every pane does unattended.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
     // Same review: "queued messages show ... above the spinner" (2.1.281) and
@@ -322,8 +322,8 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'sandbox',
-      re: /sandbox|approval|dangerously-bypass|permission/i,
-      why: 'Harbor resumes codex with --dangerously-bypass-approvals-and-sandbox. If that flag is renamed or gated, every codex resume stops at a prompt no Harbor surface can answer.',
+      re: /sandbox|approval|approve-for-me|dangerously-bypass|permission/i,
+      why: 'Harbor launches and resumes codex with --dangerously-bypass-approvals-and-sandbox, or --approve-for-me when the "Start Codex sessions in auto" preference is on. If either flag is renamed or gated, every codex resume stops at a prompt no Harbor surface can answer.',
       verify: 'npm test -- providers',
     },
     {
