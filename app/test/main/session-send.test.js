@@ -44,6 +44,17 @@ test('provider transcript discovery uses the real Codex and Cursor stores', () =
   ]);
 });
 
+test('codex fresh-transcript discovery scans every configured codex home', () => {
+  // A window launched on a second account writes its rollout under that
+  // account's CODEX_HOME; scanning ~/.codex alone never found it (2026-10-15).
+  assert.deepEqual(providerTranscriptDirs('codex', '/work/x', '/home/test', new Date('2026-07-20T12:00:00Z'), ['/h/.codex', '/h/.codex-pro']), [
+    path.join('/h/.codex', 'sessions', '2026', '07', '20'),
+    path.join('/h/.codex', 'sessions', '2026', '07', '19'),
+    path.join('/h/.codex-pro', 'sessions', '2026', '07', '20'),
+    path.join('/h/.codex-pro', 'sessions', '2026', '07', '19'),
+  ]);
+});
+
 test('link registry sets, resolves, prunes by pane and ttl', () => {
   const links = createLinkRegistry({ ttlMs: 60_000 });
   links.set('sess-a', { paneId: 'pane-1', workspaceId: 'ws-1' });

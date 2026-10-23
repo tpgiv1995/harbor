@@ -27,22 +27,28 @@ function claudeProjectDir(cwd, home = os.homedir()) {
   return path.join(home, '.claude', 'projects', String(cwd || '').replace(/[^a-zA-Z0-9]/g, '-'));
 }
 
-function codexDayDir(home, date) {
+// `codexHome` is the Codex HOME itself (the dir holding `sessions/`), not the
+// user's home directory: a second account's rollouts live under its own home.
+function codexDayDir(codexHome, date) {
   return path.join(
-    home, '.codex', 'sessions',
+    codexHome, 'sessions',
     String(date.getFullYear()),
     String(date.getMonth() + 1).padStart(2, '0'),
     String(date.getDate()).padStart(2, '0'),
   );
 }
 
-function providerTranscriptDirs(provider, cwd, home = os.homedir(), date = new Date()) {
+function providerTranscriptDirs(provider, cwd, home = os.homedir(), date = new Date(), codexHomes = null) {
   if (provider === 'codex') {
     // Yesterday too: a session launched before midnight writes its rollout
     // into the NEXT day's directory, and a scan of today alone would then
-    // count every one of yesterday's rollouts as brand new.
+    // count every one of yesterday's rollouts as brand new. EVERY configured
+    // codex home is scanned (2026-10-15): a window launched on a second
+    // account writes its rollout under that account's CODEX_HOME, and a scan
+    // of ~/.codex alone never found it.
     const yesterday = new Date(date.getTime() - 24 * 60 * 60_000);
-    return [codexDayDir(home, date), codexDayDir(home, yesterday)];
+    const homes = codexHomes?.length ? codexHomes : [path.join(home, '.codex')];
+    return homes.flatMap((codexHome) => [codexDayDir(codexHome, date), codexDayDir(codexHome, yesterday)]);
   }
   if (provider === 'cursor') {
     const project = String(cwd || '').replace(/^\/+/, '').replace(/[^a-zA-Z0-9]/g, '-');
@@ -51,9 +57,9 @@ function providerTranscriptDirs(provider, cwd, home = os.homedir(), date = new D
   return [claudeProjectDir(cwd, home)];
 }
 
-async function transcriptFiles(provider, cwd) {
+async function transcriptFiles(provider, cwd, codexHomes = null) {
   const files = [];
-  for (const dir of providerTranscriptDirs(provider, cwd)) {
+  for (const dir of providerTranscriptDirs(provider, cwd, undefined, undefined, codexHomes)) {
     if (provider === 'cursor') {
       const ids = await fs.readdir(dir).catch(() => []);
       for (const id of ids) files.push({ id, file: path.join(dir, id, `${id}.jsonl`) });
@@ -383,6 +389,8 @@ function createSessionSend(deps) {
     // one that its sleep advances.
     clock = () => Date.now(),
     captureDir: suppliedCaptureDir,
+    // () => the configured codex homes (fresh-transcript discovery scans all).
+    codexHomes = () => null,
   } = deps;
   // Same isolation-surface rule as artifact-thumbs and artifacts: the env
   // override outranks anything composed in. As a destructuring DEFAULT this
@@ -490,7 +498,7 @@ function createSessionSend(deps) {
     const deadline = start + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const candidates = await transcriptFiles(provider, cwd);
+        const candidates = await transcriptFiles(provider, cwd, codexHomes());
         for (const { id, file } of candidates) {
           if (knownIds.has(id)) continue;
           try {
@@ -512,7 +520,7 @@ function createSessionSend(deps) {
 
   const listTranscriptIds = async (cwd, provider = 'claude') => {
     try {
-      return new Set((await transcriptFiles(provider, cwd)).map(({ id }) => id));
+      return new Set((await transcriptFiles(provider, cwd, codexHomes())).map(({ id }) => id));
     } catch {
       return new Set();
     }

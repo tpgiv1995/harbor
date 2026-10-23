@@ -486,8 +486,8 @@ async function composeServer(options = {}) {
     'ask:list': () => { askInbox.scan(); return askInbox.list(); },
     'ask:answer': ({ id, ...payload } = {}) => { askInbox.scan(); return askInbox.answer(id, payload); },
     'ask:decline': ({ id, reason } = {}) => { askInbox.scan(); return askInbox.decline(id, reason); },
-    'capabilities:get': async ({ sessionId } = {}) => {
-      try { return { ok: true, capabilities: await capabilities.get(sessionId) }; }
+    'capabilities:get': async ({ sessionId, provider, profileId, cwd } = {}) => {
+      try { return { ok: true, capabilities: await capabilities.get(sessionId, { provider, profileId, cwd }) }; }
       catch (error) { return { ok: false, reason: error.message }; }
     },
     'capabilities:permission-mode': async ({ paneId } = {}) => {

@@ -50,6 +50,7 @@ const { createPlanUsageProvider } = require('./providers/plan-usage.js');
 const { resolveLeanFile, readLean, writeLean } = require('./providers/provider-lean.js');
 const { createWorkflowRuns } = require('./providers/workflow-runs.js');
 const { readAccountEmails, createAccountsProvider } = require('./providers/accounts.js');
+const { codexHomes } = require('./providers/codex-model-catalog.js');
 const { createSingleFlight } = require('./single-flight.js');
 const {
   configureModelCatalog, createCapabilitiesProvider, newSessionOptions, modelCatalog, MODEL_VERSION_SEED,
@@ -1332,9 +1333,9 @@ function registerIpc() {
 
   // Capability menu: fs-only enumeration (renderer stays fs-free), plus the two
   // pty-touching permission-mode operations (scrape + shift+tab cycle).
-  ipcMain.handle('capabilities:get', async (_event, { sessionId }) => {
+  ipcMain.handle('capabilities:get', async (_event, { sessionId, provider, profileId, cwd } = {}) => {
     try {
-      return { ok: true, capabilities: await capabilitiesProvider.get(sessionId) };
+      return { ok: true, capabilities: await capabilitiesProvider.get(sessionId, { provider, profileId, cwd }) };
     } catch (error) {
       return { ok: false, reason: error.message };
     }
@@ -2687,6 +2688,7 @@ app.whenReady().then(async () => {
   });
   const sendClient = createControlClient({ env: process.env, sessionStorePolicy });
   sessionSend = createSessionSend({
+    codexHomes: () => codexHomes(harborConfig?.profiles || []),
     snapshot: async () => {
       const res = await sendClient.snapshot();
       return res?.snapshot || res || {};

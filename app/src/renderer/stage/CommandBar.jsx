@@ -240,7 +240,16 @@ export function CommandBar({
       setCapsError(null);
       setPlusCmdSearch('');
     }
-    window.harbor.capabilities.get({ sessionId: session.id })
+    // The window's provider and launch profile ride along: a fresh Codex
+    // window is a provisional `pane:` id with no rollout yet, and without them
+    // main resolved it to the default (Claude) home and offered Claude's
+    // commands, skills and MCP servers in a Codex composer.
+    window.harbor.capabilities.get({
+      sessionId: session.id,
+      provider: session.provider || 'claude',
+      profileId: session.home || null,
+      cwd: session.cwd || null,
+    })
       .then((res) => {
         if (!live) return;
         if (res?.ok) setCaps(res.capabilities);
@@ -248,7 +257,7 @@ export function CommandBar({
       })
       .catch((e) => { if (live) setCapsError(String(e?.message || e)); });
     return () => { live = false; };
-  }, [menuOpen, plusMenuOpen, session?.id]);
+  }, [menuOpen, plusMenuOpen, session?.id, session?.provider, session?.home, session?.cwd]);
 
   useEffect(() => {
     if (!menuOpen) return undefined;

@@ -303,3 +303,155 @@ test('new session options carry the configured workflows, and nothing when there
     [{ id: 'mine', label: '/mine' }, { id: 'unlabelled', label: '/unlabelled' }],
   );
 });
+
+// THE SLASH MENU IS PROVIDER-SCOPED (2026-10-15). A Codex window was offered
+// Claude's built-ins (/effort, /fast, /output-style, /init "Generate a
+// CLAUDE.md") plus the default Claude home's commands, skills, plugins and MCP
+// servers. A Codex window now lists Codex's own built-ins (the 0.160.0 popup),
+// its home's skills as `$name`, and the MCP server names in its config.toml.
+const { createAccountsProvider } = require('../../src/main/providers/accounts.js');
+const { CODEX_BUILTIN_COMMANDS } = require('../../src/main/providers/capabilities.js');
+
+async function makeCodexWorld(root) {
+  const claudeHome = path.join(root, '.claude');
+  const codexHome = path.join(root, '.codex-pro');
+  const userHome = path.join(root, 'user');
+  const cwd = path.join(root, 'proj');
+  // A Claude home that MUST NOT leak into the Codex window.
+  await writeFile(path.join(claudeHome, '.claude.json'), JSON.stringify({ mcpServers: { 'claude-only-mcp': {} } }));
+  await writeFile(path.join(claudeHome, 'commands', 'claude-only.md'), '---\ndescription: Claude command.\n---\n');
+  await writeFile(path.join(claudeHome, 'skills', 'claude-skill', 'SKILL.md'), '---\nname: claude-skill\ndescription: Claude skill.\n---\n');
+  // The Codex home: a user skill, a bundled .system skill, a skill whose
+  // frontmatter name differs from its folder, and one Codex would reject.
+  await writeFile(path.join(codexHome, 'skills', 'sketch', 'SKILL.md'), '---\nname: sketch\ndescription: Draw a sketch.\n---\n');
+  await writeFile(path.join(codexHome, 'skills', 'folder-name', 'SKILL.md'), '---\nname: renamed\ndescription: >\n  Folded block\n  description.\n---\n');
+  await writeFile(path.join(codexHome, 'skills', 'no-description', 'SKILL.md'), '---\nname: no-description\n---\n');
+  await writeFile(path.join(codexHome, 'skills', '.system', 'bundled', 'SKILL.md'), '---\nname: bundled\ndescription: Ships with Codex.\n---\n');
+  await writeFile(path.join(userHome, '.agents', 'skills', 'roaming', 'SKILL.md'), '---\nname: roaming\ndescription: From ~/.agents.\n---\n');
+  await writeFile(path.join(cwd, '.agents', 'skills', 'repo-skill', 'SKILL.md'), '---\nname: repo-skill\ndescription: From the repo.\n---\n');
+  await writeFile(path.join(codexHome, 'prompts', 'old-prompt.md'), '---\ndescription: 0.160 has no custom prompts.\n---\n');
+  await writeFile(path.join(codexHome, 'config.toml'), [
+    'model = "gpt-6-sol"',
+    '[mcp_servers.docs]',
+    'command = "npx"',
+    'env = { TOKEN = "synthetic-secret" }',
+    '[mcp_servers."quoted.name"]',
+    'url = "http://127.0.0.1:1"',
+    '[mcp_servers.docs.env]',
+    'X = "y"',
+  ].join('\n'));
+  return { claudeHome, codexHome, userHome, cwd };
+}
+
+test('a Codex window lists Codex built-ins, $skills and its own MCP names, never Claude\'s', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-caps-codex-'));
+  try {
+    const { claudeHome, codexHome, userHome, cwd } = await makeCodexWorld(root);
+    const profiles = [
+      { id: 'max', provider: 'claude', configHome: claudeHome, isDefault: true },
+      { id: 'cx-pro', provider: 'codex', configHome: codexHome },
+    ];
+    const accounts = createAccountsProvider({
+      history: { sessionMeta: async () => { throw new Error('not indexed'); } },
+      profiles,
+    });
+    const provider = createCapabilitiesProvider({ accounts, homedir: () => userHome });
+    // The provisional window has no rollout yet; the hint is all there is.
+    const caps = await provider.get('pane:42', { provider: 'codex', profileId: 'cx-pro', cwd });
+    assert.equal(caps.provider, 'codex');
+    assert.equal(caps.account, 'cx-pro');
+    assert.equal(caps.home, codexHome);
+    const names = caps.commands.map((c) => c.name);
+    for (const claudeOnly of ['/effort', '/fast', '/output-style', '/rate-limit-options', '/claude-only', '/claude-skill']) {
+      assert.ok(!names.includes(claudeOnly), `${claudeOnly} leaked into a Codex window`);
+    }
+    assert.equal(caps.commands.find((c) => c.name === '/init').description, 'create an AGENTS.md file with instructions for Codex');
+    assert.deepEqual(names.filter((n) => n.startsWith('/')), CODEX_BUILTIN_COMMANDS.map(([n]) => n));
+    // The popup's own exclusions: debug commands, /apps, debug-build-only and alias rows.
+    for (const hidden of ['/debug-config', '/debug-m-drop', '/apps', '/rollout', '/test-approval', '/quit', '/btw']) {
+      assert.ok(!names.includes(hidden), `${hidden} is not in the 0.160 popup`);
+    }
+    // No custom prompts in 0.160.
+    assert.ok(!names.some((n) => n.startsWith('/prompts:')));
+    // Skills insert with Codex's own `$` syntax.
+    assert.deepEqual(names.filter((n) => n.startsWith('$')), ['$bundled', '$renamed', '$repo-skill', '$roaming', '$sketch']);
+    assert.equal(caps.commands.find((c) => c.name === '$renamed').description, 'Folded block description.');
+    assert.ok(caps.commands.filter((c) => c.name.startsWith('$')).every((c) => c.source === 'skill'));
+    // MCP names from config.toml only, no values, no Claude servers.
+    assert.deepEqual(caps.mcpServers, ['docs', 'quoted.name']);
+    assert.doesNotMatch(JSON.stringify(caps), /synthetic-secret|claude-only-mcp/);
+    // Nothing of Claude's model / effort / fast-mode surface either.
+    assert.deepEqual(caps.models, { cached: [], families: [], versions: [] });
+    assert.deepEqual(caps.effort.levels, []);
+    assert.deepEqual(caps.plugins, []);
+    assert.equal(caps.dynamicWorkflow, null);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an indexed Codex session resolves its home from the rollout scan, with no hint', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-caps-codex-'));
+  try {
+    const { claudeHome, codexHome, userHome, cwd } = await makeCodexWorld(root);
+    const accounts = createAccountsProvider({
+      history: { sessionMeta: async () => ({ provider: 'codex', cwd, path: path.join(codexHome, 'sessions', 'r.jsonl'), configHome: codexHome }) },
+      profiles: [
+        { id: 'max', provider: 'claude', configHome: claudeHome, isDefault: true },
+        { id: 'cx-pro', provider: 'codex', configHome: codexHome },
+      ],
+    });
+    const caps = await createCapabilitiesProvider({ accounts, homedir: () => userHome }).get('019a0000-0000-7000-8000-000000000000');
+    assert.equal(caps.provider, 'codex');
+    assert.equal(caps.account, 'cx-pro');
+    assert.ok(caps.commands.some((c) => c.name === '$repo-skill'));
+    assert.ok(!caps.commands.some((c) => c.name === '/effort'));
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a Cursor window gets no Claude command list', async () => {
+  const accounts = createAccountsProvider({
+    history: { sessionMeta: async () => { throw new Error('not indexed'); } },
+    profiles: [{ id: 'max', provider: 'claude', configHome: '/nonexistent/.claude', isDefault: true }],
+  });
+  const caps = await createCapabilitiesProvider({ accounts }).get('pane:9', { provider: 'cursor' });
+  assert.equal(caps.provider, 'cursor');
+  assert.deepEqual(caps.commands, []);
+  assert.deepEqual(caps.models.families, []);
+});
+
+test('a Claude window is unchanged by the provider split', async () => {
+  const caps = await providerFor({}, null).get('unknown-2', { provider: 'claude' });
+  assert.equal(caps.provider, 'claude');
+  assert.ok(caps.commands.some((c) => c.name === '/effort'));
+  assert.equal(caps.models.families.length, 4);
+});
+
+test('codex model menus read EVERY configured codex home, the default home winning a shared slug', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-codex-homes-'));
+  try {
+    const first = path.join(dir, '.codex');
+    const second = path.join(dir, '.codex-pro');
+    await writeFile(path.join(first, 'models_cache.json'), JSON.stringify({ models: [
+      { slug: 'gpt-6-sol', display_name: 'GPT-6-Sol', visibility: 'list', priority: 2, supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }] },
+    ] }));
+    await writeFile(path.join(second, 'models_cache.json'), JSON.stringify({ models: [
+      { slug: 'gpt-6-sol', display_name: 'Other label', visibility: 'list', priority: 2, supported_reasoning_levels: [{ effort: 'ultra' }] },
+      { slug: 'gpt-6-astra', display_name: 'GPT-6-Astra', visibility: 'list', priority: 1, supported_reasoning_levels: [{ effort: 'medium' }, { effort: 'ultra' }] },
+    ] }));
+    const options = newSessionOptions({ profiles: [
+      { id: 'personal', provider: 'claude', configHome: '/home/testuser/.claude', isDefault: true },
+      { id: 'cx', provider: 'codex', configHome: first },
+      { id: 'cx-pro', provider: 'codex', configHome: second },
+    ] }).providers.codex;
+    assert.deepEqual(options.models.map((m) => m.value), ['default', 'gpt-6-sol', 'gpt-6-astra']);
+    assert.equal(options.models[1].label, 'GPT-6-Sol');
+    assert.deepEqual(options.effortsByModel['gpt-6-sol'], ['low', 'high']);
+    // The highest-priority model across every home supplies Default.
+    assert.deepEqual(options.efforts, ['medium', 'ultra']);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

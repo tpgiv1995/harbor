@@ -24,6 +24,9 @@ const {
 const { resolveOrphanPolicy, sweepOrphans, snapshotProcessTable } = require('./orphan-sweep.js');
 const { createProcessIntel } = require('./process-intel.js');
 const { createStateFileCache } = require('./state-cache.js');
+const { codexSessionRoots } = require('./codex-roots.js');
+// Per-session spawn env (CODEX_HOME), read lazily by the dormancy veto.
+const sessionEnvCache = new Map();
 const {
   resolveJobPolicy, createSessionJob, openSessionJob, assignPid: assignJobPid,
   queryJob, terminateJob, closeJob,
@@ -169,6 +172,7 @@ function removeSessionFiles(id) {
   // daemon's job handle goes with the files: without this the handle map grew
   // by one entry per exited session for the daemon's whole life.
   dropSessionJob(id);
+  sessionEnvCache.delete(id);
 }
 
 function readAllStateFiles() {
@@ -1065,6 +1069,18 @@ const providerTranscriptRoots = {
     .split(path.delimiter).filter(Boolean),
 };
 
+// The spawn env a session was started with (its config file), read once per
+// session: only CODEX_HOME is used, to find a second account's rollouts. The
+// cache is declared with the other module state near the top (see
+// removeSessionFiles, which prunes it).
+function sessionSpawnEnv(id) {
+  if (sessionEnvCache.has(id)) return sessionEnvCache.get(id);
+  let env = null;
+  try { env = JSON.parse(fs.readFileSync(configPath(id), 'utf8'))?.env || null; } catch { env = null; }
+  sessionEnvCache.set(id, env);
+  return env;
+}
+
 function sessionWorkFresh(state) {
   const agent = state.agent === 'cursor-agent' ? 'cursor' : state.agent;
   if (agent === 'codex' || agent === 'cursor') {
@@ -1072,7 +1088,9 @@ function sessionWorkFresh(state) {
     // sweep's catch, which leaves the session alone: fail closed, per the
     // provider-keeper design.
     return providerTranscriptFresh(state, {
-      codexRoots: providerTranscriptRoots.codex,
+      codexRoots: agent === 'codex'
+        ? codexSessionRoots({ sessionEnv: sessionSpawnEnv(state.id), defaults: providerTranscriptRoots.codex })
+        : providerTranscriptRoots.codex,
       cursorRoots: providerTranscriptRoots.cursor,
       now: Date.now(),
       freshMs: dormancyPolicy.afterMs,
