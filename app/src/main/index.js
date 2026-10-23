@@ -46,6 +46,7 @@ const { startLagMonitor } = require('./lag-monitor.js');
 const { createGpuTelemetry } = require('./gpu-telemetry.js');
 const { createCrashCapture } = require('./crash-capture.js');
 const { createUsageProvider } = require('./providers/usage.js');
+const { createCliAgentsWatcher } = require('./providers/cli-agents.js');
 const { createPlanUsageProvider } = require('./providers/plan-usage.js');
 const { resolveLeanFile, readLean, writeLean } = require('./providers/provider-lean.js');
 const { createWorkflowRuns } = require('./providers/workflow-runs.js');
@@ -231,6 +232,7 @@ const e2eLaunchCalls = [];
 let mainWindow = null;
 let bootRecovery = null;
 let sidebarBridge = null;
+let cliAgents = null;
 let terminalBridge = null;
 
 // Push an IPC message to the renderer only if the window is still alive. A bare
@@ -2035,6 +2037,9 @@ function createWindow() {
     notifier?.acknowledgeAll();
     broadcastUsageUpdate();
     cliUpdates?.reconcile().catch((error) => console.warn(`cli-updates: local reconcile failed: ${error.message}`));
+    // `claude agents` lists nothing while the window is hidden or minimized;
+    // the homes whose sessions changed meanwhile are listed now.
+    cliAgents?.nudge();
   });
   if (!e2eMode) {
     let persistTimer = null;
@@ -2621,7 +2626,23 @@ app.whenReady().then(async () => {
     cacheDir: harborConfig.paths.cacheDir,
     profiles: harborConfig.profiles,
   });
+  // Every live Claude session's status from the CLI itself (`claude agents
+  // --json`), for the sessions Harbor does not run. Claude profiles only, and
+  // never under a harness: it starts the real CLI against real homes.
+  cliAgents = createCliAgentsWatcher({
+    homes: Object.fromEntries((harborConfig.profiles || [])
+      .filter((profile) => (profile.provider || 'claude') === 'claude' && profile.configHome)
+      .map((profile) => [profile.id, profile.configHome])),
+    bin: harborConfig.providers?.claude?.bin || 'claude',
+    env: process.env,
+    windowState: () => {
+      if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized()) return 'hidden';
+      return mainWindow.isFocused() ? 'focused' : 'visible';
+    },
+  });
+  if (!e2eMode && harborConfig.providers?.claude?.enabled !== false) cliAgents.start();
   sidebarBridge = createSidebarBridge({
+    cliAgents,
     ownerOptions: { contextCacheDir: contextDir },
     daemonOptions: { env: process.env, sessionStorePolicy },
     projectLabelForCwd,
@@ -3042,6 +3063,15 @@ app.whenReady().then(async () => {
     } else notifier.onAgentStatusChanged(event);
   });
   sidebarBridge.emitter.on('update', () => notifier.onBackgroundChanged());
+  // A Harbor pane whose CLI reports through OSC 7501 never needs the CLI's
+  // list, so a rewrite of its `sessions/<pid>.json` lists nothing.
+  let ownPanePids = new Set();
+  sidebarBridge.emitter.on('update', ({ model } = {}) => {
+    ownPanePids = new Set((model?.projects || []).flatMap((project) => project.sessions || [])
+      .filter((row) => row.paneId && Number.isInteger(row.panePid) && Number.isInteger(row.agentStatusSeq))
+      .map((row) => row.panePid));
+  });
+  cliAgents?.setOwnPaneFileTest((pid) => ownPanePids.has(pid));
   sidebarBridge.emitter.on('panes-changed', () => notifier.onBackgroundChanged());
 
   // Agent-status watcher: the daemon only delivers pane.agent_status_changed
@@ -3252,6 +3282,7 @@ function shutdownApp() {
   taskStore?.close();
   noteStore?.close();
   whiteboardStore?.close();
+  cliAgents?.stop();
   sidebarBridge?.close();
   terminalBridge?.close();
 }

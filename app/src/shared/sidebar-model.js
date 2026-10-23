@@ -246,7 +246,57 @@ export function sleptSince(entry, lastActiveMs) {
   return Number.isFinite(at) && at >= lastActiveMs - DORMANT_GRACE_MS;
 }
 
-export function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = [], homes = {}, dormantSessions = {}, grouping = 'project', now = new Date() } = {}) {
+// The rail row fields a pane's agent status drives: the CLI's own state and,
+// from OSC 7501 (daemon/screen.js), its words (`msg`: the current step, or
+// what a prompt asks), the prompt kind, and the keeper's per-change seq. The
+// sidebar bridge's status fast path patches exactly these with this function,
+// and the merge below derives them with it, so the two paths cannot disagree.
+// cli is the pane's row from `claude agents --json` (cliStatusForPane): it
+// fills in only when the pane reports no status of its own (a keeper or CLI
+// from before OSC 7501), and then its `waitingFor` is the only words there are.
+export function paneStatusFields(pane, cli = null) {
+  const status = pane?.agent_status || null;
+  return {
+    agentStatus: status || cli?.status || null,
+    agentStatusKind: status ? pane.agent_status_kind || null : null,
+    agentStatusMsg: status ? pane.agent_status_msg || null : null,
+    agentStatusSeq: status && Number.isInteger(pane.agent_status_seq) ? pane.agent_status_seq : null,
+    agentWaitingFor: status ? null : cli?.waitingFor || null,
+  };
+}
+
+// cliStatuses: sessionId -> { status, waitingFor, kind, pid } from `claude
+// agents --json` (main/providers/cli-agents.js), the CLI's own view of every
+// live Claude session on the machine. A pane's own status wins; the list fills
+// in for sessions Harbor does not run and marks them alive (cliAlive).
+//
+// A list row whose pid is a live pane's belongs to THAT pane. A /clear or a
+// fork inside a pane starts a new session id Y under the same CLI process
+// while the pane still holds X. Applied to Y's history row, the pane's prompt
+// counted twice and Y read as running outside Harbor. Such a row fills in the
+// pane's status (when the pane has none) and never marks another row alive.
+function panePid(pane) {
+  return Number.isInteger(pane?.pid) && pane.pid > 0 ? pane.pid : null;
+}
+
+export function cliStatusForPane(pane, cliStatuses) {
+  if (!cliStatuses || typeof cliStatuses.get !== 'function') return null;
+  const id = sessionAgentId(pane?.agent_session);
+  const byId = id ? cliStatuses.get(id) : null;
+  if (byId) return byId;
+  const pid = panePid(pane);
+  if (!pid) return null;
+  for (const entry of cliStatuses.values()) if (entry?.pid === pid) return entry;
+  return null;
+}
+
+export function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = [], homes = {}, dormantSessions = {}, grouping = 'project', now = new Date(), cliStatuses = null } = {}) {
+  const panePids = new Set((livePanes || []).map(panePid).filter(Boolean));
+  const paneSessionIds = new Set((livePanes || []).map((pane) => sessionAgentId(pane?.agent_session)).filter(Boolean));
+  const cliFor = (id) => {
+    const entry = id && cliStatuses && typeof cliStatuses.get === 'function' ? cliStatuses.get(id) || null : null;
+    return entry && panePids.has(entry.pid) && !paneSessionIds.has(id) ? null : entry;
+  };
   const groupMode = grouping === 'date' ? 'date' : 'project';
   const currentTime = new Date(now);
   const workspaceById = new Map((workspaces || []).map((w) => [w.workspace_id, w]));
@@ -262,9 +312,10 @@ export function mergeSidebarModel({ historySessions = [], livePanes = [], worksp
       workspaceId: pane.workspace_id,
       project,
       sessionId,
+      pid: panePid(pane),
       provider: paneProvider(pane),
       model: pane.model || pane.metadata?.tokens?.model || null,
-      agentStatus: pane.agent_status || null,
+      ...paneStatusFields(pane, cliStatusForPane(pane, cliStatuses)),
       isLiveInteractive: pane.isLiveInteractive === true,
       title: pane.terminal_title || pane.label || 'Live session',
       lastActiveMs: currentTime.getTime(),
@@ -288,6 +339,7 @@ export function mergeSidebarModel({ historySessions = [], livePanes = [], worksp
     const lastDt = parseLocalDateTime(row.lastActive);
     const lastActiveMs = lastDt ? lastDt.getTime() : 0;
     const live = liveBySessionId.get(row.id);
+    const cli = cliFor(row.id);
     byId.set(row.id, {
       id: row.id,
       project: (row.project || '').trim(),
@@ -309,8 +361,14 @@ export function mergeSidebarModel({ historySessions = [], livePanes = [], worksp
       isLiveInteractive: live?.isLiveInteractive === true,
       dormant: !live && sleptSince(dormantSessions?.[row.id], lastActiveMs),
       paneId: live?.paneId ?? null,
+      panePid: live?.pid ?? null,
       workspaceId: live?.workspaceId ?? null,
-      agentStatus: live?.agentStatus ?? null,
+      agentStatus: live ? live.agentStatus : cli?.status ?? null,
+      agentStatusKind: live?.agentStatusKind ?? null,
+      agentStatusMsg: live?.agentStatusMsg ?? null,
+      agentStatusSeq: live?.agentStatusSeq ?? null,
+      agentWaitingFor: live ? live.agentWaitingFor : cli?.waitingFor ?? null,
+      cliAlive: Boolean(cli),
       isWindowsEra: isWindowsEra(row.project),
       isInternalSession: Boolean(row.isInternalSession),
       entrypoint: row.entrypoint || null,
@@ -337,8 +395,14 @@ export function mergeSidebarModel({ historySessions = [], livePanes = [], worksp
       model: live.model || null,
       isLive: true,
       paneId: live.paneId,
+      panePid: live.pid,
       workspaceId: live.workspaceId,
       agentStatus: live.agentStatus,
+      agentStatusKind: live.agentStatusKind,
+      agentStatusMsg: live.agentStatusMsg,
+      agentStatusSeq: live.agentStatusSeq,
+      agentWaitingFor: live.agentWaitingFor,
+      cliAlive: Boolean(cliFor(live.sessionId)),
       isWindowsEra: isWindowsEra(live.project),
       isChildTask: isChildTask(live.title),
       childTitle: isChildTask(live.title) ? childTaskTitle(live.title) : null,
