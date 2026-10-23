@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { replyStore, useQuestionReply } from './use-question-reply.js';
 import { frameReply } from './question-reply.cjs';
+import { sendNowCount } from './send-now.cjs';
 import './question-reply.css';
 import { createPortal } from 'react-dom';
 import { ProjectIcon } from './ProjectIcon.jsx';
@@ -106,6 +107,7 @@ export function CommandBar({
   sendState,
   onSend,
   onInterrupt,
+  onSendNow,
   liveVoice,
   onCancelQueued,
   onResume,
@@ -275,6 +277,7 @@ export function CommandBar({
   // Settings that TYPE into the pty need a Harbor-controlled pane; lists and
   // current-state reads work for any session.
   const drivable = Boolean(session && pane && !readOnly && !externalLive && !externallyControlled);
+  const claudeQueued = sendNowCount({ header, provider: session?.provider, drivable, pending, queuedItem });
   const disabledReason = !session
     ? 'Select a session window first'
     : readOnly
@@ -1079,6 +1082,19 @@ export function CommandBar({
             <span className={`ustat-phase${phaseText || chainText ? '' : ' empty'}`} title={phaseText || chainText || undefined}>
               {phaseText || chainText ||' '}
             </span>
+            {claudeQueued > 0 && onSendNow ? (
+              <span className="queued-mini claude-queued">
+                {`${claudeQueued} queued`}
+                <button
+                  type="button"
+                  className="send-now"
+                  title="Send the queued message into the running turn now (Ctrl+X Ctrl+S)"
+                  onClick={() => onSendNow()}
+                >
+                  Send now
+                </button>
+              </span>
+            ) : null}
             {queuedItem ? (
               <span className="queued-mini" title={queuedItem.textPreview}>
                 queued

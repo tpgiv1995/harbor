@@ -79,6 +79,7 @@ export function Stage({
   onNewSession,
   onSend,
   onInterrupt,
+  onSendNow,
   liveVoice,
   onCancelQueued,
   onResume,
@@ -410,6 +411,7 @@ export function Stage({
         sendState={selected ? sendStates.get(selected.id) || null : null}
         onSend={onSend}
         onInterrupt={onInterrupt}
+        onSendNow={onSendNow}
         liveVoice={liveVoice}
         onCancelQueued={onCancelQueued}
         onResume={onResume}

@@ -1110,6 +1110,26 @@ function App() {
     return window.harbor.session.interrupt({ paneId: pane.paneId });
   }, [selectedId, sessionsWithSynthetic, resolvePane]);
 
+  // A refusal (nothing queued any more, Harbor still typing, read-only pane)
+  // shows on the command bar like a failed send, instead of a click that
+  // silently did nothing.
+  const sendNowSelected = useCallback(async () => {
+    const session = sessionsWithSynthetic.get(selectedId);
+    const pane = session ? resolvePane(session) : null;
+    if (!pane?.paneId) return { ok: false, reason: 'no live pane to send into' };
+    const result = await window.harbor.session.sendNow({
+      sessionId: session.id, paneId: pane.paneId, workspaceId: pane.workspaceId,
+    }).catch((error) => ({ ok: false, reason: String(error?.message || error) }));
+    if (!result?.ok) {
+      setSendStates((prev) => {
+        const next = new Map(prev);
+        next.set(session.id, { sessionId: session.id, phase: 'error', detail: result?.reason || 'Send now failed' });
+        return next;
+      });
+    }
+    return result;
+  }, [selectedId, sessionsWithSynthetic, resolvePane]);
+
   const cancelQueuedSend = useCallback(async (sendId) => {
     if (!selectedId || !sendId) return { ok: false, reason: 'queued message not found' };
     return window.harbor.session.cancelSend({ sessionId: selectedId, sendId });
@@ -1718,6 +1738,7 @@ function App() {
                 onNewSession={openNewSession}
                 onSend={sendToSelected}
                 onInterrupt={interruptSelected}
+                onSendNow={sendNowSelected}
                 liveVoice={voice}
                 onCancelQueued={cancelQueuedSend}
                 onResume={resumeSelected}

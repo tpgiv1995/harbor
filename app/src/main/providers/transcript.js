@@ -625,6 +625,19 @@ class TranscriptParser {
     // transcript FILE on demand instead; see providers/pending-ask.js. There is
     // deliberately no second copy of that state here to drift from it.
     this.queuedByText = new Map(); // normalized text -> queued user block (to attach its images)
+    // Claude's own input queue, mirrored from its queue-operation records:
+    // `enqueue` adds (with content), `dequeue` pops the oldest (no content),
+    // `remove` drops one by content (absorbed mid-turn, or pulled back to the
+    // composer). Every enqueue is tracked, task notifications included, because
+    // a dequeue carries no content and pops whatever is oldest. Only the
+    // human-typed entries count toward header.queuedPending, which is what the
+    // command bar's "Send now" offers to flush.
+    this.claudeQueue = []; // [{ key, human }]
+    // A dequeue is followed by the user record that delivers it. A typed
+    // prompt with no dequeue before it was typed at an idle composer, and
+    // Claude drains its queue before it is idle, so any human entry still
+    // mirrored then is left over from a CLI that died with it queued.
+    this.dequeuedSinceUser = false;
     this.header = {
       model: seedModel && seedModel !== 'default' ? modelDisplay(seedModel) : null,
       effort: null,
@@ -639,6 +652,7 @@ class TranscriptParser {
       // transcript event.
       cacheTtlMs: null,
       cacheTouchedMs: null,
+      queuedPending: 0, // human messages sitting in Claude's queue (see claudeQueue)
     };
     this.seq = 0;
     // Once set, remains true: any evidence of a 1M context window (high-water
@@ -657,6 +671,27 @@ class TranscriptParser {
     if (tokens) {
       this.header.contextPct = Math.max(1, Math.min(99, Math.round((tokens / windowTokens) * 100)));
     }
+  }
+
+  countQueued() {
+    this.header.queuedPending = this.claudeQueue.filter((item) => item.human).length;
+  }
+
+  // Once per user record that carries text (a tool_result record carries
+  // none). A typed prompt that no dequeue delivered started its turn at an idle
+  // composer, so no human message can still be in Claude's queue: drop the
+  // human entries a dead CLI left behind (see dequeuedSinceUser). Task
+  // notifications stay, so the next dequeue still pops in step.
+  noteUserRecord(obj, content) {
+    const parts = Array.isArray(content) ? content.filter((part) => part?.type === 'text') : null;
+    if (typeof content !== 'string' && !parts?.length) return;
+    const text = typeof content === 'string' ? content : parts.map((part) => part.text || '').join('\n');
+    const delivered = this.dequeuedSinceUser;
+    this.dequeuedSinceUser = false;
+    const typed = !obj.isMeta && !isCompactContinuation(obj, text) && Boolean(userTextFor(text));
+    if (!typed || delivered || !this.header.queuedPending) return;
+    this.claudeQueue = this.claudeQueue.filter((item) => !item.human);
+    this.countQueued();
   }
 
   push(block) {
@@ -768,6 +803,7 @@ class TranscriptParser {
 
     if (obj.type === 'user') {
       const content = obj.message?.content;
+      this.noteUserRecord(obj, content);
       if (typeof content === 'string') {
         if (obj.isMeta) return changed;
         if (isCompactContinuation(obj, content)) {
@@ -850,8 +886,23 @@ class TranscriptParser {
     // messages); any pasted IMAGES are on the paired queued_command attachment
     // (whose prompt is empty for text-only messages). Render the enqueue as a
     // user bubble and attach the queued_command's images to it by matching text.
+    if (obj.type === 'queue-operation' && obj.operation === 'dequeue') {
+      this.claudeQueue.shift();
+      this.dequeuedSinceUser = true;
+      this.countQueued();
+      return changed;
+    }
+    if (obj.type === 'queue-operation' && obj.operation === 'remove') {
+      const key = normalizeQueuedKey(obj.content);
+      const at = this.claudeQueue.findIndex((item) => item.key === key);
+      if (at !== -1) this.claudeQueue.splice(at, 1);
+      this.countQueued();
+      return changed;
+    }
     if (obj.type === 'queue-operation' && obj.operation === 'enqueue') {
       const user = userTextFor(obj.content);
+      this.claudeQueue.push({ key: normalizeQueuedKey(obj.content), human: Boolean(user) });
+      this.countQueued();
       if (user) {
         const block = this.push({ kind: 'user', text: user.text, command: user.command, ts, queued: true, ...(isPeerMessage(obj.content) ? { peer: true } : {}) });
         this.queuedByText.set(normalizeQueuedKey(user.text), block);

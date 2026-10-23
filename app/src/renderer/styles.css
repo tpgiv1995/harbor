@@ -3072,6 +3072,18 @@ button { font-family: inherit; }
 
 .queued-mini button:hover { background: rgba(255, 255, 255, 0.09); color: var(--fnt); }
 
+.queued-mini button.send-now {
+  width: auto;
+  height: 18px;
+  padding: 0 7px;
+  margin-left: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+  color: var(--fnt);
+  font: inherit;
+  white-space: nowrap;
+}
+
 .ubar .field {
   flex: 1;
   min-width: 0;

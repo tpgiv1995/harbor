@@ -87,6 +87,9 @@ const MUTATING = new Set([
   'session:send',
   'session:menu-answer',
   'session:interrupt',
+  // Types the ctrl+x ctrl+s chord into a live pty (sendInput), so it is
+  // authenticated like every other path that reaches a pane's keys.
+  'session:send-now',
   'session:delete',
   'worker:close',
   'terminal:send-input',
@@ -271,6 +274,7 @@ const METHOD_NAMES = [
   'session:send-queue',
   'session:cancel-send',
   'session:interrupt',
+  'session:send-now',
   'session:delete',
   'capabilities:get',
   'capabilities:permission-mode',

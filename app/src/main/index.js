@@ -1322,6 +1322,14 @@ function registerIpc() {
     if (!paneId) return { ok: false, reason: 'no live pane to interrupt' };
     return terminalBridge.sendInput(paneId, '\x1b');
   });
+  // Flush the message waiting in Claude's own queue into the running turn
+  // (the CLI's ctrl+x ctrl+s chord; see sessionSend.sendNow).
+  ipcMain.handle('session:send-now', (_event, { sessionId, paneId, workspaceId } = {}) => {
+    if (sidebarBridge.isDelegatedPane(paneId) || (sessionId && sidebarBridge.isDelegated(sessionId))) {
+      return { ok: false, reason: 'Delegated agents are read-only.' };
+    }
+    return sessionSend.sendNow({ sessionId, pane: { paneId, workspaceId } });
+  });
 
   // Delete a session for good: moves its transcript to a recoverable trash
   // folder (see session-delete.js). The rail's fs-watch drops the row once the

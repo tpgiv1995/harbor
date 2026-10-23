@@ -20,6 +20,7 @@ const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFrom
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
 const { planResumeNudge } = require('./resume-nudge.js');
+const { sendNowChord, showsSendNowHint } = require('./send-now.js');
 
 // Claude Code's project-dir munge: every non-alphanumeric cwd character
 // becomes '-' ('/home/you/dev/harbor' -> '-home-you-dev-harbor').
@@ -2455,6 +2456,48 @@ function createSessionSend(deps) {
     } finally { planMoves.delete(sessionId); }
   };
 
+  // "Send now": flush the message waiting in CLAUDE's queue into the running
+  // turn with the CLI's own chord (send-now.js). Two races refuse it before a
+  // key is pressed. Harbor's own send may still be typing into this pane
+  // (deliver holds no pane mutex), and a chord landing mid-type mixes a half
+  // draft into the composer. And the queue the button counted (transcript
+  // queue-operation records) may already be empty by the time it is clicked,
+  // or hold a message from a CLI that has since died; the CLI draws its "ctrl+x
+  // ctrl+s to send now" hint only while it really holds one, so the screen is
+  // re-read under the pane mutex and the chord goes in only if the hint is on
+  // it.
+  const sendNow = ({ sessionId, pane } = {}) => {
+    const paneId = pane?.paneId;
+    if (!paneId) return Promise.resolve({ ok: false, reason: 'no live pane to send into' });
+    const busy = () => planMoves.has(sessionId) || inFlight.has(sessionId) || getQueueState(sessionId).count > 0;
+    const busyResult = { ok: false, reason: 'Harbor is still sending a message to this session; Send now waits for it.' };
+    if (busy()) return Promise.resolve(busyResult);
+    return serializeOnPane(paneId, async () => {
+      if (busy()) return busyResult;
+      // The VISIBLE screen only: scrollback can still carry a hint the CLI
+      // has since redrawn away.
+      let screen = '';
+      try { screen = await readPane(paneId, MENU_READ_LINES, 'visible'); } catch { /* refused below */ }
+      if (!showsSendNowHint(screen)) {
+        return { ok: false, reason: 'Claude is not holding a queued message, so there is nothing to send now.' };
+      }
+      terminalBridge.holdControl?.(paneId);
+      try {
+        const typeKey = async (key) => {
+          let result = terminalBridge.sendInput(paneId, key);
+          if (result?.ok === false) {
+            await acquireControl(paneId, pane.workspaceId);
+            result = terminalBridge.sendInput(paneId, key);
+          }
+          return result;
+        };
+        return await sendNowChord(typeKey, sleep);
+      } finally {
+        terminalBridge.releaseControlHold?.(paneId);
+      }
+    });
+  };
+
   // Did the pane's screen move on after a keystroke that should end or advance
   // a dialog. The CLI needs a moment to redraw, so an unchanged first read gets
   // one more look before it counts as "did not register".
@@ -2639,6 +2682,7 @@ function createSessionSend(deps) {
     confirmNeedle,
     getQueueState,
     cancelQueued,
+    sendNow,
   };
 }
 

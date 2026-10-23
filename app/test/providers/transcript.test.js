@@ -395,6 +395,58 @@ test('an image message while busy renders once with its image attached (no dup t
   assert.deepEqual(p.blocks[0].images, [{ mediaType: 'image/png', dataUri: TINY_PNG_URI }]);
 });
 
+// Claude's own queue, for the command bar's "N queued · Send now". A dequeue
+// carries no content and pops the oldest entry, so every enqueue is tracked;
+// only human-typed ones count.
+const queueOp = (operation, content) => ({ type: 'queue-operation', operation, ...(content === undefined ? {} : { content }), timestamp: TS, sessionId: 's1' });
+const TASK_NOTE = '<task-notification>\n<task-id>t1</task-id>\n</task-notification>';
+
+test('queuedPending mirrors Claude queue operations and counts only human messages', () => {
+  const p = new TranscriptParser();
+  assert.equal(p.header.queuedPending, 0);
+  p.applyLine(queueOp('enqueue', TASK_NOTE));
+  p.applyLine(queueOp('enqueue', 'first follow-up'));
+  p.applyLine(queueOp('enqueue', 'second  follow-up'));
+  assert.equal(p.header.queuedPending, 2, 'the task notification is not a message the user typed');
+  p.applyLine(queueOp('dequeue'));
+  assert.equal(p.header.queuedPending, 2, 'the dequeue popped the OLDEST entry, the notification');
+  p.applyLine(queueOp('remove', 'second follow-up'));
+  assert.equal(p.header.queuedPending, 1, 'remove matches by normalized content');
+  p.applyLine(queueOp('dequeue'));
+  p.applyLine(userLine('first follow-up'));
+  assert.equal(p.header.queuedPending, 0);
+  p.applyLine(queueOp('dequeue'));
+  assert.equal(p.header.queuedPending, 0, 'a dequeue on an empty mirror stays at zero');
+});
+
+test('a prompt typed at an idle composer clears human entries a dead CLI left queued', () => {
+  const p = new TranscriptParser();
+  p.applyLine(queueOp('enqueue', 'stranded by a crash'));
+  p.applyLine(queueOp('enqueue', TASK_NOTE));
+  assert.equal(p.header.queuedPending, 1);
+  // The resumed run: the user types at an idle composer, so no dequeue
+  // delivered this prompt, and Claude holds nothing it typed.
+  p.applyLine(userLine('a fresh prompt after resume'));
+  assert.equal(p.header.queuedPending, 0);
+  // The notification is kept so the next dequeue still pops in step.
+  p.applyLine(queueOp('enqueue', 'typed during the new turn'));
+  p.applyLine(queueOp('dequeue'));
+  assert.equal(p.header.queuedPending, 1);
+});
+
+test('a queued message delivered by its dequeue leaves the rest of the queue counted', () => {
+  const p = new TranscriptParser();
+  p.applyLine(queueOp('enqueue', 'A'));
+  p.applyLine(queueOp('enqueue', 'B'));
+  p.applyLine(queueOp('dequeue'));
+  p.applyLine(userLine('A'));
+  assert.equal(p.header.queuedPending, 1, 'B is still waiting');
+  // Neither a tool result nor a compaction summary is a typed prompt.
+  p.applyLine(userLine([{ type: 'tool_result', tool_use_id: 'x', content: 'ok' }]));
+  p.applyLine(userLine('This session is being continued from a previous conversation that ran out of context.'));
+  assert.equal(p.header.queuedPending, 1);
+});
+
 test('a non-human queued_command image is not rendered', () => {
   const p = new TranscriptParser();
   p.applyLine(queuedCommandLine([imagePart()], { kind: 'system' }));
