@@ -46,12 +46,14 @@ const { emptyDraft, resolveDraftAlias } = draftStore;
 import gridNav from './stage/grid-nav.cjs';
 import unseenCompletions from './stage/unseen-completions.cjs';
 import taskbarBadge from './stage/taskbar-badge.cjs';
+import { useQuickAnswerKeys } from './stage/use-quick-answer-keys.js';
+import { useSessionReveal } from './stage/use-session-reveal.js';
 import handoffChainLib from './stage/handoff-chain.cjs';
 import * as sidebarModelShared from '../shared/sidebar-model.js';
 import './styles.css';
 
 const {
-  loadSeenStore, seedSeenStore, markSeen, attentionFor, badgeCounts,
+  loadSeenStore, seedSeenStore, markSeen, attentionFor, badgeCounts, needsYouIds,
 } = unseenCompletions;
 const { planTaskbarBadge, createTaskbarBadgeScheduler } = taskbarBadge;
 // One scheduler for the renderer's lifetime: it remembers what the taskbar
@@ -922,7 +924,9 @@ function App() {
         background: backgroundBusy(session, header),
         // A question waiting in the hook lane is the strongest blocked signal
         // there is: Claude is inside the tool call until the form answers.
-        blocked: asksBySession.has(session.id) || terminalDialogs.has(id) || (header ? Boolean(header.blocked) : session.agentStatus === 'blocked'),
+        // The CLI's own OSC 7501 status counts even with a transcript open: the
+        // transcript never says "waiting on a permission prompt", the CLI does.
+        blocked: asksBySession.has(session.id) || terminalDialogs.has(id) || Boolean(header?.blocked) || session.agentStatus === 'blocked',
         isSelected: id === selectedId,
         // Orchestration workers and BATCH TITLE children finish all day; they
         // are not waiting for Pat, and counting them pinned the badge at 9+.
@@ -945,6 +949,21 @@ function App() {
     () => new Set(attentionDescriptors.filter((d) => d.blocked).map((d) => d.id)),
     [attentionDescriptors],
   );
+
+  // "N need you" in the title bar, and the rail filter it opens: the same
+  // blocked evidence as waitingIds, minus machine-made sessions, and whatever
+  // is selected (needsYouIds). Keyed by its ids so a transcript update that
+  // changes nothing hands the rail the same Set.
+  const needsYouKey = needsYouIds(attentionDescriptors).join('\n');
+  const needsYou = useMemo(() => new Set(needsYouKey ? needsYouKey.split('\n') : []), [needsYouKey]);
+  const [needsYouOnly, setNeedsYouOnly] = useState(false);
+  // Nothing left waiting: the filter has nothing to show, so it lets go.
+  useEffect(() => { if (needsYouOnly && needsYou.size === 0) setNeedsYouOnly(false); }, [needsYouOnly, needsYou]);
+  const toggleNeedsYou = useCallback(() => {
+    if (!needsYouOnly) setView('agents');
+    setNeedsYouOnly(!needsYouOnly);
+  }, [needsYouOnly, setView]);
+  const clearNeedsYou = useCallback(() => setNeedsYouOnly(false), []);
 
   // Taskbar status projects the same descriptors as the rail pips, with one
   // deliberate difference (badgeCounts): blocked is a LIVE state that ignores
@@ -994,6 +1013,10 @@ function App() {
   const prevControlRef = useRef(null);
   const selectedSession = sessionsWithSynthetic.get(selectedId) || null;
   const selectedPaneId = selectedSession ? resolvePane(selectedSession)?.paneId || null : null;
+  // Cmd/Ctrl+Shift+Y / N answer the selected window's permission prompt.
+  useQuickAnswerKeys(selectedSession, selectedSession ? resolvePane(selectedSession) : null);
+  // A clicked notification opens (or selects) the window it was about.
+  useSessionReveal(sessionsWithSynthetic, openSession);
   useEffect(() => {
     const session = selectedSession;
     const pane = session ? resolvePane(session) : null;
@@ -1635,6 +1658,9 @@ function App() {
         onNewSession={openNewSession}
         profiles={profiles}
         liveCount={liveCount}
+        needsYouCount={needsYou.size}
+        needsYouActive={needsYouOnly}
+        onToggleNeedsYou={toggleNeedsYou}
         stageLayout={stageLayout}
         onToggleStageLayout={toggleStageLayout}
         workers={workers}
@@ -1659,6 +1685,9 @@ function App() {
           openSessionIds={openSessionIds}
           selectedSessionId={selectedId}
           attention={attention}
+          needsYou={needsYou}
+          needsYouOnly={needsYouOnly}
+          onClearNeedsYou={clearNeedsYou}
           searchRef={searchRef}
           onNewSession={openNewSession}
           view={view}

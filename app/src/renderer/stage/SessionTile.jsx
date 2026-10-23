@@ -13,7 +13,9 @@ import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
 import { terminalView } from './terminal-view.cjs';
 import { copyText } from './md.jsx';
-import { runStateCue } from '../../shared/session-run-state.cjs';
+import { runStateCue, canQuickAnswer } from '../../shared/session-run-state.cjs';
+import { QuickAnswer } from './QuickAnswer.jsx';
+import { useNotifyPrefs, setSessionMuted } from '../notify-prefs-store.js';
 import { createPortal } from 'react-dom';
 
 const EFFORT_LABEL = { low: 'low', medium: 'med', high: 'high', xhigh: 'xhigh', max: 'max' };
@@ -207,6 +209,8 @@ export const SessionTile = memo(forwardRef(function SessionTile({
 }, ref) {
   const { profiles } = useProfiles();
   const [copiedId, setCopiedId] = useState(false);
+  const notifyPrefs = useNotifyPrefs();
+  const muted = notifyPrefs.muted.has(session.id);
   const [taskTip, setTaskTip] = useState(null);
   const header = headerForOwnedPane(session, pane, data?.header || null);
   const blocks = useMemo(() => data?.blocks || [], [data?.blocks]);
@@ -319,6 +323,24 @@ export const SessionTile = memo(forwardRef(function SessionTile({
             {pane && !readOnly ? (
               <button
                 type="button"
+                className={`ico tile-bell${muted || !notifyPrefs.enabled ? ' off' : ''}`}
+                title={!notifyPrefs.enabled
+                  ? 'Notifications are off for every window (app menu)'
+                  : muted ? 'Unmute: notify when this window finishes or needs you' : 'Mute notifications for this window'}
+                aria-label={muted ? 'Unmute notifications for this window' : 'Mute notifications for this window'}
+                aria-pressed={muted}
+                onClick={(e) => { e.stopPropagation(); setSessionMuted(session.id, !muted); }}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 1.5a4.5 4.5 0 0 0-4.5 4.5v2.6L2 11h12l-1.5-2.4V6A4.5 4.5 0 0 0 8 1.5Z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+                  <path d="M6.2 12.8a1.9 1.9 0 0 0 3.6 0" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                  {muted || !notifyPrefs.enabled ? <path d="M2.5 2.5l11 11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /> : null}
+                </svg>
+              </button>
+            ) : null}
+            {pane && !readOnly ? (
+              <button
+                type="button"
                 className={`ico tty${tty ? ' on' : ''}`}
                 title={tty ? 'Back to the conversation view' : 'Raw terminal (permission prompts live here)'}
                 onClick={(e) => { e.stopPropagation(); onToggleTty(); }}
@@ -367,6 +389,11 @@ export const SessionTile = memo(forwardRef(function SessionTile({
               <span className="runstate-dot" aria-hidden="true" />
               <span className="runstate-verb">{runState.label}</span>
             </span>
+          ) : null}
+          {/* Allow / Deny right on the header while the CLI reports a permission
+              prompt; a question held by the hook lane is answered on its form. */}
+          {canQuickAnswer(session, pane, readOnly) && !pendingAsk ? (
+            <QuickAnswer pane={pane} sessionId={session.id} expect={session.agentStatusMsg} expectSeq={session.agentStatusSeq ?? null} listenKeys={selected} />
           ) : null}
           {workMeter ? (
             <span className="work-meter" title={workMeter.title}>{workMeter.label}</span>

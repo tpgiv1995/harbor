@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createNotifier, COALESCE_MS, NOTIFY_STATUSES, WORKING } = require('../../src/main/notify.js');
+const { createNotifier, createStatusQueue, COALESCE_MS, NOTIFY_STATUSES, WORKING } = require('../../src/main/notify.js');
 
 function makeNotifier({ focusedPaneId = null, windowFocused = false } = {}) {
   const calls = [];
@@ -190,4 +190,116 @@ test('notifier: destroy clears pending batch', (t, done) => {
   assert.equal(notifier._pendingCount(), 0);
   assert.equal(calls.length, 0);
   done();
+});
+
+// --- one window, two slots per pane ----------------------------------------
+// The window used to keep only the FIRST entry per pane, so a prompt that came
+// within COALESCE_MS of a finish was never announced. A pane now has a slot
+// for a finish and one for a prompt; the newer entry replaces the older in
+// its slot, and at flush a prompt still on screen wins.
+
+test('notifier: a prompt that arrives inside the window of a finish is the one announced', () => {
+  const { notifier, calls } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'done'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-a', 'blocked'));
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['Session slot-a needs you']);
+});
+
+test('notifier: a prompt answered inside the window gives way to the finish after it', () => {
+  const { notifier, calls } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'blocked'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-b', 'done'));
+  assert.equal(notifier._pendingCount(), 2, 'one prompt slot and one finish slot');
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['Session slot-b finished']);
+});
+
+test('notifier: a prompt answered while the turn goes on toasts nothing and leaves no badge', () => {
+  const { notifier, calls, badgeCounts } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-c', 'working'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-c', 'blocked'));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-c', 'working'));
+  notifier._flushNow();
+  assert.equal(calls.length, 0);
+  assert.equal(badgeCounts.at(-1), 0);
+});
+
+test('notifier: a newer finish replaces the older one in its slot', () => {
+  const { notifier, calls } = makeNotifier();
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'working', { title: 'Old title' }));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'idle', { title: 'Old title' }));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'working', { title: 'New title' }));
+  notifier.onAgentStatusChanged(agentStatusEvent('slot-d', 'done', { title: 'New title' }));
+  assert.equal(notifier._pendingCount(), 1);
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['New title finished']);
+});
+
+test('notifier: a coalesced toast counts prompts apart from finishes', () => {
+  const { notifier, calls } = makeNotifier();
+  for (const [paneId, status] of [['mix-a', 'done'], ['mix-b', 'idle'], ['mix-c', 'blocked']]) {
+    notifier.onAgentStatusChanged(agentStatusEvent(paneId, 'working'));
+    notifier.onAgentStatusChanged(agentStatusEvent(paneId, status));
+  }
+  notifier._flushNow();
+  assert.deepEqual(calls.map((call) => call.body), ['2 sessions finished · 1 needs you']);
+});
+
+// --- status queue ----------------------------------------------------------
+
+test('status queue: a working never overtakes the idle that is waiting on its scan', async () => {
+  const delivered = [];
+  let release;
+  const queue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'idle' ? new Promise((resolve) => { release = resolve; }) : null),
+    deliver: (event) => delivered.push(event.data.agent_status),
+  });
+  queue(agentStatusEvent('q', 'working'));
+  queue(agentStatusEvent('q', 'idle'));
+  const last = queue(agentStatusEvent('q', 'working'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(delivered, ['working'], 'the second working waits behind the idle');
+  release();
+  await last;
+  assert.deepEqual(delivered, ['working', 'idle', 'working']);
+});
+
+test('status queue: a failed scan still delivers its event', async () => {
+  const delivered = [];
+  const queue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'done' ? Promise.reject(new Error('scan failed')) : null),
+    deliver: (event) => delivered.push(event.data.agent_status),
+  });
+  queue(agentStatusEvent('q', 'working'));
+  await queue(agentStatusEvent('q', 'done'));
+  const thrown = createStatusQueue({ scanFor: () => { throw new Error('sync'); }, deliver: (event) => delivered.push(event.data.agent_status) });
+  await thrown(agentStatusEvent('q', 'idle'));
+  assert.deepEqual(delivered, ['working', 'done', 'idle']);
+});
+
+test('status queue: the notifier ends on the real state, so the next finish still toasts', async () => {
+  const { notifier, calls } = makeNotifier();
+  let release;
+  const queue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'idle' ? new Promise((resolve) => { release = resolve; }) : null),
+    deliver: (event) => notifier.onAgentStatusChanged(event),
+  });
+  queue(agentStatusEvent('real', 'working'));
+  queue(agentStatusEvent('real', 'idle'));
+  const resumed = queue(agentStatusEvent('real', 'working'));
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  await resumed;
+  notifier._flushNow();
+  assert.equal(calls.length, 1, 'the first turn finished');
+  // Out of order, the late idle would have been the last word and this done
+  // (idle -> done) would not count as a finish.
+  await queue(agentStatusEvent('real', 'done'));
+  notifier._flushNow();
+  assert.equal(calls.length, 2, 'the second turn finished too');
 });

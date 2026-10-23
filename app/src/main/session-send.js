@@ -363,6 +363,15 @@ const isWorkingTurn = (text) => {
   return WORKING_TURN_RE.test(bottom) && /[❯╭╰]/.test(text);
 };
 
+// The keeper's live OSC 7501 status off a `screen` read (daemon/screen.js), in
+// the shape a one-click answer is checked against; null when the CLI reports
+// none (an older keeper, or no status yet).
+function quickStatusFromScreen(screen) {
+  const own = screen?.status;
+  if (!own?.state) return null;
+  return { state: own.state, kind: own.kind ?? null, msg: own.msg ?? null, seq: Number.isInteger(own.seq) ? own.seq : null };
+}
+
 function createSessionSend(deps) {
   const {
     snapshot, // async () => normalized { panes: [], workspaces: [] }
@@ -371,6 +380,10 @@ function createSessionSend(deps) {
     // keeper's modeled cells (src/daemon/screen.js); a stripped scrape cannot
     // tell it from a typed draft.
     readSuggestion = async () => null,
+    // async (paneId) => the CLI's own OSC 7501 status as the keeper holds it
+    // right now ({ state, kind, msg, seq }), or null. Read with the screen, so
+    // it is as live as the dialog; a one-click answer is checked against it.
+    readQuickStatus = async () => null,
     terminalBridge,
     launchActions,
     getSessionMeta,
@@ -1584,6 +1597,51 @@ function createSessionSend(deps) {
       return { ok: true, action: 'cancel' };
     }
 
+    // ONE-CLICK ALLOW / DENY (the window chip, the rail row, the phone, the
+    // keyboard shortcut), offered while the CLI itself reports a permission
+    // prompt (OSC 7501 blocked/permission). Every click names the prompt it was
+    // shown for: `expect` is the CLI's own words ("approve Write: <path>") and
+    // `expectSeq` the keeper's per-change sequence. The button can be seconds
+    // stale (the rail, the phone, a shortcut on an old chip), and the CLI's msg
+    // is ELIDED, so two edits of one file read the same; an answer whose text
+    // or seq is not the live status's is refused, never aimed at whatever is on
+    // screen now. A keeper from before the seq reports none and the row has
+    // none to send: both null, the text alone decides. Only a dialog the parser
+    // recognises AS a permission prompt is answered. Allow is the plain
+    // one-time "Yes" (or an explicit "Yes, but ask again next time"), reached
+    // by the same verified number walk as any select, and Enter is pressed only
+    // if the dialog still shows the request that was checked. Anything that
+    // widens a permission ("don't ask again", "always allow", "keep allowing",
+    // "accept edits") is never a one-click answer. Deny is Esc, which the CLI
+    // takes as No (measured on CLI 2.1.301: Esc on "approve Write" -> idle).
+    let quickFrom = null;
+    if (action.type === 'permission-quick') {
+      if (!menu.permission) return { ok: false, reason: 'the prompt on screen is not a permission prompt' };
+      if (typeof action.expect !== 'string' || !action.expect) {
+        return { ok: false, reason: 'this answer does not say which prompt it is for; answer it in the window' };
+      }
+      const live = await Promise.resolve(readQuickStatus(paneId)).catch(() => null);
+      const liveSeq = Number.isInteger(live?.seq) ? live.seq : null;
+      const expectSeq = Number.isInteger(action.expectSeq) ? action.expectSeq : null;
+      if (live?.state !== 'blocked' || live.kind !== 'permission' || String(live.msg ?? '') !== action.expect
+        || expectSeq !== liveSeq) {
+        return { ok: false, reason: 'the prompt changed since it was shown; look at it before answering' };
+      }
+      quickFrom = menu;
+      if (action.decision === 'deny') {
+        await typeInto(paneId, workspaceId, MENU_KEYS.cancel);
+        return await screenMovedOn(paneId, menu)
+          ? { ok: true, action: 'deny' }
+          : { ok: false, reason: 'the prompt did not close after Esc' };
+      }
+      if (action.decision !== 'allow') return { ok: false, reason: 'unknown quick answer' };
+      const label = (o) => String(o.label || '').trim();
+      const yes = menu.options.find((o) => !o.isText && /^Yes\.?$/i.test(label(o)))
+        || menu.options.find((o) => !o.isText && /^Yes,? but ask again next time\.?$/i.test(label(o)));
+      if (!yes) return { ok: false, reason: 'no plain "Yes" option on this prompt; answer it in the window' };
+      action = { type: 'select', index: yes.index };
+    }
+
     // A multi-select question confirms on its own unnumbered row, drawn under
     // the last option and labelled "Submit" (or "Next", when more questions
     // follow). Measured 2026-08-09, and it corrected the belief this code was
@@ -1666,6 +1724,11 @@ function createSessionSend(deps) {
     if (feedback && (JSON.stringify(landed.permission) !== JSON.stringify(menu.permission)
       || landed.options.find(o => o.index === target)?.label !== option.label)) {
       return { ok: false, reason: 'the permission request changed; review it before sending feedback' };
+    }
+    // A one-click Allow presses Enter only on the request it checked above.
+    if (quickFrom && (JSON.stringify(landed.permission) !== JSON.stringify(quickFrom.permission)
+      || landed.options.find((o) => o.index === target)?.label !== option.label)) {
+      return { ok: false, reason: 'the prompt changed since it was shown; look at it before answering' };
     }
 
     // Tick a multi-select row. Space toggles, and the row draws its own state,
@@ -2649,4 +2712,5 @@ module.exports = {
   providerTranscriptDirs,
   composerSendState,
   isFleetView,
+  quickStatusFromScreen,
 };
