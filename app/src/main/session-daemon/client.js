@@ -89,6 +89,9 @@ function paneFor(session) {
     // When the daemon spawned it. session-send reads this to tell a pane that
     // is still starting from one that has run for hours.
     created_at: session.created_at ?? null,
+    // The keeper's last pty activity. The rail ages a pane that has no
+    // history row yet by this (sidebar-model mergeSidebarModel).
+    last_activity_at: session.last_activity_at ?? null,
   };
 }
 

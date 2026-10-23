@@ -40,3 +40,10 @@ test('06:00 boundary includes session just after roll and excludes just before',
   assert.ok(included >= boundary);
   assert.ok(excluded < boundary);
 });
+
+test('formatLocalDateTime writes the local format parseLocalDateTime reads', () => {
+  const { formatLocalDateTime } = require('../../src/shared/date-roll.cjs');
+  const date = new Date(2026, 0, 5, 7, 9, 41);
+  assert.equal(formatLocalDateTime(date), '2026-01-05 07:09');
+  assert.equal(parseLocalDateTime(formatLocalDateTime(date)).getTime(), new Date(2026, 0, 5, 7, 9).getTime());
+});

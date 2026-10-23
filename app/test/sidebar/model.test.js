@@ -779,3 +779,33 @@ test('a row is dormant only when Harbor put it to sleep after its last turn and 
   assert.equal(byId.closed.dormant, false, 'not in the ledger');
   assert.equal(mergeSidebarModel({ historySessions }).projects[0].sessions[0].dormant, false, 'no ledger, no dormant');
 });
+
+// A live pane with no history row (never prompted, or started without a known
+// session id) used to be stamped with the render time, so every such pane read
+// "Live session · just now" at the top of its project however long it had sat.
+test('an untitled live pane ages by the keeper clock, not the render time', () => {
+  const { formatRelative } = require('../../src/shared/date-roll.cjs');
+  const now = new Date('2026-01-10T12:00:00Z');
+  const workspaces = [{ workspace_id: 'w1', label: 'alpha' }, { workspace_id: 'w2', label: 'alpha' }, { workspace_id: 'w3', label: 'alpha' }];
+  const livePanes = [
+    { pane_id: 'p1', workspace_id: 'w1', agent: 'claude', created_at: '2026-01-10T09:59:50.000Z', last_activity_at: '2026-01-10T10:00:00.000Z' },
+    { pane_id: 'p2', workspace_id: 'w2', agent: 'claude', created_at: '2026-01-09T08:00:00.000Z' },
+    { pane_id: 'p3', workspace_id: 'w3', agent: 'claude' },
+  ];
+  const model = mergeSidebarModel({ now, workspaces, livePanes });
+  const rows = new Map(model.projects.find((p) => p.label === 'alpha').sessions.map((s) => [s.id, s]));
+  assert.equal(rows.get('live:p1').title, 'Live session');
+  assert.equal(rows.get('live:p1').lastActiveMs, Date.parse('2026-01-10T10:00:00.000Z'));
+  assert.equal(rows.get('live:p2').lastActiveMs, Date.parse('2026-01-09T08:00:00.000Z'), 'created_at when no activity was recorded');
+  // lastActive is the LOCAL "YYYY-MM-DD HH:MM" a history row carries, so the
+  // rail reads it as two hours old, not as hours away in the wrong direction.
+  assert.match(rows.get('live:p1').lastActive, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+  assert.equal(formatRelative(rows.get('live:p1').lastActive, now), '2h ago');
+  // A pane record with neither field still falls back to `now`.
+  assert.equal(rows.get('live:p3').lastActiveMs, now.getTime());
+  assert.deepEqual([...rows.keys()], ['live:p3', 'live:p1', 'live:p2']);
+  // A later render does not move a pane that did nothing.
+  const later = mergeSidebarModel({ now: new Date('2026-01-10T15:00:00Z'), workspaces, livePanes });
+  const again = new Map(later.projects.find((p) => p.label === 'alpha').sessions.map((s) => [s.id, s]));
+  assert.deepEqual(again.get('live:p1'), rows.get('live:p1'));
+});
