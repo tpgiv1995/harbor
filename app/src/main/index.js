@@ -367,7 +367,10 @@ function setAppBadgeCount(count) {
 // caller-minted id at launch, so its fresh pane opens on that real id. Codex
 // cannot receive an id at launch, so it still opens on a provisional pane key
 // and upgrades when the first message materializes its rollout.
-async function launchNewSession({ account, cwd, provider = 'claude', model, effort = 'default', command = null, prompt = null, stageSlot }) {
+async function launchNewSession({
+  account, cwd, provider = 'claude', model, effort = 'default', command = null, prompt = null, stageSlot,
+  permission = null, search = false, addDirs = [],
+}) {
   const [preIds, knownIds] = await Promise.all([
     sessionSend.paneIdSet(),
     provider === 'claude'
@@ -375,7 +378,7 @@ async function launchNewSession({ account, cwd, provider = 'claude', model, effo
       : sessionSend.listTranscriptIds(cwd, provider),
   ]);
   const sinceMs = Date.now();
-  const result = await launchActions.newSession({ account, cwd, provider, model, effort, prompt });
+  const result = await launchActions.newSession({ account, cwd, provider, model, effort, prompt, permission, search, addDirs });
   revealNewSessionWindow({
     result,
     provider,
@@ -1085,7 +1088,7 @@ function registerIpc() {
     return terminalBridge.requestFocusPane({ paneId, workspaceId });
   });
 
-  ipcMain.handle('resume-session', async (_event, { id, detectedHome }) => sessionOperationGate.run(id, async () => {
+  ipcMain.handle('resume-session', async (_event, { id, detectedHome, overrides = null }) => sessionOperationGate.run(id, async () => {
     if (sidebarBridge.isDelegated(id)) throw new Error('Delegated agents are read-only. Send instructions to their parent session.');
     // Snapshot BEFORE the launch so the fresh pane is identifiable the moment
     // the daemon creates it (no waiting on slow agent detection).
@@ -1099,6 +1102,8 @@ function registerIpc() {
         provider: meta.provider, cwd: meta.cwd, id,
         ...(meta.profileId ? { profileId: meta.profileId } : {}),
         ...(meta.configHome ? { configHome: meta.configHome } : {}),
+        // The config popover's Apply on a dormant codex session.
+        ...(overrides ? { overrides } : {}),
       });
       startResumeFollowup({
         sessionId: id,
@@ -1169,7 +1174,9 @@ function registerIpc() {
     return { text };
   });
 
-  ipcMain.handle('new-session', async (_event, { account, folder, sessionId, provider, model, effort, prompt, stageSlot }) => {
+  ipcMain.handle('new-session', async (_event, {
+    account, folder, sessionId, provider, model, effort, prompt, stageSlot, permission, search, addDirs,
+  }) => {
     let cwd;
     if (folder) {
       cwd = folder;
@@ -1188,7 +1195,7 @@ function registerIpc() {
     if (!stat?.isDirectory()) {
       throw new Error(`cannot start a session in ${cwd}: the folder does not exist on this machine — pick a folder`);
     }
-    return launchNewSession({ account, cwd, provider, model, effort, prompt, stageSlot });
+    return launchNewSession({ account, cwd, provider, model, effort, prompt, stageSlot, permission, search, addDirs });
   });
   ipcMain.handle('workflow:run', async (_event, { id, current = {} }) => {
     const launch = resolveWorkflowLaunch(id, current, harborConfig);

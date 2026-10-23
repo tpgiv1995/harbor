@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
-const { execFileSync, spawn } = require('node:child_process');
+const { execFile, execFileSync, spawn } = require('node:child_process');
 const path = require('node:path');
 const { SessionClient } = require('../../src/daemon/client.js');
 const { composeTaskPrompt } = require('../../src/renderer/tasks/assign-to-claude.cjs');
@@ -58,7 +58,7 @@ const CLAUDE = 'claude --dangerously-skip-permissions';
 test('codex 0.163 panes disable the new default Daybreak picker on launch and resume', () => {
   for (const args of [
     ['--provider', 'codex', 'hello'],
-    ['--provider', 'codex', '--resume-id', 'synthetic-session', 'hello'],
+    ['--provider', 'codex', '--resume-id', 'synthetic-session', '--recorded', 'hello'],
   ]) {
     for (const version of ['0.163.0', '0.164.0']) {
       const command = argv(args, { HARBOR_CODEX_VERSION: version });
@@ -213,14 +213,354 @@ test('codex still gets effort its own way, not claude flag', () => {
 
 test('codex resume argv is dry-run exact and CODEX_HOME crosses the daemon env allowlist', () => {
   const id = '019f8250-89cc-73d3-9c1a-30007bced9ff';
+  // --recorded: the caller already read the session's settings (none here), so
+  // bin/ai does not look for a rollout. The resume-settings specs cover that read.
   assert.equal(
-    argv(['--provider', 'codex', '--resume-id', id, '--home', '/tmp/codex-work']),
+    argv(['--provider', 'codex', '--resume-id', id, '--home', '/tmp/codex-work', '--recorded']),
     `codex resume --dangerously-bypass-approvals-and-sandbox ${id}`,
   );
   const clean = sessiondChildEnv({ CODEX_HOME: '/tmp/codex-work', CLAUDE_CONFIG_DIR: '/tmp/claude' });
   assert.equal(clean.CODEX_HOME, '/tmp/codex-work');
   assert.equal(clean.CLAUDE_CONFIG_DIR, '/tmp/claude');
   assert.equal(Object.hasOwn(clean, 'CURSOR_HOME'), false);
+});
+
+// CODEX PERMISSION MODES. Every codex launch and resume used to hard-code the
+// bypass flag, which stays the default; --permission picks another. The four
+// flag sets were checked against codex 0.160.0's parser: --approve-for-me
+// conflicts with -s, -a and the bypass flag, so auto is that flag alone.
+test('codex permission modes compose the flag sets codex accepts, full access by default', () => {
+  assert.equal(argv(['--provider', 'codex']), 'codex --dangerously-bypass-approvals-and-sandbox');
+  for (const [mode, flags] of [
+    ['auto', '--approve-for-me'],
+    ['ask', '-a on-request -s workspace-write -c approvals_reviewer=user'],
+    ['read-only', '-a on-request -s read-only -c approvals_reviewer=user'],
+    ['full', '--dangerously-bypass-approvals-and-sandbox'],
+  ]) {
+    assert.equal(
+      argv(['--provider', 'codex', '--permission', mode, '--model', 'gpt-6-sol']),
+      `codex ${flags} --model gpt-6-sol`,
+    );
+    // The pane controls still land straight after the permission flags, so
+    // the positionals stay last whichever shape those flags take.
+    assert.equal(
+      argv(['--provider', 'codex', '--permission', mode, '--model', 'gpt-6-sol', 'hello'], { HARBOR_CODEX_VERSION: '0.157.0' }),
+      `codex ${flags} --no-daemon -c tui.fullscreen_transcript=false --model gpt-6-sol hello`,
+    );
+    assert.match(
+      argv(['--provider', 'codex', '--permission', mode, 'hello'], { HARBOR_CODEX_VERSION: '0.163.0' }),
+      new RegExp(`^codex ${flags.replace(/[-.]/g, '\\$&')} --no-daemon -c tui\\.fullscreen_transcript=false -c features\\.cli_daybreak=false .* hello$`),
+    );
+  }
+  assert.throws(() => argv(['--provider', 'codex', '--permission', 'yolo']), /unknown --permission yolo/);
+  assert.throws(() => argv(['--permission', 'full']), /codex only/);
+  assert.throws(() => argv(['--provider', 'cursor', '--search']), /codex only/);
+});
+
+test('codex launch extras: --search and repeatable --add-dir, codex only', () => {
+  assert.equal(
+    argv(['--provider', 'codex', '--search', '--add-dir', '/tmp/a', '--add-dir', '/tmp/b', 'go']),
+    'codex --dangerously-bypass-approvals-and-sandbox --search --add-dir /tmp/a --add-dir /tmp/b go',
+  );
+  assert.throws(() => argv(['--add-dir', '/tmp/a']), /codex only/);
+  assert.throws(() => argv(['--provider', 'codex', '--add-dir', '--search']), /requires a value/);
+});
+
+// A SYNTHETIC rollout in the shape codex 0.160.0 writes: session_meta first,
+// a turn_context per turn, conversation items around them. No real content.
+function writeRollout(home, id, turnContexts, { padding = 0, compressed = false, archived = false } = {}) {
+  const dir = archived ? path.join(home, 'archived_sessions') : path.join(home, 'sessions', '2026', '10', '15');
+  fs.mkdirSync(dir, { recursive: true });
+  const lines = [{ type: 'session_meta', payload: { id, cwd: '/tmp/fixture', base_instructions: 'x'.repeat(20000) } }];
+  for (const payload of turnContexts) {
+    lines.push({ type: 'event_msg', payload: { type: 'task_started' } });
+    lines.push({ type: 'turn_context', payload: { cwd: '/tmp/fixture', ...payload } });
+    lines.push({ type: 'event_msg', payload: { type: 'item_completed', item: { type: 'AgentMessage', phase: 'final_answer', content: [{ type: 'Text', text: 'y'.repeat(padding) }] } } });
+    lines.push({ type: 'event_msg', payload: { type: 'task_complete' } });
+  }
+  const text = `${lines.map((line) => JSON.stringify({ timestamp: '2026-10-15T10:00:00Z', ...line })).join('\n')}\n`;
+  const file = path.join(dir, `rollout-2026-10-15T10-00-00-${id}.jsonl${compressed ? '.zst' : ''}`);
+  fs.writeFileSync(file, compressed ? require('node:zlib').zstdCompressSync(Buffer.from(text)) : text);
+  return file;
+}
+
+const AUTO_TURN = { model: 'gpt-6-sol', effort: 'high', approval_policy: 'on-request', approvals_reviewer: 'auto_review', sandbox_policy: { type: 'workspace-write', writable_roots: [] } };
+const READ_ONLY_TURN = { model: 'gpt-6-luna', effort: 'low', approval_policy: 'on-request', approvals_reviewer: 'user', sandbox_policy: { type: 'read-only' } };
+const ASK_TURN = { model: 'gpt-6-sol', effort: 'xhigh', approval_policy: 'on-request', approvals_reviewer: 'user', sandbox_policy: { type: 'workspace-write' } };
+const NO_ZSTD = typeof require('node:zlib').zstdCompressSync !== 'function' && 'runtime has no zstd';
+
+const refusal = (args, extraEnv) => {
+  try {
+    argv(args, extraEnv);
+  } catch (error) {
+    return { status: error.status, stdout: String(error.stdout || ''), stderr: String(error.stderr || '') };
+  }
+  return assert.fail(`expected bin/ai to refuse: ${args.join(' ')}`);
+};
+
+// `codex resume <id>` with no -m / -c comes back on the home's DEFAULT model
+// and effort, and every resume used to run under the bypass flag whatever the
+// session had been started with. The rollout's LAST turn_context names all three.
+test('a codex resume comes back on the model, effort and permission its rollout last recorded', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-resume-'));
+  const id = '01a14000-0000-7000-8000-000000000001';
+  try {
+    // The LAST turn_context wins: the session moved from a read-only turn to
+    // an ask turn on a different model.
+    writeRollout(home, id, [READ_ONLY_TURN, ASK_TURN]);
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', id], { CODEX_HOME: home }),
+      `codex resume -a on-request -s workspace-write -c approvals_reviewer=user --model gpt-6-sol -c model_reasoning_effort=xhigh ${id}`,
+    );
+    // Explicit flags (the popover's Apply on a dormant session) win over the record.
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', id, '--model', 'gpt-6-astra', '--permission', 'auto'], { CODEX_HOME: home }),
+      `codex resume --approve-for-me --model gpt-6-astra -c model_reasoning_effort=xhigh ${id}`,
+    );
+    // Through --home too, with a prompt, and with the pane controls after the
+    // permission flags.
+    assert.equal(
+      argv(['--provider', 'codex', '--home', home, '--resume-id', id, 'carry on'], { CODEX_HOME: '', HARBOR_CODEX_VERSION: '0.157.0' }),
+      `codex resume -a on-request -s workspace-write -c approvals_reviewer=user --no-daemon -c tui.fullscreen_transcript=false --model gpt-6-sol -c model_reasoning_effort=xhigh ${id} 'carry on'`,
+    );
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('sessions started under the bypass flag resume under it; a record naming no single mode resumes on the default', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-legacy-'));
+  const legacy = '01a14000-0000-7000-8000-000000000002';
+  const auto = '01a14000-0000-7000-8000-000000000003';
+  const ambiguous = '01a14000-0000-7000-8000-000000000004';
+  try {
+    writeRollout(home, legacy, [{ model: 'gpt-6-sol', effort: 'medium', approval_policy: 'never', approvals_reviewer: 'auto_review', sandbox_policy: { type: 'danger-full-access' } }]);
+    writeRollout(home, auto, [AUTO_TURN]);
+    // Workspace-write with no reviewer cannot name auto or ask.
+    writeRollout(home, ambiguous, [{ model: 'gpt-6-sol', approval_policy: 'on-request', sandbox_policy: { type: 'workspace-write' } }]);
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', legacy], { CODEX_HOME: home }),
+      `codex resume --dangerously-bypass-approvals-and-sandbox --model gpt-6-sol -c model_reasoning_effort=medium ${legacy}`,
+    );
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', auto], { CODEX_HOME: home }),
+      `codex resume --approve-for-me --model gpt-6-sol -c model_reasoning_effort=high ${auto}`,
+    );
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', ambiguous], { CODEX_HOME: home }),
+      `codex resume --dangerously-bypass-approvals-and-sandbox --model gpt-6-sol ${ambiguous}`,
+    );
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('the turn_context tail reader finds the last record across chunk boundaries', () => {
+  const { lastCodexTurnContext, codexRecordedSettings } = require('../../../bin/harbor-bin.cjs');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-tail-'));
+  try {
+    const file = writeRollout(home, 'tail-fixture', [
+      { ...AUTO_TURN, model: 'gpt-6-luna' },
+      { ...AUTO_TURN, model: 'gpt-6-sol', effort: 'xhigh' },
+    ], { padding: 5000 });
+    // Chunks far smaller than a line, and a few sizes so the boundary lands
+    // inside, before and after the wanted record.
+    for (const chunkBytes of [7, 64, 1000, 4096, 1 << 20]) {
+      assert.equal(lastCodexTurnContext(file, { chunkBytes }).model, 'gpt-6-sol', `chunk ${chunkBytes}`);
+    }
+    assert.equal(lastCodexTurnContext(path.join(home, 'missing.jsonl')), null);
+    // A slug that is not a plain slug never reaches argv.
+    assert.deepEqual(codexRecordedSettings({ model: "x'; rm", effort: 'high', sandbox_policy: { type: 'read-only' } }), { model: '', effort: 'high', permission: 'read-only' });
+    assert.deepEqual(codexRecordedSettings(null), { model: '', effort: '', permission: null });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// COMPRESSED, ARCHIVED AND MISSING ROLLOUTS. Codex can compress an old rollout
+// to .jsonl.zst and moves an archived chat to archived_sessions/. A rollout that
+// cannot be found or read REFUSES the resume rather than guessing the defaults,
+// which would hand a session that ran Read-only or Ask full access.
+test('a compressed codex rollout resumes on its recorded model, effort and permission', { skip: NO_ZSTD }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-zst-'));
+  const id = '01a14000-0000-7000-8000-000000000011';
+  try {
+    writeRollout(home, id, [AUTO_TURN, READ_ONLY_TURN], { compressed: true, padding: 5000 });
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', id], { CODEX_HOME: home }),
+      `codex resume -a on-request -s read-only -c approvals_reviewer=user --model gpt-6-luna -c model_reasoning_effort=low ${id}`,
+    );
+    const { readCodexResumeSettings } = require('../../../bin/harbor-bin.cjs');
+    assert.deepEqual(await readCodexResumeSettings(id, home), { model: 'gpt-6-luna', effort: 'low', permission: 'read-only' });
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('an archived codex rollout, plain or compressed, resumes on its recorded settings', { skip: NO_ZSTD }, () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-archived-'));
+  const plain = '01a14000-0000-7000-8000-000000000012';
+  const packed = '01a14000-0000-7000-8000-000000000013';
+  try {
+    writeRollout(home, plain, [ASK_TURN], { archived: true });
+    writeRollout(home, packed, [READ_ONLY_TURN], { archived: true, compressed: true });
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', plain], { CODEX_HOME: home }),
+      `codex resume -a on-request -s workspace-write -c approvals_reviewer=user --model gpt-6-sol -c model_reasoning_effort=xhigh ${plain}`,
+    );
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', packed], { CODEX_HOME: home }),
+      `codex resume -a on-request -s read-only -c approvals_reviewer=user --model gpt-6-luna -c model_reasoning_effort=low ${packed}`,
+    );
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a codex resume whose rollout cannot be found or read refuses instead of resuming on the defaults', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-missing-'));
+  const missing = '01a14000-0000-7000-8000-000000000014';
+  const corrupt = '01a14000-0000-7000-8000-000000000015';
+  try {
+    const out = refusal(['--provider', 'codex', '--resume-id', missing], { CODEX_HOME: home });
+    assert.equal(out.status, 1);
+    assert.equal(out.stdout, '', 'no command line is produced');
+    assert.match(out.stderr, new RegExp(`^ai: cannot resume codex session ${missing}: no rollout for it under `));
+    assert.match(out.stderr, /refusing rather than resuming it on the defaults/);
+    // One line, because the IPC caller surfaces the LAST stderr line.
+    assert.equal(out.stderr.trim().split('\n').length, 1);
+    // A rollout that exists but cannot be decompressed is refused the same way.
+    const dir = path.join(home, 'sessions', '2026', '10', '15');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `rollout-2026-10-15T10-00-00-${corrupt}.jsonl.zst`), 'not zstd at all');
+    const unreadable = refusal(['--provider', 'codex', '--resume-id', corrupt], { CODEX_HOME: home });
+    assert.match(unreadable.stderr, new RegExp(`^ai: cannot resume codex session ${corrupt}: its rollout .* (could not be read|cannot decompress it)`));
+    // A partial override still needs the record for what it leaves out...
+    assert.match(
+      refusal(['--provider', 'codex', '--resume-id', missing, '--permission', 'auto'], { CODEX_HOME: home }).stderr,
+      /cannot resume codex session/,
+    );
+    // ...while a caller that names all three needs nothing from it.
+    assert.equal(
+      argv(['--provider', 'codex', '--resume-id', missing, '--permission', 'read-only', '--model', 'gpt-6-sol', '--effort', 'high'], { CODEX_HOME: home }),
+      `codex resume -a on-request -s read-only -c approvals_reviewer=user --model gpt-6-sol -c model_reasoning_effort=high ${missing}`,
+    );
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a refused codex resume reaches the IPC caller as a clean error', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-ipc-'));
+  const missing = '01a14000-0000-7000-8000-000000000016';
+  const calls = [];
+  const actions = createLaunchActions({
+    profiles: [{ id: 'codex-home', provider: 'codex', configHome: home }],
+    execFile: (command, args, options, callback) => {
+      calls.push(args);
+      execFile(command, args, { ...options, env: { ...options.env, HARBOR_AI_DRY_RUN: '1', HARBOR_CONFIG_FILE: EMPTY_CONFIG, HARBOR_CODEX_VERSION: '0.155.1' } }, callback);
+    },
+  });
+  try {
+    await assert.rejects(
+      actions.resumeProviderSession({ provider: 'codex', cwd: home, id: missing, configHome: home }),
+      (error) => {
+        assert.match(error.message, new RegExp(`^ai: cannot resume codex session ${missing}: no rollout for it under `));
+        return true;
+      },
+    );
+    assert.equal(calls.length, 1);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// bin/ai runs on whatever `node` is on PATH, and zstd exists only from Node
+// 22.15 (23.8). Simulate a node without it: the .zst read refuses with a
+// reason that names the node and what zstd needs, and a caller that read the
+// record itself (--recorded, as Harbor's main does on Electron's Node)
+// resumes without bin/ai touching the rollout.
+const NO_ZSTD_PRELOAD = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-nozstd-')), 'no-zstd.cjs');
+fs.writeFileSync(NO_ZSTD_PRELOAD, "const zlib = require('node:zlib');\nfor (const key of Object.keys(zlib)) if (/zstd/i.test(key)) delete zlib[key];\n");
+process.on('exit', () => { try { fs.rmSync(path.dirname(NO_ZSTD_PRELOAD), { recursive: true, force: true }); } catch { /* going away anyway */ } });
+const noZstdEnv = (extraEnv = {}) => ({
+  ...process.env, HARBOR_AI_DRY_RUN: '1', HARBOR_CONFIG_FILE: EMPTY_CONFIG, CODEX_HOME: EMPTY_CODEX_HOME, HARBOR_CODEX_VERSION: '0.155.1', ...extraEnv,
+});
+const argvNoZstd = (args, extraEnv) => execFileSync(process.execPath, ['--require', NO_ZSTD_PRELOAD, AI, ...args], { env: noZstdEnv(extraEnv), encoding: 'utf8' }).trim();
+const refusalNoZstd = (args, extraEnv) => {
+  try { argvNoZstd(args, extraEnv); } catch (error) { return { status: error.status, stdout: String(error.stdout || ''), stderr: String(error.stderr || '') }; }
+  return assert.fail(`expected bin/ai to refuse: ${args.join(' ')}`);
+};
+
+test('bin/ai on a node without zstd: a .zst resume refuses accurately, --recorded resumes', { skip: NO_ZSTD }, () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-nozstd-'));
+  const id = '01a14000-0000-7000-8000-000000000031';
+  try {
+    writeRollout(home, id, [AUTO_TURN, READ_ONLY_TURN], { compressed: true, padding: 5000 });
+    const out = refusalNoZstd(['--provider', 'codex', '--resume-id', id], { CODEX_HOME: home });
+    assert.equal(out.status, 1);
+    assert.equal(out.stdout, '');
+    assert.match(out.stderr, new RegExp(`^ai: cannot resume codex session ${id}: its rollout .*\\.jsonl\\.zst is zstd-compressed and this node \\(v[\\d.]+ at .*\\) cannot decompress it \\(zstd needs Node 22\\.15\\+ \\(or 23\\.8\\+\\)`));
+    assert.equal(out.stderr.trim().split('\n').length, 1, 'one line: the IPC caller shows the last one');
+    assert.equal(
+      argvNoZstd(['--provider', 'codex', '--resume-id', id, '--model', 'gpt-6-luna', '--effort', 'low', '--permission', 'read-only', '--recorded'], { CODEX_HOME: home }),
+      `codex resume -a on-request -s read-only -c approvals_reviewer=user --model gpt-6-luna -c model_reasoning_effort=low ${id}`,
+    );
+    // A record that named nothing: the default mode on the home's defaults, as a read would have given.
+    assert.equal(argvNoZstd(['--provider', 'codex', '--resume-id', id, '--permission', 'full', '--recorded'], { CODEX_HOME: home }), `codex resume --dangerously-bypass-approvals-and-sandbox ${id}`);
+    assert.match(refusalNoZstd(['--provider', 'codex', '--recorded'], { CODEX_HOME: home }).stderr, /--recorded is for a codex --resume-id only/);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('the rail resume argv main builds for a .zst session runs on a bin/ai node without zstd', { skip: NO_ZSTD }, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-rail-zst-'));
+  const id = '01a14000-0000-7000-8000-000000000032';
+  const printed = [];
+  try {
+    writeRollout(home, id, [AUTO_TURN, ASK_TURN], { compressed: true, padding: 5000 });
+    const actions = createLaunchActions({
+      profiles: [{ id: 'codex-home', provider: 'codex', configHome: home }],
+      // Main's own read runs here, on the test's node (which has zstd, like
+      // Electron's); bin/ai runs with zstd removed.
+      execFile: (command, args, options, callback) => {
+        const at = args.indexOf(AI);
+        execFile(process.execPath, ['--require', NO_ZSTD_PRELOAD, AI, ...args.slice(at + 1)], { ...options, env: noZstdEnv({ CODEX_HOME: home }) }, (error, stdout, stderr) => {
+          printed.push(String(stdout).trim());
+          callback(error, stdout, stderr);
+        });
+      },
+    });
+    const result = await actions.resumeProviderSession({ provider: 'codex', cwd: home, id, configHome: home });
+    assert.deepEqual(result.argv.slice(-7), ['--model', 'gpt-6-sol', '--effort', 'xhigh', '--permission', 'ask', '--recorded']);
+    assert.deepEqual(printed, [`codex resume -a on-request -s workspace-write -c approvals_reviewer=user --model gpt-6-sol -c model_reasoning_effort=xhigh ${id}`]);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('the .zst turn_context scan keeps the LAST record across chunk and line boundaries', { skip: NO_ZSTD }, async () => {
+  const { lastCompressedCodexTurnContext } = require('../../src/main/providers/codex-resume-settings.js');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-zst-scan-'));
+  try {
+    // Lines far longer than a decompressor chunk on either side of the record.
+    const file = writeRollout(home, 'scan-fixture', [AUTO_TURN, { ...READ_ONLY_TURN, model: 'gpt-6-last' }], { compressed: true, padding: 600_000 });
+    assert.equal((await lastCompressedCodexTurnContext(file)).model, 'gpt-6-last');
+    const none = path.join(home, 'none.jsonl.zst');
+    fs.writeFileSync(none, require('node:zlib').zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'event_msg', payload: { text: `"turn_context"${'q'.repeat(100_000)}` } })}\n`)));
+    assert.equal(await lastCompressedCodexTurnContext(none), null, 'a mention deep in another row is not a record');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+// The Orch view launches the DEFAULT profile as `--home <configHome>` with no
+// --provider. A default CODEX profile then started claude against ~/.codex.
+test('a --home that names a codex profile launches codex even without --provider', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-ai-codex-profile-'));
+  const configFile = path.join(root, 'config.json');
+  const codexHome = path.join(root, '.codex');
+  fs.mkdirSync(codexHome);
+  fs.writeFileSync(configFile, JSON.stringify({
+    profiles: [{ id: 'gpt', provider: 'codex', configHome: codexHome, isDefault: true }],
+  }));
+  try {
+    for (const home of [codexHome, 'gpt']) {
+      assert.equal(
+        argv(['--home', home, '/orchestrate-research goal'], { HARBOR_CONFIG_FILE: configFile }),
+        "codex --dangerously-bypass-approvals-and-sandbox '/orchestrate-research goal'",
+      );
+      assert.equal(
+        argv(['--provider', 'codex', '--home', home, '--permission', 'auto'], { HARBOR_CONFIG_FILE: configFile }),
+        'codex --approve-for-me',
+      );
+    }
+    assert.throws(
+      () => argv(['--provider', 'claude', '--home', codexHome], { HARBOR_CONFIG_FILE: configFile }),
+      /is a codex profile, not claude/,
+    );
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 // CODEX 0.157.0 CHANGED THREE DEFAULTS UNDER A HARBOR PANE (2026-09-25): the
@@ -241,7 +581,7 @@ test('codex >= 0.156.0 panes run without the shared server and keep the inline t
       `codex --dangerously-bypass-approvals-and-sandbox ${pinned}${migrations} --model gpt-6-sol -c model_reasoning_effort=high`,
     );
     assert.equal(
-      argv(['--provider', 'codex', '--resume-id', 'abc-123'], { HARBOR_CODEX_VERSION: version }),
+      argv(['--provider', 'codex', '--resume-id', 'abc-123', '--recorded'], { HARBOR_CODEX_VERSION: version }),
       `codex resume --dangerously-bypass-approvals-and-sandbox ${pinned}${migrations} abc-123`,
     );
   }
@@ -281,7 +621,7 @@ test('every migration the launch home lists is acknowledged for that process onl
     // ...and through an inherited CODEX_HOME on a resume, with or without the
     // version pins, because the acknowledgment is an old, stable config key.
     assert.equal(
-      argv(['--provider', 'codex', '--resume-id', 'abc-123'], { CODEX_HOME: home, HARBOR_CODEX_VERSION: '0.155.1' }),
+      argv(['--provider', 'codex', '--resume-id', 'abc-123', '--recorded'], { CODEX_HOME: home, HARBOR_CODEX_VERSION: '0.155.1' }),
       `codex resume --dangerously-bypass-approvals-and-sandbox ${acks} abc-123`,
     );
     // Codex's one in-code migration (a saved gpt-5.4-mini selection) joins the
@@ -352,7 +692,7 @@ test('retired GPT-5.4 selections acknowledge the 0.158.0 built-in migrations on 
     assert.ok(acks.includes("'gpt-5.4'='gpt-6-sol'"));
     assert.ok(acks.includes("'openai.gpt-5.4'='openai.gpt-6-sol'"));
     assert.ok(acks.includes("'gpt-5.4-mini'='gpt-6-luna'"));
-    const resumed = argv(['--provider', 'codex', '--resume-id', 'retired-session'], {
+    const resumed = argv(['--provider', 'codex', '--resume-id', 'retired-session', '--recorded'], {
       CODEX_HOME: home, HARBOR_CODEX_VERSION: '0.158.0',
     });
     assert.match(resumed, /notice\.model_migrations=/);
@@ -504,7 +844,7 @@ test('codex --home refuses a Claude-owned profile instead of routing to it', () 
   try {
     assert.throws(
       () => argv(['--provider', 'codex', '--home', 'work'], { HARBOR_CONFIG_FILE: configFile }),
-      /neither a codex profile nor a config home/,
+      /is a claude profile, not codex/,
     );
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
@@ -598,7 +938,7 @@ test('the same ai launch reaches one real sessiond spawn by default', async (t) 
 
     const sessiondResult = execFileSync(process.execPath, [AI, ...drive], { cwd: project, env: daemonEnv, encoding: 'utf8' });
     assert.match(sessiondResult, /started claude in sessiond session/);
-    await execFileSync(process.execPath, [AI, '--provider', 'codex', '--resume-id', 'codex-resume-id'], {
+    await execFileSync(process.execPath, [AI, '--provider', 'codex', '--resume-id', 'codex-resume-id', '--recorded'], {
       cwd: project, env: daemonEnv, encoding: 'utf8',
     });
     await execFileSync(process.execPath, [AI, '--provider', 'cursor', '--resume-id', 'cursor-resume-id'], {

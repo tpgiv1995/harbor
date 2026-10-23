@@ -50,18 +50,28 @@ test('ai rejects missing values and unknown providers', () => {
 });
 
 test('ai --resume-id builds provider resume argv and rejects it for claude', () => {
-  assert.equal(
-    parse('--provider', 'codex', '--resume-id', '019f-abc').stdout.trim(),
-    'codex resume --dangerously-bypass-approvals-and-sandbox 019f-abc',
-  );
+  // No rollout exists for this id, so the codex resume REFUSES rather than
+  // coming back on the home's defaults (test/bin/ai-launch-argv).
+  const refused = parse('--provider', 'codex', '--resume-id', '019f-abc');
+  assert.equal(refused.status, 1);
+  assert.equal(refused.stdout, '');
+  assert.match(refused.stderr, /^ai: cannot resume codex session 019f-abc: no rollout for it under /);
   assert.equal(
     parse('--provider', 'cursor', '--resume-id', 'uuid-1').stdout.trim(),
     'cursor-agent --force --trust --disable-auto-update --resume uuid-1',
   );
-  // A resumed session keeps its own model/effort; presets must not leak in.
+  // A resumed session keeps its own model/effort (read off its rollout, see
+  // test/bin/ai-launch-argv); an EXPLICIT --model/--effort on a resume is the
+  // popover re-modelling a dormant session, and wins. With no rollout, only a
+  // caller that names all three, or passes --recorded, gets a command.
   assert.equal(
-    parse('--provider', 'codex', '--model', 'gpt-5.6-sol', '--effort', 'high', '--resume-id', 'x').stdout.trim(),
+    parse('--provider', 'codex', '--model', 'gpt-5.6-sol', '--effort', 'high', '--permission', 'full', '--resume-id', 'x').stdout.trim(),
+    'codex resume --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol -c model_reasoning_effort=high x',
+  );
+  assert.equal(
+    parse('--provider', 'codex', '--resume-id', 'x', '--recorded').stdout.trim(),
     'codex resume --dangerously-bypass-approvals-and-sandbox x',
   );
+  assert.match(parse('--recorded').stderr, /--recorded is for a codex --resume-id only/);
   assert.match(parse('--resume-id', 'x').stderr, /codex\/cursor only/);
 });

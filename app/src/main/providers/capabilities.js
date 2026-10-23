@@ -15,6 +15,7 @@ const { createModelCatalog } = require('./model-catalog.js');
 const { legacyConfig } = require('../config/migrate.js');
 const { codexHomes, readCodexCache } = require('./codex-model-catalog.js');
 const { cursorModelOptions } = require('./cursor-model-catalog.js');
+const { CODEX_PERMISSIONS, DEFAULT_CODEX_PERMISSION } = require('../../shared/codex-permission.cjs');
 
 // The ONE list allowed to go stale: Claude Code's built-in slash commands,
 // written against v2.1.214 and re-checked against the v2.1.284 binary on
@@ -192,6 +193,11 @@ function newSessionOptions(rawConfig, deps = {}) {
         efforts: codex.efforts,
         effortsByModel: codex.effortsByModel,
         defaultEffort: 'medium',
+        // Launch-time permission modes. Full access (the bypass flag) stays
+        // the default; bin/ai maps each id to codex's flags through the same
+        // shared table.
+        permissions: CODEX_PERMISSIONS,
+        defaultPermission: DEFAULT_CODEX_PERMISSION,
       },
       cursor: {
         defaultModel: 'default',
