@@ -353,7 +353,7 @@ function posixProcessTreeCpuUsec(table, rootPid, { groupPid = null } = {}) {
 function posixCpuSnapshot({ execFileImpl = execFile, timeoutMs = 15000 } = {}) {
   return new Promise((resolve) => {
     const [command, args] = POSIX_PROCESS_TABLE_COMMAND;
-    execFileImpl(command, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+    execFileImpl(command, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
       if (error) { resolve(null); return; }
       resolve(parsePosixProcessTable(String(stdout)));
     });
