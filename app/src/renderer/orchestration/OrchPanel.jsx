@@ -112,6 +112,14 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
   );
 }
 
+// Execute stays locked through `done`, not just `running`: the panel lingers
+// ~900 ms after a successful kickoff, and the pane it started only reaches the
+// mutex on the bridge's next poll, so re-enabling on `done` let a second click
+// start a second orchestrator. `done` lasts until the panel closes.
+export function executeLocked({ mutexBlocked, executeState, sessionId }) {
+  return Boolean(mutexBlocked) || executeState === 'running' || executeState === 'done' || !sessionId;
+}
+
 export function OrchPanel({ project, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -197,7 +205,7 @@ export function OrchPanel({ project, onClose }) {
   };
 
   const handleExecute = async () => {
-    if (mutex.blocked || executeState === 'running') return;
+    if (executeLocked({ mutexBlocked: mutex.blocked, executeState, sessionId })) return;
     setExecuteState('running');
     try {
       const result = await window.harbor.orchestration.kickoffExecute({
@@ -314,7 +322,7 @@ export function OrchPanel({ project, onClose }) {
           <button
             type="button"
             className="orch-kickoff-btn orch-execute-btn"
-            disabled={mutex.blocked || executeState === 'running' || !sessionId}
+            disabled={executeLocked({ mutexBlocked: mutex.blocked, executeState, sessionId })}
             onClick={handleExecute}
           >
             {executeState === 'running' ? 'Starting...' : 'Execute (team)'}
