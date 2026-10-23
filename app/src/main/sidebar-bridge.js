@@ -5,6 +5,7 @@ const fsp = require('node:fs/promises');
 const { createControlClient } = require('./session-daemon/factory.js');
 const { createHistoryProvider } = require('./providers/history.js');
 const { createProviderHistory } = require('./providers/provider-history.js');
+const { buildProviderPreview } = require('./providers/provider-preview.js');
 const { createProviderSessionLinker } = require('./providers/provider-session-link.js');
 const { mergeSidebarModel, sleptSince } = require('../shared/sidebar-model.cjs');
 const { parseLocalDateTime } = require('../shared/date-roll.cjs');
@@ -628,6 +629,32 @@ function createSidebarBridge(options = {}) {
     daemonClient = null;
   };
 
+  // Claude ids resolve through the indexer; codex/cursor ids through the
+  // provider scan (path + provider, so transcript open needs no hints).
+  const getSessionMeta = async (id) => {
+    const indexed = historyById.get(id);
+    // The bulk index refresh already has these facts. Orch summary polls
+    // and send lookups must not enqueue one worker RPC per historical row.
+    if (indexed?.meta) return { ...indexed.meta, home: indexed.home ?? null };
+    const providerMeta = providerHistory?.metaFor(id);
+    if (providerMeta) return providerMeta;
+    try {
+      return await history.sessionMeta(id);
+    } catch (error) {
+      const providerMeta = providerHistory?.metaFor(id);
+      if (providerMeta) return providerMeta;
+      throw error;
+    }
+  };
+  // The same answer for a reader of the conversation: a compressed codex
+  // rollout comes back with its decompressed copy as `path`. Everything else
+  // (identity, cwd, the Orch join) asks getSessionMeta, which never
+  // decompresses anything.
+  const getReadableSessionMeta = async (id) => {
+    const readable = await providerHistory?.readableMetaFor?.(id);
+    return readable || getSessionMeta(id);
+  };
+
   return {
     emitter,
     start,
@@ -695,28 +722,34 @@ function createSidebarBridge(options = {}) {
     onPaneAgentStatus,
     focusLivePane,
     close,
-    // Claude ids resolve through the indexer; codex/cursor ids through the
-    // provider scan (path + provider, so transcript open needs no hints).
-    getSessionMeta: async (id) => {
-      const indexed = historyById.get(id);
-      // The bulk index refresh already has these facts. Orch summary polls
-      // and send lookups must not enqueue one worker RPC per historical row.
-      if (indexed?.meta) return { ...indexed.meta, home: indexed.home ?? null };
-      const providerMeta = providerHistory?.metaFor(id);
-      if (providerMeta) return providerMeta;
-      try {
-        return await history.sessionMeta(id);
-      } catch (error) {
-        const providerMeta = providerHistory?.metaFor(id);
-        if (providerMeta) return providerMeta;
-        throw error;
+    getSessionMeta,
+    getReadableSessionMeta,
+    // The claude index never holds a codex or cursor id, so asking it alone
+    // answered "session ... not in index yet" for every codex batch worker's
+    // preview. Ids the provider scan knows get a preview built from their own
+    // rollout, from a bounded head and tail.
+    getSessionPreview: async (id) => {
+      const providerMeta = await providerHistory?.readableMetaFor?.(id);
+      if (providerMeta?.path && providerMeta.provider && providerMeta.provider !== 'claude') {
+        return buildProviderPreview({ id, meta: providerMeta, row: historyById.get(id) || null });
       }
+      return history.sessionPreview(id);
     },
-    getSessionPreview: (id) => history.sessionPreview(id),
     // A send is the moment a codex pane's first prompt hits disk; resolving
     // right then names the session in seconds instead of at the next tick.
     resolveProviderSessions: () => providerLinker?.resolveNow() ?? false,
     providerSessionForPane: (paneId) => providerLinker?.get(paneId) ?? null,
+    // Is a live pane running this provider's agent on this session? The
+    // daemon detects the pane's foreground agent from its process tree, and a
+    // link exists only while that pane and agent do, so this is the codex
+    // owner-liveness answer the transcript provider has no tee or beacon for.
+    providerPaneAlive: (sessionId, provider) => {
+      const panes = providerLinker ? providerLinker.apply(liveState.panes) : liveState.panes;
+      return panes.some((pane) => {
+        const named = typeof pane?.agent_session === 'string' ? pane.agent_session : pane?.agent_session?.value;
+        return pane?.agent === provider && named === sessionId;
+      });
+    },
     getLivePaneIds: () => liveState.panes.map((pane) => pane.pane_id),
     getHistoryRow: (id) => historyById.get(id),
     getState: () => publisher.getState(),

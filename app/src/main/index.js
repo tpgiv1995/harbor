@@ -38,6 +38,8 @@ const {
 const {
   createOrchestrationActions,
   checkExecuteMutex,
+  createExecuteReservations,
+  createLruCache,
 } = require('./actions/orchestration.js');
 const { createTerminalBridge } = require('./terminal-bridge.js');
 const { deleteSessionTranscript } = require('./session-delete.js');
@@ -71,7 +73,7 @@ const {
 const { createNotifier } = require('./notify.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
-const { createArtifactsProvider } = require('./providers/artifacts.js');
+const { createArtifactsProvider, codexHomesFromProfiles } = require('./providers/artifacts.js');
 const { createTaskStore } = require('./providers/tasks.js');
 const { createNoteStore } = require('./providers/notes.js');
 const { createWhiteboardStore } = require('./providers/whiteboard.js');
@@ -1474,8 +1476,9 @@ function registerIpc() {
   // Parsed-liveness cache keyed by transcript size+mtime. Safe because the run
   // derivation degrades any signal by its AGE (WORKING_FRESH_MS in delegate.js),
   // so a cached verdict for an unchanged file can never render fresher than its
-  // own mtime allows.
-  const orchLivenessCache = new Map();
+  // own mtime allows. Bounded (LRU, 200 paths): the corpus of orch workers
+  // only grows, and a plain Map kept every transcript any poll ever read.
+  const orchLivenessCache = createLruCache();
   const ORCH_LIVENESS_CONCURRENCY = 6;
 
   async function orchHistoryRows(queues = []) {
@@ -1580,8 +1583,10 @@ function registerIpc() {
     const { summary, events, liveBatches } = await orchDeriveQueue(queue);
     const mutex = checkExecuteMutex({
       projectLabel,
+      projectRoot,
       terminalState: terminalBridge.getState(),
       queue,
+      executionCommand: orchActions?.EXECUTION_COMMAND,
     });
     return { queue: { ...queue, batches: (queue.batches || []).map((batch) => ({
       ...batch,
@@ -1694,6 +1699,9 @@ function registerIpc() {
   });
 
   let executeKickoffInFlight = false;
+  // Covers the ~1 s between a successful kickoff and the bridge's next poll
+  // reporting the new pane (see createExecuteReservations).
+  const executeReservations = createExecuteReservations();
   ipcMain.handle('orchestration:kickoff-execute', async (_event, { projectLabel, sessionId }) => {
     if (!orchActions) return ORCH_UNAVAILABLE;
     if (executeKickoffInFlight) return { blocked: true, reason: 'An execute kickoff is already in progress.' };
@@ -1702,15 +1710,23 @@ function registerIpc() {
       const projectRoot = await orchGetProjectRoot(sessionId);
       if (!projectRoot) return { error: 'Could not determine project root' };
       const queue = await delegateProvider.getQueue(projectRoot);
-      // Fresh state check with no await between it and the kickoff; the tab
-      // created by kickoffExecute is the durable reservation.
+      // Fresh state check with no await between it and the kickoff; the pane
+      // created by kickoffExecute is the durable reservation once the bridge
+      // reports it, and executeReservations covers the gap before that.
+      const terminalState = terminalBridge.getState();
       const mutex = checkExecuteMutex({
         projectLabel,
-        terminalState: terminalBridge.getState(),
+        projectRoot,
+        terminalState,
         queue,
+        executionCommand: orchActions.EXECUTION_COMMAND,
       });
       if (mutex.blocked) return { blocked: true, reason: mutex.reason };
-      return await orchActions.kickoffExecute({ projectRoot, projectLabel });
+      const reserved = executeReservations.blockedReason(projectRoot, terminalState);
+      if (reserved) return { blocked: true, reason: reserved };
+      const launched = await orchActions.kickoffExecute({ projectRoot, projectLabel });
+      executeReservations.reserve(projectRoot, launched);
+      return launched;
     } finally {
       executeKickoffInFlight = false;
     }
@@ -2674,7 +2690,9 @@ app.whenReady().then(async () => {
   // Conversation-surface plumbing: transcript tailing, the command-bar send
   // engine, and the provisional session<->pane link registry.
   transcriptProvider = createTranscriptProvider({
-    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
+    providerPaneAlive: (id, provider) => sidebarBridge.providerPaneAlive(id, provider),
     contextCacheDir: contextDir,
   });
   transcriptProvider.emitter.on('update', (payload) => {
@@ -2765,6 +2783,9 @@ app.whenReady().then(async () => {
   const artifactsProvider = createArtifactsProvider({
     getSessionLabel: (id) => sidebarBridge.getSessionLabel(id),
     roots: [harborConfig.paths.projectsDir],
+    // Codex outputs too: the same codex homes the rail lists sessions from,
+    // asked per collection (harborConfig is reassigned when the wizard saves).
+    codexHomes: () => codexHomesFromProfiles(harborConfig.profiles),
     cacheFile: path.join(harborConfig.paths.cacheDir, 'artifacts-index.json'),
   });
   // Grid previews: HTML artifacts render in a short-lived OFFSCREEN window

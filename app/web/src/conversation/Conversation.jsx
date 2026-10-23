@@ -113,7 +113,7 @@ function wordCount(text) {
 // verb buckets first, then file basenames when there is room.
 function summarizeActions(blocks) {
   const ran = countVerb(blocks, 'Ran');
-  const edited = countVerb(blocks, 'Edited') + countVerb(blocks, 'Wrote') + countVerb(blocks, 'NotebookEdit');
+  const edited = countVerb(blocks, 'Edited') + countVerb(blocks, 'Wrote') + countVerb(blocks, 'Deleted') + countVerb(blocks, 'NotebookEdit');
   const read = countVerb(blocks, 'Read');
   const searched = countVerb(blocks, 'Searched') + countVerb(blocks, 'Globbed') + countVerb(blocks, 'Searched web');
   const fetched = countVerb(blocks, 'Fetched');
@@ -233,6 +233,10 @@ const Block = memo(function Block({ block, provider, onImageLoad, leadsTurn = tr
             : <span className="conv-user-text"><Markdown text={block.text} preserveBreaks /></span>
         ) : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
+        {/* A codex file named by path only (not shown inline): its name. */}
+        {block.attachments?.length ? (
+          <div className="conv-attachments">{block.attachments.map((file) => file.name || file.path).join(', ')}</div>
+        ) : null}
       </div>
     );
   }
@@ -253,6 +257,23 @@ const Block = memo(function Block({ block, provider, onImageLoad, leadsTurn = tr
         ) : null}
         {block.text ? <Markdown text={block.text} /> : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
+      </div>
+    );
+  }
+  if (block.kind === 'question') {
+    // A codex request_user_input question (main/providers/transcript.js):
+    // its preamble and each question with its choices, read-only, so the
+    // phone never loses text the desktop shows. No phone styling of its own.
+    return (
+      <div className="conv-assistant conv-question">
+        {block.text ? <Markdown text={block.text} /> : null}
+        {(block.questions || []).map((q, i) => (
+          <div className="conv-question-item" key={i}>
+            {q.title ? <strong>{q.title}</strong> : null}
+            {q.options?.length ? <div className="conv-question-options">{q.options.join(' · ')}</div> : null}
+          </div>
+        ))}
+        <div className="conv-question-state">{block.answered ? 'Answered' : block.closed ? 'Not answered' : 'Waiting for your answer'}</div>
       </div>
     );
   }

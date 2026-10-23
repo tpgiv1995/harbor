@@ -97,6 +97,23 @@ function ConvImages({ images, onImageLoad }) {
   );
 }
 
+// Files a message carried by PATH that are not shown inline: a codex
+// local_image whose file is gone, too large, or read by a parser that does
+// not load images. Named, never silently dropped; the full path is the title.
+function ConvAttachments({ attachments }) {
+  if (!attachments?.length) return null;
+  return (
+    <div className="conv-attachments">
+      {attachments.map((file, i) => (
+        <span className="file-chip conv-attachment" key={`${file.path}-${i}`} title={file.path}>
+          <span className="file-chip-glyph" aria-hidden="true">▤</span>
+          <span className="file-chip-name">{file.name || file.path}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 const ActionBlock = memo(function ActionBlock({ block }) {
   return (
     <div className={`conv-act status-${block.status}`}>
@@ -135,7 +152,7 @@ function wordCount(text) {
 // optional file basenames when there is room.
 function summarizeActions(blocks) {
   const ran = countVerb(blocks, 'Ran');
-  const edited = countVerb(blocks, 'Edited') + countVerb(blocks, 'Wrote') + countVerb(blocks, 'NotebookEdit');
+  const edited = countVerb(blocks, 'Edited') + countVerb(blocks, 'Wrote') + countVerb(blocks, 'Deleted') + countVerb(blocks, 'NotebookEdit');
   const read = countVerb(blocks, 'Read');
   const searched = countVerb(blocks, 'Searched') + countVerb(blocks, 'Globbed') + countVerb(blocks, 'Searched web');
   const fetched = countVerb(blocks, 'Fetched');
@@ -229,6 +246,13 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   );
 });
 
+// An answered question says so; one whose turn ended unanswered is settled
+// too, so it never reads "Waiting for your answer" forever.
+function questionState(block) {
+  if (block.answered) return 'Answered';
+  return block.closed ? 'Not answered' : 'Waiting for your answer';
+}
+
 const Block = memo(function Block({ block, provider, home, profiles, onImageLoad }) {
   if (block.kind === 'note') {
     return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`}>{block.text}</div>;
@@ -252,6 +276,7 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
             : <span className="conv-user-text"><Markdown text={block.text} preserveBreaks /></span>
         ) : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
+        <ConvAttachments attachments={block.attachments} />
       </div>
       {/* What this task spent: output tokens across every reply it produced and
           the time from the prompt to the latest reply, growing while it runs. */}
@@ -272,6 +297,36 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
         </div>
         {block.text ? <Markdown text={block.text} /> : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
+      </div>
+    );
+  }
+  if (block.kind === 'question') {
+    // A codex request_user_input question (transcript.js codexAgent and
+    // codexQuestionCall): the model is waiting on the user with a set of
+    // choices. Read-only here; it says plainly whether it is still open, and
+    // the reply goes through the command bar like any other message.
+    const identity = providerIdentity(provider);
+    const settled = block.answered || block.closed;
+    return (
+      <div className={`conv-assistant conv-question${settled ? ' answered' : ''}`}>
+        <div className="conv-assistant-who">
+          <img className="conv-sig" src={identity.logo} alt="" aria-hidden="true" />
+          <span className="conv-provider" style={{ color: identity.color }}>{identity.label}</span>
+        </div>
+        {block.text ? <Markdown text={block.text} /> : null}
+        <div className="conv-question-list">
+          {(block.questions || []).map((q, i) => (
+            <div className="conv-question-item" key={i}>
+              {q.title ? <div className="conv-question-title">{q.title}</div> : null}
+              {q.options?.length ? (
+                <div className="conv-question-options">
+                  {q.options.map((option, j) => <span className="conv-question-option" key={j}>{option}</span>)}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+        <div className="conv-question-state">{questionState(block)}</div>
       </div>
     );
   }

@@ -140,9 +140,14 @@ const { parseTokenCount, liveMeterLabel } = turnMetaHelpers;
 // ticks locally from the task's prompt, and tokens are the larger of the last
 // count the CLI showed and the transcript's running total for the task
 // (turn-meta.cjs liveMeterLabel). Polled only while the window is working.
+// A CODEX window gets the same chip from its rollout alone: codex writes
+// token_count records as it goes (transcript.js noteCodexTokens), so there is
+// no pane line to read and nothing to poll, only the clock to tick.
 function useWorkMeter(session, pane, working, prompt) {
   const paneId = pane?.paneId || null;
-  const active = Boolean(working && paneId && (session.provider || 'claude') === 'claude');
+  const provider = session.provider || 'claude';
+  const readsPane = provider === 'claude';
+  const active = Boolean(working && (readsPane ? paneId : provider === 'codex'));
   const promptKey = prompt?.key || null;
   const [cli, setCli] = useState(null);
   const [now, setNow] = useState(() => Date.now());
@@ -152,7 +157,9 @@ function useWorkMeter(session, pane, working, prompt) {
     let alive = true;
     let timer = null;
     const tick = async () => {
-      const next = await window.harbor?.session?.workMeter?.({ pane, sessionId: session.id }).catch(() => null);
+      const next = readsPane
+        ? await window.harbor?.session?.workMeter?.({ pane, sessionId: session.id }).catch(() => null)
+        : null;
       if (!alive) return;
       // Keep the last count through the stretches the CLI hides its line.
       if (next) setCli((prev) => ({ elapsed: next.elapsed || prev?.elapsed || null, tokens: parseTokenCount(next.tokens) ?? prev?.tokens ?? null, verb: next.verb, thinking: next.thinking }));
@@ -163,7 +170,7 @@ function useWorkMeter(session, pane, working, prompt) {
     return () => { alive = false; if (timer) clearTimeout(timer); };
     // pane is read through paneId; a fresh pane object for the same id is the same pane.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, paneId, session.id, promptKey]);
+  }, [active, readsPane, paneId, session.id, promptKey]);
   if (!active) return null;
   const startMs = prompt?.ts ? Date.parse(prompt.ts) : NaN;
   const label = liveMeterLabel({
@@ -214,7 +221,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   const terminalDialogs = useTerminalDialogs();
   const awaitingAnswer = pendingAsk && !pendingAsk.answered || terminalDialogs.has(session.id);
   const runState = runStateCue(session, pane, awaitingAnswer ? { ...header, blocked: true } : header);
-  const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued) return blocks[i]; return null; }, [blocks]);
+  const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued && !blocks[i].steer) return blocks[i]; return null; }, [blocks]);
   const workMeter = useWorkMeter(session, pane, Boolean(header?.working) && !awaitingAnswer, lastPrompt);
   const title = session.isChildTask && session.childTitle ? session.childTitle : session.title;
   const projectLabel = !session.project || session.project === '~' ? 'home' : session.project;

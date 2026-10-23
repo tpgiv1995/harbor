@@ -148,6 +148,9 @@ function codexLineage(payload = {}) {
     agentPath: payload.agent_path || spawn?.agent_path || null,
     role: payload.agent_role || spawn?.agent_role || null,
     originator: payload.originator || null,
+    // `codex exec fork <id>` writes a new rollout naming <id> here; the
+    // delegation linker uses it to tie a fork dispatch to its exact source.
+    forkedFromId: payload.forked_from_id || null,
     startedMs: Date.parse(payload.timestamp) || 0,
   };
 }
