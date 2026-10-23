@@ -32,7 +32,7 @@ const { createSystemMemoryProvider } = require('../main/providers/system-memory.
 const { createAccountsProvider, readAccountEmails } = require('../main/providers/accounts.js');
 const { createCapabilitiesProvider, newSessionOptions } = require('../main/providers/capabilities.js');
 const { createWorkflowRuns } = require('../main/providers/workflow-runs.js');
-const { createArtifactsProvider } = require('../main/providers/artifacts.js');
+const { createArtifactsProvider, codexHomesFromProfiles } = require('../main/providers/artifacts.js');
 const { createArtifactThumbs } = require('../main/providers/artifact-thumbs.js');
 const { createProjectIconProvider } = require('../main/providers/project-icons.js');
 const { createTaskStore } = require('../main/providers/tasks.js');
@@ -216,6 +216,11 @@ async function composeServer(options = {}) {
     roots: env.HARBOR_ARTIFACTS_ROOTS
       ? env.HARBOR_ARTIFACTS_ROOTS.split(path.delimiter).filter(Boolean)
       : [config.paths.projectsDir],
+    // Codex outputs. The isolation contract still holds: relocated roots (a
+    // harness) read no real codex home unless the codex homes are relocated too.
+    codexHomes: env.HARBOR_ARTIFACTS_CODEX_HOMES
+      ? env.HARBOR_ARTIFACTS_CODEX_HOMES.split(path.delimiter).filter(Boolean)
+      : env.HARBOR_ARTIFACTS_ROOTS ? [] : () => codexHomesFromProfiles(config.profiles),
     cacheFile: env.HARBOR_ARTIFACTS_CACHE || path.join(config.paths.cacheDir, 'artifacts-index.json'),
   });
   const icons = options.icons || createProjectIconProvider({ app, configuredDir: config.paths.projectIconsDir, scheme: 'harbor-icon' });
@@ -224,7 +229,8 @@ async function composeServer(options = {}) {
   const whiteboard = options.whiteboard || createWhiteboardStore({ app, env, configuredDir: config.paths.boardsDir });
   const terminalBridge = options.terminalBridge || createTerminalBridge({ env, sessionStorePolicy, processKill: guardedKill });
   const transcript = options.transcript || createTranscriptProvider({
-    getSessionMeta: (id) => sidebar.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => (sidebar.getReadableSessionMeta ? sidebar.getReadableSessionMeta(id) : sidebar.getSessionMeta(id)),
     contextCacheDir: contextDir,
   });
   // What each connected client has acquired, so it can be given back when that
