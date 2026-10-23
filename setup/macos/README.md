@@ -1,5 +1,23 @@
 # macOS validation checklist
 
+## Install from source
+
+To build this checkout and install it as `/Applications/Harbor.app` (icon
+included), start or hand over the session daemon, and open the app:
+
+```bash
+setup/macos/install.sh            # add --no-open to skip opening it
+```
+
+It needs Node at the `engines` version in `app/package.json`, Git and the
+Xcode Command Line Tools. It runs `npm ci` and `npm run pack -- --mac` for the
+host CPU only, moves a previous `Harbor.app` to the Trash, clears the
+quarantine attribute on the unsigned build, and hands a running session daemon
+over to the new build so its sessions survive. Re-run it after `git pull` to
+update. The release `.dmg` needs none of this.
+
+## Validation
+
 Harbor has not been validated on real Mac hardware. A generated package or a
 passing test with an injected platform adapter does not establish desktop support.
 The [historical checklist](HISTORY.md) is retained as context only.
