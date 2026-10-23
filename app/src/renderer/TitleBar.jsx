@@ -529,6 +529,10 @@ function ProviderRow({ provider, onChanged }) {
         </span>
       </div>
       {provider.error ? <div className="upd-note-error">{provider.error}</div> : null}
+      {/* How this CLI is installed decides the upgrader (cli-updates.js
+          describeInstall): brew for a Homebrew copy, and for a copy Harbor
+          will not upgrade (native installer, unrecognised) the way to do it. */}
+      {provider.install?.hint ? <div className="upd-uptodate">{provider.install.hint}</div> : null}
       {!hasNewer && !provider.error ? (
         <div className="upd-uptodate">
           {provider.latest ? 'up to date' : 'latest version unknown; use the CLI’s own update command'}
@@ -542,9 +546,11 @@ function ProviderRow({ provider, onChanged }) {
       {hasNewer ? (
         <>
           <div className="upd-actions">
-            <button type="button" className="upd-btn primary" disabled={Boolean(busy)} onClick={runInstall}>
-              {busy === 'install' ? 'Installing…' : 'Install'}
-            </button>
+            {provider.install?.manual ? null : (
+              <button type="button" className="upd-btn primary" disabled={Boolean(busy)} onClick={runInstall}>
+                {busy === 'install' ? 'Installing…' : 'Install'}
+              </button>
+            )}
             {skipped ? null : (
               <button type="button" className="upd-btn" disabled={Boolean(busy)} onClick={runSkip}>
                 {busy === 'skip' ? '…' : 'Skip this version'}

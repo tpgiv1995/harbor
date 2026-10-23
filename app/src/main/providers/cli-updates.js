@@ -396,6 +396,120 @@ const IMPACT_FLAGS = {
   ],
 };
 
+// ---------------------------------------------------------------------------
+// Install method: HOW each CLI got onto this machine
+// ---------------------------------------------------------------------------
+//
+// 2026-10-15 (the first macOS seat): the checker assumed every claude and codex
+// was the npm package, so on a Mac whose codex is a Homebrew CASK
+// (/opt/homebrew/bin/codex -> Caskroom/codex/<version>/bin/codex) Install would
+// have run `npm install -g @openai/codex` and left a SECOND codex beside the one
+// PATH actually runs, while the chip read a package.json nobody launches. The
+// method is now read off the binary PATH resolves (realpath'd, the file a launch
+// really execs), and the version read, the latest check and the upgrader all
+// follow that method. A method Harbor cannot upgrade safely (Claude's native
+// installer, anything unrecognised) is described, never "fixed" with npm.
+
+const BIN_NAMES = { claude: 'claude', codex: 'codex', cursor: 'cursor-agent' };
+// The same exact pins model-catalog.js and codex-model-catalog.js honour.
+// bin/harbor-bin.cjs providerBin() honours HARBOR_<PROVIDER>_BIN for every
+// provider, so cursor's pin is read here too.
+const BIN_PIN_ENV = { claude: 'HARBOR_CLAUDE_BIN', codex: 'HARBOR_CODEX_BIN', cursor: 'HARBOR_CURSOR_BIN' };
+
+// Where `npm install -g` puts packages under a prefix: <prefix>\node_modules on
+// win32, <prefix>/lib/node_modules everywhere else. Reading the win32 layout on
+// macOS found nothing, so a Mac's npm claude always read as "not installed".
+function npmModulesDir(prefix, platform = process.platform) {
+  return platform === 'win32'
+    ? path.join(prefix, 'node_modules')
+    : path.join(prefix, 'lib', 'node_modules');
+}
+
+// cmd.exe reads these even in an argument Node passes through `cmd.exe /c`,
+// and Node quotes an argument only when it holds a space or a quote, so a
+// prefix like C:\Users\R&D\AppData\Roaming\npm split into a second command.
+const WIN_CMD_META_RE = /[&|^<>()%"]/;
+const sameWinPath = (a, b) => Boolean(a && b)
+  && String(a).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+    === String(b).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+
+// Classify a resolved binary by its path alone (pure, so every shape is testable
+// on any OS). `real` is the realpath of `bin`; both are consulted because a
+// Homebrew or native-installer symlink names the method in its TARGET while a
+// win32 npm shim names it in its own directory.
+function classifyInstall(id, { bin = '', real = '' } = {}) {
+  const pkg = PROVIDERS[id]?.pkg;
+  const target = String(real || bin).replace(/\\/g, '/');
+  const link = String(bin).replace(/\\/g, '/');
+  // Homebrew is tested BEFORE the npm marker (2026-10-16): a formula that wraps
+  // an npm package (Cellar/codex/<v>/libexec/lib/node_modules/@openai/codex/...)
+  // read as npm with its keg's libexec as the prefix, and Install then ran
+  // `npm install -g --prefix <keg>` straight over Homebrew's files. A Caskroom
+  // path is always Homebrew's. A Cellar path is Homebrew's unless the keg is
+  // node itself: a package `npm install -g` put under Homebrew node's own prefix
+  // belongs to npm, which is what installed it. The same regexes match
+  // /opt/homebrew, /usr/local and /home/linuxbrew/.linuxbrew.
+  const cask = /^(.*)\/Caskroom\/([^/]+)\/([^/]+)\//.exec(target);
+  if (cask) return { method: 'homebrew-cask', brewPrefix: cask[1], token: cask[2], version: cask[3] };
+  const formula = /^(.*)\/Cellar\/([^/]+)\/([^/]+)\//.exec(target);
+  if (formula && !/^node(@\d+)?$/.test(formula[2])) {
+    // Cellar folders carry the formula revision (25.9.0_2); the version is the part before it.
+    return { method: 'homebrew-formula', brewPrefix: formula[1], formula: formula[2], version: formula[3].replace(/_\d+$/, '') };
+  }
+  if (pkg) {
+    const marker = `/node_modules/${pkg}/`;
+    const at = target.indexOf(marker);
+    if (at >= 0) {
+      let prefix = target.slice(0, at);
+      let layout = 'win32';
+      if (prefix.endsWith('/lib')) { prefix = prefix.slice(0, -4); layout = 'posix'; }
+      return { method: 'npm', prefix, layout, fromBin: true };
+    }
+  }
+  if (id === 'claude') {
+    // Claude's native installer: ~/.local/bin/claude -> ~/.local/share/claude/versions/<version>.
+    const versioned = /\/\.local\/share\/claude\/versions\/([^/]+)$/.exec(target);
+    if (versioned) return { method: 'native', version: versioned[1] };
+    if (/\/\.local\/bin\/claude(\.exe)?$/i.test(link)) return { method: 'native', version: null };
+  }
+  return { method: 'unknown' };
+}
+
+// The serializable description the chip renders: what installed it, and either
+// the exact upgrader Harbor will run or, when Harbor will not run one, how to.
+function describeInstall(id, how) {
+  const label = PROVIDERS[id]?.label || id;
+  if (!how) return null;
+  if (how.method === 'npm') {
+    return { method: 'npm', label: how.prefix ? `npm global (${how.prefix})` : 'npm global', manual: false, hint: null };
+  }
+  if (how.method === 'homebrew-cask' || how.method === 'homebrew-formula') {
+    const cask = how.method === 'homebrew-cask';
+    const name = cask ? how.token : how.formula;
+    return {
+      method: how.method,
+      label: `Homebrew ${cask ? 'cask' : 'formula'} ${name}`,
+      manual: false,
+      hint: `Updates through Homebrew (brew upgrade ${cask ? '--cask ' : ''}${name}), never a second copy from npm.`,
+    };
+  }
+  if (how.method === 'cursor-agent') return { method: 'cursor-agent', label: 'cursor-agent installer', manual: false, hint: null };
+  if (how.method === 'native') {
+    return {
+      method: 'native',
+      label: 'Claude native installer',
+      manual: true,
+      hint: `${label} is managed by its native installer${how.bin ? ` (${how.bin})` : ''}. Update it with "claude update" in a terminal; Harbor will not install a second copy with npm.`,
+    };
+  }
+  return {
+    method: 'unknown',
+    label: 'unrecognised install',
+    manual: true,
+    hint: `Harbor cannot tell how ${label}${how.real || how.bin ? ` at ${how.real || how.bin}` : ''} was installed, so it will not install a second copy. Update it the way it was installed.`,
+  };
+}
+
 function flagsFor(provider) {
   return [REVERTED_FLAG, ...(IMPACT_FLAGS[provider] || [])];
 }
@@ -631,6 +745,9 @@ function emptyState() {
  * @param {Function} [options.mkdir]      fsp.mkdir
  * @param {Function} [options.readdir]    fsp.readdir (snapshot listing)
  * @param {object}   [options.env]
+ * @param {Function} [options.configuredBin] (id) => config.providers.<id>.bin,
+ *                                        read per resolve so a wizard save is
+ *                                        seen; the launcher's own choice.
  * @param {Function} [options.homedir]
  * @param {Function} [options.now]
  * @param {string}   [options.stateFile]  defaults to ~/.harbor/cli-updates.json
@@ -651,6 +768,8 @@ function createCliUpdateChecker(options = {}) {
   const mkdir = options.mkdir || fsp.mkdir;
   const readdir = options.readdir || fsp.readdir;
   const execFile = options.execFile || require('node:util').promisify(require('node:child_process').execFile);
+  const platform = options.platform || process.platform;
+  const realpath = options.realpath || fsp.realpath;
 
   // Shared app state lives at ~/.harbor on win32, deliberately outside
   // %APPDATA% (the MSIX virtualization rule); same home as config.json.
@@ -761,7 +880,7 @@ function createCliUpdateChecker(options = {}) {
   // `npm prefix -g` is only the fallback.
   const npmPrefix = async () => {
     if (env.HARBOR_NPM_PREFIX) return env.HARBOR_NPM_PREFIX;
-    if (process.platform === 'win32' && env.APPDATA) return path.join(env.APPDATA, 'npm');
+    if (platform === 'win32' && env.APPDATA) return path.join(env.APPDATA, 'npm');
     try {
       const { stdout } = await execFile('npm', ['prefix', '-g'], { windowsHide: true, timeout: 20_000 });
       return String(stdout).trim();
@@ -770,13 +889,94 @@ function createCliUpdateChecker(options = {}) {
     }
   };
 
+  // The binary a launch would actually exec, chosen in the order
+  // bin/harbor-bin.cjs providerBin() chooses it: the HARBOR_<PROVIDER>_BIN pin,
+  // then the path the setup wizard saved (config.providers.<id>.bin), then the
+  // bare name on PATH (PATHEXT on win32). Before 2026-10-16 the configured path
+  // was skipped, so with the wizard's ~/.npm-global/bin/codex saved and a cask
+  // first on PATH, Install upgraded the cask and the npm copy Harbor launches
+  // never moved. Realpath'd so a Homebrew or native-installer symlink reveals
+  // what it points at. A file stat and a realpath, never a CLI start.
+  const configuredBin = typeof options.configuredBin === 'function' ? options.configuredBin : () => null;
+  const launchBinName = (id) => {
+    const pinned = BIN_PIN_ENV[id] ? String(env[BIN_PIN_ENV[id]] || '').trim() : '';
+    if (pinned) return pinned;
+    let configured = null;
+    try { configured = configuredBin(id); } catch { /* an unreadable config is no configured path */ }
+    if (typeof configured === 'string' && configured.trim()) return configured.trim();
+    return BIN_NAMES[id];
+  };
+  const resolveBin = options.resolveBin || (async (id) => {
+    const { executablePath } = require('../setup/executables.js');
+    const bin = await executablePath(launchBinName(id), { env, platform });
+    if (!bin) return null;
+    let real = bin;
+    try { real = await realpath(bin); } catch { /* a dangling link still names its method */ }
+    return { bin, real };
+  });
+
+  const exists = async (file) => {
+    try { await readFile(file, 'utf8'); return true; } catch { return false; }
+  };
+
+  // How this provider is installed, from the binary PATH resolves. The last
+  // answer per provider is kept for installCommand(), which is synchronous.
+  const lastHow = {};
+  const detectInstall = async (id) => {
+    let how;
+    if (id === 'cursor') {
+      how = { method: 'cursor-agent' };
+    } else if (env.HARBOR_NPM_PREFIX) {
+      // An explicit prefix pin (harnesses, and an operator who means it).
+      how = { method: 'npm', prefix: env.HARBOR_NPM_PREFIX, pinned: true };
+    } else {
+      const found = await resolveBin(id).catch(() => null);
+      if (!found) {
+        // Nothing on PATH: the pre-2026-10-15 answer, the npm global prefix.
+        how = { method: 'npm', prefix: null };
+      } else {
+        how = { ...classifyInstall(id, found), bin: found.bin, real: found.real };
+        if (how.method === 'npm') {
+          how.prefix = platform === 'win32' ? how.prefix.replace(/\//g, '\\') : how.prefix;
+        } else if (how.method === 'unknown') {
+          // A win32 npm shim (%APPDATA%\npm\codex.cmd) is a file, not a link,
+          // and a POSIX one can be a copy: the package beside the shim's prefix
+          // is what proves npm owns it.
+          const dir = path.dirname(found.bin);
+          const prefix = platform === 'win32' ? dir : path.dirname(dir);
+          if (await exists(path.join(npmModulesDir(prefix, platform), ...PROVIDERS[id].pkg.split('/'), 'package.json'))) {
+            how = { method: 'npm', prefix, fromBin: true, bin: found.bin, real: found.real };
+          }
+        } else if (how.method === 'native' && !how.version) {
+          how.version = await newestNativeClaude();
+        }
+      }
+    }
+    lastHow[id] = how;
+    return how;
+  };
+
+  // A native claude whose binary is a copy, not a link (win32): the installer's
+  // newest versions/ entry is the one ~/.local/bin was refreshed from.
+  const newestNativeClaude = async () => {
+    try {
+      const names = (await readdir(path.join(home, '.local', 'share', 'claude', 'versions')))
+        .map((entry) => (typeof entry === 'string' ? entry : entry.name))
+        .filter((name) => SAFE_VERSION_RE.test(name))
+        .sort(compareVersions);
+      return names.length ? names[names.length - 1] : null;
+    } catch {
+      return null;
+    }
+  };
+
   // Installed version WITHOUT running the CLI: the package.json the global
   // install left on disk. Spawning `claude --version` at boot costs seconds
   // and starts the very process Harbor is trying not to disturb.
-  const installedNpm = async (pkg) => {
-    const prefix = await npmPrefix();
+  const installedNpm = async (pkg, knownPrefix) => {
+    const prefix = knownPrefix || await npmPrefix();
     if (!prefix) return null;
-    const file = path.join(prefix, 'node_modules', ...pkg.split('/'), 'package.json');
+    const file = path.join(npmModulesDir(prefix, platform), ...pkg.split('/'), 'package.json');
     try {
       return JSON.parse(await readFile(file, 'utf8'))?.version || null;
     } catch {
@@ -784,14 +984,24 @@ function createCliUpdateChecker(options = {}) {
     }
   };
 
+  // What `<bin> --version` must answer for the install to count: the provider's
+  // own signature AND the exact target (the 2026-10-03 contract).
+  const versionMatches = (id, stdout, expected) => {
+    const output = String(stdout || '').trim();
+    const match = id === 'claude'
+      ? /^(\S+) \(Claude Code\)$/.exec(output)
+      : /^codex-cli (\S+)$/.exec(output);
+    return match?.[1] === expected;
+  };
+
   // Only an explicit install probes the executable. Package metadata can be
   // current while a failed native download leaves an unusable placeholder.
   // Follow this package's bin entry, never an older executable found on PATH.
-  const verifyNpmExecutable = async (id, expected) => {
+  const verifyNpmExecutable = async (id, expected, knownPrefix) => {
     try {
-      const prefix = await npmPrefix();
+      const prefix = knownPrefix || await npmPrefix();
       if (!prefix) throw new Error('npm prefix unavailable');
-      const root = path.resolve(prefix, 'node_modules', ...PROVIDERS[id].pkg.split('/'));
+      const root = path.resolve(npmModulesDir(prefix, platform), ...PROVIDERS[id].pkg.split('/'));
       const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
       const entry = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin?.[id];
       if (!entry) throw new Error('package has no bin entry');
@@ -803,21 +1013,43 @@ function createCliUpdateChecker(options = {}) {
           windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024,
           env: { ...env, ...(javascript ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
         });
-      const output = String(result?.stdout || '').trim();
-      const match = id === 'claude'
-        ? /^(\S+) \(Claude Code\)$/.exec(output)
-        : /^codex-cli (\S+)$/.exec(output);
-      if (match?.[1] !== expected) throw new Error(`version response did not identify ${id} ${expected}`);
+      if (!versionMatches(id, result?.stdout, expected)) throw new Error(`version response did not identify ${id} ${expected}`);
       return { ok: true };
     } catch (error) {
       return { ok: false, error: `${id} executable verification failed: ${error.message}` };
     }
   };
 
+  // A Homebrew install has no package bin entry: probe the binary PATH resolves
+  // NOW (the upgrade relinks it), under the same deadline and hidden window.
+  const verifyBinaryExecutable = async (id, expected) => {
+    try {
+      const found = await resolveBin(id);
+      if (!found) throw new Error(`${BIN_NAMES[id]} is no longer on PATH`);
+      const result = await execFile(found.real || found.bin, ['--version'], {
+        windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024, env,
+      });
+      if (!versionMatches(id, result?.stdout, expected)) throw new Error(`version response did not identify ${id} ${expected}`);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: `${id} executable verification failed: ${error.message}` };
+    }
+  };
+
+  const verifyExecutable = (id, expected, how) => {
+    if (!how || how.method === 'npm') return verifyNpmExecutable(id, expected, how?.prefix);
+    if (how.method === 'homebrew-cask' || how.method === 'homebrew-formula') return verifyBinaryExecutable(id, expected);
+    return Promise.resolve({ ok: true });
+  };
+
   const CURSOR_VERSION_RE = /^\d{4}\.\d{1,2}\.\d{1,2}(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/;
 
+  // Cursor's installer keeps its builds under %LOCALAPPDATA%\cursor-agent on
+  // win32 and ~/.local/share/cursor-agent elsewhere (its install.sh).
   const cursorRoot = () => env.HARBOR_CURSOR_AGENT_DIR
-    || path.join(env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'cursor-agent');
+    || (platform === 'win32'
+      ? path.join(env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'cursor-agent')
+      : path.join(home, '.local', 'share', 'cursor-agent'));
 
   // The cursor launcher picks the newest folder under versions/, so that IS the
   // installed version (see cursor-agent.ps1).
@@ -834,8 +1066,27 @@ function createCliUpdateChecker(options = {}) {
     }
   };
 
-  const readInstalled = (id) => PROVIDERS[id].source === 'npm'
-    ? installedNpm(PROVIDERS[id].pkg) : installedCursor();
+  // The installed version, read the way its install method lays it out.
+  // Homebrew and the native installer name the version in the path itself.
+  const installedFor = async (id, how) => {
+    if (how.method === 'cursor-agent') return installedCursor();
+    if (how.method === 'npm') return installedNpm(PROVIDERS[id].pkg, how.prefix);
+    if (how.version && SAFE_VERSION_RE.test(how.version)) return how.version;
+    return null;
+  };
+
+  const readInstalled = async (id) => installedFor(id, await detectInstall(id));
+
+  // Keep the chip's description of the install method current. Returns true
+  // when it changed, so a reconcile knows to push.
+  const recordInstallMethod = (id) => {
+    const next = describeInstall(id, lastHow[id]);
+    const provider = state.providers[id];
+    // Same method and location: keep what the last check added (the upstream note).
+    if (!next || (provider.install?.method === next.method && provider.install?.label === next.label)) return false;
+    provider.install = next;
+    return true;
+  };
 
   const clearSettledNotes = (provider) => {
     if (!isNewer(provider.latest, provider.installed)) {
@@ -888,6 +1139,7 @@ function createCliUpdateChecker(options = {}) {
         // 2026-09-20: a slow sibling read must not commit a sample taken before
         // an install. Its owner records the final disk version and attribution.
         if (versions[i] === undefined || installOwners.has(id) || revisions[id] !== installedRevisions[id]) continue;
+        if (recordInstallMethod(id)) changed = true;
         // 2026-09-20: npm briefly removes package.json while replacing a global
         // install. Preserve its version until a separate reconcile also misses
         // it; a successful read, even unchanged, breaks the missing-read streak.
@@ -937,6 +1189,33 @@ function createCliUpdateChecker(options = {}) {
     return body.version;
   };
 
+  // Homebrew's own answer, from its LOCAL index: the version `brew upgrade`
+  // would install right now, which is the only honest install target for a
+  // brew-owned CLI. HOMEBREW_NO_AUTO_UPDATE keeps a check from turning into a
+  // `brew update` (network, minutes, and it rewrites the user's taps); the
+  // index refreshes whenever the user runs brew themselves. Same deadline and
+  // hidden-window posture as every other spawn here.
+  const brewEnv = () => ({
+    ...env, HOMEBREW_NO_AUTO_UPDATE: '1', HOMEBREW_NO_ENV_HINTS: '1', HOMEBREW_NO_COLOR: '1',
+  });
+  const brewBin = (how) => path.join(how.brewPrefix, 'bin', 'brew');
+  const latestBrew = async (how) => {
+    const cask = how.method === 'homebrew-cask';
+    const { stdout } = await execFile(brewBin(how), ['info', '--json=v2', ...(cask ? ['--cask', how.token] : [how.formula])], {
+      windowsHide: true, timeout: 30_000, maxBuffer: 16 * 1024 * 1024, env: brewEnv(),
+    });
+    const body = JSON.parse(String(stdout || '{}'));
+    const version = cask ? body?.casks?.[0]?.version : body?.formulae?.[0]?.versions?.stable;
+    if (!version) throw new Error(`Homebrew returned no version for ${cask ? how.token : how.formula}`);
+    return String(version);
+  };
+
+  const latestFor = (id, how) => {
+    if (id === 'cursor') return latestCursor();
+    if (how.method === 'homebrew-cask' || how.method === 'homebrew-formula') return latestBrew(how);
+    return latestNpm(PROVIDERS[id].pkg);
+  };
+
   // Release notes are BEST EFFORT and never hide an update: a GitHub rate limit
   // (403/429) or an unreachable changelog answers "notes unavailable" while the
   // version comparison stands on its own.
@@ -974,19 +1253,30 @@ function createCliUpdateChecker(options = {}) {
     const previous = state.providers[id] || emptyProviderState(id);
     const provider = PROVIDERS[id];
     const next = { ...previous, id, label: provider.label, source: provider.source, error: null };
+    let how = { method: id === 'cursor' ? 'cursor-agent' : 'npm' };
     try {
-      next.installed = provider.source === 'npm'
-        ? await installedNpm(provider.pkg)
-        : await installedCursor();
+      how = await detectInstall(id);
+      next.installed = await installedFor(id, how);
     } catch (error) {
       next.installed = null;
       next.error = `installed version unreadable: ${error.message}`;
     }
+    next.install = describeInstall(id, how);
     try {
-      next.latest = provider.source === 'npm'
-        ? await latestNpm(provider.pkg)
-        : await latestCursor();
+      next.latest = await latestFor(id, how);
       next.latestStale = false;
+      // Brew's index can trail the upstream release by hours. Say so instead of
+      // offering a target brew cannot install yet (best effort, never fatal).
+      if ((how.method === 'homebrew-cask' || how.method === 'homebrew-formula') && provider.pkg) {
+        const upstream = await latestNpm(provider.pkg).catch(() => null);
+        if (upstream && isNewer(upstream, next.latest) && next.install) {
+          next.install = {
+            ...next.install,
+            upstream,
+            hint: `${next.install.hint} ${upstream} is released upstream but Homebrew's index lists ${next.latest}; running "brew update" refreshes it.`,
+          };
+        }
+      }
     } catch (error) {
       // Keep the last KNOWN latest so an offline or rate-limited check does not
       // erase an update the user already saw and make the chip vanish; mark it
@@ -1061,7 +1351,9 @@ function createCliUpdateChecker(options = {}) {
       // fields, and replacing the whole provider would regress a concurrent
       // install() or dismiss() (2026-09-03 round-2 fix).
       const live = state.providers[result.id] || emptyProviderState(result.id);
-      providers[result.id] = { ...result, installed: live.installed, history: live.history, dismissed: live.dismissed };
+      providers[result.id] = {
+        ...result, installed: live.installed, history: live.history, dismissed: live.dismissed, install: result.install ?? live.install,
+      };
       clearSettledNotes(providers[result.id]);
     }
     state = { checkedAt: now().toISOString(), providers };
@@ -1240,21 +1532,55 @@ function createCliUpdateChecker(options = {}) {
 
   // The argv for a manual install. Exposed so the UI can SHOW the command it is
   // about to run, and so the test can assert on it without spawning anything.
-  const installCommand = (id, version) => {
+  // The argv follows the install METHOD (detectInstall): npm for an npm
+  // package, `brew upgrade` for a Homebrew one, cursor's own updater for
+  // cursor. A method Harbor will not upgrade answers null; runInstall then says
+  // how instead of installing a second copy.
+  const installCommand = (id, version, how = lastHow[id]) => {
     const provider = PROVIDERS[id];
     if (!provider) return null;
-    if (provider.source === 'npm') {
+    const method = how?.method || (id === 'cursor' ? 'cursor-agent' : 'npm');
+    if (method === 'npm') {
       const spec = `${provider.pkg}@${version}`;
+      // A prefix read off the resolved binary is passed explicitly, so the new
+      // version lands where the launched copy lives even when the npm on PATH
+      // belongs to another node (Homebrew's node keeps its own prefix).
+      let prefixDir = how?.fromBin && how.prefix ? how.prefix : null;
+      if (prefixDir && platform === 'win32') {
+        // npm's own default prefix on win32 is %APPDATA%\npm, and the shim
+        // fallback names it on every npm install, so it is dropped rather
+        // than passed: npm lands there anyway, and the path stays off the
+        // cmd.exe command line. Any other prefix holding a cmd.exe
+        // metacharacter cannot be passed through `cmd.exe /c` safely, so the
+        // install is refused by name instead of half-run.
+        if (env.APPDATA && sameWinPath(prefixDir, path.win32.join(env.APPDATA, 'npm'))) prefixDir = null;
+        else if (WIN_CMD_META_RE.test(prefixDir)) {
+          return {
+            refused: `Harbor will not run npm with the install folder ${prefixDir}: it contains a character`
+              + ' cmd.exe treats as a command (& | ^ < > ( ) % or a quote). Update it from a terminal instead:'
+              + ` npm install -g ${spec} --prefix "${prefixDir}"`,
+          };
+        }
+      }
+      const prefix = prefixDir ? ['--prefix', prefixDir] : [];
       // execFile cannot launch npm.cmd directly on win32 (Node refuses .cmd
       // without a shell), and shell:true would put a remote version string
       // through a command line. cmd.exe /c with an argv array is neither.
-      return process.platform === 'win32'
-        ? { file: 'cmd.exe', args: ['/c', 'npm', 'install', '-g', spec] }
-        : { file: 'npm', args: ['install', '-g', spec] };
+      return platform === 'win32'
+        ? { file: 'cmd.exe', args: ['/c', 'npm', 'install', '-g', ...prefix, spec] }
+        : { file: 'npm', args: ['install', '-g', ...prefix, spec] };
     }
-    // Cursor is not on npm; its own `update` subcommand IS its installer.
-    const launcher = path.join(cursorRoot(), process.platform === 'win32' ? 'cursor-agent.cmd' : 'cursor-agent');
-    return cliCommand(launcher, ['update']);
+    if (method === 'homebrew-cask') return { file: brewBin(how), args: ['upgrade', '--cask', how.token] };
+    if (method === 'homebrew-formula') return { file: brewBin(how), args: ['upgrade', how.formula] };
+    if (method === 'cursor-agent') {
+      // Cursor is not on npm; its own `update` subcommand IS its installer.
+      // Its launcher sits in the install root on win32 and in ~/.local/bin elsewhere.
+      const launcher = platform === 'win32'
+        ? path.join(cursorRoot(), 'cursor-agent.cmd')
+        : path.join(home, '.local', 'bin', 'cursor-agent');
+      return cliCommand(launcher, ['update'], platform);
+    }
+    return null;
   };
 
   // Never called by a timer, a boot path, or a check. Only ever by an explicit
@@ -1268,19 +1594,42 @@ function createCliUpdateChecker(options = {}) {
     if (!SAFE_VERSION_RE.test(target)) return { ok: false, reason: `refusing an unsafe version string: ${target}` };
     // Ignore the throttle at a click: the watcher may have installed seconds ago.
     await reconcileLocal(true);
-    const observedFrom = await readInstalled(id);
+    const how = await detectInstall(id);
+    const observedFrom = await installedFor(id, how);
     const from = observedFrom || state.providers[id].installed || null;
     const changedBeforeClick = observedFrom !== null && state.providers[id].installed !== observedFrom;
     if (observedFrom !== null) installedChanged(id, observedFrom);
     if (changedBeforeClick) { await persist(); emit(); }
     if (observedFrom === target) {
-      const verified = provider.source === 'npm' ? await verifyNpmExecutable(id, target) : { ok: true };
+      const verified = await verifyExecutable(id, target, how);
       if (verified.ok) {
         await persist();
         emit();
         return { ok: true, alreadyInstalled: true, installed: from, target, output: 'Already installed' };
       }
       // A retry repairs a partial install instead of trusting the same metadata.
+    }
+
+    // A copy Harbor cannot upgrade in place is described, never duplicated:
+    // `npm install -g` beside a native or unrecognised install leaves two CLIs
+    // and a chip that reads the one nobody launches (2026-10-15).
+    const command = installCommand(id, target, how);
+    if (command?.refused) return { ok: false, target, installed: from, reason: command.refused };
+    if (!command) {
+      const described = describeInstall(id, how);
+      return { ok: false, manual: true, target, installed: from, reason: described?.hint || `Harbor cannot upgrade this ${provider.label} install.` };
+    }
+    // `brew upgrade` takes whatever the local index names and cannot pin a
+    // version, so the click must still be for exactly that version: a target
+    // reviewed against another source (or an index refreshed since) is refused.
+    if (how.method === 'homebrew-cask' || how.method === 'homebrew-formula') {
+      const brewTarget = await latestBrew(how).catch((error) => ({ error }));
+      if (typeof brewTarget !== 'string') {
+        return { ok: false, target, reason: `Homebrew could not say what it would install: ${brewTarget.error?.message || 'unknown'}` };
+      }
+      if (compareVersions(brewTarget, target) !== 0) {
+        return { ok: false, target, reason: `Homebrew would install ${brewTarget}, not the reviewed ${target}. Check again, then install.` };
+      }
     }
 
     const snapshot = await snapshotConfig(id, { from, to: target }).catch((error) => (
@@ -1299,7 +1648,6 @@ function createCliUpdateChecker(options = {}) {
       };
     }
 
-    const command = installCommand(id, target);
     let output = '';
     let ok = false;
     let error = null;
@@ -1309,7 +1657,9 @@ function createCliUpdateChecker(options = {}) {
         timeout: 10 * 60 * 1000,
         maxBuffer: 8 * 1024 * 1024,
         // cursor-agent deletes an API-key sign-in on any run that does not pass the key.
-        ...(id === 'cursor' ? { env: cursorAuthEnv(env, { home }) } : {}),
+        // No `brew update` mid-install: it could move the target past the review.
+        ...(id === 'cursor' ? { env: cursorAuthEnv(env, { home, platform }) }
+          : how.method === 'homebrew-cask' || how.method === 'homebrew-formula' ? { env: brewEnv() } : {}),
       });
       output = `${result?.stdout || ''}${result?.stderr || ''}`;
       ok = true;
@@ -1320,7 +1670,8 @@ function createCliUpdateChecker(options = {}) {
 
     let installed = null;
     try {
-      installed = provider.source === 'npm' ? await installedNpm(provider.pkg) : await installedCursor();
+      // Re-detect: an upgrade relinks the binary (a new Caskroom folder).
+      installed = await readInstalled(id);
     } catch { /* the re-read is best effort; the history entry still lands */ }
     // The install "worked" when the version on disk actually moved to the target.
     // npm can exit 0 and leave the old tree (a shim, a permission fault), and
@@ -1336,8 +1687,8 @@ function createCliUpdateChecker(options = {}) {
       ok = false;
       error = error || `the updater exited cleanly but ${installed} is installed, not ${target}`;
     }
-    if (ok && provider.source === 'npm') {
-      const verified = await verifyNpmExecutable(id, target);
+    if (ok && id !== 'cursor') {
+      const verified = await verifyExecutable(id, target, lastHow[id] || how);
       ok = verified.ok;
       if (!ok) error = verified.error;
     }
@@ -1351,6 +1702,7 @@ function createCliUpdateChecker(options = {}) {
       ...(ok && installed && installed !== target ? { requested: target } : {}),
     };
     installedChanged(id, installed, 'harbor');
+    recordInstallMethod(id);
     const current = state.providers[id] || emptyProviderState(id);
     state.providers[id] = {
       ...current,
@@ -1455,6 +1807,9 @@ module.exports = {
   tagLine,
   flagsFor,
   configTargets,
+  classifyInstall,
+  describeInstall,
+  npmModulesDir,
   diffJson,
   diffText,
   pendingUpdates,

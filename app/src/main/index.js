@@ -2435,7 +2435,14 @@ app.whenReady().then(async () => {
   // notice; a toast for something the user must not be nagged into installing
   // would be the wrong pressure.
   const updatesFixture = process.env.HARBOR_CLI_UPDATES_FIXTURE || null;
-  cliUpdates = createCliUpdateChecker({ log: (message) => console.warn(message) });
+  // configuredBin: the updater must inspect and upgrade the SAME binary the
+  // launcher (bin/harbor-bin.cjs providerBin) runs, which is the wizard-saved
+  // path when there is one, not whatever PATH happens to resolve first. Read
+  // live so a setup save is seen without a restart.
+  cliUpdates = createCliUpdateChecker({
+    log: (message) => console.warn(message),
+    configuredBin: (id) => harborConfig?.providers?.[id]?.bin ?? null,
+  });
   cliUpdates.subscribe((state) => sendToRenderer('cli-updates:changed', state));
   cliUpdates.onInstalledChanged((change) => { refreshProviderModels(change).catch(console.warn); });
   if ((!e2eMode || updatesFixture) && process.env.HARBOR_NO_UPDATE_CHECK !== '1') {
