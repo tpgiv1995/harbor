@@ -40,6 +40,10 @@ test('the run line counts workers by what they are doing, not by queue status', 
   assert.equal(runCounts({ active: 3, ready: 0, waiting: 0 }), '3 active');
   assert.equal(runCounts({ active: 0, ready: 0, waiting: 0 }), null);
   assert.equal(runCounts(null), null);
+  // A worker whose last turn errored or was stopped is neither working nor
+  // awaiting review, and the line says so.
+  assert.equal(runCounts({ active: 3, working: 1, awaitingReview: 0, quiet: 0, missing: 0, failed: 1, stopped: 1, ready: 0, waiting: 0 }),
+    '1 failed · 1 working · 1 stopped');
 });
 
 test('the ETA says when a batch is running long instead of promising the same minutes', () => {

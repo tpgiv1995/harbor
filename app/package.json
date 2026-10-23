@@ -85,6 +85,13 @@
         "to": "bin"
       },
       {
+        "from": "../.claude/commands",
+        "to": ".claude/commands",
+        "filter": [
+          "*.md"
+        ]
+      },
+      {
         "from": "assets/fonts",
         "to": "licenses/fonts",
         "filter": [

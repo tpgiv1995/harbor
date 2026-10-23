@@ -245,7 +245,13 @@ A handful of explicit negative patterns (`!**/*.test.js`, `!**/*.md`,
 
 `bin/` ships via `build.extraResources` rather than `build.files`, because it
 lives one directory above `app/` (at the repository root) and `files` only
-reaches inside the project directory `electron-builder` is run from.
+reaches inside the project directory `electron-builder` is run from. The
+repository's `.claude/commands/*.md` ship the same way, to
+`resources/.claude/commands/`: a Codex Orch kickoff falls back to them when
+the project and the Claude home have no copy of the workflow command
+(`shippedCommandsDir` in `app/src/main/actions/orchestration.js`). The entry
+sits in the ROOT `extraResources` list, which electron-builder applies
+together with each platform's own list.
 
 **`app/src/server/` (the phone-client bridge server, started with
 `npm run start:server`) is shipped as source but is not wired up to run

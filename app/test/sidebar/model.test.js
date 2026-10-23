@@ -779,3 +779,20 @@ test('a row is dormant only when Harbor put it to sleep after its last turn and 
   assert.equal(byId.closed.dormant, false, 'not in the ledger');
   assert.equal(mergeSidebarModel({ historySessions }).projects[0].sessions[0].dormant, false, 'no ledger, no dormant');
 });
+
+test('archived codex chats stay indexed but appear in the rail only when searched, unless live', () => {
+  const sessions = [
+    { id: 'active', title: 'Fix the sidebar', project: 'widget', lastActiveMs: 1 },
+    { id: 'archived', title: 'Old spike', project: 'widget', isArchived: true, lastActiveMs: 2 },
+    { id: 'archived-live', title: 'Resumed spike', project: 'widget', isArchived: true, isLive: true, lastActiveMs: 3 },
+  ];
+  const model = { projects: [{ label: 'widget', sessions }] };
+  assert.deepEqual(filterProjects(model, { filter: { kind: 'all' } }).projects[0].sessions.map(s => s.id), ['archived-live', 'active']);
+  assert.equal(filterProjects(model, { filter: { kind: 'all' }, query: 'Old spike' }).projects[0].sessions[0].id, 'archived');
+  // The flag rides from the provider row into the model.
+  const merged = mergeSidebarModel({
+    historySessions: [{ id: 'x', title: 'Old spike', project: 'widget', lastActive: '2026-10-15 10:00', provider: 'codex', archived: true }],
+    livePanes: [],
+  });
+  assert.equal(merged.projects[0].sessions[0].isArchived, true);
+});

@@ -374,24 +374,86 @@ function eventForBatch(batch, events) {
   }).sort((a, b) => eventTime(b) - eventTime(a))[0] || null;
 }
 
+function sessionStartedAt(row) {
+  return timestamp(row.startedAt || row.start || row.lineage?.startedMs);
+}
+
+function sessionActivityAt(row) {
+  return timestamp(row.signalAt || row.mtimeMs || row.lastActive);
+}
+
+function mostRecentlyActive(list) {
+  return list.sort((a, b) => sessionActivityAt(b) - sessionActivityAt(a))[0] || null;
+}
+
+// A batch's worker is found in three tiers, strongest first, and a weaker tier
+// is consulted only when every stronger one is empty: the exact session id
+// the queue recorded, then the BATCH TITLE: prompt, then a session started in
+// the batch's own lane worktree. Codex workers were never launched with the
+// title prefix, so before the lane tier they joined only by id and otherwise
+// read "no liveness signal". Mixing tiers and sorting by activity let a later
+// session in the same worktree (the next batch's worker, a review) outrank
+// the real worker, so the tiers stay separate.
 function joinBatchesToSessions(queue, indexRows = [], events = [], now = Date.now()) {
   const rows = Array.isArray(indexRows) ? indexRows : [];
-  const byId = new Map((queue?.batches || []).map((batch) => [String(batch.id), batch]));
-  const held = heldResources(queue?.batches || []);
-  return (queue?.batches || []).map((batch) => {
-    const status = String(batch.status || 'pending').toLowerCase();
-    const dispatchedAt = timestamp(batch.last_dispatched_at || batch.started_at);
-    const exact = batch.last_session_id
-      ? rows.filter((row) => row.id === batch.last_session_id)
-      : [];
-    const titleNeedle = `batch title: ${String(batch.title || '').trim()}`.toLowerCase();
-    const heuristic = batch.title ? rows.filter((row) => {
-      const prompt = String(row.firstPrompt || row.first_prompt || row.title || '').trim().toLowerCase();
+  const batches = queue?.batches || [];
+  const byId = new Map(batches.map((batch) => [String(batch.id), batch]));
+  const held = heldResources(batches);
+  const dispatchOf = (batch) => timestamp(batch.last_dispatched_at || batch.started_at);
+  // A session another batch names as its own worker is never a heuristic
+  // match for this one, in either heuristic tier.
+  const claimedBy = new Map(batches.filter((batch) => batch.last_session_id).map((batch) => [batch.last_session_id, batch.id]));
+  const ownedElsewhere = (row, batch) => claimedBy.has(row.id) && claimedBy.get(row.id) !== batch.id;
+  const strong = batches.map((batch) => {
+    if (batch.last_session_id) {
+      const exact = mostRecentlyActive(rows.filter((row) => row.id === batch.last_session_id));
+      if (exact) return exact;
+    }
+    if (!batch.title) return null;
+    const dispatchedAt = dispatchOf(batch);
+    const titleNeedle = `batch title: ${String(batch.title).trim()}`.toLowerCase();
+    // The title prefix is how claude workers announce themselves; a codex
+    // worker's prompt may carry the packet after a preamble, so for codex the
+    // line may sit anywhere in the prompt.
+    return mostRecentlyActive(rows.filter((row) => {
+      if (ownedElsewhere(row, batch)) return false;
       const startedAt = timestamp(row.startedAt || row.start);
-      return prompt.startsWith(titleNeedle) && (!dispatchedAt || !startedAt || startedAt >= dispatchedAt - JOIN_SLACK_MS);
-    }) : [];
-    const session = (exact.length ? exact : heuristic)
-      .sort((a, b) => timestamp(b.signalAt || b.mtimeMs || b.lastActive) - timestamp(a.signalAt || a.mtimeMs || a.lastActive))[0] || null;
+      if (dispatchedAt && startedAt && startedAt < dispatchedAt - JOIN_SLACK_MS) return false;
+      const prompt = String(row.firstPrompt || row.first_prompt || row.title || '').trim().toLowerCase();
+      return prompt.startsWith(titleNeedle) || (row.provider === 'codex' && prompt.includes(titleNeedle));
+    }));
+  });
+  const taken = new Set(strong.filter(Boolean).map((row) => row.id));
+  // Lanes are shared by successive batches, so each batch owns a window that
+  // never overlaps another's: from its dispatch (less the join slack when no
+  // earlier batch was dispatched into the lane) up to the next dispatch into
+  // the same lane, and the EARLIEST session in it is the worker; anything later
+  // (a review, a resume) came after it. Windows that met at the midpoint of two
+  // close dispatches overlapped, so a worker that started late could be taken
+  // by the next batch while its own batch read "no liveness signal".
+  const laneWorker = (batch) => {
+    const dispatchedAt = dispatchOf(batch);
+    if (!batch.worktree || !dispatchedAt) return null;
+    const laneStamps = batches
+      .filter((other) => other !== batch && other.worktree && sameWorkspace(other.worktree, batch.worktree))
+      .map(dispatchOf).filter(Boolean);
+    const earlier = laneStamps.some((at) => at <= dispatchedAt);
+    const from = earlier ? dispatchedAt : dispatchedAt - JOIN_SLACK_MS;
+    const until = laneStamps.filter((at) => at > dispatchedAt).reduce((min, at) => Math.min(min, at), Infinity);
+    const worker = rows.filter((row) => {
+      const startedAt = sessionStartedAt(row);
+      if (!startedAt || !row.cwd || startedAt < from || startedAt >= until) return false;
+      if (taken.has(row.id) || ownedElsewhere(row, batch)) return false;
+      return sameWorkspace(row.cwd, batch.worktree);
+    }).sort((a, b) => sessionStartedAt(a) - sessionStartedAt(b))[0] || null;
+    // One worker, one batch, even for two dispatches stamped the same instant.
+    if (worker) taken.add(worker.id);
+    return worker;
+  };
+  return batches.map((batch, index) => {
+    const status = String(batch.status || 'pending').toLowerCase();
+    const dispatchedAt = dispatchOf(batch);
+    const session = strong[index] || laneWorker(batch);
     const event = eventForBatch(batch, events);
     const transcriptSignal = timestamp(session?.signalAt || session?.mtimeMs || session?.lastActive);
     const eventSignal = eventTime(event);
@@ -407,7 +469,12 @@ function joinBatchesToSessions(queue, indexRows = [], events = [], now = Date.no
     else if (['blocked', 'failed', 'error'].includes(status)) workerState = 'error-blocked';
     else if (status === 'active') {
       const eventSaysFinished = /\b(finished|worker done|exited|completed)\b/i.test(String(event?.msg || ''));
-      if (session?.finished === true || eventSaysFinished) workerState = 'awaiting-review';
+      // How the worker's last turn ended (the transcript's turnEnd). A failed
+      // or stopped turn has finished too, but "awaiting review" (or, with no
+      // end at all, "possibly hung") would hide that it did not succeed.
+      if (session?.turnEnd === 'error') workerState = 'failed';
+      else if (session?.turnEnd === 'aborted') workerState = 'stopped';
+      else if (session?.finished === true || eventSaysFinished) workerState = 'awaiting-review';
       else if (signalAt && signalAgeMs <= WORKING_FRESH_MS) workerState = 'working';
       else if (signalAt) workerState = 'quiet';
       else workerState = 'no-signal';
@@ -422,6 +489,9 @@ function joinBatchesToSessions(queue, indexRows = [], events = [], now = Date.no
       signalSource,
       quietMs: workerState === 'quiet' ? signalAgeMs : null,
       elapsedMs: dispatchedAt ? Math.max(0, now - dispatchedAt) : null,
+      // The worker's own last turn, before the queue has a reviewed excerpt.
+      workerError: workerState === 'failed' ? session?.turnError?.message || 'turn failed' : null,
+      workerResult: session?.resultText || null,
     };
   });
 }
@@ -434,21 +504,24 @@ function formatSignalAge(ms) {
 
 function refineSummary(summary, joined = []) {
   if (!summary) return null;
-  const counts = { working: 0, awaitingReview: 0, quiet: 0, missing: 0 };
+  const counts = { working: 0, awaitingReview: 0, quiet: 0, missing: 0, failed: 0, stopped: 0 };
   for (const row of joined) {
     if (row.workerState === 'working') counts.working += 1;
     else if (row.workerState === 'awaiting-review') counts.awaitingReview += 1;
+    else if (row.workerState === 'failed') counts.failed += 1;
+    else if (row.workerState === 'stopped') counts.stopped += 1;
     else if (row.workerState === 'quiet') counts.quiet += 1;
     else if (row.workerState === 'no-signal') counts.missing += 1;
   }
-  const currentState = counts.quiet ? 'quiet' : counts.working ? 'working'
-    : counts.awaitingReview ? 'awaiting-review' : counts.missing ? 'no-signal' : null;
+  const currentState = counts.failed ? 'failed' : counts.quiet ? 'quiet' : counts.working ? 'working'
+    : counts.awaitingReview ? 'awaiting-review' : counts.stopped ? 'stopped' : counts.missing ? 'no-signal' : null;
   const current = joined.filter((row) => row.workerState === currentState)
     .sort((a, b) => (a.signalAgeMs ?? Infinity) - (b.signalAgeMs ?? Infinity))[0] || null;
   // Nothing running while batches are ready is the run sitting idle, which is
   // exactly what the pill must say rather than a bare "live".
   const idleReady = summary.ready && summary.state === 'live' ? 'ready, not started' : null;
-  const stateWord = counts.quiet ? 'quiet' : counts.working ? 'working' : counts.awaitingReview ? 'awaiting review' : counts.missing ? 'no signal' : idleReady || summary.state;
+  const stateWord = counts.failed ? 'worker failed' : counts.quiet ? 'quiet' : counts.working ? 'working' : counts.awaitingReview ? 'awaiting review'
+    : counts.stopped ? 'worker stopped' : counts.missing ? 'no signal' : idleReady || summary.state;
   return { ...summary, ...counts, currentState: current?.workerState || null, stateWord,
     signalAgeMs: current?.signalAgeMs ?? null, signal: current ? formatSignalAge(current.signalAgeMs) : null };
 }

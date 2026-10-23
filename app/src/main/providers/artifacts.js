@@ -18,14 +18,44 @@
 //
 // Results carry the owning session id and cwd so the renderer can group them
 // by project exactly like the rail groups sessions.
+//
+// CODEX (2026-10-15): the view was wired to Claude's projects dir alone, so a
+// codex session's report or render never appeared. Codex rollouts are read
+// STRUCTURALLY, never by the raw line regex: a codex line embeds whole command
+// outputs and file bodies, so "a path appears somewhere" is far fuzzier there
+// than in a Claude transcript. What counts is what codex itself records as
+// written: a FileChange item's add/update paths (and an update's move_path),
+// an apply_patch call's "*** Add File:" / "*** Update File:" / "*** Move to:"
+// targets (relative ones resolved against the turn's cwd), an image
+// generation's savedPath, and every file under <codex home>/generated_images/
+// <thread id>/, which is codex's own output store. CommandExecution writes are
+// deliberately NOT mined (too fuzzy). The same viewable-extension, existence,
+// exclusion and not-older-than-the-session rules then apply unchanged.
+// Rollouts codex has compressed (.jsonl.zst, its cold and archived sessions)
+// are decompressed in the stream (codex-rollout-files.js, the zstd reader the
+// rail uses too); they are immutable, so one parse is cached.
+//
+// The walk is cheap on purpose: it runs every 60 s
+// while the Files view is open, and listing + stat'ing every rollout codex
+// ever wrote each time is the cost to avoid. A sessions/YYYY/MM/DD folder whose date ends before the window is
+// skipped by NAME, except on a full sweep every FULL_SWEEP_MS (a session
+// resumed weeks later appends to its OLD day folder's rollout, and the sweep
+// is what finds it again); a rollout already in the window stays checked on
+// every pass whatever its folder. Folder listings are cached by the folder's
+// mtime, so an unchanged folder is one stat, not a readdir.
 
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const {
+  CODEX_ID_RE, zstdAvailable, isCompressed, createRolloutReadStream,
+} = require('./codex-rollout-files.js');
 
 const DEFAULT_ROOTS = [path.join(os.homedir(), '.claude', 'projects')];
+const DAY_MS = 24 * 60 * 60 * 1000;
+const FULL_SWEEP_MS = 10 * 60 * 1000;
 const DEFAULT_CACHE = path.join(os.homedir(), '.cache', 'harbor', 'artifacts-index.json');
 const WINDOW_DAYS = 14;
 const MENTION_GRACE_MS = 5 * 60 * 1000;
@@ -323,6 +353,135 @@ async function parseTranscript(filePath, parseOptions = {}) {
   return { candidates: [...candidates], cwd, startMs, parsedBytes: consumed };
 }
 
+// Codex homes the Files view reads: every configured codex profile's home, else
+// an inherited CODEX_HOME, else ~/.codex. The same order codexHomes()
+// (codex-model-catalog.js) and defaultCodexHome() (accounts.js) use, which is
+// bin/ai's: with no profile, codex itself writes under CODEX_HOME.
+function codexHomesFromProfiles(profiles, homedir = os.homedir(), { env = process.env } = {}) {
+  const configured = (profiles || [])
+    .filter((profile) => profile?.provider === 'codex' && profile.configHome)
+    .map((profile) => profile.configHome);
+  return configured.length ? [...new Set(configured)] : [env.CODEX_HOME || path.join(homedir, '.codex')];
+}
+
+// The ms a sessions/ date folder's days END, from its path parts below
+// sessions/ ([YYYY], [YYYY, MM] or [YYYY, MM, DD]); null when the names are
+// not a date (such a folder is always walked).
+function dateFolderEndMs(parts) {
+  const [y, m, d] = parts.map((part) => (/^\d+$/.test(part) ? Number(part) : NaN));
+  if (!Number.isFinite(y) || parts.length > 3) return null;
+  if (parts.length === 1) return Date.UTC(y + 1, 0, 1);
+  if (!Number.isFinite(m) || m < 1 || m > 12) return null;
+  if (parts.length === 2) return Date.UTC(y, m, 1);
+  if (!Number.isFinite(d) || d < 1 || d > 31) return null;
+  return Date.UTC(y, m - 1, d + 1);
+}
+
+// The paths ONE codex rollout record says were written. `cwd` resolves an
+// apply_patch path given relative to the turn. Pure, so every shape is testable.
+function codexRecordOutputs(record, cwd) {
+  const out = [];
+  const payload = record?.payload;
+  if (!payload || typeof payload !== 'object') return out;
+  const add = (candidate) => {
+    if (typeof candidate !== 'string' || !candidate) return;
+    let value = candidate.trim();
+    if (!path.isAbsolute(value) && !/^[A-Za-z]:[\\/]/.test(value)) {
+      if (!cwd) return;
+      value = path.resolve(cwd, value);
+    }
+    if (artifactKind(value) && !isExcluded(value)) out.push(value);
+  };
+  if (record.type === 'event_msg' && payload.type === 'item_completed') {
+    const item = payload.item || {};
+    if (item.type === 'FileChange' && item.changes && typeof item.changes === 'object') {
+      for (const [file, change] of Object.entries(item.changes)) {
+        if (change?.type === 'delete') continue;
+        add(change?.move_path || file);
+      }
+    }
+    // Image generation (an Extension item) names the file it saved.
+    if (item.type === 'Extension' && typeof item.savedPath === 'string') add(item.savedPath);
+  }
+  if (record.type === 'response_item' && payload.type === 'custom_tool_call' && payload.name === 'apply_patch') {
+    for (const match of String(payload.input || '').matchAll(/^\*\*\* (?:Add File|Update File|Move to): (.+?)\s*$/gm)) {
+      // An update that also moves names its source first and its target after;
+      // only the target still exists, and the existence check drops the source.
+      add(match[1]);
+    }
+  }
+  return out;
+}
+
+// Cheap pre-filter: only these records can carry an output or the facts the
+// parse needs, and a rollout line can be megabytes (session_meta embeds the
+// whole system prompt), so the rest are never JSON.parsed.
+const CODEX_INTERESTING_RE = /"(?:session_meta|turn_context|FileChange|apply_patch|Extension)"/;
+
+async function parseCodexRollout(filePath, parseOptions = {}) {
+  const compressed = isCompressed(filePath);
+  // A compressed rollout is immutable and cannot be resumed mid-stream.
+  const fromByte = !compressed && Number.isFinite(parseOptions.fromByte) && parseOptions.fromByte > 0
+    ? parseOptions.fromByte : 0;
+  const prior = fromByte ? parseOptions.prior || null : null;
+  const candidates = new Set(prior ? prior.candidates || [] : []);
+  let cwd = prior ? prior.cwd ?? null : null;
+  let turnCwd = prior ? prior.turnCwd ?? cwd : null;
+  let startMs = prior ? prior.startMs ?? null : null;
+  let consumed = fromByte;
+  const takeLine = (line) => {
+    if (!CODEX_INTERESTING_RE.test(line)) return;
+    let record;
+    try { record = JSON.parse(line); } catch { return; }
+    if (record?.type === 'session_meta') {
+      cwd = cwd || record.payload?.cwd || null;
+      turnCwd = turnCwd || cwd;
+      if (startMs === null) {
+        const parsed = Date.parse(record.payload?.timestamp || record.timestamp);
+        if (Number.isFinite(parsed)) startMs = parsed;
+      }
+      return;
+    }
+    if (record?.type === 'turn_context') {
+      if (record.payload?.cwd) turnCwd = record.payload.cwd;
+      return;
+    }
+    if (candidates.size >= MAX_CANDIDATES_PER_FILE) return;
+    for (const candidate of codexRecordOutputs(record, turnCwd || cwd)) candidates.add(candidate);
+  };
+  if (compressed) {
+    // Throws when this runtime cannot decompress zstd; destroying the stream
+    // releases the file too.
+    const input = createRolloutReadStream(filePath);
+    const lines = readline.createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) if (line) takeLine(line);
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+    return { candidates: [...candidates], cwd, turnCwd, startMs, parsedBytes: 0 };
+  }
+  let carry = Buffer.alloc(0);
+  const stream = fs.createReadStream(filePath, fromByte ? { start: fromByte } : {});
+  try {
+    for await (const chunk of stream) {
+      const buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      const lastNl = buf.lastIndexOf(0x0A);
+      if (lastNl === -1) { carry = buf; continue; }
+      const complete = buf.subarray(0, lastNl + 1);
+      carry = buf.subarray(lastNl + 1);
+      consumed += complete.length;
+      for (const line of complete.toString('utf8').split('\n')) {
+        if (line) takeLine(line.endsWith('\r') ? line.slice(0, -1) : line);
+      }
+    }
+  } finally {
+    stream.destroy();
+  }
+  return { candidates: [...candidates], cwd, turnCwd, startMs, parsedBytes: consumed };
+}
+
 function createArtifactsProvider(options = {}) {
   // The env vars OUTRANK the composed options: they are the harness/operator
   // escape, same contract as HARBOR_CONTEXT_DIR and HARBOR_MODEL_CACHE_FILE.
@@ -334,6 +493,26 @@ function createArtifactsProvider(options = {}) {
     : null)
     || options.roots
     || DEFAULT_ROOTS;
+  // Codex homes follow the same isolation contract: the env var outranks, and a
+  // harness that relocated the Claude roots (env or an explicit `roots`) gets NO
+  // codex default, so an isolated run can never read the real ~/.codex.
+  // `codexHomes` may be a FUNCTION, asked on every collection: the composition
+  // root passes one so a profile saved after launch (the wizard reassigns the
+  // config) is read without a restart.
+  const pinnedCodexHomes = process.env.HARBOR_ARTIFACTS_CODEX_HOMES
+    ? process.env.HARBOR_ARTIFACTS_CODEX_HOMES.split(path.delimiter).filter(Boolean)
+    : process.env.HARBOR_ARTIFACTS_ROOTS ? []
+      : options.codexHomes ? null
+        : options.roots ? [] : codexHomesFromProfiles([]);
+  const codexHomes = () => {
+    if (pinnedCodexHomes) return pinnedCodexHomes;
+    if (typeof options.codexHomes !== 'function') return options.codexHomes;
+    try {
+      const homes = options.codexHomes();
+      return Array.isArray(homes) ? homes.filter(Boolean) : [];
+    } catch { return []; }
+  };
+  const fullSweepMs = options.fullSweepMs ?? FULL_SWEEP_MS;
   const cacheFile = process.env.HARBOR_ARTIFACTS_CACHE || options.cacheFile || DEFAULT_CACHE;
   const windowDays = options.windowDays ?? WINDOW_DAYS;
   const nowFn = options.now || Date.now;
@@ -350,7 +529,9 @@ function createArtifactsProvider(options = {}) {
   // shipped and the fix would look inert on exactly the history being viewed.
   // (2026-10-21: the linear rewrite kept the output, so no bump; see
   // extractCandidates.)
-  const CACHE_VERSION = 3;
+  // v4: codex rollouts and generated_images (entries now carry provider and
+  // sessionId).
+  const CACHE_VERSION = 4;
   let cache = { version: CACHE_VERSION, files: {} };
   try {
     const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
@@ -364,7 +545,24 @@ function createArtifactsProvider(options = {}) {
   let scanPromise = null;
   let assemblePromise = null;
   let lastScanMs = 0;
+  // dir -> { mtimeMs, entries: [{ name, isDir }] }: a folder is re-read only
+  // when its mtime moved (a file added, removed or renamed in it).
+  const dirListings = new Map();
+  let lastSweepMs = -Infinity;
+  const listDir = async (dir) => {
+    let stat;
+    try { stat = await fsp.stat(dir); } catch { dirListings.delete(dir); return null; }
+    const hit = dirListings.get(dir);
+    if (hit && hit.mtimeMs === stat.mtimeMs) return hit.entries;
+    let dirents;
+    try { dirents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return null; }
+    const entries = dirents.map((dirent) => ({ name: dirent.name, isDir: dirent.isDirectory() }));
+    dirListings.set(dir, { mtimeMs: stat.mtimeMs, entries });
+    return entries;
+  };
 
+  // Each transcript with the provider that parses it and the session it
+  // belongs to (a codex rollout's id is the thread id in its file name).
   async function listTranscripts() {
     const out = [];
     for (const root of roots) {
@@ -376,7 +574,81 @@ function createArtifactsProvider(options = {}) {
         let entries = [];
         try { entries = await fsp.readdir(dir); } catch { continue; }
         for (const name of entries) {
-          if (name.endsWith('.jsonl')) out.push(path.join(dir, name));
+          if (name.endsWith('.jsonl')) out.push({ file: path.join(dir, name), provider: 'claude', sessionId: path.basename(name, '.jsonl') });
+        }
+      }
+    }
+    // sessions/YYYY/MM/DD/ and archived_sessions/ (flat today; walked to the
+    // same depth in case codex dates it too). Under sessions/, a date folder
+    // that ends before the window (a day of slack for time zones) is skipped
+    // unless this pass is a full sweep.
+    const now = nowFn();
+    const sweep = now - lastSweepMs >= fullSweepMs;
+    const oldBefore = now - windowDays * DAY_MS - DAY_MS;
+    const seen = new Set();
+    const walkCodex = async (dir, depth, dated = null) => {
+      const entries = await listDir(dir);
+      if (!entries) return;
+      for (const { name, isDir } of entries) {
+        const full = path.join(dir, name);
+        if (isDir) {
+          if (depth <= 0) continue;
+          const parts = dated ? [...dated, name] : null;
+          const endMs = parts ? dateFolderEndMs(parts) : null;
+          if (!sweep && endMs !== null && endMs < oldBefore) continue;
+          await walkCodex(full, depth - 1, parts);
+          continue;
+        }
+        const id = name.match(CODEX_ID_RE)?.[1];
+        if (!id) continue;
+        if (isCompressed(name) && !zstdAvailable()) continue;
+        seen.add(full);
+        out.push({ file: full, provider: 'codex', sessionId: id });
+      }
+    };
+    for (const home of codexHomes()) {
+      await walkCodex(path.join(home, 'sessions'), 3, []);
+      await walkCodex(path.join(home, 'archived_sessions'), 3);
+    }
+    // A rollout the last collection found inside the window is checked again
+    // whatever folder it sits in (collectFiles drops it once it ages out).
+    if (!sweep) {
+      for (const [file, entry] of Object.entries(cache.files)) {
+        if (entry.provider !== 'codex' || seen.has(file) || file.startsWith('codex-images:')) continue;
+        out.push({ file, provider: 'codex', sessionId: entry.sessionId || file.match(CODEX_ID_RE)?.[1] || null });
+      }
+    } else {
+      lastSweepMs = now;
+    }
+    return out;
+  }
+
+  // <codex home>/generated_images/<thread id>/<file>: codex's own image output
+  // store. Owned by that thread; inside the window by the FILE's mtime.
+  async function listGeneratedImages(cutoff) {
+    const out = [];
+    for (const home of codexHomes()) {
+      const root = path.join(home, 'generated_images');
+      let threads = [];
+      try { threads = await fsp.readdir(root, { withFileTypes: true }); } catch { continue; }
+      for (const thread of threads) {
+        if (!thread.isDirectory()) continue;
+        const dir = path.join(root, thread.name);
+        let names = [];
+        try { names = await fsp.readdir(dir); } catch { continue; }
+        const candidates = [];
+        let newest = 0;
+        for (const name of names) {
+          const file = path.join(dir, name);
+          if (!artifactKind(file)) continue;
+          let stat;
+          try { stat = await fsp.stat(file); } catch { continue; }
+          if (!stat.isFile() || stat.mtimeMs < cutoff) continue;
+          candidates.push(file);
+          newest = Math.max(newest, stat.mtimeMs);
+        }
+        if (candidates.length) {
+          out.push({ key: `codex-images:${dir}`, entry: { provider: 'codex', sessionId: thread.name, candidates, cwd: null, startMs: null, mtimeMs: newest } });
         }
       }
     }
@@ -395,7 +667,7 @@ function createArtifactsProvider(options = {}) {
     const cutoff = now - windowDays * 24 * 60 * 60 * 1000;
     const transcripts = await listTranscripts();
     const nextFiles = {};
-    for (const transcriptPath of transcripts) {
+    for (const { file: transcriptPath, provider, sessionId } of transcripts) {
       let stat;
       try { stat = await fsp.stat(transcriptPath); } catch { continue; }
       if (stat.mtimeMs < cutoff) continue;
@@ -410,15 +682,17 @@ function createArtifactsProvider(options = {}) {
         // parsedBytes existed lack the field and take one full parse to earn it.
         const resumable = cached && Number.isFinite(cached.parsedBytes)
           && cached.parsedBytes > 0 && stat.size >= cached.parsedBytes;
-        const parsed = await parseTranscript(
+        const parse = provider === 'codex' ? parseCodexRollout : parseTranscript;
+        const parsed = await parse(
           transcriptPath,
           resumable ? { fromByte: cached.parsedBytes, prior: cached } : {},
         ).catch(() => null);
         if (!parsed) continue;
-        entry = { size: stat.size, mtimeMs: stat.mtimeMs, ...parsed };
+        entry = { size: stat.size, mtimeMs: stat.mtimeMs, provider, sessionId, ...parsed };
       }
       nextFiles[transcriptPath] = entry;
     }
+    for (const { key, entry } of await listGeneratedImages(cutoff)) nextFiles[key] = entry;
     cache = { version: CACHE_VERSION, files: nextFiles };
     lastScanMs = now;
     try {
@@ -435,8 +709,14 @@ function createArtifactsProvider(options = {}) {
   async function assembleArtifacts() {
     // path -> { sessionId, cwd, transcriptMtimeMs, startMs }
     const byArtifactPath = new Map();
+    // A generated image's store names only its thread; the rollout knows the cwd.
+    const codexCwd = new Map();
+    for (const entry of Object.values(cache.files)) {
+      if (entry.provider === 'codex' && entry.cwd && entry.sessionId) codexCwd.set(entry.sessionId, entry.cwd);
+    }
     for (const [transcriptPath, entry] of Object.entries(cache.files)) {
-      const sessionId = path.basename(transcriptPath, '.jsonl');
+      const sessionId = entry.sessionId || path.basename(transcriptPath, '.jsonl');
+      const provider = entry.provider || 'claude';
       for (const raw of entry.candidates || []) {
         // Keyed by the CANONICAL path, so the two spellings of one file
         // ('C:\dev\x.png' from Write, '/dev/x.png' from a bare-regex match on
@@ -448,7 +728,8 @@ function createArtifactsProvider(options = {}) {
         if (prior && prior.transcriptMtimeMs >= entry.mtimeMs) continue;
         byArtifactPath.set(candidate, {
           sessionId,
-          cwd: entry.cwd || null,
+          provider,
+          cwd: entry.cwd || (provider === 'codex' ? codexCwd.get(sessionId) : null) || null,
           transcriptMtimeMs: entry.mtimeMs,
           startMs: entry.startMs ?? null,
         });
@@ -470,6 +751,7 @@ function createArtifactsProvider(options = {}) {
         bytes: stat.size,
         mtimeMs: stat.mtimeMs,
         sessionId: mention.sessionId,
+        provider: mention.provider,
         cwd: mention.cwd,
       });
     }
@@ -525,12 +807,17 @@ function createArtifactsProvider(options = {}) {
     // Canonicalised the SAME way the index was, by the same object, so the two
     // cannot disagree the way they did on Windows until 2026-08-13.
     isServable: (candidate) => allowlist.allows(candidate),
+    // One collection now (tests and measurement; list() schedules its own).
+    _collect: () => collectFiles(),
   };
 }
 
 module.exports = {
   createArtifactsProvider,
   createServeAllowlist,
+  codexHomesFromProfiles,
+  codexRecordOutputs,
+  parseCodexRollout,
   extractCandidates,
   barePaths,
   artifactKind,

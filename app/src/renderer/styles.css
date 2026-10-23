@@ -2413,6 +2413,70 @@ button { font-family: inherit; }
   font-variant-numeric: tabular-nums;
 }
 
+/* Files a message named by path but cannot show inline (a codex local_image
+   that is gone or too large): the composer's file chip, without its remove. */
+.conv-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.conv-attachments:first-child {
+  margin-top: 0;
+}
+
+.conv-attachment {
+  padding-right: 9px;
+}
+
+/* A codex request_user_input question: the choices the model is waiting on,
+   read-only. Open questions carry the amber answer cue; settled ones go quiet. */
+.conv-question-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--warn);
+  border-radius: 9px;
+}
+
+.conv-question.answered .conv-question-list {
+  border-color: var(--ln);
+}
+
+.conv-question-title {
+  font-weight: 600;
+  color: var(--tx);
+}
+
+.conv-question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.conv-question-option {
+  padding: 2px 8px;
+  border: 1px solid var(--ln2, var(--ln));
+  border-radius: 6px;
+  color: var(--sub);
+  font-size: 11.5px;
+}
+
+.conv-question-state {
+  margin-top: 5px;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--warn);
+}
+
+.conv-question.answered .conv-question-state {
+  color: var(--fnt);
+}
+
 .conv-images {
   display: flex;
   flex-direction: column;
@@ -5527,6 +5591,11 @@ button { font-family: inherit; }
 }
 
 .orch-kickoff-btn:hover:not(:disabled) { background: var(--surface-3); }
+
+.orch-provider-pick { display: inline-flex; gap: 2px; padding: 2px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.orch-provider-opt { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--text-dim, var(--text)); cursor: pointer; font: inherit; font-size: 12px; }
+.orch-provider-opt.on { background: var(--surface-3); color: var(--text); }
+.orch-provider-opt:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .orch-kickoff-btn:disabled {
   opacity: 0.45;
@@ -10202,6 +10271,14 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .delegation-pill { max-width: none; flex: 0 0 auto; }
 .delegation-group { max-width: 1200px; }
 .delegation-agent-copy p, .delegation-meta, .delegation-project, .delegation-reviewers, .delegation-rounds, .delegation-tasks { color: #a5afbf; }
+.delegation-error { margin: 8px 0 0 34px; font-size: 12px; color: var(--warn, #e5b759); overflow-wrap: anywhere; }
+.delegation-result { margin: 8px 0 0 34px; font-size: 12px; color: #a5afbf; }
+.delegation-result summary { cursor: pointer; }
+.delegation-result pre { margin: 6px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: #d3d9e3; }
+.delegation-state.state-stopped { color: #aab5c6; }
+.delegation-group > .delegation-reviewers { margin: 0; padding: 10px 20px 14px; }
+.delegation-parent-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.delegation-parent-title > img { width: 16px; height: 16px; flex: 0 0 16px; }
 
 /* Sub-session history has its own bounded Orch request and search. */
 .sub-sessions { max-width: 1200px; margin: 24px 0; }

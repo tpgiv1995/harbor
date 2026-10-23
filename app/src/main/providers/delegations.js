@@ -12,6 +12,11 @@ const FRESH_WINDOW_MS = 30_000; // The incident's launch-to-meta delay is 2.697s
 const RECENT_DONE_MS = 10 * 60 * 1000;
 const QUIET_MS = 10 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const SHARED_VALUE_FLAGS = new Set(['-c', '--config', '--home', '--effort', '--max-resets', '--sandbox', '-s', '--output-format']);
+// Every value-taking option `codex exec --help` lists (0.160.0), checked one
+// by one. A value skipped as the prompt would mislabel the agent row.
+const CODEX_VALUE_FLAGS = new Set([...SHARED_VALUE_FLAGS, '-p', '--profile', '-i', '--image', '--add-dir', '--output-schema',
+  '--color', '--thread-source', '--local-provider', '--enable', '--disable', '-a', '--ask-for-approval']);
 async function mergeDelegationLinks(file, updates) {
   const lockDir = `${file}.lock`;
   if (!await acquireStoreLock(lockDir)) throw new Error('Delegation links are busy; the next history event retries.');
@@ -45,7 +50,11 @@ function shellWords(text) {
       else word += ch;
       continue;
     }
-    if (ch === '"' || ch === "'") { quote = ch; started = true; }
+    // `'\''` is how a single-quoted word carries an apostrophe (every Harbor
+    // kickoff writes it). Only an escaped QUOTE is unescaped outside quotes:
+    // a bare backslash stays literal so an unquoted Windows path survives.
+    if (ch === '\\' && (text[i + 1] === "'" || text[i + 1] === '"')) { word += text[++i]; started = true; }
+    else if (ch === '"' || ch === "'") { quote = ch; started = true; }
     else if (/\s/.test(ch)) flush();
     else if (';|&<>'.includes(ch)) { flush(); words.push(ch); }
     else { word += ch; started = true; }
@@ -63,7 +72,7 @@ function dispatchFor(task, parentCwd, depth = 0) {
     if (/^[A-Za-z_][\w]*=/.test(word) || ['env', 'export', 'exec', 'call'].includes(word)) continue;
     const exe = word.replace(/\\/g, '/').split('/').pop().replace(/\.(exe|cmd|ps1|mjs|js)$/i, '').toLowerCase();
     if (exe === 'cd') { cwd = words[i + 1] === '/d' ? words[i + 2] : words[i + 1]; start = false; continue; }
-    if (['bash', 'sh'].includes(exe) && /^-[a-z]*c$/.test(words[i + 1] || '')) {
+    if (['bash', 'sh', 'zsh'].includes(exe) && /^-[a-z]*c$/.test(words[i + 1] || '')) {
       const nested = dispatchFor({ ...task, command: words[i + 2] }, cwd, depth + 1);
       if (nested) return nested;
     }
@@ -74,20 +83,40 @@ function dispatchFor(task, parentCwd, depth = 0) {
       : exe === 'claude' && args.some((a) => a === '-p' || a === '--print') ? 'claude'
         : exe === 'cursor-agent' && args.some((a) => a === '-p' || a === '--print') ? 'cursor' : null;
     if (!provider) continue;
-    let resumeId = null; let model = exe === 'astra-run' ? 'gpt-6-astra' : null; let prompt = '';
+    // Codex's `-p` is --profile and takes a value; Claude's and Cursor's is
+    // --print and does not. Value flags are therefore read per provider.
+    const valueFlags = provider === 'codex' ? CODEX_VALUE_FLAGS : SHARED_VALUE_FLAGS;
+    let resumeId = null; let forkOf = null; let model = exe === 'astra-run' ? 'gpt-6-astra' : null; let prompt = '';
+    let outputFile = null; let ephemeral = false; let worktree = false; let json = false;
     for (let j = 0; j < args.length; j++) {
       const a = args[j];
       if ([';', '|', '&', '<', '>'].includes(a)) break;
       if (a === 'resume' && UUID.test(args[j + 1] || '')) { resumeId = args[++j]; continue; }
+      // `exec fork <id>` writes a NEW rollout whose session_meta names <id>
+      // as forked_from_id; the fork source is exact, the child id is not.
+      if (a === 'fork' && UUID.test(args[j + 1] || '')) { forkOf = args[++j]; continue; }
       if (['--cd', '-C'].includes(a)) { cwd = args[++j]; continue; }
       if (a.startsWith('--cd=')) { cwd = a.slice(5); continue; }
       if (['--model', '-m'].includes(a)) { model = args[++j]; continue; }
       if (/^--model=/.test(a)) { model = a.slice(8); continue; }
-      if (['-c', '--config', '-o', '--output-last-message', '--home', '--effort', '--max-resets', '--sandbox', '-s', '--output-format'].includes(a)) { j++; continue; }
-      if (a.startsWith('-') || ['exec', 'e', 'resume'].includes(a)) continue;
+      if (['-o', '--output-last-message'].includes(a)) { outputFile = args[++j] || null; continue; }
+      if (a.startsWith('--output-last-message=')) { outputFile = a.slice(22) || null; continue; }
+      if (a === '--ephemeral') { ephemeral = true; continue; }
+      if (a === '--worktree') { worktree = true; continue; }
+      if (a === '--json') { json = true; continue; }
+      // `codex exec -i <FILE>...` takes every following word until the next
+      // option (clap multi-value, per --help); `exec fork -i <FILE>` takes one.
+      if (provider === 'codex' && ['-i', '--image'].includes(a) && !forkOf) {
+        while (j + 1 < args.length && !args[j + 1].startsWith('-') && ![';', '|', '&', '<', '>'].includes(args[j + 1])) j++;
+        continue;
+      }
+      if (valueFlags.has(a)) { j++; continue; }
+      if (a.startsWith('-') || ['exec', 'e', 'resume', 'fork'].includes(a)) continue;
       prompt = a.split('\n').find((s) => s.trim())?.slice(0, 500) || '';
     }
-    return { ...task, provider, resumeId, model, prompt, cwd: cwd || parentCwd };
+    return { ...task, provider, resumeId, forkOf, model, prompt, cwd: cwd || parentCwd,
+      threadId: provider === 'codex' && json && UUID.test(task.threadId || '') ? task.threadId : null,
+      outputFile, ephemeral, worktree };
   }
   return null;
 }
@@ -106,22 +135,32 @@ function linkDispatches(parents, providerRows) {
     if (dispatch) dispatches.push({ ...dispatch, parentId: parent.id });
   }
   dispatches.sort((a, b) => a.startedMs - b.startedMs || a.id.localeCompare(b.id));
+  // Exact identities: a resumed id, or the thread id `codex exec --json`
+  // printed into stdout the parent captured (thread.started).
+  const exactId = (d) => d.resumeId || d.threadId || null;
   const exactOwners = new Map();
-  for (const d of dispatches) if (d.provider === 'codex' && d.resumeId) {
-    if (!exactOwners.has(d.resumeId)) exactOwners.set(d.resumeId, d.parentId);
-    else if (exactOwners.get(d.resumeId) !== d.parentId) exactOwners.set(d.resumeId, null);
+  for (const d of dispatches) if (d.provider === 'codex' && exactId(d)) {
+    const id = exactId(d);
+    if (!exactOwners.has(id)) exactOwners.set(id, d.parentId);
+    else if (exactOwners.get(id) !== d.parentId) exactOwners.set(id, null);
   }
   for (const d of dispatches) {
     if (d.provider !== 'codex') continue;
-    if (d.resumeId) {
+    if (exactId(d)) {
       // Exact identity survives missing rollout files. Cross-parent ownership
       // conflicts remain unlinked, rather than creating two writers.
-      if (exactOwners.get(d.resumeId) === d.parentId) {
-        d.childId = d.resumeId; claimed.set(d.resumeId, d.parentId);
+      if (exactOwners.get(exactId(d)) === d.parentId) {
+        d.childId = exactId(d); claimed.set(d.childId, d.parentId);
       }
       continue;
     }
+    // --ephemeral writes no rollout, so there is nothing to link and nothing
+    // to wait for. --worktree runs the child in a managed worktree whose path
+    // the dispatch does not name, so the cwd rule cannot prove ownership.
+    if (d.ephemeral) { d.unlinkable = 'ephemeral'; continue; }
+    if (d.worktree) { d.unlinkable = 'worktree'; continue; }
     const matches = (rootsByCwd.get(canonicalCwd(d.cwd)) || []).filter((r) => !claimed.has(r.id) && (!exactOwners.has(r.id) || exactOwners.get(r.id) === d.parentId)
+      && (!d.forkOf || !('forkedFromId' in r.lineage) || r.lineage.forkedFromId === d.forkOf)
       && r.lineage.startedMs >= d.startedMs && r.lineage.startedMs - d.startedMs <= FRESH_WINDOW_MS
       && (!d.endedMs || r.lineage.startedMs <= d.endedMs))
       .sort((a, b) => a.lineage.startedMs - b.lineage.startedMs);
@@ -134,9 +173,15 @@ function linkDispatches(parents, providerRows) {
   return { dispatches, delegatedBy: Object.fromEntries(claimed) };
 }
 function agentState(task, rollout, now = Date.now(), familySignalMs = 0) {
-  if (['completed', 'failed', 'stopped', 'killed'].includes(task?.status)) return task.status === 'completed' ? 'done' : task.status === 'killed' ? 'stopped' : task.status;
   const evidence = rollout?.signal;
-  if (evidence?.endedMs >= (task?.startedMs || 0) && !evidence.working) return evidence.outcome || 'done';
+  const childEnded = evidence?.endedMs >= (task?.startedMs || 0) && !evidence.working;
+  if (['completed', 'failed', 'stopped', 'killed'].includes(task?.status)) {
+    const own = task.status === 'completed' ? 'done' : task.status === 'killed' ? 'stopped' : task.status;
+    // A launcher can exit 0 around a turn that failed or was stopped; the
+    // child's own terminal event is the better witness of what happened.
+    return own === 'done' && childEnded && ['failed', 'stopped'].includes(evidence.outcome) ? evidence.outcome : own;
+  }
+  if (childEnded) return evidence.outcome || 'done';
   const lastSignalMs = Math.max(task?.lastSignalMs || 0, evidence?.lastSignalMs || 0, rollout?.lastWriteMs || 0, familySignalMs);
   if (!lastSignalMs) return 'no signal';
   if (now - lastSignalMs >= QUIET_MS) return 'quiet';
@@ -165,8 +210,21 @@ function buildDelegationGroups(parents, providerRows, now = Date.now(), links = 
     // A finished command with no linked rollout is background inventory, not
     // evidence that an agent started. Preserve its actual command outcome.
     const agentDispatches = own.filter((d) => d.child || d.status === 'running');
-    const tasks = (parent.background?.tasks || []).filter((t) => !agentDispatches.some((d) => d.id === t.id));
-    if (!own.length && !tasks.length) continue;
+    const dispatchById = new Map(own.map((d) => [d.id, d]));
+    const tasks = (parent.background?.tasks || []).filter((t) => !agentDispatches.some((d) => d.id === t.id)).map((t) => {
+      const d = dispatchById.get(t.id);
+      if (!d) return t;
+      // Say WHY an inventory dispatch has no conversation, and keep its -o result.
+      const note = d.unlinkable === 'ephemeral' ? 'no transcript (--ephemeral)'
+        : d.unlinkable === 'worktree' ? 'managed worktree; conversation not linked' : null;
+      return { ...t, provider: d.provider, ...(note ? { note } : {}), ...(d.outputResult ? { result: d.outputResult } : {}) };
+    });
+    // A Codex parent's own subagents and guardians (session_meta lineage) are
+    // its delegated agents; guardians stay a plain approval-review count.
+    const spawned = parent.provider === 'codex' ? (childrenByParent.get(parent.id) || []) : [];
+    const subagents = spawned.filter((r) => r.lineage?.kind !== 'guardian');
+    const reviews = spawned.length - subagents.length;
+    if (!own.length && !tasks.length && !subagents.length) continue;
     const agents = [];
     for (const d of agentDispatches) {
       const key = d.childId || d.id;
@@ -181,13 +239,24 @@ function buildDelegationGroups(parents, providerRows, now = Date.now(), links = 
       agent.rounds.push({ id: d.id, description: d.description, startedMs: d.startedMs, endedMs: d.endedMs || (state === 'done' ? d.child?.signal?.endedMs : null), outcome: state, parentStatus: d.status });
       Object.assign(agent, { description: d.description, prompt: d.prompt && !d.prompt.includes('$(') ? d.prompt : d.child?.firstPrompt || '', model: d.child?.signal?.model || d.model,
         state, parentState: state, rolloutState: d.child ? agentState({ startedMs: d.startedMs }, d.child, now, rolloutLastSignalMs) : null,
-        parentLastSignalMs: d.lastSignalMs || 0, rolloutLastSignalMs, lastSignalMs });
+        parentLastSignalMs: d.lastSignalMs || 0, rolloutLastSignalMs, lastSignalMs,
+        result: d.child?.signal?.result || d.outputResult || null, error: d.child?.signal?.error || null });
+    }
+    for (const r of subagents) {
+      const children = childrenFor(r.id, new Set([parent.id]));
+      const lastSignal = Math.max(r.signal?.lastSignalMs || 0, r.lastWriteMs || 0, ...children.map((c) => c.lastSignalMs));
+      const state = agentState(null, r, now, lastSignal);
+      agents.push({ id: r.id, sessionId: r.id, provider: 'codex', kind: r.lineage.kind, linked: true, children,
+        description: r.title || r.lineage.nickname || 'subagent', prompt: r.firstPrompt || '', model: r.signal?.model || r.model,
+        rounds: [{ id: r.id, description: r.title, startedMs: r.lineage.startedMs || r.signal?.startedMs || 0, endedMs: state === 'done' || state === 'failed' || state === 'stopped' ? r.signal?.endedMs || null : null, outcome: state, parentStatus: null }],
+        state, parentState: state, rolloutState: state, parentLastSignalMs: 0, rolloutLastSignalMs: lastSignal, lastSignalMs: lastSignal,
+        result: r.signal?.result || null, error: r.signal?.error || null });
     }
     const lastSignalMs = Math.max(parent.ownerEvidence?.lastWriteMs || 0, parent.background?.lastSignalMs || 0, ...agents.map((a) => a.lastSignalMs), ...tasks.map((t) => t.lastSignalMs || 0));
-    groups.push({ parentId: parent.id, title: parent.title, project: parent.project,
+    groups.push({ parentId: parent.id, title: parent.title, project: parent.project, provider: parent.provider || 'claude',
       owner: { ...parent.ownerEvidence, isLive: Boolean(parent.isLive) }, working: parent.background?.working, awaitingFinal: parent.background?.awaitingFinal,
       lastInTurnMs: parent.background?.lastInTurnMs || 0,
-      lastSignalMs, agents, tasks });
+      lastSignalMs, agents, tasks, reviews });
   }
   return { groups: ageDelegationGroups(groups, now), delegatedBy, dispatches };
 }

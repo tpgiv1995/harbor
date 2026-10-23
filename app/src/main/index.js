@@ -38,6 +38,8 @@ const {
 const {
   createOrchestrationActions,
   checkExecuteMutex,
+  createExecuteReservations,
+  createLruCache,
 } = require('./actions/orchestration.js');
 const { createTerminalBridge } = require('./terminal-bridge.js');
 const { deleteSessionTranscript } = require('./session-delete.js');
@@ -56,8 +58,8 @@ const {
 } = require('./providers/capabilities.js');
 const { compareVersionsDesc } = require('./providers/model-catalog.js');
 const { createCliUpdateChecker } = require('./providers/cli-updates.js');
-const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath } = require('./providers/delegate.js');
-const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptLastSignal } = require('./providers/transcript.js');
+const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath, sameWorkspace } = require('./providers/delegate.js');
+const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptTailSignal } = require('./providers/transcript.js');
 const { createAskTranscriptResolver } = require('./ask-transcript-path.js');
 const { createPendingAskReader } = require('./providers/pending-ask.js');
 const { createSessionSend, createLinkRegistry } = require('./session-send.js');
@@ -71,7 +73,7 @@ const {
 const { createNotifier } = require('./notify.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
-const { createArtifactsProvider } = require('./providers/artifacts.js');
+const { createArtifactsProvider, codexHomesFromProfiles } = require('./providers/artifacts.js');
 const { createTaskStore } = require('./providers/tasks.js');
 const { createNoteStore } = require('./providers/notes.js');
 const { createWhiteboardStore } = require('./providers/whiteboard.js');
@@ -1474,8 +1476,10 @@ function registerIpc() {
   // Parsed-liveness cache keyed by transcript size+mtime. Safe because the run
   // derivation degrades any signal by its AGE (WORKING_FRESH_MS in delegate.js),
   // so a cached verdict for an unchanged file can never render fresher than its
-  // own mtime allows.
-  const orchLivenessCache = new Map();
+  // own mtime allows. Bounded (LRU, 200 paths): the corpus of orch workers
+  // only grows, and a plain Map kept every transcript any poll ever read.
+  // An entry holds at most 2 KB of the worker's final reply.
+  const orchLivenessCache = createLruCache();
   const ORCH_LIVENESS_CONCURRENCY = 6;
 
   async function orchHistoryRows(queues = []) {
@@ -1502,10 +1506,24 @@ function registerIpc() {
     const windowFloorMs = incompleteBatches.length === 0
       ? Infinity
       : (dispatchStamps.length ? Math.min(...dispatchStamps) - DISPATCH_SLACK_MS : 0);
+    // Lane worktrees of in-flight batches: a worker started there is that
+    // batch's worker even without the BATCH TITLE: prefix (codex workers).
+    // The basename gate keeps realpath off every other session on each poll.
+    const laneGate = (batches) => {
+      const worktrees = batches.map((batch) => batch.worktree).filter(Boolean);
+      const names = new Set(worktrees.map((worktree) => path.basename(String(worktree)).toLowerCase()));
+      return (cwd) => Boolean(cwd) && names.has(path.basename(String(cwd)).toLowerCase())
+        && worktrees.some((worktree) => sameWorkspace(cwd, worktree));
+    };
+    const inLane = laneGate(incompleteBatches);
+    const titledWorker = (session) => {
+      const prompt = String(session.firstPrompt || session.title || '');
+      return /^BATCH TITLE:/i.test(prompt) || (session.provider === 'codex' && /BATCH TITLE:/i.test(prompt));
+    };
     const candidates = sidebarBridge.getHistoryRows().filter((session) => (
       exactIds.has(session.id)
-      || ((session.isChildTask || /^BATCH TITLE:/i.test(String(session.firstPrompt || session.title || '')))
-        && (session.lastActiveMs || Date.parse(session.lastActive) || 0) >= windowFloorMs)
+      || ((session.lastActiveMs || Date.parse(session.lastActive) || 0) >= windowFloorMs
+        && (session.isChildTask || titledWorker(session) || inLane(session.cwd)))
     ));
     // `finished` is read by the join for ACTIVE batches only (delegate.js
     // joinBatchesToSessions), so only a session that can join one is read:
@@ -1518,8 +1536,13 @@ function registerIpc() {
     const activeExactIds = new Set(activeBatches.map((batch) => batch.last_session_id).filter(Boolean));
     const activeTitleNeedles = activeBatches.filter((batch) => batch.title)
       .map((batch) => `batch title: ${String(batch.title).trim()}`.toLowerCase());
+    const inActiveLane = laneGate(activeBatches);
     const needsFinished = (session) => activeExactIds.has(session.id)
-      || activeTitleNeedles.some((needle) => String(session.firstPrompt || session.title || '').trim().toLowerCase().startsWith(needle));
+      || activeTitleNeedles.some((needle) => {
+        const prompt = String(session.firstPrompt || session.title || '').trim().toLowerCase();
+        return prompt.startsWith(needle) || (session.provider === 'codex' && prompt.includes(needle));
+      })
+      || inActiveLane(session.cwd);
     // Bounded fan-out: the candidates can be every orch worker in the corpus
     // (the zero floor for an unstamped batch), and a fresh launch has no
     // cache, so one Promise.all opened and read all of them at once.
@@ -1530,21 +1553,23 @@ function registerIpc() {
       // Only content-derived facts are cached; anything computed against the
       // wall clock would come back stale from a cache hit. The join derives
       // freshness from signalAt at its own read of the clock.
-      let finished = null;
+      let finished = null; let turnEnd = null; let turnError = null; let resultText = null;
       const cached = orchLivenessCache.get(meta.path);
       if (!needsFinished(session)) {
         // No active batch can join this session, so its verdict is never read.
       } else if (cached && stat && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
-        ({ finished } = cached);
+        ({ finished, turnEnd, turnError, resultText } = cached);
       } else {
         try {
-          // The TAIL only (readTranscriptLastSignal): this used to read and
+          // The TAIL only (readTranscriptTailSignal): this used to read and
           // parse the whole file, and a codex worker log runs to hundreds of MB.
           // On 2026-10-09 that crashed two launches in a row with a main-process
-          // heap OOM (the doctrine in docs/claude/views.md).
-          const lastSignal = await readTranscriptLastSignal(meta.path, meta.provider || session.provider || 'claude');
-          finished = lastSignal === 'idle';
-          if (stat) orchLivenessCache.set(meta.path, { size: stat.size, mtimeMs: stat.mtimeMs, finished });
+          // heap OOM (the doctrine in docs/claude/views.md). The same tail says
+          // how the last turn ended and what the worker last said.
+          const tail = await readTranscriptTailSignal(meta.path, meta.provider || session.provider || 'claude');
+          finished = tail.lastSignal === 'idle';
+          ({ turnEnd, turnError, resultText } = tail);
+          if (stat) orchLivenessCache.set(meta.path, { size: stat.size, mtimeMs: stat.mtimeMs, finished, turnEnd, turnError, resultText });
         } catch { /* The join still has identity and mtime if parsing fails. */ }
       }
       return {
@@ -1555,6 +1580,9 @@ function registerIpc() {
         start: meta.start || session.startedAt || null,
         signalAt: stat?.mtimeMs || meta.mt || null,
         finished,
+        turnEnd,
+        turnError,
+        resultText,
       };
     };
     const joined = new Array(candidates.length);
@@ -1580,8 +1608,10 @@ function registerIpc() {
     const { summary, events, liveBatches } = await orchDeriveQueue(queue);
     const mutex = checkExecuteMutex({
       projectLabel,
+      projectRoot,
       terminalState: terminalBridge.getState(),
       queue,
+      executionCommand: orchActions?.EXECUTION_COMMAND,
     });
     return { queue: { ...queue, batches: (queue.batches || []).map((batch) => ({
       ...batch,
@@ -1686,15 +1716,25 @@ function registerIpc() {
   // no explanation, and the Orch view surfaces `error` to the user.
   const ORCH_UNAVAILABLE = { error: 'Orchestration is not configured: Harbor could not build it from this config. Check orchestration.launcher and your default plan, or turn the Orch view off in the setup wizard.' };
 
-  ipcMain.handle('orchestration:kickoff-research', async (_event, { projectLabel, sessionId, goal }) => {
+  // `provider` picks the orchestrator's CLI (claude | codex); the actions
+  // refuse anything else by name, and a missing plan or workflow file comes
+  // back as `error` for the Orch view to show.
+  ipcMain.handle('orchestration:kickoff-research', async (_event, { projectLabel, sessionId, goal, provider = 'claude' }) => {
     if (!orchActions) return ORCH_UNAVAILABLE;
     const projectRoot = await orchGetProjectRoot(sessionId);
     if (!projectRoot) return { error: 'Could not determine project root' };
-    return orchActions.kickoffResearch({ projectRoot, projectLabel, goal });
+    try {
+      return await orchActions.kickoffResearch({ projectRoot, projectLabel, goal, provider });
+    } catch (error) {
+      return { error: error.message };
+    }
   });
 
   let executeKickoffInFlight = false;
-  ipcMain.handle('orchestration:kickoff-execute', async (_event, { projectLabel, sessionId }) => {
+  // Covers the ~1 s between a successful kickoff and the bridge's next poll
+  // reporting the new pane (see createExecuteReservations).
+  const executeReservations = createExecuteReservations();
+  ipcMain.handle('orchestration:kickoff-execute', async (_event, { projectLabel, sessionId, provider = 'claude' }) => {
     if (!orchActions) return ORCH_UNAVAILABLE;
     if (executeKickoffInFlight) return { blocked: true, reason: 'An execute kickoff is already in progress.' };
     executeKickoffInFlight = true;
@@ -1702,15 +1742,25 @@ function registerIpc() {
       const projectRoot = await orchGetProjectRoot(sessionId);
       if (!projectRoot) return { error: 'Could not determine project root' };
       const queue = await delegateProvider.getQueue(projectRoot);
-      // Fresh state check with no await between it and the kickoff; the tab
-      // created by kickoffExecute is the durable reservation.
+      // Fresh state check with no await between it and the kickoff; the pane
+      // created by kickoffExecute is the durable reservation once the bridge
+      // reports it, and executeReservations covers the gap before that.
+      const terminalState = terminalBridge.getState();
       const mutex = checkExecuteMutex({
         projectLabel,
-        terminalState: terminalBridge.getState(),
+        projectRoot,
+        terminalState,
         queue,
+        executionCommand: orchActions.EXECUTION_COMMAND,
       });
       if (mutex.blocked) return { blocked: true, reason: mutex.reason };
-      return await orchActions.kickoffExecute({ projectRoot, projectLabel });
+      const reserved = executeReservations.blockedReason(projectRoot, terminalState);
+      if (reserved) return { blocked: true, reason: reserved };
+      const launched = await orchActions.kickoffExecute({ projectRoot, projectLabel, provider });
+      executeReservations.reserve(projectRoot, launched);
+      return launched;
+    } catch (error) {
+      return { error: error.message };
     } finally {
       executeKickoffInFlight = false;
     }
@@ -2674,7 +2724,9 @@ app.whenReady().then(async () => {
   // Conversation-surface plumbing: transcript tailing, the command-bar send
   // engine, and the provisional session<->pane link registry.
   transcriptProvider = createTranscriptProvider({
-    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
+    providerPaneAlive: (id, provider) => sidebarBridge.providerPaneAlive(id, provider),
     contextCacheDir: contextDir,
   });
   transcriptProvider.emitter.on('update', (payload) => {
@@ -2765,6 +2817,9 @@ app.whenReady().then(async () => {
   const artifactsProvider = createArtifactsProvider({
     getSessionLabel: (id) => sidebarBridge.getSessionLabel(id),
     roots: [harborConfig.paths.projectsDir],
+    // Codex outputs too: the same codex homes the rail lists sessions from,
+    // asked per collection (harborConfig is reassigned when the wizard saves).
+    codexHomes: () => codexHomesFromProfiles(harborConfig.profiles),
     cacheFile: path.join(harborConfig.paths.cacheDir, 'artifacts-index.json'),
   });
   // Grid previews: HTML artifacts render in a short-lived OFFSCREEN window

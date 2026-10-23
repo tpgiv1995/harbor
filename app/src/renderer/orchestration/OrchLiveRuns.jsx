@@ -19,6 +19,8 @@ function stateText(batch) {
   if (batch.workerState === 'quiet') return `quiet ${Math.max(1, Math.floor(batch.signalAgeMs / 60_000))}m, possibly hung`;
   if (batch.workerState === 'done') return 'done';
   if (batch.workerState === 'error-blocked') return 'error / blocked';
+  if (batch.workerState === 'failed') return `worker failed, ${ageText(batch.signalAgeMs)}`;
+  if (batch.workerState === 'stopped') return `worker stopped, ${ageText(batch.signalAgeMs)}`;
   return 'no liveness signal';
 }
 

@@ -196,7 +196,7 @@ from the defaults, or when you are isolating something for a test.
 | `HARBOR_TASKS_FILE` | The Tasks view's document |
 | `HARBOR_PROJECT_ICONS_DIR` | Per-project icons (see section 6) |
 | `HARBOR_CONTEXT_DIR` | Statusline context tees |
-| `HARBOR_ARTIFACTS_ROOTS`, `HARBOR_ARTIFACTS_CACHE`, `HARBOR_ARTIFACT_THUMBS_DIR` | Files view roots, index cache, thumbnails |
+| `HARBOR_ARTIFACTS_ROOTS`, `HARBOR_ARTIFACTS_CODEX_HOMES`, `HARBOR_ARTIFACTS_CACHE`, `HARBOR_ARTIFACT_THUMBS_DIR` | Files view roots (Claude projects dirs; codex homes, path-delimited), index cache, thumbnails |
 | `HARBOR_TITLES_FILE`, `HARBOR_MODEL_CACHE_FILE` | Session-title and model-discovery caches |
 | `HARBOR_DELEGATE_STATE_DIR` | Orchestration queues |
 | `HARBOR_UNRECOGNIZED_DIR`, `HARBOR_PERF_LOG_DIR` | Captured unknown dialogs, performance logs |
