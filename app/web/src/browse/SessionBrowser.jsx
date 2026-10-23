@@ -234,6 +234,7 @@ export function SessionBrowser({
             return (
               <SessionRow
                 key={row.key}
+                client={client}
                 row={row}
                 selected={row.session.id === activeSessionId}
                 iconUrl={row.iconUrl}

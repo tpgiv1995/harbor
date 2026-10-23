@@ -8,7 +8,8 @@ const test = require('node:test');
 const LIVE_METHODS = `accounts:read-emails artifacts:list artifacts:open-external artifacts:show-in-folder artifacts:thumb ask:answer ask:decline ask:list capabilities:cycle-permission-mode capabilities:get capabilities:permission-mode clipboard:image-data-uri clipboard:read-image clipboard:save-image clipboard:write-formatted clipboard:write-image context-menu:add-to-dictionary context-menu:edit-action context-menu:replace-misspelling context-menu:spell-status daemon:get-banner daemon:retry diag:input e2e:emit-launched e2e:get-launch-calls e2e:get-metrics e2e:mark-interactive e2e:quit e2e:session-owner-pid e2e:set-ask-transcript e2e:set-link links:get new-session new-session:folder new-session:options notes:mutate notes:read orchestration:get-data orchestration:kickoff-execute orchestration:kickoff-research orchestration:session-preview orchestration:unwatch orchestration:unwatch-summaries orchestration:watch orchestration:watch-summaries pane:focus perf:stall pick-files pick-folder project-icons:list project-icons:reveal resume-session session:cancel-send session:delete session:interrupt session:menu-answer session:menu-state session:preview session:send session:send-queue session:takeover session:workflow-runs setup:catalog setup:detect setup:login setup:pick-folder setup:preview setup:read-home setup:save setup:state setup:symlink-apply setup:symlink-plan sidebar:get-state system-memory:get taskbar-badge:set tasks:mutate tasks:read tasks:reveal terminal:blur-pane terminal:close-tab terminal:close-workspace terminal:create-tab terminal:create-workspace terminal:focus-pane terminal:focus-tab terminal:focus-workspace terminal:get-state terminal:rename-tab terminal:resize-pane terminal:send-input terminal:set-visible-panes transcript:close transcript:open upload:image usage:get-all voice:token voice:voices whisper:transcribe whiteboard:create whiteboard:delete whiteboard:list whiteboard:read whiteboard:rename whiteboard:write window:close window:get-bounds window:is-maximized window:menu-action window:minimize window:open-board window:set-bounds window:toggle-maximize worker:close workflow:run`.split(' ');
 const LIVE_PUSH_CHANNELS = `app:update-available ask:changed cli-updates:changed context-menu:show daemon:banner links:update notes:changed orchestration:summaries orchestration:update project-icons:update send:status session:launched setup:open sidebar:update system-memory:update tasks:changed terminal:backfill terminal:control-state terminal:frame terminal:reset terminal:update transcript:update usage:update whiteboard:changed window:maximize-changed`.split(' ');
 LIVE_METHODS.push('orchestration:list-runs', 'orchestration:list-delegations', 'orchestration:list-sub-sessions', 'orchestration:get-session', 'usage:get-plans', 'usage:get-lean', 'usage:set-lean');
-LIVE_PUSH_CHANNELS.push('provider-models:changed');
+// A clicked notification opens its window (session:reveal).
+LIVE_PUSH_CHANNELS.push('provider-models:changed', 'session:reveal');
 LIVE_PUSH_CHANNELS.sort();
 // CLI update checker (2026-09-03). Seven methods, split across all three
 // capabilities on purpose: two reads, two state mutators, and three that touch
@@ -81,13 +82,15 @@ test('router emits named pushes without a transport dependency', () => {
 
 // Claude's composer suggestion, read for the desktop command bar (2026-10-05).
 LIVE_METHODS.push('session:suggestion', 'session:work-meter');
+// Notification on/off and per-window mute: the desktop's own toasts, local-only.
+LIVE_METHODS.push('notify:get-prefs', 'notify:set-prefs');
 LIVE_METHODS.sort();
-test('channel metadata covers exactly the captured 130 methods and 26 pushes', () => {
+test('channel metadata covers exactly the captured 132 methods and 27 pushes', () => {
   const { METHOD_CHANNELS, PUSH_CHANNELS } = require('../../src/main/rpc/channels.js');
   assert.deepEqual([...METHOD_CHANNELS.map(({ method }) => method)].sort(), LIVE_METHODS);
   assert.deepEqual([...PUSH_CHANNELS].sort(), LIVE_PUSH_CHANNELS);
-  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 130);
-  assert.equal(new Set(PUSH_CHANNELS).size, 26);
+  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 132);
+  assert.equal(new Set(PUSH_CHANNELS).size, 27);
   assert.ok(METHOD_CHANNELS.every(({ capability }) => (
     ['local-only', 'remote-safe', 'mutating'].includes(capability)
   )));
@@ -97,12 +100,12 @@ test('channel metadata covers exactly the captured 130 methods and 26 pushes', (
       METHOD_CHANNELS.filter((entry) => entry.capability === capability).length,
     ])),
     // session:work-meter moved local-only -> remote-safe 2026-10-11 (phone header).
-    { 'local-only': 42, 'remote-safe': 45, mutating: 43 },
+    { 'local-only': 44, 'remote-safe': 45, mutating: 43 },
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'local-only')
       .map(({ method }) => method).sort(),
-    [...LOCAL_ONLY_METHODS, 'usage:get-plans', 'usage:get-lean', 'usage:set-lean', 'session:suggestion'].sort(),
+    [...LOCAL_ONLY_METHODS, 'usage:get-plans', 'usage:get-lean', 'usage:set-lean', 'session:suggestion', 'notify:get-prefs', 'notify:set-prefs'].sort(),
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'mutating')

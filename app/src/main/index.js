@@ -60,7 +60,7 @@ const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath } = 
 const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptLastSignal } = require('./providers/transcript.js');
 const { createAskTranscriptResolver } = require('./ask-transcript-path.js');
 const { createPendingAskReader } = require('./providers/pending-ask.js');
-const { createSessionSend, createLinkRegistry } = require('./session-send.js');
+const { createSessionSend, createLinkRegistry, quickStatusFromScreen } = require('./session-send.js');
 const { revealNewSessionWindow } = require('./new-session-window.cjs');
 const { resolveWorkflowLaunch } = require('./workflows.js');
 const {
@@ -68,10 +68,11 @@ const {
   parseSecondInstanceArgs,
   buildSecondInstancePayload,
 } = require('./lifecycle.js');
-const { createNotifier } = require('./notify.js');
+const { createNotifier, createStatusQueue } = require('./notify.js');
+const { createNotifyPrefs } = require('./notify-prefs.js');
 const { canReceivePush, planRendererRecovery } = require('./renderer-recovery.js');
 const { createBootRecovery } = require('./boot-recovery.js');
-const { createArtifactsProvider } = require('./providers/artifacts.js');
+const { createArtifactsProvider, codexHomesFromProfiles } = require('./providers/artifacts.js');
 const { createTaskStore } = require('./providers/tasks.js');
 const { createNoteStore } = require('./providers/notes.js');
 const { createWhiteboardStore } = require('./providers/whiteboard.js');
@@ -326,6 +327,7 @@ let stopMainLagMonitor = null;
 let usageTimer = null;
 let daemonWatchdog = null;
 let notifier = null;
+let notifyPrefs = null;
 // Set once the app is on its way out, so a renderer dying as part of the quit
 // is not mistaken for a crash worth recovering from.
 let shuttingDown = false;
@@ -1248,6 +1250,8 @@ function registerIpc() {
     try {
       if (sidebarBridge.isDelegated(payload?.sessionId)) throw new Error('Delegated agents are read-only. Send instructions to their parent session.');
       const result = await sessionSend.send(payload);
+      // A message sent into a pane is the user dealing with it, a prompt too.
+      if (result?.ok && !result.cancelled) notifier?.answered(result.paneId || payload?.pane?.paneId);
       // A codex/cursor session first exists on disk when its first prompt
       // lands, and the daemon has not named it: the send IS the moment to look. A
       // window that opened as a bare pane becomes its real session here,
@@ -1293,6 +1297,15 @@ function registerIpc() {
     }
   });
   // Claude's live working meter for a window header (elapsed + tokens so far).
+  // Notification controls: the app menu's on/off and each window's mute.
+  ipcMain.handle('notify:get-prefs', () => notifyPrefs?.get() || { enabled: true, muted: [] });
+  ipcMain.handle('notify:set-prefs', (_event, payload = {}) => {
+    if (!notifyPrefs) return { enabled: true, muted: [] };
+    const next = notifyPrefs.set(payload);
+    // Turning them off clears the dock badge too: nothing is owed any more.
+    if (payload.enabled === false) notifier?.acknowledgeAll();
+    return next;
+  });
   ipcMain.handle('session:work-meter', async (_event, payload) => {
     try { return await sessionSend.getWorkMeter(payload); } catch { return null; }
   });
@@ -1306,7 +1319,11 @@ function registerIpc() {
       const ask = payload?.action?.type === 'sheet'
         ? (await liveAskFor(payload?.sessionId))?.questions || null
         : null;
-      return await sessionSend.answerMenu({ ...payload, ask });
+      const result = await sessionSend.answerMenu({ ...payload, ask });
+      // An answer given in Harbor (a one-click Allow / Deny or the window's
+      // card) is not news: its badge and any "needs you" still queued go.
+      if (result?.ok) notifier?.answered(payload?.pane?.paneId);
+      return result;
     } catch (error) {
       return { ok: false, reason: error.message };
     }
@@ -2674,7 +2691,9 @@ app.whenReady().then(async () => {
   // Conversation-surface plumbing: transcript tailing, the command-bar send
   // engine, and the provisional session<->pane link registry.
   transcriptProvider = createTranscriptProvider({
-    getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
+    // The readable form: a compressed codex rollout opens from its plain copy.
+    getSessionMeta: (id) => sidebarBridge.getReadableSessionMeta(id),
+    providerPaneAlive: (id, provider) => sidebarBridge.providerPaneAlive(id, provider),
     contextCacheDir: contextDir,
   });
   transcriptProvider.emitter.on('update', (payload) => {
@@ -2699,6 +2718,9 @@ app.whenReady().then(async () => {
       const res = await sendClient.readPane(paneId, { source: 'visible', lines: 1 });
       return res?.screen?.suggestion || null;
     },
+    // The CLI's OSC 7501 status as the keeper holds it now (daemon/screen.js),
+    // read with the screen: what a one-click answer is checked against.
+    readQuickStatus: async (paneId) => quickStatusFromScreen((await sendClient.readPane(paneId, { source: 'visible', lines: 1 }))?.screen),
     terminalBridge,
     launchActions: {
       ...launchActions,
@@ -2765,6 +2787,9 @@ app.whenReady().then(async () => {
   const artifactsProvider = createArtifactsProvider({
     getSessionLabel: (id) => sidebarBridge.getSessionLabel(id),
     roots: [harborConfig.paths.projectsDir],
+    // Codex outputs too: the same codex homes the rail lists sessions from,
+    // asked per collection (harborConfig is reassigned when the wizard saves).
+    codexHomes: () => codexHomesFromProfiles(harborConfig.profiles),
     cacheFile: path.join(harborConfig.paths.cacheDir, 'artifacts-index.json'),
   });
   // Grid previews: HTML artifacts render in a short-lived OFFSCREEN window
@@ -3017,14 +3042,40 @@ app.whenReady().then(async () => {
   capabilitiesProvider = createCapabilitiesProvider({ accounts: accountsProvider });
 
   // Notification driver (R8): Electron supplies the native implementation.
+  // A clicked notification: show and focus Harbor, then tell the renderer which
+  // session to open (session:reveal). The pane is resolved to its session here
+  // because the renderer's windows are keyed by session id.
+  const revealPane = (paneId) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    if (process.platform === 'darwin') app.focus({ steal: true });
+    mainWindow.focus();
+    const sessionId = paneId ? sidebarBridge?.notificationState(paneId)?.sessionId : null;
+    if (sessionId) sendToRenderer('session:reveal', { sessionId });
+  };
+  notifyPrefs = createNotifyPrefs({ file: path.join(harborConfig.paths.cacheDir, 'notify-prefs.json') });
   notifier = createNotifier({
+    isSuppressed: (paneId) => !notifyPrefs.enabled()
+      || notifyPrefs.isMuted(sidebarBridge.notificationState(paneId)?.sessionId),
     getPaneState: (paneId) => sidebarBridge.notificationState(paneId),
     getFocusedPaneId: () => terminalBridge?.getState().controlledPaneId ?? null,
     isWindowFocused: () => mainWindow?.isFocused() ?? false,
     getWorkspaceLabel: (workspaceId) => terminalBridge?.getState().workspaces
       ?.find((w) => w.workspace_id === workspaceId)?.label || '',
     setBadgeCount: setAppBadgeCount,
-    notify: (title, body) => platform.notify(title, body),
+    // Clicking a toast brings Harbor forward on the window it is about. Only
+    // the user's click does this: nothing here focuses a window on its own.
+    notify: (title, body, meta = {}) => platform.notify(title, body, { onClick: () => revealPane(meta.paneId) }),
+  });
+  // Read the append before an idle event can claim completion. The history
+  // watcher is debounced and can otherwise arrive after the toast window.
+  // Only a completion needs the fresh background verdict. Tool-transition
+  // chatter must not scan the entire delegation corpus on every status.
+  const notifierQueue = createStatusQueue({
+    scanFor: (data) => (data.agent_status === 'idle' || data.agent_status === 'done'
+      ? sidebarBridge.refreshDelegations() : null),
+    deliver: (event) => notifier.onAgentStatusChanged(event),
   });
   sidebarBridge.emitter.on('pane-agent-status', (event) => {
     // agent_status 'unknown' means no foreground agent owns the pane: the CLI
@@ -3033,54 +3084,21 @@ app.whenReady().then(async () => {
     // 2026-07-22), so the link dies with the agent.
     const data = event?.data || {};
     if (data.agent_status === 'unknown' && data.pane_id) paneLinks?.dropPane(data.pane_id);
-    // Read the append before an idle event can claim completion. The history
-    // watcher is debounced and can otherwise arrive after the toast window.
-    // Only a completion needs the fresh background verdict. Tool-transition
-    // chatter must not scan the entire delegation corpus on every status.
-    if (data.agent_status === 'idle' || data.agent_status === 'done') {
-      sidebarBridge.refreshDelegations().then(() => notifier.onAgentStatusChanged(event)).catch(() => {});
-    } else notifier.onAgentStatusChanged(event);
+    notifierQueue(event);
   });
   sidebarBridge.emitter.on('update', () => notifier.onBackgroundChanged());
   sidebarBridge.emitter.on('panes-changed', () => notifier.onBackgroundChanged());
 
-  // Agent-status watcher: the daemon only delivers pane.agent_status_changed
-  // with a per-pane subscription entry (verified live), so maintain one
-  // subscription covering the current set of live agent panes and rebuild it
-  // (debounced) whenever that set changes.
-  const agentClient = createControlClient({ env: process.env, sessionStorePolicy });
-  let agentSub = null;
-  let agentSubKey = '';
-  let agentSubTimer = null;
-  const rebuildAgentWatcher = () => {
-    clearTimeout(agentSubTimer);
-    agentSubTimer = setTimeout(() => {
-      try {
-        const paneIds = [...new Set(sidebarBridge?.getLivePaneIds() || [])].sort();
-        const key = paneIds.join(',');
-        if (key === agentSubKey) return;
-        agentSubKey = key;
-        agentSub?.close?.();
-        agentSub = null;
-        if (!paneIds.length) return;
-        agentSub = agentClient.subscribeAgentStatus(paneIds);
-        agentSub.ready().catch(() => {}); // daemon-down subscribe must not reject unhandled
-        // This subscription is the authoritative status source for both the
-        // window working state and notifications. The sidebar bridge updates
-        // the owning session, then re-emits the unchanged event to notifier.
-        agentSub.on('event', (event) => sidebarBridge?.onPaneAgentStatus(event));
-        agentSub.on('error', () => {});
-        agentSub.on('close', () => {
-          agentSubKey = '';
-          rebuildAgentWatcher(); // notifications must not stay dead until the next sidebar update
-        });
-      } catch (e) {
-        console.error('agent watcher rebuild failed:', e.message);
-      }
-    }, 2000);
-    agentSubTimer.unref?.();
-  };
-  sidebarBridge.emitter.on('panes-changed', rebuildAgentWatcher);
+  // ONE status feed. The sidebar bridge's bootstrap subscription already
+  // polls every session, is reconnected by the bridge, and hands
+  // pane.agent_status_changed to onPaneAgentStatus -> 'pane-agent-status' ->
+  // the notifier. A second subscription per live-pane set used to feed the
+  // same door: on sessiond it ignored its pane list and was another 1 s poll
+  // of every session, rebuilt unseeded on each pane-set change, so it
+  // replayed every pane's events into the bridge and would deliver each
+  // status twice. The notifier is seeded from the snapshot the bridge's
+  // subscription was seeded with, at boot and on every reconnect.
+  sidebarBridge.emitter.on('daemon-snapshot', (snapshot) => notifier?.seedFromSnapshot(snapshot));
 
   terminalBridge.emitter.on('update', broadcastTerminalUpdate);
   terminalBridge.emitter.on('frame', (payload) => sendToRenderer('terminal:frame', payload));
@@ -3193,15 +3211,6 @@ app.whenReady().then(async () => {
   // as before. Serialized and idempotent; a pane with the ">_" view open is
   // left at the size that xterm fitted.
   if (!e2eMode) terminalBridge.startPaneSizeSweep();
-  // Seed notifier with current agent statuses so the first event is
-  // interpreted correctly (a completion right after boot must still toast).
-  try {
-    const snap = await agentClient.snapshot();
-    notifier?.seedFromSnapshot(snap.snapshot);
-  } catch {
-    // daemon may be unavailable; notifier starts cold
-  }
-  rebuildAgentWatcher();
   broadcastSidebarUpdate(sidebarBridge.getState());
   broadcastTerminalUpdate(terminalBridge.getState());
   createWindow();

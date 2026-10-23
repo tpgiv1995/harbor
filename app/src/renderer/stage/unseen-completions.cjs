@@ -160,6 +160,20 @@ function badgeCounts(sessions, store) {
   return { finished, blocked, total: finished + blocked };
 }
 
+// Every session waiting on an answer right now, for the title bar's "N need
+// you" and the rail filter it opens. The same live rule badgeCounts applies to
+// blocked: selection and the seen store do not matter (attentionFor drops the
+// SELECTED session, so a count built from it disagreed with the badge, and a
+// row clicked in the filter to answer it vanished under the cursor). Unlike
+// the badge it counts every row the rail shows amber, not only open windows.
+function needsYouIds(sessions) {
+  const ids = [];
+  for (const session of sessions || []) {
+    if (session && session.blocked && !session.excluded) ids.push(session.id);
+  }
+  return ids;
+}
+
 module.exports = {
   SEEN_STORE_VERSION,
   MAX_SEEN_ENTRIES,
@@ -171,4 +185,5 @@ module.exports = {
   attentionFor,
   countAttention,
   badgeCounts,
+  needsYouIds,
 };
