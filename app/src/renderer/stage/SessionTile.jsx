@@ -13,7 +13,9 @@ import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
 import { terminalView } from './terminal-view.cjs';
 import { copyText } from './md.jsx';
-import { runStateCue } from '../../shared/session-run-state.cjs';
+import { runStateCue, canQuickAnswer } from '../../shared/session-run-state.cjs';
+import { QuickAnswer } from './QuickAnswer.jsx';
+import { useNotifyPrefs, setSessionMuted } from '../notify-prefs-store.js';
 import { createPortal } from 'react-dom';
 
 const EFFORT_LABEL = { low: 'low', medium: 'med', high: 'high', xhigh: 'xhigh', max: 'max' };
@@ -140,9 +142,14 @@ const { parseTokenCount, liveMeterLabel } = turnMetaHelpers;
 // ticks locally from the task's prompt, and tokens are the larger of the last
 // count the CLI showed and the transcript's running total for the task
 // (turn-meta.cjs liveMeterLabel). Polled only while the window is working.
+// A CODEX window gets the same chip from its rollout alone: codex writes
+// token_count records as it goes (transcript.js noteCodexTokens), so there is
+// no pane line to read and nothing to poll, only the clock to tick.
 function useWorkMeter(session, pane, working, prompt) {
   const paneId = pane?.paneId || null;
-  const active = Boolean(working && paneId && (session.provider || 'claude') === 'claude');
+  const provider = session.provider || 'claude';
+  const readsPane = provider === 'claude';
+  const active = Boolean(working && (readsPane ? paneId : provider === 'codex'));
   const promptKey = prompt?.key || null;
   const [cli, setCli] = useState(null);
   const [now, setNow] = useState(() => Date.now());
@@ -152,7 +159,9 @@ function useWorkMeter(session, pane, working, prompt) {
     let alive = true;
     let timer = null;
     const tick = async () => {
-      const next = await window.harbor?.session?.workMeter?.({ pane, sessionId: session.id }).catch(() => null);
+      const next = readsPane
+        ? await window.harbor?.session?.workMeter?.({ pane, sessionId: session.id }).catch(() => null)
+        : null;
       if (!alive) return;
       // Keep the last count through the stretches the CLI hides its line.
       if (next) setCli((prev) => ({ elapsed: next.elapsed || prev?.elapsed || null, tokens: parseTokenCount(next.tokens) ?? prev?.tokens ?? null, verb: next.verb, thinking: next.thinking }));
@@ -163,7 +172,7 @@ function useWorkMeter(session, pane, working, prompt) {
     return () => { alive = false; if (timer) clearTimeout(timer); };
     // pane is read through paneId; a fresh pane object for the same id is the same pane.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, paneId, session.id, promptKey]);
+  }, [active, readsPane, paneId, session.id, promptKey]);
   if (!active) return null;
   const startMs = prompt?.ts ? Date.parse(prompt.ts) : NaN;
   const label = liveMeterLabel({
@@ -207,6 +216,8 @@ export const SessionTile = memo(forwardRef(function SessionTile({
 }, ref) {
   const { profiles } = useProfiles();
   const [copiedId, setCopiedId] = useState(false);
+  const notifyPrefs = useNotifyPrefs();
+  const muted = notifyPrefs.muted.has(session.id);
   const [taskTip, setTaskTip] = useState(null);
   const header = headerForOwnedPane(session, pane, data?.header || null);
   const blocks = useMemo(() => data?.blocks || [], [data?.blocks]);
@@ -214,7 +225,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   const terminalDialogs = useTerminalDialogs();
   const awaitingAnswer = pendingAsk && !pendingAsk.answered || terminalDialogs.has(session.id);
   const runState = runStateCue(session, pane, awaitingAnswer ? { ...header, blocked: true } : header);
-  const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued) return blocks[i]; return null; }, [blocks]);
+  const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued && !blocks[i].steer) return blocks[i]; return null; }, [blocks]);
   const workMeter = useWorkMeter(session, pane, Boolean(header?.working) && !awaitingAnswer, lastPrompt);
   const title = session.isChildTask && session.childTitle ? session.childTitle : session.title;
   const projectLabel = !session.project || session.project === '~' ? 'home' : session.project;
@@ -319,6 +330,24 @@ export const SessionTile = memo(forwardRef(function SessionTile({
             {pane && !readOnly ? (
               <button
                 type="button"
+                className={`ico tile-bell${muted || !notifyPrefs.enabled ? ' off' : ''}`}
+                title={!notifyPrefs.enabled
+                  ? 'Notifications are off for every window (app menu)'
+                  : muted ? 'Unmute: notify when this window finishes or needs you' : 'Mute notifications for this window'}
+                aria-label={muted ? 'Unmute notifications for this window' : 'Mute notifications for this window'}
+                aria-pressed={muted}
+                onClick={(e) => { e.stopPropagation(); setSessionMuted(session.id, !muted); }}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 1.5a4.5 4.5 0 0 0-4.5 4.5v2.6L2 11h12l-1.5-2.4V6A4.5 4.5 0 0 0 8 1.5Z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+                  <path d="M6.2 12.8a1.9 1.9 0 0 0 3.6 0" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                  {muted || !notifyPrefs.enabled ? <path d="M2.5 2.5l11 11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /> : null}
+                </svg>
+              </button>
+            ) : null}
+            {pane && !readOnly ? (
+              <button
+                type="button"
                 className={`ico tty${tty ? ' on' : ''}`}
                 title={tty ? 'Back to the conversation view' : 'Raw terminal (permission prompts live here)'}
                 onClick={(e) => { e.stopPropagation(); onToggleTty(); }}
@@ -367,6 +396,11 @@ export const SessionTile = memo(forwardRef(function SessionTile({
               <span className="runstate-dot" aria-hidden="true" />
               <span className="runstate-verb">{runState.label}</span>
             </span>
+          ) : null}
+          {/* Allow / Deny right on the header while the CLI reports a permission
+              prompt; a question held by the hook lane is answered on its form. */}
+          {canQuickAnswer(session, pane, readOnly) && !pendingAsk ? (
+            <QuickAnswer pane={pane} sessionId={session.id} expect={session.agentStatusMsg} expectSeq={session.agentStatusSeq ?? null} listenKeys={selected} />
           ) : null}
           {workMeter ? (
             <span className="work-meter" title={workMeter.title}>{workMeter.label}</span>
@@ -460,7 +494,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           onAnswer={(id, payload) => window.harbor.asks.answer({ id, ...payload })}
           onDecline={(id, reason) => window.harbor.asks.decline({ id, reason })}
         />
-      ) : pane && !readOnly && session.provider === 'claude' ? (
+      ) : pane && !readOnly && (session.provider === 'claude' || session.provider === 'codex') ? (
         // Mounted behind the raw terminal too, watching only, so a window left
         // on >_ still turns the taskbar amber when a prompt appears.
         // blockedHint is the evidence OTHER than this card's own verdict: fed

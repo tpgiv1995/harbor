@@ -89,6 +89,10 @@ const IconHandoff = (props) => (
 );
 
 const stripBeta = (id) => String(id || '').replace(/\[1m\]/g, '');
+// A Codex queue read is polled every 1.5 s; an unchanged one keeps the old
+// object so the bar does not re-render on every poll.
+const sameCliQueue = (a, b) => a === b || Boolean(a && b && a.working === b.working && a.count === b.count
+  && (a.steer || []).join('\n') === (b.steer || []).join('\n') && (a.queued || []).join('\n') === (b.queued || []).join('\n'));
 
 // The universal prompt bar: always shows WHERE input goes (status row),
 // drives exactly the selected session, and never pretends. A session Harbor
@@ -123,6 +127,28 @@ export function CommandBar({
 }) {
   const questionReply = useQuestionReply(session?.id);
   const [questionReplyError, setQuestionReplyError] = useState(null);
+  // CODEX'S QUEUE IS ON ITS SCREEN. A message sent into a busy Codex is a
+  // STEER, held under "Messages to be submitted after next tool call" until
+  // the turn's next tool call, and a Tab'd one is a queued follow-up; Codex
+  // writes neither to its rollout until it delivers them. Main reads the pane
+  // (session:cli-queue) while the turn runs; Send now is Codex's own "esc to
+  // interrupt and send immediately", offered only while a steer is pending.
+  const codexBusy = session?.provider === 'codex' && Boolean(pane?.paneId) && !readOnly
+    && Boolean(header?.working || session?.agentStatus === 'working');
+  const [codexQueue, setCodexQueue] = useState(null);
+  useEffect(() => {
+    if (!codexBusy || !window.harbor?.session?.cliQueue) { setCodexQueue(null); return undefined; }
+    let live = true;
+    const poll = async () => {
+      const next = await window.harbor.session.cliQueue({ pane, sessionId: session.id, provider: 'codex' }).catch(() => null);
+      if (live) setCodexQueue((prev) => (sameCliQueue(prev, next) ? prev : next));
+    };
+    poll();
+    const timer = setInterval(poll, 1500);
+    return () => { live = false; clearInterval(timer); };
+  }, [codexBusy, pane?.paneId, pane?.workspaceId, session?.id]);
+  const codexSteers = codexQueue?.steer?.length || 0;
+  const codexQueued = codexQueue?.count || 0;
   const { profiles, workflows } = useProfiles();
   const text = draft?.text ?? '';
   const attachments = Array.isArray(draft?.attachments) ? draft.attachments : [];
@@ -1079,6 +1105,24 @@ export function CommandBar({
             <span className={`ustat-phase${phaseText || chainText ? '' : ' empty'}`} title={phaseText || chainText || undefined}>
               {phaseText || chainText ||' '}
             </span>
+            {codexQueued > 0 ? (
+              <span
+                className="queued-mini"
+                title={[...(codexQueue.steer || []), ...(codexQueue.queued || [])].join('\n')}
+              >
+                {codexQueued === 1 ? '1 queued in Codex' : `${codexQueued} queued in Codex`}
+                {codexSteers > 0 && window.harbor?.session?.sendSteerNow ? (
+                  <button
+                    type="button"
+                    className="send-now"
+                    title="Codex takes this after its next tool call. Send now interrupts the turn and sends it at once (Esc)"
+                    onClick={() => window.harbor.session.sendSteerNow({ paneId: pane.paneId, workspaceId: pane.workspaceId }).catch(() => null)}
+                  >
+                    Send now
+                  </button>
+                ) : null}
+              </span>
+            ) : null}
             {queuedItem ? (
               <span className="queued-mini" title={queuedItem.textPreview}>
                 queued

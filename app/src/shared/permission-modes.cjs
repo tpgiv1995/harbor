@@ -7,6 +7,8 @@ const MODE_LABEL = Object.freeze({
   'accept-edits': 'accept edits',
   bypass: 'bypass permissions',
   auto: 'auto mode · classifier reviews',
+  // Codex only: its sandbox, read from the rollout's turn_context.
+  'read-only': 'read-only sandbox',
 });
 
 module.exports = { MODE_LABEL };

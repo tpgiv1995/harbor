@@ -441,3 +441,14 @@ test('the footer hints say only what the keys do', () => {
   const lone = buildSheet(parseMenu(fixture('real-claude-120x60.txt')));
   assert.ok(!keyHints(lone, initialState(lone)).some(([k]) => k === '← →'), 'a lone question has no question keys');
 });
+
+test('a Codex menu builds a sheet that knows Codex is asking', () => {
+  const sheet = sheetModel.buildSheet({
+    provider: 'codex', question: 'Which color?', footer: 'tab to add notes | enter to submit answer | esc to interrupt',
+    keys: { notes: true }, notesKey: '\t',
+    options: [{ index: 1, label: 'Red', selected: true }, { index: 2, label: 'Blue' }, { index: 3, label: 'None of the above', isText: true }],
+  });
+  assert.equal(sheet.provider, 'codex');
+  assert.equal(sheet.kind, 'ask');
+  assert.equal(sheetModel.buildSheet({ question: 'q', footer: 'x', options: [{ index: 1, label: 'a' }] }).provider, 'claude');
+});

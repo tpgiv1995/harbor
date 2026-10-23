@@ -51,3 +51,10 @@ test('no arrow key is forwarded to the pty from the card', () => {
   assert.match(askCardSource, /key: 'left' \}\); \}\}>← Back to the questions/, 'and it is labelled as exactly that key');
   assert.doesNotMatch(askCardSource, /onKeyDown[\s\S]{0,400}run\(\{ type: 'key'/, 'no keyboard handler forwards a key');
 });
+
+// Codex's approvals and request_user_input questions parse into the same menu
+// shape (codex-screen.js), so the same card answers them.
+test('the answer sheet mounts for Codex windows as well as Claude ones', () => {
+  assert.match(sessionTileSource, /\(session\.provider === 'claude' \|\| session\.provider === 'codex'\) \? \(/);
+  assert.match(askCardSource, /codex \? 'Codex is asking' : 'Claude is asking'/);
+});

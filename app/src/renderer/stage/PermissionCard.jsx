@@ -81,7 +81,8 @@ export function ScreenPermissionDetail({ permission }) {
 
 export function ScrapedPermissionCard({ menu, busy, error, onAction, device }) {
   const permission = menu.permission;
-  const feedback = menu.options.find(option => /(?:tell Claude what to (?:do differently|change))/i.test(option.label));
+  // Codex words its row "No, and tell Codex what to do differently" (0.160).
+  const feedback = menu.options.find(option => /(?:tell (?:Claude|Codex) what to (?:do differently|change))/i.test(option.label));
   const feedbackIndex = feedback ? feedback.index : null;
   const negative = menu.options.find(option => /^No\b/i.test(option.label));
   const title = permission.toolName || permission.toolTitle?.replace(/^.+?\s+[-\u2014]\s+/, '').replace(/:?\s*\(MCP\)$/, '');
