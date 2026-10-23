@@ -19,6 +19,7 @@ const { isDividerLine } = require('../shared/divider.cjs');
 const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFromStrip, CHAT_ROW_RE } = require('./ask-question.js');
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
+const { isApiRequestRecordLine } = require('./providers/claude-request-records.js');
 const { planResumeNudge } = require('./resume-nudge.js');
 
 // Claude Code's project-dir munge: every non-alphanumeric cwd character
@@ -721,7 +722,9 @@ function createSessionSend(deps) {
     const expected = String(text ?? '').replace(/\s+/g, ' ').trim();
     if (!expected) return false;
     for (const line of String(chunk || '').split('\n')) {
-      if (!line.trim()) continue;
+      // The CLI writes a request copy right after taking the message; it can
+      // run to megabytes and never confirms anything.
+      if (!line.trim() || isApiRequestRecordLine(line)) continue;
       try {
         const obj = JSON.parse(line);
         if (obj.type === 'queue-operation'

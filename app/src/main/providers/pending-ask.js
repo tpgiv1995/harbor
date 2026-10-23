@@ -26,6 +26,7 @@
 
 const fs = require('node:fs');
 const { normalizeAsk } = require('../ask-question.js');
+const { isApiRequestRecordLine } = require('./claude-request-records.js');
 
 // A question sits a long way above the tool results that follow it, and those
 // results can be large. 1MB of tail covers the realistic gap while keeping a
@@ -63,6 +64,9 @@ function createPendingAskReader(options = {}) {
     const answered = new Set();
     for (const line of text.split('\n')) {
       if (!line || line.charCodeAt(0) !== 123 /* { */) continue;
+      // A request copy names AskUserQuestion in its tool list on every call;
+      // drop it before the substring test sends it to JSON.parse.
+      if (isApiRequestRecordLine(line)) continue;
       // Cheap pre-filter: parsing every line of a megabyte of tool output to
       // find two records is the difference between 1ms and 60ms per poll.
       const isAsk = line.includes('"AskUserQuestion"');

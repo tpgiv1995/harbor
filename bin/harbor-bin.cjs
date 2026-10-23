@@ -798,10 +798,78 @@ function index(args, options = {}) {
 //
 // That is also what removes the last functional reason a profile id had to be
 // one of three specific words, one of which was a person's first name.
-function resumeArgv(id, prompt = null) {
-  const argv = [claudeBin(), '--dangerously-skip-permissions', '--resume', id];
+function resumeArgv(id, prompt = null, permissionMode = null) {
+  const argv = [claudeBin(), ...resumePermissionArgs(permissionMode), '--resume', id];
   if (prompt != null) argv.push(String(prompt));
   return argv;
+}
+
+// A RESUMED SESSION COMES BACK IN THE PERMISSION MODE IT WAS LEFT IN
+// (2026-10-19). Every resume passed `--dangerously-skip-permissions`, so a
+// session the user had switched to plan, manual or accept-edits came back in
+// bypass, the least restrictive mode, after Claude Code itself had started
+// restoring the mode on --resume (2.1.29x). The mode is read from the
+// transcript: an interactive session appends `permission-mode` records as it
+// runs and stamps `permissionMode` on each user record (a `claude -p` run
+// writes only the stamp); the last of either is current. Any mode the CLI names
+// is carried over, with bypass left one Shift+Tab away as a fresh launch has
+// it. Bypass itself, and a transcript that names no mode, resume exactly as
+// before. An unknown word is never passed through: the CLI refuses an argument
+// outside its choices and the resume would fail outright.
+const RESUME_MODES = new Set(['default', 'manual', 'acceptEdits', 'plan', 'auto', 'dontAsk']);
+
+function resumePermissionArgs(mode) {
+  if (!RESUME_MODES.has(mode)) return ['--dangerously-skip-permissions'];
+  return ['--permission-mode', mode, '--allow-dangerously-skip-permissions'];
+}
+
+// Bounded like every other question asked of a transcript's end: the window
+// starts at 1 MB and grows to 16 MB at most, never the whole file. Only raw
+// bytes are searched; a user record is decoded only when it is the newest
+// candidate, and the mode is its TOP-LEVEL field (a nested key, or text that
+// merely mentions the field, does not count).
+const PERMISSION_RECORD = Buffer.from('{"type":"permission-mode","permissionMode":"');
+const PERMISSION_FIELD = Buffer.from('"permissionMode":"');
+const USER_RECORD = Buffer.from('"type":"user"');
+const PERMISSION_TAIL_START = 1024 * 1024;
+const PERMISSION_TAIL_MAX = 16 * 1024 * 1024;
+
+function lastPermissionMode(transcriptPath) {
+  let fd;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+    const size = fs.fstatSync(fd).size;
+    for (let span = Math.min(size, PERMISSION_TAIL_START); ; span = Math.min(size, span * 4, PERMISSION_TAIL_MAX)) {
+      const buffer = Buffer.alloc(span);
+      const filled = fs.readSync(fd, buffer, 0, span, size - span);
+      const data = buffer.subarray(0, filled);
+      // The first line of a window that starts mid-file is cut, so it is skipped.
+      const cut = span < size ? data.indexOf(10) : -1;
+      const floor = span < size ? (cut === -1 ? data.length : cut + 1) : 0;
+      let end = data.length;
+      while (end > floor) {
+        const start = data.lastIndexOf(10, end - 1) + 1;
+        if (start < floor) break;
+        const head = data.subarray(start, Math.min(end, start + 256));
+        if (head.indexOf(PERMISSION_RECORD) === 0) {
+          const from = start + PERMISSION_RECORD.length;
+          const to = data.indexOf(34, from);
+          if (to !== -1 && to < end) return data.toString('utf8', from, to);
+        } else if (head.indexOf(USER_RECORD) !== -1 && data.subarray(start, end).indexOf(PERMISSION_FIELD) !== -1) {
+          try {
+            const record = JSON.parse(data.toString('utf8', start, end));
+            if (record?.type === 'user' && typeof record.permissionMode === 'string') return record.permissionMode;
+          } catch { /* a half-written last line */ }
+        }
+        end = start - 1;
+      }
+      if (span >= size || span >= PERMISSION_TAIL_MAX) return null;
+    }
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* already closed */ }
+  }
 }
 
 // The inverse of the wizard's `homeId`: `personal` is the bare `~/.claude`, and
@@ -903,7 +971,7 @@ async function claudeSessions(args) {
     // The same Windows resolution a launch gets: a bare `claude` is npm's
     // claude.cmd, which sessiond's CreateProcess cannot start. A full path (what
     // the wizard saves) passes through untouched.
-    const argv = resolveWindowsLaunch(resumeArgv(resumeId, prompt), { env: resumeEnv });
+    const argv = resolveWindowsLaunch(resumeArgv(resumeId, prompt, lastPermissionMode(meta.path)), { env: resumeEnv });
     if (here) {
       const result = spawnSync(argv[0], argv.slice(1), { cwd: meta.cwd, env: resumeEnv, stdio: 'inherit', windowsHide: true });
       return result.status ?? 1;
@@ -939,7 +1007,7 @@ async function claudeSessions(args) {
 module.exports = {
   ROOT, ai, parseAi, claudeSessions, claudeBin, claudeConfigFile, cleanDaemonEnv, commandString,
   preacceptFolderTrust, runtime, resolveUnitPolicy,
-  trustKeysFor,
+  trustKeysFor, lastPermissionMode, resumeArgv,
   resolveSessionBackend, sessiondChildEnv, spawnSessiond,
   resolveWindowsLaunch, codexCliVersion, codexMigrationAcks, codexPaneControls, withCodexPaneControls,
 };

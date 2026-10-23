@@ -18,6 +18,7 @@ const path = require('node:path');
 const readline = require('node:readline');
 const { readSessionBeacon, readOwnerProcessAlive } = require('./session-owner.js');
 const { processAliveFromEvidence } = require('../../shared/session-run-state.cjs');
+const { isApiRequestRecordLine, isApiRequestRecordBytes } = require('./claude-request-records.js');
 
 
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
@@ -296,7 +297,9 @@ async function findProviderTranscript({ provider, sessionId, cwd, home = os.home
 // decoded one at a time from the buffer, so no string is ever larger than one
 // record. The first line of a window that starts mid-file is dropped (it is
 // cut); the trailing segment is kept, and a half-written one simply fails to
-// parse, exactly as it did when the whole file was split.
+// parse, exactly as it did when the whole file was split. A Claude Code request
+// copy (claude-request-records.js) is dropped before it is decoded, so it
+// neither costs a string nor counts toward `minLines`.
 const TAIL_SIGNAL_MIN_LINES = 64;
 const TAIL_SIGNAL_MAX_BYTES = 16 * 1024 * 1024;
 const TAIL_RECORDS_MAX_BYTES = 64 * 1024 * 1024;
@@ -324,7 +327,8 @@ async function readTailLines(filePath, { minLines = 1, startBytes = MAX_INITIAL_
       while (lineStart < filled) {
         let lineEnd = buffer.indexOf(0x0a, lineStart);
         if (lineEnd === -1 || lineEnd > filled) lineEnd = filled;
-        const text = buffer.toString('utf8', lineStart, lineEnd).trim();
+        const text = isApiRequestRecordBytes(buffer, lineStart, lineEnd)
+          ? '' : buffer.toString('utf8', lineStart, lineEnd).trim();
         if (text) lines.push(text);
         lineStart = lineEnd + 1;
       }
@@ -1092,6 +1096,9 @@ async function readPrefixImageBlocks(filePath, endOffset, provider = 'claude') {
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   const images = [];
   for await (const line of lines) {
+    // A request copy repeats the session's pasted images inside its messages;
+    // it is never a block, and JSON.parse of one is the expensive part.
+    if (isApiRequestRecordLine(line)) continue;
     if (!/"type"\s*:\s*"image"/.test(line)) continue;
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
@@ -1148,6 +1155,7 @@ async function readOpeningBlock(filePath, provider = 'claude', limitBytes = OPEN
         // Split on raw '\n' bytes: 0x0a never occurs inside a multi-byte UTF-8
         // sequence, so line boundaries stay exact without decoding first.
         if (data[i] !== 0x0a) continue;
+        if (isApiRequestRecordBytes(data, lineStart, i)) { lineStart = i + 1; continue; }
         const line = data.toString('utf8', lineStart, i);
         lineStart = i + 1;
         let obj = null;
@@ -1209,6 +1217,7 @@ async function readChunkEndingAt(filePath, provider, endOffset, chunkSize) {
   for (let idx = 0; idx < lineRanges.length; idx += 1) {
     if (idx === 0 && firstLineIsPartial) continue;
     const [lineStart, lineEnd] = lineRanges[idx];
+    if (isApiRequestRecordBytes(buffer, lineStart, lineEnd)) continue;
     const text = buffer.toString('utf8', lineStart, lineEnd).trim();
     if (!text) continue;
     let obj;
@@ -1479,6 +1488,7 @@ function createTranscriptProvider(options = {}) {
         const lines = entry.lineBuffer.feed(buffer.toString('utf8', 0, bytesRead));
         for (const line of lines) {
           if (entry.skipFirstPartial) { entry.skipFirstPartial = false; continue; }
+          if (isApiRequestRecordLine(line)) continue;
           let obj = null;
           try { obj = JSON.parse(line); } catch { continue; }
           for (const key of entry.parser.applyLine(obj)) changedKeys.add(key);

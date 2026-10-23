@@ -8,6 +8,7 @@ const { discoverProfiles } = require('../config/homes.js');
 const { projectLabelForCwd } = require('../../shared/project-label.cjs');
 
 const { readClaudeTitles } = require('./native-session-titles.cjs');
+const { isApiRequestRecordLine } = require('./claude-request-records.js');
 
 // Entry fields are additive. Keep the envelope readable by the older phone
 // server sharing this cache; upgrade missing fields after the window opens.
@@ -56,6 +57,9 @@ function cleanText(value, limit) {
 }
 
 function jsonObject(line) {
+  // A Claude Code request copy is never a prompt, title or timestamp source,
+  // and parsing one is most of a tail window's cost.
+  if (isApiRequestRecordLine(line)) return null;
   try {
     const value = JSON.parse(line);
     return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
@@ -201,14 +205,20 @@ function parseTranscript(file, previous) {
   }
   recent.reverse();
   const native = readClaudeTitles(file, previous);
-  const title = native.native_title || native.native_summary || summary || firstPrompt || commandName;
+  // A /rename beats Claude's own ai-title, which beats the compaction summary.
+  // An orchestration worker keeps its BATCH TITLE: prompt as its name: the
+  // child-task rule reads the title, and an ai-title would hide the worker in
+  // the rail.
+  const batchWorker = /^\s*BATCH TITLE:/u.test(String(firstPrompt || ''));
+  const nativeName = native.native_title || (batchWorker ? null : native.native_ai_title) || native.native_summary;
+  const title = nativeName || summary || firstPrompt || commandName;
   return {
     cwd,
     entrypoint,
     start,
     last,
     ...native,
-    title: native.native_title || native.native_summary || (title ? cleanText(title, TITLE_MAX) : null),
+    title: nativeName || (title ? cleanText(title, TITLE_MAX) : null),
     first_prompt: firstPrompt ? cleanText(firstPrompt, 1200) : null,
     command: commandName ? cleanText(commandName, TITLE_MAX) : null,
     recent,
@@ -313,7 +323,7 @@ function createHistoryIndex(options = {}) {
     if (appliedTitles && appliedTitles.files === files && appliedTitles.titles === titles) return files;
     for (const entry of Object.values(files)) {
       const generated = titles[entry.id];
-      if (!generated || entry.native_title || entry.native_summary || String(entry.title || '').trimStart().startsWith('BATCH TITLE:')) continue;
+      if (!generated || entry.native_title || entry.native_ai_title || entry.native_summary || String(entry.title || '').trimStart().startsWith('BATCH TITLE:')) continue;
       entry.title = cleanText(String(generated), TITLE_MAX);
     }
     appliedTitles = { files, titles };

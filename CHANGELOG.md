@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-Nothing yet.
+- A resumed Claude session comes back in the permission mode it was left in
+  (plan, manual, accept edits, auto) instead of always in bypass.
+- Sessions are named by Claude Code's own generated title when they have no
+  /rename; a /rename still wins.
+- The Files view no longer lists files that only Claude Code's system prompt
+  mentions, and transcript readers skip the per-request copies that Claude Code
+  2.1.300 stores, instead of decoding them.
 
 ## 0.1.0 (2026-10-12)
 

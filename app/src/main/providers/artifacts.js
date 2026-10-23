@@ -24,6 +24,7 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const { isApiRequestRecordLine } = require('./claude-request-records.js');
 
 const DEFAULT_ROOTS = [path.join(os.homedir(), '.claude', 'projects')];
 const DEFAULT_CACHE = path.join(os.homedir(), '.cache', 'harbor', 'artifacts-index.json');
@@ -289,6 +290,9 @@ async function parseTranscript(filePath, parseOptions = {}) {
   let consumed = fromByte;
   let carry = Buffer.alloc(0);
   const takeLine = (line) => {
+    // A Claude Code request copy quotes the whole system prompt, and the paths
+    // it names (instructions, memory, skills) are not session outputs.
+    if (isApiRequestRecordLine(line)) return;
     if (!cwd) {
       const match = line.match(CWD_RE);
       if (match) cwd = decodeJsonString(match[1]);
@@ -350,7 +354,10 @@ function createArtifactsProvider(options = {}) {
   // shipped and the fix would look inert on exactly the history being viewed.
   // (2026-10-21: the linear rewrite kept the output, so no bump; see
   // extractCandidates.)
-  const CACHE_VERSION = 3;
+  // v4: Claude Code request copies (claude-request-records.js) are skipped; a
+  // cache built before carries candidates lifted from their system prompts.
+  // The re-parse is bounded by the WINDOW_DAYS scan, not the whole store.
+  const CACHE_VERSION = 4;
   let cache = { version: CACHE_VERSION, files: {} };
   try {
     const raw = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));

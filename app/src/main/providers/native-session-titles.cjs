@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const { isApiRequestRecordBytes } = require('./claude-request-records.js');
 
 async function readCodexTitles(configHome) {
   const titles = new Map();
@@ -30,23 +31,42 @@ async function readCodexTitles(configHome) {
 // the first time it changes after this shipped, and from its offset after that;
 // the index cache version is deliberately NOT bumped, so no launch re-reads the
 // whole store.
-const TITLE_MARKS = [Buffer.from('custom-title'), Buffer.from('"summary"')];
+//
+// Three names, most deliberate first: `custom-title` is the user's /rename,
+// `ai-title` the name Claude Code generates for the session itself (2.1.29x on;
+// the CLI re-appends it as the session runs, so the LAST one wins, and the
+// desktop app shows it), and `summary` the older compaction summary. ai-title
+// was added 2026-10-19 the same way, again without a cache bump: an entry
+// cached before it has no `native_ai_title` key, so the first time that
+// transcript changes it is rescanned from byte 0 once, and an untouched old
+// session keeps the name it had. A Claude Code request copy
+// (claude-request-records.js) can carry a `"summary"` key in its tool schemas;
+// it is skipped before it is decoded.
+const TITLE_MARKS = [Buffer.from('custom-title'), Buffer.from('"ai-title"'), Buffer.from('"summary"')];
 const SCAN_CHUNK = 1024 * 1024;
 
 function readClaudeTitles(file, previous = {}) {
+  const ownId = path.basename(file, '.jsonl');
   const fd = fs.openSync(file, 'r');
   try {
     const size = fs.fstatSync(fd).size;
-    const resume = Number.isInteger(previous.title_offset) && previous.title_offset <= size;
+    const resume = Number.isInteger(previous.title_offset) && previous.title_offset <= size
+      && previous.native_ai_title !== undefined;
     let position = resume ? previous.title_offset : 0;
     let offset = position;
     let custom = resume ? previous.native_title || null : null;
     let summary = resume ? previous.native_summary || null : null;
+    let aiTitle = resume ? previous.native_ai_title || null : null;
     const consume = line => {
       let record;
       try { record = JSON.parse(line); } catch { return; }
       if (record.type === 'custom-title' && typeof record.customTitle === 'string' && record.customTitle.trim()) custom = record.customTitle.trim();
       if (record.type === 'summary' && typeof record.summary === 'string' && record.summary.trim()) summary = record.summary.trim();
+      // An ai-title names its own session. One carrying another session's id
+      // is not this one's name (never observed, but a wrong name is worse
+      // than none).
+      if (record.type === 'ai-title' && typeof record.aiTitle === 'string' && record.aiTitle.trim()
+        && (record.sessionId == null || record.sessionId === ownId)) aiTitle = record.aiTitle.trim();
     };
     // `lines` holds whole lines only. Matching lines are decoded in file order,
     // so a later rename still wins over an earlier one.
@@ -57,7 +77,7 @@ function readClaudeTitles(file, previous = {}) {
           const start = at === 0 ? 0 : lines.lastIndexOf(10, at - 1) + 1;
           let end = lines.indexOf(10, at);
           if (end === -1) end = lines.length;
-          starts.set(start, end);
+          if (!isApiRequestRecordBytes(lines, start, end)) starts.set(start, end);
           at = lines.indexOf(mark, end);
         }
       }
@@ -82,7 +102,7 @@ function readClaudeTitles(file, previous = {}) {
     // A valid final record need not have a newline. Re-read it on the next
     // append so an incomplete record is never skipped permanently.
     if (pending.length) scan(pending);
-    return { native_title: custom, native_summary: summary, title_offset: offset };
+    return { native_title: custom, native_ai_title: aiTitle, native_summary: summary, title_offset: offset };
   } finally { fs.closeSync(fd); }
 }
 module.exports = { readCodexTitles, readClaudeTitles };
