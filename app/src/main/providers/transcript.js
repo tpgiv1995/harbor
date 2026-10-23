@@ -486,6 +486,61 @@ function codexToolSnippet(source) {
   return { name: match[1], input };
 }
 
+// A tool call's output: a plain string before codex 0.160, an ARRAY of text
+// parts since.
+function codexOutputText(output) {
+  if (Array.isArray(output)) {
+    return output.map((part) => (part && typeof part.text === 'string' ? part.text : '')).join('\n');
+  }
+  return typeof output === 'string' ? output : '';
+}
+
+// Only an exit code in the text counts. The bare word "error" used to mark a
+// row failed, which made every `grep error` and every log a command printed
+// read as a failure.
+const CODEX_EXIT_TEXT_RE = /Process exited with code ([1-9]\d*)|"exit_code"\s*:\s*([1-9]\d*)/;
+
+// turn_context's approval_policy / sandbox_policy, as the raw value codex
+// wrote: a string stays a string, a tagged object (`{ "type":
+// "workspace-write", ... }`, or a serde enum variant `{ "granular": {...} }`)
+// is reduced to the name of its mode.
+function codexPolicyValue(value) {
+  if (typeof value === 'string') return value || null;
+  if (!value || typeof value !== 'object') return null;
+  if (typeof value.type === 'string') return value.type;
+  if (typeof value.mode === 'string') return value.mode;
+  return Object.keys(value)[0] || null;
+}
+
+// One codex tool call -> one action row. See codexToolSnippet for the exec
+// shape. MCP tools arrive as a function_call whose `namespace` names the
+// server (`mcp__cua_repl`) and whose `name` is the bare tool (`js`), so on its
+// own the row read "Js"; folded back into the Claude spelling it renders like
+// a Claude MCP row (tool, then the server on the right), with the call's own
+// title as the chip when it has one.
+function codexActionFor(payload) {
+  let name = payload.name || 'Tool';
+  const raw = payload.arguments ?? payload.input ?? {};
+  let input = raw;
+  if (typeof raw === 'string') {
+    const snippet = codexToolSnippet(raw);
+    if (snippet) ({ name, input } = snippet);
+    else { try { input = JSON.parse(raw); } catch { input = { command: raw }; } }
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) input = {};
+  if (input.cmd && !input.command) input.command = input.cmd;
+  const namespace = typeof payload.namespace === 'string' && payload.namespace ? payload.namespace : null;
+  const mcp = namespace && /^mcp__/.test(namespace);
+  if (mcp && !/^mcp__/.test(name)) name = `mcp__${namespace.replace(/^mcp__/, '').replace(/_+$/, '')}__${name}`;
+  const action = actionForToolUse({ name, input });
+  if (namespace && !mcp && !action.cv && !action.pill) action.cv = namespace;
+  if (!action.chip && typeof input.title === 'string' && input.title.trim()) {
+    action.chip = clip(input.title.trim(), 64);
+    action.chipTitle = clip(input.title.trim(), 400);
+  }
+  return action;
+}
+
 function primaryInputValue(input) {
   if (!input || typeof input !== 'object') return null;
   for (const key of ['file_path', 'path', 'command', 'query', 'pattern', 'url', 'description', 'prompt']) {
@@ -612,6 +667,23 @@ const PRESENT_TENSE = {
 class TranscriptParser {
   constructor(provider = 'claude', seedModel = null) {
     this.provider = provider;
+    // Codex turn bookkeeping (see applyCodexLine). codexExits / codexItemFailed
+    // hold what an item said about a tool call before that call's output line
+    // resolved it; codexTotalOutput is the session's cumulative output tokens
+    // as of the last token_count, the baseline a new task's spend is measured
+    // from.
+    this.codexExits = new Map(); // call_id -> its last command's exit (0, the code, or -1)
+    this.codexItemFailed = new Map(); // call_id -> true when its item failed
+    this.codexExecCalls = new Set(); // open custom_tool_call (exec) call_ids
+    this.codexTurnOpen = false; // a task's prompt is in, its end is not
+    // A UserMessage while a task runs and no task_started has come since its
+    // prompt is the user steering THAT task, not a new one. Only trusted once
+    // a task_started has been seen in this parse: a tail that starts
+    // mid-session, and the oldest rollouts, keep one turn per message.
+    this.codexSawTaskStarted = false;
+    this.codexPromptExpected = false; // a task_started is waiting for its prompt
+    this.codexTotalOutput = null;
+    this.codexCompactKind = null; // which of the two compaction records drew the note
     this.blocks = [];
     this.pendingTools = new Map(); // tool_use id -> action block
     // The task in flight: the user prompt that opened it and the output tokens
@@ -639,6 +711,15 @@ class TranscriptParser {
       // transcript event.
       cacheTtlMs: null,
       cacheTouchedMs: null,
+      // Codex-only facts; only this parser writes them. approvalPolicy and
+      // sandboxPolicy are turn_context's raw values (a sandbox object is
+      // reduced to its type). turnEnd is how the last FINISHED task ended
+      // ('complete' | 'aborted' | 'error'), null while one runs; turnError is
+      // { message, ts } when that end was an error.
+      approvalPolicy: null,
+      sandboxPolicy: null,
+      turnEnd: null,
+      turnError: null,
     };
     this.seq = 0;
     // Once set, remains true: any evidence of a 1M context window (high-water
@@ -958,66 +1039,304 @@ class TranscriptParser {
     return changed;
   }
 
+  // CODEX TURNS. A codex task runs from `task_started` to `task_complete` (or
+  // `turn_aborted`); between them the model may speak several times. Only an
+  // AgentMessage whose phase is `final_answer` (or that carries no phase at
+  // all: rollouts from before phases existed) ends the turn's speech, and
+  // task_complete / turn_aborted end the turn itself. A `commentary` message is
+  // the model narrating mid-task, so it keeps the turn in flight: about one
+  // turn in seven on a real store spoke more than once, and treating the first
+  // message as the end painted those windows "ready" (and told every
+  // readTranscriptLastSignal caller the session had finished) while codex was
+  // still working.
   applyCodexLine(obj) {
     const changed = [];
     const payload = obj.payload || {};
     const ts = obj.timestamp || null;
     if (ts) this.header.lastEventTs = ts;
-    if (obj.type === 'turn_context' && payload.model) this.header.model = modelDisplay(payload.model);
-    if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message) {
-      this.push({ kind: 'user', text: clipProse(payload.message), ts });
-      this.header.lastSignal = 'user-turn';
-    } else if (obj.type === 'event_msg' && payload.type === 'agent_message' && payload.message) {
-      this.push({ kind: 'assistant', text: clipProse(payload.message), ts });
-      this.header.lastSignal = 'idle';
-    } else if (obj.type === 'event_msg' && payload.type === 'item_completed') {
-      // Codex 0.147.0 stopped writing user_message/agent_message and moved the
-      // conversation into this item stream, the same items its own UI renders
-      // (found 2026-08-08: Pat's real 4.5MB review parsed to 16 tool actions
-      // and zero text). Only the two message kinds are taken: CommandExecution
-      // mirrors the custom_tool_call lines already rendered above, and the
-      // response_item message lines are NOT the conversation, they carry the
-      // injected scaffolding (skills instructions, AGENTS.md,
-      // environment_context) that would bury the real prompt. Part type casing
-      // differs by role in the real bytes ('text' vs 'Text'), so any part
-      // carrying a text string counts.
-      const item = payload.item || {};
-      if (item.type === 'UserMessage' || item.type === 'AgentMessage') {
-        const text = (Array.isArray(item.content) ? item.content : [])
-          .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
-          .filter(Boolean)
-          .join('\n')
-          .trim();
-        if (text) {
-          const user = item.type === 'UserMessage';
-          this.push({ kind: user ? 'user' : 'assistant', text: clipProse(text), ts });
-          this.header.lastSignal = user ? 'user-turn' : 'idle';
-        }
-      }
-    } else if (obj.type === 'response_item' && ['function_call', 'custom_tool_call'].includes(payload.type)) {
-      let name = payload.name || 'Tool';
-      let input = payload.arguments ?? payload.input ?? {};
-      if (typeof input === 'string') {
-        const snippet = codexToolSnippet(input);
-        if (snippet) ({ name, input } = snippet);
-        else { try { input = JSON.parse(input); } catch { input = { command: input }; } }
-      }
-      if (input.cmd && !input.command) input.command = input.cmd;
-      const tool = { name, input };
-      const action = this.push({ kind: 'action', toolId: payload.call_id || payload.id || null, status: 'run', ts, ...actionForToolUse(tool) });
-      if (action.toolId) this.pendingTools.set(action.toolId, action);
-      this.header.lastSignal = 'tool-pending';
-    } else if (obj.type === 'response_item' && ['function_call_output', 'custom_tool_call_output'].includes(payload.type)) {
-      const action = this.pendingTools.get(payload.call_id);
-      if (action) {
-        action.status = /Process exited with code [1-9]|error/i.test(String(payload.output || '')) ? 'err' : 'ok';
-        this.pendingTools.delete(payload.call_id);
-        changed.push(action.key);
-      }
-    } else if (obj.type === 'event_msg' && ['task_complete', 'task_completed'].includes(payload.type)) {
-      this.header.lastSignal = 'idle';
+    if (obj.type === 'turn_context') {
+      if (payload.model) this.header.model = modelDisplay(payload.model);
+      if (payload.effort) this.header.effort = String(payload.effort);
+      if (payload.approval_policy != null) this.header.approvalPolicy = codexPolicyValue(payload.approval_policy);
+      if (payload.sandbox_policy != null) this.header.sandboxPolicy = codexPolicyValue(payload.sandbox_policy);
+    } else if (obj.type === 'compacted') {
+      this.noteCodexCompaction('compacted', ts);
+    } else if (obj.type === 'event_msg') {
+      this.applyCodexEvent(payload, ts, changed);
+    } else if (obj.type === 'response_item') {
+      this.applyCodexResponseItem(payload, ts, changed);
     }
     return changed;
+  }
+
+  applyCodexEvent(payload, ts, changed) {
+    switch (payload.type) {
+      case 'task_started':
+        this.header.turnEnd = null;
+        this.header.turnError = null;
+        this.codexSawTaskStarted = true;
+        this.codexPromptExpected = true;
+        this.noteCodexWindow(payload.model_context_window);
+        this.header.lastSignal = 'user-turn';
+        break;
+      // The pre-0.147 conversation events, kept for the historical corpus.
+      case 'user_message':
+        if (payload.message) this.codexUser(clipProse(payload.message), ts);
+        break;
+      case 'agent_message':
+        if (payload.message) this.codexAgent(String(payload.message), payload.phase, ts);
+        break;
+      case 'item_completed':
+        this.applyCodexItem(payload.item || {}, ts, changed);
+        break;
+      case 'token_count':
+        this.noteCodexTokens(payload.info, ts, changed);
+        break;
+      case 'task_complete':
+      case 'task_completed':
+        this.endCodexTurn(payload.error ? 'error' : 'complete', payload, ts, changed);
+        break;
+      case 'turn_aborted':
+        this.endCodexTurn('aborted', payload, ts, changed);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Codex 0.147.0 stopped writing user_message/agent_message and moved the
+  // conversation into this item stream, the same items its own UI renders
+  // (found 2026-08-08: Pat's real 4.5MB review parsed to 16 tool actions and
+  // zero text). The response_item message lines are NOT the conversation, they
+  // carry the injected scaffolding (skills instructions, AGENTS.md,
+  // environment_context) that would bury the real prompt. Part type casing
+  // differs by role in the real bytes ('text' vs 'Text'), so any part carrying
+  // a text string counts. CommandExecution and McpToolCall items never draw a
+  // row of their own (the call lines already did); they only say how it went.
+  applyCodexItem(item, ts, changed) {
+    const parts = Array.isArray(item.content) ? item.content : [];
+    const text = parts
+      .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+    switch (item.type) {
+      case 'UserMessage':
+        if (text) this.codexUser(clipProse(text), ts);
+        break;
+      case 'AgentMessage':
+        this.codexAgent(text, item.phase, ts);
+        break;
+      case 'CommandExecution':
+        this.noteCodexCommand(item);
+        break;
+      case 'McpToolCall':
+        this.noteCodexItemFailed(item.id, item.status === 'failed' || item.result?.isError === true, changed);
+        break;
+      case 'ContextCompaction':
+        this.noteCodexCompaction('item', ts);
+        break;
+      default:
+        break;
+    }
+  }
+
+  codexUser(text, ts) {
+    const block = { kind: 'user', text, ts };
+    // A steer (a message typed while the task runs; real TUI rollouts write
+    // it as a UserMessage with no task_started before it) joins the open
+    // task. Starting a turn on it froze the real prompt's time and tokens
+    // part-way and charged the rest of the task to the steer. Marked, so the
+    // window's work meter keeps timing the prompt that started the task.
+    const steer = this.codexTurnOpen && this.turn && this.codexSawTaskStarted && !this.codexPromptExpected;
+    if (steer) block.steer = true;
+    this.push(block);
+    if (!steer) {
+      this.startTurn(block, ts);
+      // The baseline this task's spend is measured from: the session's
+      // cumulative output as of the last token_count before it began.
+      this.turn.codexOutputBase = this.codexTotalOutput;
+    }
+    this.codexPromptExpected = false;
+    this.codexTurnOpen = true;
+    this.header.lastSignal = 'user-turn';
+  }
+
+  codexAgent(text, phase, ts) {
+    if (!text) return;
+    this.push({ kind: 'assistant', text: clipProse(text), ts });
+    const final = !phase || phase === 'final_answer';
+    if (final) this.header.lastSignal = 'idle';
+    else this.header.lastSignal = this.pendingTools.size ? 'tool-pending' : 'user-turn';
+  }
+
+  // The context gauge and the per-task meter, from codex's own numbers.
+  // token_count carries the last request's usage (its total is what now sits
+  // in the context), the session's cumulative usage, and the model's context
+  // window as codex itself states it, so a percentage here is codex's own
+  // denominator, never a Harbor guess.
+  noteCodexWindow(windowTokens) {
+    if (Number.isFinite(windowTokens) && windowTokens > 0 && windowTokens !== this.learnedWindow) this.setLearnedWindow(windowTokens);
+  }
+
+  noteCodexTokens(info, ts, changed) {
+    if (!info || typeof info !== 'object') return;
+    const last = info.last_token_usage || null;
+    const total = info.total_token_usage || null;
+    this.noteCodexWindow(info.model_context_window);
+    const inContext = Number.isFinite(last?.total_tokens) && last.total_tokens > 0
+      ? last.total_tokens
+      : (Number(last?.input_tokens) || 0) + (Number(last?.output_tokens) || 0);
+    if (inContext > 0) {
+      this.header.contextTokens = inContext;
+      this.header.contextPct = this.learnedWindow
+        ? Math.max(1, Math.min(99, Math.round((inContext / this.learnedWindow) * 100)))
+        : null;
+    }
+    const totalOut = Number.isFinite(total?.output_tokens) ? total.output_tokens : null;
+    if (totalOut === null) return;
+    // The same `turnMeta` the Claude side writes (noteTurnUsage), on the
+    // prompt block of the one task in flight (`this.turn`).
+    const turn = this.turn;
+    if (turn && this.codexTurnOpen) {
+      const lastOut = Number.isFinite(last?.output_tokens) ? last.output_tokens : 0;
+      // No baseline (the tail began mid-session) or a counter that went
+      // backwards: this report's own request is the task's first spend.
+      if (turn.codexOutputBase == null || totalOut < turn.codexOutputBase) turn.codexOutputBase = Math.max(0, totalOut - lastOut);
+      const endMs = Date.parse(ts);
+      turn.block.turnMeta = {
+        ...turn.block.turnMeta,
+        outputTokens: totalOut - turn.codexOutputBase,
+        durationMs: turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : (turn.block.turnMeta?.durationMs ?? null),
+      };
+      if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+    }
+    this.codexTotalOutput = totalOut;
+  }
+
+  endCodexTurn(kind, payload, ts, changed) {
+    if (kind === 'aborted') {
+      // An interrupt ends every call still running, the way Claude's
+      // interrupted tool results resolve as errors, and leaves the same
+      // "Interrupted" marker in the conversation.
+      for (const action of this.pendingTools.values()) {
+        action.status = 'err';
+        if (!action.pill) action.pill = { text: 'interrupted', tone: 'err' };
+        if (this.blocks.includes(action)) changed.push(action.key);
+      }
+      this.pendingTools.clear();
+      this.codexExits.clear();
+      this.codexItemFailed.clear();
+      this.codexExecCalls.clear();
+      this.push({ kind: 'user', text: 'Interrupted', command: true, ts });
+    }
+    if (kind === 'error') {
+      // A failed task (codex gave up on the API, the stream broke) must SHOW,
+      // exactly like a CLI warning on the Claude side: otherwise the window
+      // just stops with no reply and reads as finished.
+      const message = clip(String(payload.error?.message || 'The task failed.').trim(), 400);
+      this.push({ kind: 'note', tone: 'warn', text: message, ts });
+      this.header.turnError = { message, ts };
+    } else {
+      this.header.turnError = null;
+    }
+    this.header.turnEnd = kind;
+    this.header.lastSignal = 'idle';
+    this.codexPromptExpected = false;
+    const turn = this.turn;
+    if (turn && this.codexTurnOpen && Number.isFinite(payload.duration_ms)) {
+      // Codex's own task clock outranks the last token report's timestamp.
+      turn.block.turnMeta = { outputTokens: 0, ...turn.block.turnMeta, durationMs: payload.duration_ms };
+      if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+    }
+    this.codexTurnOpen = false;
+  }
+
+  // A tool call's status comes from what it actually did. A CommandExecution
+  // item names its exit code but not its call (its id matches nothing), and
+  // arrives while the exec call that ran it is still open, so it belongs to
+  // the newest open exec call. One call can run several commands, and the
+  // LAST one decides: a code-mode snippet that runs `grep` (exit 1 on no
+  // match) and handles it before moving on succeeded, and marking it by the
+  // first non-zero exit painted the row a false "exit 1". An execution that
+  // lands after its call already resolved (a long command polled through
+  // write_stdin) is left unattributed rather than pinned on the wrong row.
+  noteCodexCommand(item) {
+    const failed = (Number.isInteger(item.exit_code) && item.exit_code !== 0) || item.status === 'failed';
+    let callId = null;
+    for (const [id] of [...this.pendingTools.entries()].reverse()) {
+      if (this.codexExecCalls.has(id)) { callId = id; break; }
+    }
+    if (!callId) return;
+    this.codexExits.set(callId, failed ? (Number.isInteger(item.exit_code) && item.exit_code > 0 ? item.exit_code : -1) : 0);
+  }
+
+  // An McpToolCall item's id IS its function_call's call_id.
+  noteCodexItemFailed(callId, failed, changed) {
+    if (!callId) return;
+    if (this.pendingTools.has(callId)) { this.codexItemFailed.set(callId, failed); return; }
+    if (!failed) return;
+    for (let i = this.blocks.length - 1; i >= 0; i -= 1) {
+      const block = this.blocks[i];
+      if (block.kind !== 'action' || block.toolId !== callId) continue;
+      block.status = 'err';
+      if (!block.pill) block.pill = { text: 'error', tone: 'err' };
+      changed.push(block.key);
+      return;
+    }
+  }
+
+  applyCodexResponseItem(payload, ts, changed) {
+    if (['function_call', 'custom_tool_call'].includes(payload.type)) {
+      const action = this.push({ kind: 'action', toolId: payload.call_id || payload.id || null, status: 'run', ts, ...codexActionFor(payload) });
+      if (action.toolId) {
+        this.pendingTools.set(action.toolId, action);
+        if (payload.type === 'custom_tool_call') this.codexExecCalls.add(action.toolId);
+      }
+      this.header.lastSignal = 'tool-pending';
+    } else if (['function_call_output', 'custom_tool_call_output'].includes(payload.type)) {
+      const id = payload.call_id;
+      const action = this.pendingTools.get(id);
+      if (action) {
+        let failure = null;
+        if (this.codexExits.has(id)) {
+          const code = this.codexExits.get(id);
+          if (code !== 0) failure = code > 0 ? `exit ${code}` : 'error';
+        } else if (this.codexItemFailed.has(id)) {
+          if (this.codexItemFailed.get(id)) failure = 'error';
+        } else {
+          // Fallback for calls no item describes (older rollouts, or a tool
+          // with no item): an exit code written in the output text. The output
+          // is an ARRAY of parts since 0.160 and a plain string before it.
+          const match = CODEX_EXIT_TEXT_RE.exec(codexOutputText(payload.output));
+          if (match) failure = `exit ${match[1] || match[2]}`;
+        }
+        action.status = failure ? 'err' : 'ok';
+        if (failure && !action.pill) action.pill = { text: failure, tone: 'err' };
+        this.pendingTools.delete(id);
+        changed.push(action.key);
+      }
+      // Forgotten even when the row is gone: push() evicts old blocks, and a
+      // call whose row was evicted while it ran still answers here.
+      this.codexExits.delete(id);
+      this.codexItemFailed.delete(id);
+      this.codexExecCalls.delete(id);
+      // Every call answered: the model owes the next step, not a tool.
+      if (this.header.lastSignal === 'tool-pending' && !this.pendingTools.size) this.header.lastSignal = 'user-turn';
+    }
+  }
+
+  // Codex writes one compaction twice: a `compacted` record and a
+  // ContextCompaction item. Whichever lands first draws the note and the other
+  // one of the pair is absorbed; rollouts that only ever write one kind still
+  // get a note per compaction.
+  noteCodexCompaction(kind, ts) {
+    if (this.codexCompactKind && this.codexCompactKind !== kind) {
+      this.codexCompactKind = null;
+      return;
+    }
+    this.codexCompactKind = kind;
+    this.push({ kind: 'note', text: 'Session compacted: earlier context was summarized.', ts });
   }
 
   applyCursorLine(obj) {
@@ -1334,7 +1653,15 @@ function createTranscriptProvider(options = {}) {
     // predates the pid field; its refresh cadence is minutes, so it gets a
     // deliberately conservative window (a mid-gap flap once offered Resume
     // on an ALIVE session, which is the two-writers trap).
-    const exactOwner = readOwnerProcessAlive(entry.ownerPid, options.readProcessCmdline);
+    // Codex has no statusline tee and no beacon, so without the pane check a
+    // codex task running one long command (no rollout writes for minutes)
+    // aged past the transcript-recency window and read "ready" mid-command. A
+    // Harbor pane whose detected foreground agent is codex AND that is paired
+    // with this session IS the live codex process; see entry.providerPaneAlive
+    // in readNew.
+    const exactOwner = entry.providerPaneAlive
+      ? true
+      : readOwnerProcessAlive(entry.ownerPid, options.readProcessCmdline);
     // The transcript is a beacon too. The statusline beacon repaints only
     // on interactive activity, so across a long idle gap it goes stale
     // while the session is very much alive; meanwhile a session that wrote
@@ -1458,6 +1785,14 @@ function createTranscriptProvider(options = {}) {
       // is adoptable, and adopting kills the owner. The homes come from the same
       // discovery the config and the wizard use, so the three cannot disagree.
       entry.beaconMs = await readSessionBeacon(entry.sessionId);
+      // The codex owner: is a live Harbor pane running codex on this session?
+      // Asked per read, never cached past it, so a pane that exits stops
+      // vouching on the very next read. Unknown (no answerer, or it threw) is
+      // not "dead"; it falls back to transcript recency exactly as before.
+      if (entry.provider === 'codex' && typeof options.providerPaneAlive === 'function') {
+        try { entry.providerPaneAlive = Boolean(await options.providerPaneAlive(entry.sessionId, entry.provider)); }
+        catch { entry.providerPaneAlive = false; }
+      }
       if (stat.size === entry.offset) {
         await handle.close();
         // mtime moved with no new bytes still refreshes the working clock.
@@ -1815,6 +2150,7 @@ module.exports = {
   imageFromPart,
   imagesFromContent,
   buildDiffPreview,
+  codexActionFor,
   transcriptPathFor,
   findProviderTranscript,
   readTranscriptTailRecords,
