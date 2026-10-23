@@ -1430,6 +1430,24 @@ button { font-family: inherit; }
   font: 700 9px var(--font-ui);
 }
 
+/* Numbers read with a Keychain login on another plan than the home's
+   (usage.js planMismatch): the badge carries a warning ring and a dot, so the
+   row says it without moving the meter columns; the row tooltip says why. */
+.rm-row.is-plan-mismatch .rm-b {
+  position: relative;
+  box-shadow: 0 0 0 1.5px var(--warn);
+}
+.rm-row.is-plan-mismatch .rm-b::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
 .rail-meters[data-profile-count="5"] {
   gap: 6px;
   padding-bottom: 10px;

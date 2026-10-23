@@ -106,6 +106,83 @@ function keychainServicesFor(home, homedir = require('node:os').homedir()) {
   return path.resolve(home) === path.resolve(homedir, '.claude') ? [KEYCHAIN_SERVICE, hashed] : [hashed];
 }
 
+// THE PLAN A HOME IS SIGNED IN TO, and the Keychain item that matches it. The
+// home's .claude.json names its account's plan (`oauthAccount.organizationType`:
+// claude_team, claude_max, ...) and each Keychain item names the plan of the
+// login it holds (`claudeAiOauth.subscriptionType`: team, max, ...). The two
+// can disagree: the default home has two items (bare for a plain `claude`,
+// hashed for sessions launched with CLAUDE_CONFIG_DIR) that may hold two
+// different logins, and a login made in one home can end up in another's
+// item. Null when the plan is not one of the known names.
+const KNOWN_PLANS = new Set(['pro', 'max', 'team', 'enterprise']);
+async function homePlan(home, readFile, homedir = require('node:os').homedir()) {
+  // The default home's .claude.json may live beside it (~/.claude.json).
+  const isDefaultHome = path.resolve(home) === path.resolve(homedir, '.claude');
+  const files = [path.join(home, '.claude.json'), ...(isDefaultHome ? [path.join(homedir, '.claude.json')] : [])];
+  for (const file of files) {
+    try {
+      const type = JSON.parse(await readFile(file, 'utf8'))?.oauthAccount?.organizationType;
+      const plan = typeof type === 'string' ? type.replace(/^claude_/, '') : null;
+      return KNOWN_PLANS.has(plan) ? plan : null;
+    } catch { /* not this file */ }
+  }
+  return null;
+}
+
+// Which of a home's Keychain items to use (`readItem(service)` returns the
+// item's JSON text). The first item holding a token on the home's plan wins,
+// or on an unknown plan. An item without a token is the answer only when no
+// item has one. When exactly one item holds a token, every item was read and
+// its plan differs from the home's, that login is still the only one the home
+// has (a plan can change before the CLI rewrites .claude.json), so it is used
+// and marked `planMismatch: { keychain, home }`; the usage provider refuses it
+// when another configured home is signed in to that plan, and otherwise shows
+// the mismatch on the account's row. Two or more tokened items with none on
+// the home's plan is an error rather than a guess.
+async function pickKeychainCredentials(services, readItem, { plan = null } = {}) {
+  let lastError = null;
+  let tokenless = null;
+  let readAll = true;
+  const otherPlans = [];
+  for (const service of services) {
+    let creds;
+    try {
+      creds = JSON.parse(await readItem(service));
+    } catch (error) {
+      lastError = error;
+      // 44 = no such item: try the next name. Anything else (a denied or
+      // timed-out prompt) is an answer, not a reason to keep asking.
+      if (error?.code === 44) continue;
+      readAll = false;
+      break;
+    }
+    if (creds?.claudeAiOauth?.accessToken) {
+      const type = creds.claudeAiOauth.subscriptionType;
+      if (!plan || !KNOWN_PLANS.has(type) || type === plan) return creds;
+      otherPlans.push({ creds, type });
+    } else {
+      tokenless ??= creds;
+    }
+  }
+  if (readAll && otherPlans.length === 1) {
+    const [{ creds, type }] = otherPlans;
+    return { ...creds, planMismatch: { keychain: type, home: plan } };
+  }
+  if (readAll && otherPlans.length > 1) {
+    return { keychainError: `no Keychain login is on this home's ${plan} plan (found ${otherPlans.map((o) => o.type).join(', ')}); sign in again in this home` };
+  }
+  if (tokenless) return tokenless;
+  // Say WHY instead of reading as "not signed in": a denied or timed-out
+  // Keychain prompt is a different fix from a missing login.
+  const why = lastError?.killed ? 'the Keychain prompt timed out' : lastError?.code === 44 ? 'no Claude Code entry in the Keychain' : `security exited ${lastError?.code ?? 'abnormally'}`;
+  return { keychainError: why };
+}
+
+function planMismatchNote(mismatch) {
+  if (!mismatch?.keychain || !mismatch?.home) return null;
+  return `Plan mismatch: the Keychain login is on the ${mismatch.keychain} plan but this home's .claude.json says ${mismatch.home}`;
+}
+
 async function readClaudeCredentials(home, readFile) {
   try { return JSON.parse(await readFile(path.join(home, '.credentials.json'), 'utf8')); } catch {}
   // Claude Code itself owns these macOS Keychain entries. Never read them for
@@ -118,22 +195,11 @@ async function readClaudeCredentials(home, readFile) {
   const isDefaultHome = path.resolve(home) === path.resolve(require('node:os').homedir(), '.claude');
   if (!isDefaultHome && !fs.existsSync(path.join(home, '.claude.json'))) return null;
   const execFile = require('node:util').promisify(require('node:child_process').execFile);
-  let lastError = null;
-  for (const service of keychainServicesFor(home)) {
-    try {
-      const { stdout } = await execFile('/usr/bin/security', ['find-generic-password', '-s', service, '-w'], { timeout: 5000, maxBuffer: 1024 * 1024 });
-      return JSON.parse(stdout);
-    } catch (error) {
-      lastError = error;
-      // 44 = no such item: try the next name. Anything else (a denied or
-      // timed-out prompt) is an answer, not a reason to keep asking.
-      if (error?.code !== 44) break;
-    }
-  }
-  // Say WHY instead of reading as "not signed in": a denied or timed-out
-  // Keychain prompt is a different fix from a missing login.
-  const why = lastError?.killed ? 'the Keychain prompt timed out' : lastError?.code === 44 ? 'no Claude Code entry in the Keychain' : `security exited ${lastError?.code ?? 'abnormally'}`;
-  return { keychainError: why };
+  const plan = await homePlan(home, readFile);
+  return pickKeychainCredentials(keychainServicesFor(home), async (service) => {
+    const { stdout } = await execFile('/usr/bin/security', ['find-generic-password', '-s', service, '-w'], { timeout: 5000, maxBuffer: 1024 * 1024 });
+    return stdout;
+  }, { plan });
 }
 
 async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCredentials, reportUnavailable = false, now = () => new Date(), fetchImpl = fetch } = {}) {
@@ -184,7 +250,9 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   if (body?.seven_day) rateLimits.seven_day = mapWindow(body.seven_day);
   if (!finiteNumber(rateLimits.five_hour?.used_percentage)
     && !finiteNumber(rateLimits.seven_day?.used_percentage)) return failed('Claude usage response carried no 5-hour or weekly numbers');
-  return { payload: { rate_limits: rateLimits }, updatedAt: now().toISOString() };
+  const fetched = { payload: { rate_limits: rateLimits }, updatedAt: now().toISOString() };
+  if (creds.planMismatch) fetched.planMismatch = creds.planMismatch;
+  return fetched;
 }
 
 function createUsageProvider(options = {}) {
@@ -216,6 +284,18 @@ function createUsageProvider(options = {}) {
     const parsed = sample?.updatedAt ? Date.parse(sample.updatedAt) : NaN;
     return Number.isFinite(parsed) ? parsed : 0;
   };
+
+  // A Keychain login on another plan than its home's (planMismatch) whose
+  // plan another configured Claude home is signed in to is most likely THAT
+  // account's login, so its numbers are not shown under this one's name.
+  const labelOf = (account) => (options.profiles || []).find((p) => p?.id === account)?.label || account;
+  async function otherHomeOnPlan(account, plan) {
+    for (const [other, home] of Object.entries(homes)) {
+      if (other === account || notClaude.has(other) || !home) continue;
+      if (await homePlan(home, readFile) === plan) return labelOf(other);
+    }
+    return null;
+  }
 
   function assertAccount(account) {
     if (!Object.hasOwn(homes, account)) throw new Error(`unknown account: ${account}`);
@@ -263,28 +343,43 @@ function createUsageProvider(options = {}) {
           : null;
       const remote = remoteSamples.get(account);
       if (remote && (!chosen || stampMs(remote) > stampMs(chosen))) {
-        chosen = { payload: remote.payload, updatedAt: remote.updatedAt, email };
+        chosen = { payload: remote.payload, updatedAt: remote.updatedAt, email, remote };
       }
 
       const age = chosen ? nowMs - stampMs(chosen) : Infinity;
       if (age > staleAfterMs && typeof fetchRemoteUsage === 'function'
         && nowMs - (lastRemoteAttempt.get(account) || 0) >= remoteCooldownMs) {
         lastRemoteAttempt.set(account, nowMs);
-        const fetched = await Promise.resolve(fetchRemoteUsage(homes[account])).catch(() => null);
+        let fetched = await Promise.resolve(fetchRemoteUsage(homes[account])).catch(() => null);
+        const owner = fetched?.payload && fetched.planMismatch ? await otherHomeOnPlan(account, fetched.planMismatch.keychain) : null;
+        if (owner) {
+          remoteSamples.delete(account);
+          fetched = {
+            unavailable: true,
+            reason: `This home's Keychain login is on the ${fetched.planMismatch.keychain} plan, which ${owner} is signed in to, so its usage would be that account's. Sign in again in this home.`,
+          };
+        }
         if (fetched?.unavailable) remoteUnavailable.set(account, fetched);
         if (fetched?.payload) {
           remoteUnavailable.delete(account);
           remoteSamples.set(account, fetched);
-          chosen = { payload: fetched.payload, updatedAt: fetched.updatedAt, email };
+          chosen = { payload: fetched.payload, updatedAt: fetched.updatedAt, email, remote: fetched };
         }
       }
 
       if (!chosen) return { ...(remoteUnavailable.get(account) || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
-      return usageFromStatuslinePayload(chosen.payload, {
+      const result = usageFromStatuslinePayload(chosen.payload, {
         email: chosen.email || email,
         updatedAt: chosen.updatedAt,
         nowMs,
       });
+      // Shown numbers that came from a Keychain login on another plan say so.
+      // A statusline sample is the CLI's own and never carries the flag.
+      if (chosen.remote?.planMismatch) {
+        result.planMismatch = chosen.remote.planMismatch;
+        result.planMismatchNote = planMismatchNote(chosen.remote.planMismatch);
+      }
+      return result;
     },
   };
 }
@@ -298,5 +393,8 @@ module.exports = {
   createUsageProvider,
   fetchOauthUsage,
   keychainServicesFor,
+  pickKeychainCredentials,
+  planMismatchNote,
+  homePlan,
   usageFromStatuslinePayload,
 };

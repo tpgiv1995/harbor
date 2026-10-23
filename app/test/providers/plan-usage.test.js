@@ -141,3 +141,14 @@ test('plan-usage never samples a sessions store that two Codex homes share', asy
   assert.equal(byEmail['solo@example.com'].source, 'rollout');
   assert.equal(byEmail['solo@example.com'].windows[0].usedPct, 53);
 });
+
+test('a Claude plan read with a Keychain login on another plan says so on its row', async (t) => {
+  const { root } = fixture(t);
+  const note = "Plan mismatch: the Keychain login is on the max plan but this home's .claude.json says team";
+  const provider = createPlanUsageProvider({ home: root, env: { HARBOR_E2E: '1' }, io, now: () => NOW,
+    profiles: [{ id: 'a', label: 'Team', provider: 'claude' }],
+    usageProvider: { getUsage: async () => ({ fiveHourPct: 17, weeklyPct: 12, updatedAt: new Date(NOW).toISOString(), planMismatch: { keychain: 'max', home: 'team' }, planMismatchNote: note }) } });
+  const claude = (await provider.getPlans()).plans.find((p) => p.provider === 'claude');
+  assert.equal(claude.signInNotice, note);
+  assert.equal(claude.unavailable, false);
+});

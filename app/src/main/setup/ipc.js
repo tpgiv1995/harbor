@@ -17,7 +17,7 @@
 
 const os = require('node:os');
 const path = require('node:path');
-const { detectEnvironment, detectCatalog, readClaudeHome } = require('./detect.js');
+const { detectEnvironment, detectCatalog, readClaudeHome, readCodexHome } = require('./detect.js');
 const { launchLogin, loginPlan, isSafeConfigHome, validateBin, CMD_METACHARACTERS } = require('./auth.js');
 const { planShared, applyShared } = require('./symlink.js');
 const { validateProviderExecutables, executablePath } = require('./executables.js');
@@ -100,6 +100,7 @@ function registerSetupIpc(deps = {}) {
   const detect = deps.detectEnvironment || detectEnvironment;
   const catalog = deps.detectCatalog || detectCatalog;
   const readHome = deps.readClaudeHome || readClaudeHome;
+  const readCodex = deps.readCodexHome || readCodexHome;
   const login = deps.launchLogin || launchLogin;
   const checkExecutables = deps.validateProviderExecutables || validateProviderExecutables;
   // The SAME resolver setup:preview / setup:save trust (2026-09-19), so
@@ -141,9 +142,10 @@ function registerSetupIpc(deps = {}) {
   // Re-check after a login. Reads the home's .claude.json for real rather than
   // believing the login window succeeded, because the login finishes in another
   // process and Harbor cannot see it.
-  handle('setup:read-home', async (_event, { home } = {}) => {
+  handle('setup:read-home', async (_event, { home, provider } = {}) => {
     if (!home) return { ok: false, reason: 'no folder given' };
-    return { ok: true, home: await readHome(home, require('node:fs/promises').readFile) };
+    const read = provider === 'codex' ? readCodex : readHome;
+    return { ok: true, home: await read(home, require('node:fs/promises').readFile) };
   });
 
   // The real skills and slash commands from the homes the user just picked.

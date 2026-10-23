@@ -19,7 +19,9 @@
 //    key, a token or a password, and none may be added. Claude, codex and
 //    cursor each own their own auth; the wizard points at config homes and
 //    launches the vendors' own login flows. The only auth-shaped value we ever
-//    hold is an email address READ BACK from a home's .claude.json, which is
+//    hold is an email address READ BACK from a home (a Claude home's
+//    .claude.json, or the email claim main decodes from a Codex home's
+//    auth.json id_token; the token itself never leaves main), which is
 //    confirmation of what the user picked, not a secret.
 
 // Seeded profile identity. Pat's install is P/T/S with the rail colors the
@@ -294,16 +296,52 @@ function initialState(detected = {}, config = null) {
 // create on first run. Leaving it blank instead meant a machine with codex
 // installed but never run opened step 3 already blocked on a required field,
 // which is friction with nothing to learn from it.
-function seedCodexAccount(detected, index) {
+//
+// There is no cap on Codex accounts (2026-10-15). The step used to stop at two,
+// but nothing downstream ever assumed two: provider history, plan usage and the
+// rail scan every configured codex home, and the rail is built for six profiles
+// (an install can run one codex home per ChatGPT plan). Ids are picked so a
+// removed middle account can never make a new one collide with a survivor.
+// Each new Codex account is seeded its own badge: with
+// the cap gone, every account seeded as the same green 'C' and the rail's
+// profile badges could not tell them apart. The first keeps C and the green
+// it always had; later ones take their number and the next colour no other
+// account already wears. Only the SEED changes: a saved account keeps the
+// letter and colour it was saved with.
+const CODEX_COLORS = ['#7bd3a0', '#5ec4d6', '#e0c35a', '#8fa8ff', '#e38fb0', '#b8d36b', '#d9a05b', '#a3a3ff'];
+
+function seedCodexBadge(n, existing = []) {
+  const usedColors = new Set((existing || []).map((account) => String(account?.color || '').toLowerCase()));
+  const usedLetters = new Set((existing || []).map((account) => account?.letter));
+  const start = (n - 1) % CODEX_COLORS.length;
+  const color = [...CODEX_COLORS.slice(start), ...CODEX_COLORS.slice(0, start)]
+    .find((candidate) => !usedColors.has(candidate.toLowerCase())) || CODEX_COLORS[start];
+  const preferred = n === 1 ? 'C' : (n <= 9 ? String(n) : 'C');
+  const letter = !usedLetters.has(preferred) ? preferred
+    : (['C', '2', '3', '4', '5', '6', '7', '8', '9', 'X'].find((candidate) => !usedLetters.has(candidate)) || preferred);
+  return { letter, color };
+}
+
+function seedCodexAccount(detected, index, existing = []) {
   const found = detected.providers?.codex?.home;
   const conventional = detected.homedir ? `${detected.homedir}/.codex` : '';
+  const taken = new Set((existing || []).map((account) => account?.id));
+  let n = index + 1;
+  let id = n === 1 ? 'codex' : `codex-${n}`;
+  while (taken.has(id)) {
+    n += 1;
+    id = `codex-${n}`;
+  }
   return {
-    id: index === 0 ? 'codex' : `codex-${index + 1}`,
-    label: index === 0 ? 'Codex' : `Codex ${index + 1}`,
-    letter: 'C',
-    color: '#7bd3a0',
-    configHome: found || (index === 0 ? conventional : ''),
-    email: detected.providers?.codex?.email ?? null,
+    id,
+    label: n === 1 ? 'Codex' : `Codex ${n}`,
+    ...seedCodexBadge(n, existing),
+    // Only the first account starts on the detected (or conventional) home;
+    // pre-filling a second with the same folder opened it already invalid.
+    configHome: index === 0 ? (found || conventional) : '',
+    // The email detection read belongs to the DETECTED home only; a second
+    // account's home is read back when the user points at it.
+    email: index === 0 && found ? (detected.providers?.codex?.email ?? null) : null,
   };
 }
 

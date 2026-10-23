@@ -15,6 +15,7 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { PRIMARY_HOME, homeId, listHomeDirs } = require('../config/homes.js');
+const { readCodexAccountEmail } = require('../providers/accounts.js');
 const { execFile } = require('node:child_process');
 
 function run(command, args, { timeout = 4000 } = {}) {
@@ -112,6 +113,59 @@ async function readClaudeHome(dir, readFile) {
   };
 }
 
+// Where this Codex home keeps its login: config.toml's top-level
+// `cli_auth_credentials_store` ("file", "keyring" or "auto"). A keyring home
+// has no auth.json at all, so its absence is not "not signed in". Only
+// this one key is read; the keyring itself is never touched.
+async function codexCredentialStore(dir, readFile) {
+  let raw;
+  try { raw = await readFile(path.join(dir, 'config.toml'), 'utf8'); } catch { return null; }
+  for (const line of String(raw).split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) break; // past the top-level table
+    const match = /^\s*cli_auth_credentials_store\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$/.exec(line);
+    if (match) return String(match[1] ?? match[2]).trim().toLowerCase() || null;
+  }
+  return null;
+}
+
+// A Codex home's signed-in account, read back the same way: the email claim of
+// the ChatGPT login's id_token in `auth.json` (accounts.js decodes it in memory
+// and returns ONLY the email; no token is ever stored, shown or forwarded). An
+// API-key login carries no id_token, so "no email" is reported as what it is.
+async function readCodexHome(dir, readFile) {
+  const stat = await statOrNull(dir);
+  if (!stat || !stat.isDirectory()) {
+    return { path: dir, exists: false, authed: false, email: null, reason: 'folder does not exist' };
+  }
+  if (!(await statOrNull(path.join(dir, 'auth.json')))) {
+    if (await codexCredentialStore(dir, readFile) === 'keyring') {
+      return {
+        path: dir,
+        exists: true,
+        authed: false,
+        email: null,
+        credentialStore: 'keyring',
+        reason: 'signed in via the OS keyring (not verified)',
+      };
+    }
+    return {
+      path: dir,
+      exists: true,
+      authed: false,
+      email: null,
+      reason: 'no auth.json in this folder; sign in with the codex CLI first',
+    };
+  }
+  const email = await readCodexAccountEmail(dir, readFile);
+  return {
+    path: dir,
+    exists: true,
+    authed: Boolean(email),
+    email,
+    reason: email ? null : 'signed in with an API key, or not signed in; no account email recorded',
+  };
+}
+
 // Candidate homes, in the order the wizard should seed them. A multi-account
 // install has several; a fresh machine has one or none. Everything found is
 // offered and nothing is required.
@@ -148,15 +202,14 @@ async function detectProviders(options) {
   const cursor = await detectBinary('cursor-agent', options);
   const codexHome = path.join(options.homedir, '.codex');
   const cursorHome = path.join(options.homedir, '.cursor');
+  const codexAccount = await readCodexHome(codexHome, options.readFile);
   return {
     claude: { ...claude },
     codex: {
       ...codex,
-      home: (await statOrNull(codexHome)) ? codexHome : null,
-      // Codex records no account email anywhere Harbor can read, so this stays
-      // null rather than being inferred from a file that does not carry it.
-      email: null,
-      emailReason: 'Codex does not record an account email Harbor can read; confirm the account in the codex CLI.',
+      home: codexAccount.exists ? codexHome : null,
+      email: codexAccount.email,
+      emailReason: codexAccount.email ? null : codexAccount.reason,
     },
     cursor: {
       ...cursor,
@@ -265,6 +318,7 @@ module.exports = {
   detectClaudeHomes,
   detectCatalog,
   readClaudeHome,
+  readCodexHome,
   findOnPath,
   homeId,
 };

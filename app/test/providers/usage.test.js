@@ -276,3 +276,103 @@ test('keychainServicesFor names each config home its own Claude Code credential 
   assert.deepEqual(keychainServicesFor('/Users/x/.claude', '/Users/x'),
     ['Claude Code-credentials', `Claude Code-credentials-${sha8('/Users/x/.claude')}`]);
 });
+
+// ---- which Keychain item a home uses, and a login on another plan --------
+// readItem is an injected fake: no Keychain is read here.
+
+const { pickKeychainCredentials, homePlan, fetchOauthUsage: fetchUsage } = require('../../src/main/providers/usage.js');
+
+const item = (subscriptionType, accessToken = 'synthetic-token') => JSON.stringify({ claudeAiOauth: { accessToken, subscriptionType } });
+const missing = () => { const e = new Error('no item'); e.code = 44; throw e; };
+const reader = (items) => async (service) => {
+  const value = items[service];
+  if (value instanceof Error) throw value;
+  if (value === undefined) missing();
+  return value;
+};
+
+test('the Keychain item on the home\'s plan wins over another plan\'s login', async () => {
+  const creds = await pickKeychainCredentials(['bare', 'hashed'], reader({ bare: item('max'), hashed: item('team', 'team-token') }), { plan: 'team' });
+  assert.equal(creds.claudeAiOauth.accessToken, 'team-token');
+  assert.equal(creds.planMismatch, undefined);
+  // An unknown home plan or item plan never blocks the first token.
+  assert.equal((await pickKeychainCredentials(['bare'], reader({ bare: item('max') }), { plan: null })).planMismatch, undefined);
+  assert.equal((await pickKeychainCredentials(['bare'], reader({ bare: item('future') }), { plan: 'team' })).planMismatch, undefined);
+  // A tokenless item is the answer only when no item holds a token.
+  const tokenless = JSON.stringify({ claudeAiOauth: { subscriptionType: 'team' } });
+  assert.equal((await pickKeychainCredentials(['bare', 'hashed'], reader({ bare: tokenless, hashed: item('team', 'later') }), { plan: 'team' })).claudeAiOauth.accessToken, 'later');
+});
+
+test('the only login, on another plan, is used and marked as a plan mismatch', async () => {
+  const creds = await pickKeychainCredentials(['bare', 'hashed'], reader({ hashed: item('max') }), { plan: 'team' });
+  assert.equal(creds.claudeAiOauth.accessToken, 'synthetic-token');
+  assert.deepEqual(creds.planMismatch, { keychain: 'max', home: 'team' });
+});
+
+test('a mismatched login is not used when another item could not be read, or when several disagree', async () => {
+  const denied = Object.assign(new Error('denied'), { code: 51 });
+  const partial = await pickKeychainCredentials(['bare', 'hashed'], reader({ bare: item('max'), hashed: denied }), { plan: 'team' });
+  assert.equal(partial.planMismatch, undefined);
+  assert.match(partial.keychainError, /security exited 51/);
+  const several = await pickKeychainCredentials(['bare', 'hashed'], reader({ bare: item('max'), hashed: item('pro') }), { plan: 'team' });
+  assert.match(several.keychainError, /no Keychain login is on this home's team plan \(found max, pro\)/);
+});
+
+test('homePlan reads organizationType, the default home from beside it too', async () => {
+  const files = new Map([
+    [path.join('/u/.claude-work', '.claude.json'), JSON.stringify({ oauthAccount: { organizationType: 'claude_team' } })],
+    [path.join('/u', '.claude.json'), JSON.stringify({ oauthAccount: { organizationType: 'claude_max' } })],
+    [path.join('/u/.claude-odd', '.claude.json'), JSON.stringify({ oauthAccount: { organizationType: 'something_else' } })],
+  ]);
+  const readFile = async (file) => { if (!files.has(file)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return files.get(file); };
+  assert.equal(await homePlan('/u/.claude-work', readFile, '/u'), 'team');
+  assert.equal(await homePlan('/u/.claude', readFile, '/u'), 'max');
+  assert.equal(await homePlan('/u/.claude-odd', readFile, '/u'), null);
+  assert.equal(await homePlan('/u/.claude-none', readFile, '/u'), null);
+});
+
+test('fetchOauthUsage carries a plan mismatch onto the sample it fetched', async () => {
+  const fetched = await fetchUsage('/claude', {
+    readCredentials: async () => ({ claudeAiOauth: { accessToken: 'synthetic-token' }, planMismatch: { keychain: 'max', home: 'team' } }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ five_hour: { utilization: 17 }, seven_day: { utilization: 12 } }) }),
+  });
+  assert.equal(fetched.payload.rate_limits.five_hour.used_percentage, 17);
+  assert.deepEqual(fetched.planMismatch, { keychain: 'max', home: 'team' });
+});
+
+function mismatchFixture({ otherPlan }) {
+  const files = new Map([
+    [path.join('/team', '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'team@example.com', organizationType: 'claude_team' } })],
+    [path.join('/other', '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'other@example.com', organizationType: `claude_${otherPlan}` } })],
+  ]);
+  return createUsageProvider({
+    profiles: [
+      { id: 'team', label: 'Team', configHome: '/team' },
+      { id: 'other', label: 'Other', configHome: '/other' },
+      { id: 'cx', label: 'Codex', provider: 'codex', configHome: '/cx' },
+    ],
+    teeDir: '/tee',
+    readFile: async (file) => { if (!files.has(file)) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return files.get(file); },
+    now: () => new Date('2026-10-16T12:00:00.000Z'),
+    fetchRemoteUsage: async (home) => (home === '/team' ? {
+      payload: { rate_limits: { five_hour: { used_percentage: 17 }, seven_day: { used_percentage: 12 } } },
+      updatedAt: '2026-10-16T12:00:00.000Z',
+      planMismatch: { keychain: 'max', home: 'team' },
+    } : null),
+  });
+}
+
+test('a mismatched login shows its numbers with the mismatch when no other home is on its plan', async () => {
+  const result = await mismatchFixture({ otherPlan: 'pro' }).getUsage('team');
+  assert.equal(result.fiveHourPct, 17);
+  assert.deepEqual(result.planMismatch, { keychain: 'max', home: 'team' });
+  assert.match(result.planMismatchNote, /Plan mismatch: the Keychain login is on the max plan but this home's \.claude\.json says team/);
+});
+
+test('a mismatched login on another configured home\'s plan is refused, never shown under this name', async () => {
+  const result = await mismatchFixture({ otherPlan: 'max' }).getUsage('team');
+  assert.equal(result.unavailable, true);
+  assert.equal(result.fiveHourPct, undefined);
+  assert.match(result.reason, /on the max plan, which Other is signed in to/);
+  assert.equal(result.email, 'team@example.com');
+});

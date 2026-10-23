@@ -270,12 +270,13 @@ function RailMeters({ profiles: allProfiles }) {
           typeof data?.cost === 'number' ? `last session $${data.cost.toFixed(2)}` : null,
           data?.updatedAt ? `updated ${formatRelative(data.updatedAt)}` : null,
           data?.unavailable ? (data?.reason || 'no data yet') : null,
+          data?.planMismatchNote || null,
         ].filter(Boolean).join(' · ') || undefined;
         const fiveHourBadge = resetBadge(data?.fiveHourResetsAt, { window: 'fiveHour' });
         const weeklyBadge = resetBadge(data?.weeklyResetsAt, { window: 'weekly' });
         return (
           <div
-            className="rm-row"
+            className={`rm-row${data?.planMismatch ? ' is-plan-mismatch' : ''}`}
             key={account}
             title={tooltip}
             data-account={account}

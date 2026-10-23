@@ -168,6 +168,32 @@ test('providers: two codex accounts cannot share one home', () => {
   assert.match(model.stepValidation('providers', state).errors[0].message, /cannot share one home/);
 });
 
+// No cap on Codex accounts (2026-10-15): the step stopped at two for no reason
+// anything downstream needed, and an install can run one per ChatGPT plan.
+test('providers: a third and fourth codex account are valid, with ids that never collide', () => {
+  const detected = { homedir: '/h', providers: { codex: { found: true, home: '/h/.codex', email: 'one@example.com' } } };
+  const first = model.seedCodexAccount(detected, 0);
+  assert.equal(first.id, 'codex');
+  assert.equal(first.configHome, '/h/.codex');
+  assert.equal(first.email, 'one@example.com');
+  // A later account starts on no home (pre-filling the detected one opened it
+  // already invalid) and never inherits the detected home's email.
+  const second = model.seedCodexAccount(detected, 1, [first]);
+  assert.deepEqual({ id: second.id, configHome: second.configHome, email: second.email }, { id: 'codex-2', configHome: '', email: null });
+  // Remove the middle one, then add: the new id must not collide with codex-3.
+  const third = model.seedCodexAccount(detected, 2, [first, second]);
+  const fourth = model.seedCodexAccount(detected, 2, [first, third]);
+  assert.equal(third.id, 'codex-3');
+  assert.equal(fourth.id, 'codex-4');
+  const base = model.initialState({});
+  const accounts = [first, second, third, fourth].map((account, index) => ({ ...account, configHome: `/h/.codex-${index}` }));
+  const state = { ...base, codex: { enabled: true, bin: 'codex', accounts } };
+  assert.equal(model.canAdvance('providers', state), true);
+  const profiles = model.configFromWizard(state).profiles.filter((profile) => profile.provider === 'codex');
+  assert.deepEqual(profiles.map((profile) => profile.id), ['codex', 'codex-2', 'codex-3', 'codex-4']);
+  assert.equal(profiles[0].email, 'one@example.com');
+});
+
 // -- step 5 ------------------------------------------------------------------
 
 test('symlinks: off is valid; on demands a source and a distinct target', () => {
@@ -566,4 +592,31 @@ test('setup accepts discovered Codex Ultra and rejects it for a model without it
   assert.equal(model.stepValidation('defaults',state).ok,true);
   state.defaults.model='older';
   assert.equal(model.stepValidation('defaults',state).ok,false);
+});
+
+// Every Codex account seeded as the same green 'C', so
+// with the two-account cap gone the rail's profile badges could not tell
+// them apart. Saved accounts keep what they were saved with.
+test('providers: each seeded codex account gets its own badge colour and letter', () => {
+  const detected = { homedir: '/h', providers: { codex: { found: true, home: '/h/.codex' } } };
+  const accounts = [];
+  for (let i = 0; i < 4; i += 1) accounts.push(model.seedCodexAccount(detected, accounts.length, accounts));
+  assert.deepEqual(accounts.map((a) => a.letter), ['C', '2', '3', '4']);
+  assert.equal(accounts[0].color, '#7bd3a0', 'the first account keeps the green it always had');
+  assert.equal(new Set(accounts.map((a) => a.color)).size, 4, 'four accounts, four colours');
+  // Remove the second, add one: it must not reuse a surviving account's badge.
+  const survivors = [accounts[0], accounts[2], accounts[3]];
+  const added = model.seedCodexAccount(detected, survivors.length, survivors);
+  assert.ok(!survivors.some((a) => a.color === added.color), 'a fresh colour');
+  assert.ok(!survivors.some((a) => a.letter === added.letter), 'a fresh letter');
+  // A saved config keeps its own colours, even the old same-green pair.
+  const saved = model.initialState({}, {
+    setup: { completed: true },
+    providers: { codex: { enabled: true } },
+    profiles: [
+      { id: 'codex', label: 'Codex', letter: 'C', color: '#7bd3a0', provider: 'codex', configHome: '/h/.codex' },
+      { id: 'codex-2', label: 'Codex 2', letter: 'C', color: '#7bd3a0', provider: 'codex', configHome: '/h/.codex-2' },
+    ],
+  });
+  assert.deepEqual(saved.codex.accounts.map((a) => [a.letter, a.color]), [['C', '#7bd3a0'], ['C', '#7bd3a0']]);
 });

@@ -555,6 +555,22 @@ test('re-check reads the home from disk rather than trusting the login window', 
   await fsp.rm(dir, { recursive: true, force: true });
 });
 
+test('a Codex re-check reads the home\'s auth.json email claim, never the token', async () => {
+  const { dir, ipc } = await harness();
+  const home = path.join(dir, '.codex-pro');
+  await fsp.mkdir(home, { recursive: true });
+  const part = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  await fsp.writeFile(path.join(home, 'auth.json'), JSON.stringify({
+    tokens: { id_token: `${part({ alg: 'none' })}.${part({ email: 'pro@example.com' })}.sig`, access_token: 'synthetic-access' },
+  }));
+  const result = await ipc.invoke('setup:read-home', { home, provider: 'codex' });
+  assert.equal(result.ok, true);
+  assert.equal(result.home.email, 'pro@example.com');
+  assert.equal(result.home.authed, true);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-access|id_token/);
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
 test('every channel the preload exposes is actually registered', async () => {
   const { dir, ipc, registered } = await harness();
   const preload = await fsp.readFile(path.join(__dirname, '../../src/preload/index.js'), 'utf8');
