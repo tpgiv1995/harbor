@@ -99,6 +99,11 @@ function resolveDormancyPolicy(env = process.env) {
     // A floor so that a very short interval cannot make the fraction absurdly
     // sensitive (at 400ms, 5% is 20ms, which one GC pause would exceed).
     cpuBusyFloorUsec: number(env.HARBOR_SESSIOND_DORMANT_CPU_BUSY_FLOOR_USEC, 50_000),
+    // How long a background launch with no recorded ending keeps its session
+    // awake (see `transcriptBackgroundWork`). 9h is the 8h background Bash
+    // ceiling this machine runs (BASH_MAX_TIMEOUT_MS) plus an hour; `0` turns
+    // the background veto off.
+    backgroundMaxMs: number(env.HARBOR_SESSIOND_DORMANT_BACKGROUND_MAX_MS, 9 * HOUR_MS),
   };
 }
 
@@ -411,6 +416,168 @@ function transcriptTreeFresh({ projectDir, agentSession, freshMs, now }) {
   return false;
 }
 
+// A SESSION WAITING ON ITS OWN BACKGROUND WORK IS NOT IDLE (2026-10-24, Pat:
+// "astra takes fucking forever to run but its fine as long as the
+// orchestrator ... can stay alive and just handle it once its done").
+//
+// At 07:58 CT the RFP Generator coordinator (agent session 0b441efc) was put
+// to sleep "idle for 70m with no cpu" while the Astra run it had launched as a
+// background Bash call was still writing its rollout five seconds earlier. The
+// kill took Astra and the session watcher with it, nothing woke anyone, and the
+// overseer session waiting for the coordinator's report was slept 46 minutes
+// later. Neither cheap signal can see this shape: the turn ended, so the pty is
+// silent, and a codex agent waiting minutes on its model burns well under 5% of
+// a core. Its rollout is not in this session's transcript tree either, so the
+// freshness veto above cannot see it. In the week before, eight sessions had
+// background work killed exactly this way (Astra and claude-worker launches,
+// full test suites, local servers, and the session watchers themselves).
+//
+// The CLI records the contract itself. Every background launch gets a
+// structured tool result (`toolUseResult.backgroundTaskId` for Bash and
+// PowerShell, `taskId` + `timeoutMs` for Monitor, `agentId` with `status:
+// 'async_launched'` for a background agent), and every ending the CLI knows
+// about is a `<task-notification>` carrying the task id and a terminal
+// <status> (or a Monitor expiry), or a TaskStop the model called. A launch with
+// no ending is work the session was promised it would be woken for, so it is a
+// VETO like the screen and the transcript freshness, never a vote.
+//
+// Two bounds keep a missed ending from holding a session forever (the CLI's own
+// orphan notice says a UI stop, a Monitor timeout and agent teardown "leave no
+// transcript marker"): only launches made since this keeper started count,
+// because a resumed session's old tasks died with its old process, and none
+// older than `policy.backgroundMaxMs`. A Monitor also ends at its own declared
+// expiry. Assistant records are never read for endings, so the model quoting a
+// notification cannot end real work; endings in tool results (a session reading
+// another session's log) carry another session's random ids and end nothing.
+const BACKGROUND_DONE_STATUS = /^(completed|failed|killed|stopped|cancelled|canceled|error)$/i;
+const BACKGROUND_STOP_TOOLS = new Set(['TaskStop', 'KillShell', 'KillBash']);
+const BACKGROUND_LINE_MARKERS = ['backgroundTaskId', '"taskId"', 'async_launched', 'task-notification', 'TaskStop', 'KillShell', 'KillBash'];
+const MONITOR_EXPIRY_GRACE_MS = 5 * 60 * 1000;
+const BACKGROUND_CACHE_MAX = 500;
+
+// Pure: folds one transcript record into `tasks` (id -> launch), deleting the
+// ones it ends and adding their ids to `ended` when one is given (an ending can
+// land in another transcript than its launch: see transcriptBackgroundWork).
+// `raw` is the record's own line, scanned for notification blocks so every
+// carrier the CLI uses (a user message, a queued command, an attachment) is
+// covered without depending on which one it chose.
+function applyBackgroundRecord(tasks, record, raw = '', ended = null) {
+  const end = (id) => { tasks.delete(id); if (ended) ended.add(id); };
+  if (!record || typeof record !== 'object') return tasks;
+  const at = Date.parse(record.timestamp || '');
+  if (record.type === 'assistant') {
+    for (const block of record.message?.content || []) {
+      if (block?.type !== 'tool_use' || !BACKGROUND_STOP_TOOLS.has(block.name)) continue;
+      const id = block.input?.task_id || block.input?.shell_id || block.input?.bash_id;
+      if (typeof id === 'string') end(id);
+    }
+    return tasks;
+  }
+  const result = record.toolUseResult;
+  if (record.type === 'user' && result && typeof result === 'object' && !Array.isArray(result) && Number.isFinite(at)) {
+    if (typeof result.backgroundTaskId === 'string' && result.backgroundTaskId) {
+      tasks.set(result.backgroundTaskId, { id: result.backgroundTaskId, kind: 'shell', at, until: null });
+    } else if (typeof result.taskId === 'string' && result.taskId && Number.isFinite(result.timeoutMs)) {
+      const until = result.persistent ? null : at + result.timeoutMs + MONITOR_EXPIRY_GRACE_MS;
+      tasks.set(result.taskId, { id: result.taskId, kind: 'monitor', at, until });
+    } else if (result.isAsync && result.status === 'async_launched' && typeof result.agentId === 'string' && result.agentId) {
+      tasks.set(result.agentId, { id: result.agentId, kind: 'agent', at, until: null });
+    }
+  }
+  if (raw.includes('task-notification')) {
+    for (const match of raw.matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+      const body = match[1];
+      const status = /<status>\s*([A-Za-z_]+)\s*<\/status>/.exec(body)?.[1] || '';
+      if (!BACKGROUND_DONE_STATUS.test(status) && !/Monitor expired/.test(body)) continue;
+      for (const idMatch of body.matchAll(/<task-id>([^<]+)<\/task-id>/g)) end(idMatch[1].trim());
+    }
+  }
+  return tasks;
+}
+
+// Pure: the launches still owed an ending at `now`.
+function outstandingBackgroundWork(tasks, { since = 0, now, maxAgeMs }) {
+  if (!(maxAgeMs > 0)) return [];
+  const pending = [];
+  for (const task of tasks.values()) {
+    if (task.at < since || task.at > now) continue;
+    if (now - task.at >= maxAgeMs) continue;
+    if (task.until !== null && now >= task.until) continue;
+    pending.push({ id: task.id, kind: task.kind, at: task.at });
+  }
+  return pending.sort((a, b) => a.at - b.at);
+}
+
+// Reads only what was appended since the last call (transcripts run to 100MB
+// and this is asked once a sweep for a session both cheap signals condemned),
+// in byte chunks split at newlines so a multibyte character is never cut, and
+// asynchronously so a first read of a large file cannot stall the daemon. Only
+// lines carrying a marker are parsed. An absent file answers null; any other
+// read failure throws, which the sweep reads as "leave it alone".
+const backgroundScanCache = new Map(); // file -> { offset, carry, tasks, ended }
+async function scanBackgroundFile(file, { cache = backgroundScanCache, chunkBytes = 1024 * 1024 } = {}) {
+  let handle;
+  try { handle = await fsp.open(file, 'r'); } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    let entry = cache.get(file);
+    if (!entry || size < entry.offset) {
+      entry = { offset: 0, carry: Buffer.alloc(0), tasks: new Map(), ended: new Set() };
+      cache.delete(file);
+      cache.set(file, entry);
+      // Oldest first out: a daemon lives for weeks and meets every transcript.
+      while (cache.size > BACKGROUND_CACHE_MAX) cache.delete(cache.keys().next().value);
+    }
+    while (entry.offset < size) {
+      const length = Math.min(chunkBytes, size - entry.offset);
+      const chunk = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(chunk, 0, length, entry.offset);
+      if (!bytesRead) break;
+      entry.offset += bytesRead;
+      const buf = entry.carry.length ? Buffer.concat([entry.carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead);
+      const lastNewline = buf.lastIndexOf(0x0a);
+      if (lastNewline < 0) { entry.carry = Buffer.from(buf); continue; }
+      entry.carry = Buffer.from(buf.subarray(lastNewline + 1));
+      for (const line of buf.subarray(0, lastNewline).toString('utf8').split('\n')) {
+        if (!BACKGROUND_LINE_MARKERS.some((marker) => line.includes(marker))) continue;
+        let record;
+        try { record = JSON.parse(line); } catch { continue; }
+        applyBackgroundRecord(entry.tasks, record, line, entry.ended);
+      }
+    }
+    return entry;
+  } finally {
+    await handle.close();
+  }
+}
+
+// One session's answer across its transcript TREE. A background agent's own
+// background commands are launched in the agent's transcript
+// (subagents/agent-<id>.jsonl) while their completion notices land in the
+// session's main one (measured live: a cdt-app agent's suite, launched in the
+// agent file, reported in the main file's queue), so an agent that finishes
+// while its command still runs would otherwise leave the session unguarded.
+// Launches are gathered from every file and an ending recorded in ANY file ends
+// the id; ids are random per task, so the union cannot cross-cancel.
+async function transcriptBackgroundWork(files, {
+  since = 0, now = Date.now(), maxAgeMs, cache = backgroundScanCache, chunkBytes = 1024 * 1024,
+} = {}) {
+  if (!(maxAgeMs > 0)) return [];
+  const tasks = new Map();
+  const ended = new Set();
+  for (const file of [].concat(files)) {
+    const entry = await scanBackgroundFile(file, { cache, chunkBytes });
+    if (!entry) continue;
+    for (const [id, task] of entry.tasks) tasks.set(id, task);
+    for (const id of entry.ended) ended.add(id);
+  }
+  for (const id of ended) tasks.delete(id);
+  return outstandingBackgroundWork(tasks, { since, now, maxAgeMs });
+}
+
 // A SESSION WAITING FOR PAT IS NOT AN IDLE SESSION, AND IT LOOKS EXACTLY LIKE
 // ONE (2026-08-09, adversarial review, then measured).
 //
@@ -660,7 +827,11 @@ async function sweepDormancy({ states, now, policy, watch, readCpu, readScreen, 
         continue;
       }
       if (fresh) {
-        log(`${state.id} is pty-idle but its transcript or subagents are fresh; leaving it alone`);
+        // A string names the reason (the background veto lists what it is
+        // waiting on); `true` is the transcript-freshness veto.
+        log(typeof fresh === 'string'
+          ? `${state.id} is pty-idle but ${fresh}; leaving it alone`
+          : `${state.id} is pty-idle but its transcript or subagents are fresh; leaving it alone`);
         watch.set(state.id, { cpuUsec, at: now, idleChecks: 0 });
         continue;
       }
@@ -704,6 +875,7 @@ module.exports = {
   resolveDormancyPolicy, evaluate, cgroupCpuUsec, awaitingAnswer, sweepDormancy, HOUR_MS,
   parseWinProcessTable, winProcessTreeCpuUsec, winCpuSnapshot,
   lastRecordAtMs, transcriptWrittenWithin, transcriptTreeFresh,
+  applyBackgroundRecord, outstandingBackgroundWork, transcriptBackgroundWork,
   findProviderTranscript, newestCompleteRecord, codexTranscriptFresh, cursorTranscriptFresh,
   providerTranscriptFresh, PROVIDER_ANSWER_MARKERS,
 };

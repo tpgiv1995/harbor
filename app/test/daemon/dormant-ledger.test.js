@@ -29,7 +29,7 @@ afterEach(async () => {
 
 function tempLedger() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-dormant-'));
-  cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true }));
+  cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }));
   return path.join(dir, 'dormant.json');
 }
 

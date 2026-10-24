@@ -124,7 +124,7 @@ test('a ConPTY onExit that delivers undefined still records null code and null s
       client.close();
       if (daemon.exitCode === null) { daemon.kill(); await new Promise((r) => daemon.once('exit', r)); }
       for (const pid of pids.filter(Boolean)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
-      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
     });
 
     const { id } = await client.request('spawn', { argv: SHELL_ARGV, cwd: dir, env: {}, cols: 80, rows: 24 });
@@ -203,7 +203,7 @@ test('sessiond.log spells null for a legacy exit whose state file omitted code/s
   t.after(async () => {
     client.close();
     if (daemon.exitCode === null) { daemon.kill(); await new Promise((r) => daemon.once('exit', r)); }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
 
   await client.request('list');

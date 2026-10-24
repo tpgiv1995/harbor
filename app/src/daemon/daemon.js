@@ -19,7 +19,7 @@ const { resolveHarnessWatchPid } = require('./harness-watch.js');
 const { resolveScopePolicy, ensureSliceUnit, probeScopeSupport, scopeCommand } = require('./session-scope.js');
 const {
   resolveDormancyPolicy, cgroupCpuUsec, sweepDormancy, winCpuSnapshot, winProcessTreeCpuUsec,
-  transcriptTreeFresh, providerTranscriptFresh,
+  transcriptTreeFresh, providerTranscriptFresh, transcriptBackgroundWork,
 } = require('./dormancy.js');
 const { resolveOrphanPolicy, sweepOrphans, snapshotProcessTable } = require('./orphan-sweep.js');
 const { createProcessIntel } = require('./process-intel.js');
@@ -606,7 +606,7 @@ async function dispatch(socket, record) {
     // is a real condition an operator must be able to SEE, not infer from the
     // absence of log lines.
     const dormancy = dormancyPolicy.enabled
-      ? { enabled: true, after_ms: dormancyPolicy.afterMs, watching: dormancyWatch.size }
+      ? { enabled: true, after_ms: dormancyPolicy.afterMs, background_max_ms: dormancyPolicy.backgroundMaxMs, watching: dormancyWatch.size }
       : { enabled: false };
     const jobs = jobPolicy.enabled
       ? { enabled: true, sessions: sessionJobs.size, processMemoryMax: jobPolicy.processMemoryMax || null }
@@ -1037,7 +1037,11 @@ async function resolveDormancyCpuReader(states) {
 // resolved by scanning for <session-id>.jsonl (the id is unique; same
 // fallback rule the app's transcript resolver uses) and cached; a session
 // the scan cannot place gets no veto and behaves exactly as before.
-const transcriptDirCache = new Map(); // agent_session -> project dir (or null when unresolvable)
+// Only a FOUND folder is cached (2026-10-24): a Claude transcript is created at
+// the first prompt, so a session first asked about while it sat unprompted (a
+// trust dialog keeps it awake that long) would otherwise be "unplaceable"
+// forever and lose both vetoes for the rest of its life.
+const transcriptDirCache = new Map(); // agent_session -> project dir
 function resolveTranscriptProject(agentSession) {
   if (transcriptDirCache.has(agentSession)) return transcriptDirCache.get(agentSession);
   let found = null;
@@ -1050,7 +1054,7 @@ function resolveTranscriptProject(agentSession) {
       } catch { /* unreadable project dir */ }
     }
   } catch { /* no projects root */ }
-  transcriptDirCache.set(agentSession, found);
+  if (found) transcriptDirCache.set(agentSession, found);
   return found;
 }
 
@@ -1065,7 +1069,7 @@ const providerTranscriptRoots = {
     .split(path.delimiter).filter(Boolean),
 };
 
-function sessionWorkFresh(state) {
+async function sessionWorkFresh(state) {
   const agent = state.agent === 'cursor-agent' ? 'cursor' : state.agent;
   if (agent === 'codex' || agent === 'cursor') {
     // Rejections (unresolved identity, transcript not found) propagate to the
@@ -1087,12 +1091,31 @@ function sessionWorkFresh(state) {
   // that forced the change. It was moved out of this file because everything
   // that stayed here was unreachable by a test, which is how a veto that fired
   // 27,364 times against 32 sleeps shipped and then stayed shipped.
-  return transcriptTreeFresh({
+  if (transcriptTreeFresh({
     projectDir: project,
     agentSession,
     freshMs: dormancyPolicy.afterMs,
     now: Date.now(),
+  })) return true;
+  // Background work the session launched and was never told had ended (the
+  // 2026-10-24 Astra kill; see `transcriptBackgroundWork` in dormancy.js).
+  // Only this keeper's launches count: a resumed session's old tasks died with
+  // its old process. A missing created_at counts everything, the safe side.
+  const since = Date.parse(state.created_at || '');
+  const files = [path.join(project, `${agentSession}.jsonl`)];
+  try {
+    const subagents = path.join(project, agentSession, 'subagents');
+    for (const name of await fs.promises.readdir(subagents)) {
+      if (name.endsWith('.jsonl')) files.push(path.join(subagents, name));
+    }
+  } catch { /* no subagents folder: the main transcript is the whole tree */ }
+  const pending = await transcriptBackgroundWork(files, {
+    since: Number.isFinite(since) ? since : 0,
+    now: Date.now(),
+    maxAgeMs: dormancyPolicy.backgroundMaxMs,
   });
+  if (!pending.length) return false;
+  return `still waiting on background work it started (${pending.map((task) => `${task.kind} ${task.id}`).join(', ')})`;
 }
 
 async function runDormancySweep() {
@@ -1308,7 +1331,7 @@ async function start() {
   // platform where the cgroup read could never answer and nobody could tell
   // from the log that the feature was inert (2026-08-20).
   log(dormancyPolicy.enabled
-    ? `dormancy on: sessions idle for ${Math.round(dormancyPolicy.afterMs / 60000)}m with no cpu are ended cleanly and can be resumed from the rail (cpu signal: ${process.platform === 'win32' ? (jobPolicy.enabled ? `job accounting with ${processIntel.available ? 'NT process-intel' : 'CIM'} fallback` : (processIntel.available ? 'NT process-intel tree times' : 'CIM keeper process-tree times')) : 'cgroup usage_usec'})`
+    ? `dormancy on: sessions idle for ${Math.round(dormancyPolicy.afterMs / 60000)}m with no cpu are ended cleanly and can be resumed from the rail (cpu signal: ${process.platform === 'win32' ? (jobPolicy.enabled ? `job accounting with ${processIntel.available ? 'NT process-intel' : 'CIM'} fallback` : (processIntel.available ? 'NT process-intel tree times' : 'CIM keeper process-tree times')) : 'cgroup usage_usec'}; ${dormancyPolicy.backgroundMaxMs > 0 ? `background work it started holds a session for up to ${Math.round(dormancyPolicy.backgroundMaxMs / 60000)}m` : 'background veto off'})`
     : 'dormancy off: idle sessions are kept alive indefinitely');
   startOrphanSweep();
   startPeriodicReconcile();
@@ -1369,7 +1392,10 @@ if (harnessPid) {
       for (const state of allStates()) {
         if (state.exit) continue;
         try {
-          const forwarded = await keeperRequest(state.id, 'terminate', { signal: 'SIGKILL' });
+          // The keeper watches the same harness and usually ends first with its
+          // own reason; when this poll wins the race the record must still say
+          // why, not read as an unexplained exit (2026-10-24: about 1 run in 8).
+          const forwarded = await keeperRequest(state.id, 'terminate', { signal: 'SIGKILL', reason: 'harness died; session reaped by its daemon' });
           forwarded.socket.destroy();
         } catch { /* keeper already gone */ }
       }

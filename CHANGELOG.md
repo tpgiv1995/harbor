@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-Nothing yet.
+- A session that is waiting for its own background work (a long command, a
+  Monitor, a background agent) is no longer put to sleep for being idle. Harbor
+  used to end any session that sat at its prompt for an hour with little CPU,
+  which killed the work it was waiting on. A launch with no completion notice
+  now keeps the session up for as long as the work runs, up to 9 hours
+  (`HARBOR_SESSIOND_DORMANT_BACKGROUND_MAX_MS`).
 
 ## 0.1.0 (2026-10-12)
 

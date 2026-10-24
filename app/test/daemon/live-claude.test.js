@@ -48,13 +48,13 @@ before(async () => {
 
 after(async () => {
   if (!RUN) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
     return;
   }
   try { await client.request('terminate', { id: sessionId, signal: 'SIGKILL' }); } catch {}
   client.close();
   daemon.kill('SIGKILL');
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 });
 
 test('real Claude AskUserQuestion is fully readable in a 120x60 modeled screen', { skip: !RUN, timeout: 120000 }, async () => {

@@ -115,7 +115,7 @@ async function harness(t, { swallowExit }) {
     client.close();
     if (daemon.exitCode === null) { daemon.kill(); await new Promise((r) => daemon.once('exit', r)); }
     for (const pid of pids.filter(Boolean)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
   return { client, dir };
 }

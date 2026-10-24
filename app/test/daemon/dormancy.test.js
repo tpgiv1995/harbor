@@ -112,7 +112,7 @@ test('2. hysteresis: one quiet observation is never enough', () => {
 
 test('3. a shared cgroup cannot answer a per-session question, so it is refused', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hbdormcg-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }));
   const proc = path.join(dir, 'proc', '99');
   fs.mkdirSync(proc, { recursive: true });
 
@@ -466,7 +466,7 @@ test('7. end to end: a real idle session is ended cleanly and says why, while a 
     } catch {}
     client.close();
     if (daemon.exitCode === null) { daemon.kill('SIGTERM'); await new Promise((r) => daemon.once('exit', r)); }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
 
   const idle = await client.request('spawn', {
@@ -729,5 +729,5 @@ test('3f. freshness is proven by a written record, not by a touched mtime', asyn
     'a transcript that cannot be read must never be read as permission to kill',
   );
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 });

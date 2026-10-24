@@ -71,7 +71,7 @@ test('a keeper survives clients that reset mid-request and mid-observe', { skip:
       if (state.pid) { try { process.kill(-state.pid, 'SIGKILL'); } catch { try { process.kill(state.pid, 'SIGKILL'); } catch {} } }
     } catch {}
     if (keeper.exitCode === null) { keeper.kill('SIGKILL'); await new Promise((r) => keeper.once('exit', r)); }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
 
   const ready = Date.now() + 5000;

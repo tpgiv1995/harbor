@@ -47,7 +47,7 @@ test('1. the pty child carries a higher oom badness than its keeper', { skip: pr
       if (state.pid) { try { process.kill(-state.pid, 'SIGKILL'); } catch { try { process.kill(state.pid, 'SIGKILL'); } catch {} } }
     } catch {}
     if (keeper.exitCode === null) { keeper.kill('SIGKILL'); await new Promise((r) => keeper.once('exit', r)); }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
   const ready = Date.now() + 5000;
   while (!fs.existsSync(statePath) && Date.now() < ready) await sleep(25);
@@ -113,7 +113,7 @@ test('2. a keeper killed within this boot surfaces as exited without a daemon re
     } catch {}
     client.close();
     if (daemon.exitCode === null) { daemon.kill('SIGTERM'); await new Promise((r) => daemon.once('exit', r)); }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
 
   const spawned = await client.request('spawn', { argv: ['/bin/bash', '--noprofile', '--norc'], cwd: dir, env: {}, cols: 80, rows: 24 });
@@ -180,7 +180,7 @@ test('3. a keeper that accepts but never answers is put down before it is writte
     } catch {}
     client.close();
     if (daemon.exitCode === null) { daemon.kill('SIGTERM'); await new Promise((r) => daemon.once('exit', r)); }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
 
   const victim = await client.request('spawn', { argv: ['/bin/bash', '--noprofile', '--norc'], cwd: dir, env: {}, cols: 80, rows: 24 });

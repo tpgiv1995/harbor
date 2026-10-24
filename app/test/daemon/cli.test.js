@@ -76,7 +76,7 @@ afterEach(async () => {
         process.kill(-value.pid, 'SIGKILL');
       } catch {}
     }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }
 });
 

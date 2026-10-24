@@ -231,7 +231,7 @@ async function harness(extraEnv) {
       } catch {}
       client.close();
       if (daemon.exitCode === null) { daemon.kill('SIGTERM'); await new Promise((r) => daemon.once('exit', r)); }
-      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
     },
   };
 }

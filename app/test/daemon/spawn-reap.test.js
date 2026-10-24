@@ -86,7 +86,7 @@ if ((process.argv[1] || '').endsWith('keeper.js')) {
     // The red side of this suite (pre-fix) leaves a live ghost; a test must
     // never leak one into the machine whatever the verdict was.
     for (const pid of processesOfStore(dir)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   });
   return { client, dir };
 }

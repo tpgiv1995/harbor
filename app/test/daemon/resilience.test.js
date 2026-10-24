@@ -131,13 +131,17 @@ test('wedged socket times out status and list while logs falls back, and healthy
 });
 
 test('daemon to keeper requests time out, while the same screen request succeeds for a healthy keeper', async () => {
-  const h = await runningDaemon({ HARBOR_SESSIOND_KEEPER_REQUEST_TIMEOUT_MS: '150' });
+  // The keeper timeout is daemon-wide, so the HEALTHY keeper's answer has to
+  // land inside it too, and a ConPTY start under load (another session running
+  // a suite or an agent) measured past both the old 150ms and the client's 1s.
+  // The wedge still proves the timeout; the healthy half gets room (2026-10-24).
+  const h = await runningDaemon({ HARBOR_SESSIOND_KEEPER_REQUEST_TIMEOUT_MS: '1500' });
   const wedged = await listeningServer(() => {});
   fs.writeFileSync(path.join(h.dir, 'sessions', 'wedged.json'), JSON.stringify({
     id: 'wedged', keeper_socket: wedged.socket, exit: null,
   }));
-  const client = new SessionClient({ socketPath: h.socket, requestTimeoutMs: 1000 });
-  await assert.rejects(client.request('screen', { id: 'wedged' }), /keeper screen request timed out after 150ms/);
+  const client = new SessionClient({ socketPath: h.socket, requestTimeoutMs: 10000 });
+  await assert.rejects(client.request('screen', { id: 'wedged' }), /keeper screen request timed out after 1500ms/);
   const spawned = await client.request('spawn', {
     argv: SHELL_ARGV, cwd: h.dir,
     env: { PS1: 'OK> ' }, cols: 80, rows: 40,
@@ -157,7 +161,7 @@ test('spawn config containing env is removed, and exited state is retained brief
     HARBOR_SESSIOND_EXIT_RETENTION_MS: '150',
     HARBOR_SESSIOND_KEEPER_EXIT_DELAY_MS: '50',
   });
-  const client = new SessionClient({ socketPath: h.socket, requestTimeoutMs: 1000 });
+  const client = new SessionClient({ socketPath: h.socket, requestTimeoutMs: 10000 });
   const spawned = await client.request('spawn', {
     argv: SHELL_ARGV, cwd: h.dir,
     env: { HARBOR_SECRET_PROBE: 'must-not-stay-on-disk' }, cols: 80, rows: 40,
@@ -177,7 +181,7 @@ test('spawn config containing env is removed, and exited state is retained brief
 
 test('log reads are tail-bounded and append rotation caps retained bytes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-sessiond-log-'));
-  cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true }));
+  cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 }));
   const file = path.join(dir, 'sessiond.log');
   fs.writeFileSync(file, `${'old-line\n'.repeat(2000)}TAIL_ONE\nTAIL_TWO\n`);
   assert.equal(readLogTail(file, 2, 128), 'TAIL_ONE\nTAIL_TWO\n');
