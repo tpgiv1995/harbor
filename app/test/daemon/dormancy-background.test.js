@@ -26,7 +26,7 @@ const { spawn } = require('node:child_process');
 
 const {
   resolveDormancyPolicy, sweepDormancy,
-  applyBackgroundRecord, outstandingBackgroundWork, transcriptBackgroundWork,
+  applyBackgroundRecord, outstandingBackgroundWork, transcriptBackgroundWork, BACKGROUND_IDLE_MARKER,
 } = require('../../src/daemon/dormancy.js');
 const { realTmpDir } = require('../support/real-tmpdir.js');
 const { SessionClient } = require('../../src/daemon/client.js');
@@ -39,9 +39,9 @@ const T0 = Date.parse('2026-10-24T09:51:59.791Z');
 const iso = (ms) => new Date(ms).toISOString();
 
 // The CLI's record shapes, field for field, with neutral content.
-const shellLaunch = (id, at) => ({
+const shellLaunch = (id, at, outputFile = `C:\\tmp\\tasks\\${id}.output`) => ({
   type: 'user', timestamp: iso(at),
-  message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `toolu_${id}`, content: `Command running in background with ID: ${id}. Output is being written to: C:\\tmp\\tasks\\${id}.output.` }] },
+  message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `toolu_${id}`, content: `Command running in background with ID: ${id}. Output is being written to: ${outputFile}. You will be notified when it completes.` }] },
   toolUseResult: { stdout: '', stderr: '', interrupted: false, isImage: false, noOutputExpected: false, backgroundTaskId: id },
 });
 const monitorLaunch = (id, at, timeoutMs = 600_000, persistent = false) => ({
@@ -170,6 +170,32 @@ test('B7. a command launched inside a background agent holds the session after t
       'read as a tree, the suite the agent left running still holds the session');
     fs.appendFileSync(main, lines([queuedNotice('bsuite0001', 'completed', T0 + 2 * HOUR)]));
     assert.deepEqual(await ask([main, agent]), [], 'an ending in the main transcript ends a launch recorded in the agent transcript');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  }
+});
+
+test('B8. a waiting command can let its session go with an idle line, and takes the hold back with any newer line', async () => {
+  // The session watcher's shape: it holds while it has jobs, then lingers idle
+  // so its exit cannot wake the session, and relies on the sleep to end it.
+  const dir = fs.mkdtempSync(path.join(realTmpDir(), 'harbor-bgwork-idle-'));
+  try {
+    const out = path.join(dir, 'bwatch0001.output');
+    const transcript = path.join(dir, 'main.jsonl');
+    fs.writeFileSync(transcript, `${JSON.stringify(shellLaunch('bwatch0001', T0, out))}\n`);
+    const ask = () => transcriptBackgroundWork(transcript, { since: 0, now: T0 + HOUR, maxAgeMs: MAX, cache: new Map() });
+    assert.deepEqual((await ask()).map((t) => t.id), ['bwatch0001'], 'no output file yet: the hold stands');
+    fs.writeFileSync(out, 'watching 2 job(s)\n');
+    assert.deepEqual((await ask()).map((t) => t.id), ['bwatch0001'], 'a working watcher holds its session');
+    fs.appendFileSync(out, `${BACKGROUND_IDLE_MARKER} no jobs left; waiting only for the session's next turn\r\n\r\n`);
+    assert.deepEqual(await ask(), [], 'the idle line as the newest output releases the session');
+    fs.appendFileSync(out, 'watching 1 job(s)\n');
+    assert.deepEqual((await ask()).map((t) => t.id), ['bwatch0001'], 'any newer line takes the hold back');
+    // The marker only counts as the NEWEST line, never somewhere in the middle,
+    // and a command whose output is redirected elsewhere (the Astra shape) never
+    // writes one, so it always holds.
+    fs.writeFileSync(out, `${BACKGROUND_IDLE_MARKER} early\nreal work continues\n`);
+    assert.deepEqual((await ask()).map((t) => t.id), ['bwatch0001']);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }

@@ -449,6 +449,18 @@ function transcriptTreeFresh({ projectDir, agentSession, freshMs, now }) {
 // expiry. Assistant records are never read for endings, so the model quoting a
 // notification cannot end real work; endings in tool results (a session reading
 // another session's log) carry another session's random ids and end nothing.
+//
+// A COMMAND THAT ONLY WAITS CAN LET ITS SESSION GO. A background command whose
+// newest output line starts with `[harbor-idle]` does not hold the session (the
+// CLI names each shell task's output file in the launch record). This exists for
+// watchers: one with jobs to watch must keep its session up, but once its jobs
+// are done it lingers so that its exit does not wake the session for a paid turn
+// (the 2026-10-23 usage audit: 1,198 of 1,633 watcher exits woke an idle session
+// to say nothing), and it relies on this sleep to end it quietly. Without the
+// marker every such watcher would pin an idle session (0.6 to 1.8 GB committed
+// each, measured) for up to its 8 hours. A watcher that gets new jobs prints any
+// other line and holds again. An output file that cannot be read keeps the hold.
+const BACKGROUND_IDLE_MARKER = '[harbor-idle]';
 const BACKGROUND_DONE_STATUS = /^(completed|failed|killed|stopped|cancelled|canceled|error)$/i;
 const BACKGROUND_STOP_TOOLS = new Set(['TaskStop', 'KillShell', 'KillBash']);
 const BACKGROUND_LINE_MARKERS = ['backgroundTaskId', '"taskId"', 'async_launched', 'task-notification', 'TaskStop', 'KillShell', 'KillBash'];
@@ -476,7 +488,9 @@ function applyBackgroundRecord(tasks, record, raw = '', ended = null) {
   const result = record.toolUseResult;
   if (record.type === 'user' && result && typeof result === 'object' && !Array.isArray(result) && Number.isFinite(at)) {
     if (typeof result.backgroundTaskId === 'string' && result.backgroundTaskId) {
-      tasks.set(result.backgroundTaskId, { id: result.backgroundTaskId, kind: 'shell', at, until: null });
+      const text = (record.message?.content || []).map((block) => (typeof block?.content === 'string' ? block.content : '')).join('\n');
+      const outputFile = /Output is being written to: (.+?\.output)\b/.exec(text)?.[1] || null;
+      tasks.set(result.backgroundTaskId, { id: result.backgroundTaskId, kind: 'shell', at, until: null, outputFile });
     } else if (typeof result.taskId === 'string' && result.taskId && Number.isFinite(result.timeoutMs)) {
       const until = result.persistent ? null : at + result.timeoutMs + MONITOR_EXPIRY_GRACE_MS;
       tasks.set(result.taskId, { id: result.taskId, kind: 'monitor', at, until });
@@ -503,7 +517,7 @@ function outstandingBackgroundWork(tasks, { since = 0, now, maxAgeMs }) {
     if (task.at < since || task.at > now) continue;
     if (now - task.at >= maxAgeMs) continue;
     if (task.until !== null && now >= task.until) continue;
-    pending.push({ id: task.id, kind: task.kind, at: task.at });
+    pending.push({ id: task.id, kind: task.kind, at: task.at, outputFile: task.outputFile || null });
   }
   return pending.sort((a, b) => a.at - b.at);
 }
@@ -575,7 +589,31 @@ async function transcriptBackgroundWork(files, {
     for (const id of entry.ended) ended.add(id);
   }
   for (const id of ended) tasks.delete(id);
-  return outstandingBackgroundWork(tasks, { since, now, maxAgeMs });
+  const pending = outstandingBackgroundWork(tasks, { since, now, maxAgeMs });
+  const holding = [];
+  for (const task of pending) {
+    if (task.kind === 'shell' && task.outputFile && await declaresIdle(task.outputFile)) continue;
+    holding.push(task);
+  }
+  return holding;
+}
+
+// The newest non-empty line of a task's output, from a bounded tail read. Any
+// failure answers "not idle", so the hold stands.
+async function declaresIdle(file, tailBytes = 4096) {
+  let handle;
+  try { handle = await fsp.open(file, 'r'); } catch { return false; }
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, tailBytes);
+    if (!length) return false;
+    const buf = Buffer.alloc(length);
+    await handle.read(buf, 0, length, size - length);
+    const lines = buf.toString('utf8').split(/\r?\n/).filter((line) => line.trim());
+    return Boolean(lines.length) && lines[lines.length - 1].trimStart().startsWith(BACKGROUND_IDLE_MARKER);
+  } catch { return false; } finally {
+    await handle.close().catch(() => {});
+  }
 }
 
 // A SESSION WAITING FOR PAT IS NOT AN IDLE SESSION, AND IT LOOKS EXACTLY LIKE
@@ -875,7 +913,7 @@ module.exports = {
   resolveDormancyPolicy, evaluate, cgroupCpuUsec, awaitingAnswer, sweepDormancy, HOUR_MS,
   parseWinProcessTable, winProcessTreeCpuUsec, winCpuSnapshot,
   lastRecordAtMs, transcriptWrittenWithin, transcriptTreeFresh,
-  applyBackgroundRecord, outstandingBackgroundWork, transcriptBackgroundWork,
+  applyBackgroundRecord, outstandingBackgroundWork, transcriptBackgroundWork, BACKGROUND_IDLE_MARKER,
   findProviderTranscript, newestCompleteRecord, codexTranscriptFresh, cursorTranscriptFresh,
   providerTranscriptFresh, PROVIDER_ANSWER_MARKERS,
 };

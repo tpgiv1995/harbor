@@ -1,0 +1,17 @@
+# codex release notes 0.163.0 to 0.164.0 (14 lines)
+
+## 0.164.0
+X1. [0.164.0] Save reusable prompts and slash commands in ten numbered `/presets` slots, with a keyboard menu for quick access. (#54380, #54381)
+X2. [0.164.0] Set model, reasoning effort, speed, and permission profiles directly with inline `/model` and `/permissions` arguments. (#54378, #54383)
+X3. [0.164.0] Preview viewed and generated images in the fullscreen transcript on terminals supporting Kitty or Sixel graphics. (#54216)
+X4. [0.164.0] Authenticate enterprise MCP connections using eligible Codex account grants or dedicated sign-in, including OAuth clients requiring secrets. (#55334, #55859, #56001)
+X5. [0.164.0] Mask credentials during supported remote Bash commands and Zsh snapshot sessions, including credentials from custom providers. (#54309, #54432, #56049)
+X6. [0.164.0] The Amazon Bedrock setup wizard is now enabled by default, with API key entry grouped alongside other AWS sign-in methods when credentials are detected. (#56033, #56023)
+X7. [0.164.0] Failed compaction no longer leaves partial summaries in conversation history, and background compaction failures fall back without panicking. (#53932, #55581)
+X8. [0.164.0] Resuming sessions now finds compressed histories and restores saved thread settings instead of replacing them with global defaults. (#54008, #55923)
+X9. [0.164.0] Windows HTTPS and WebSocket connections now handle proxy authentication challenges using the signed-in user’s Negotiate or NTLM credentials. (#55994, #56000)
+X10. [0.164.0] CLI configuration overrides are preserved when `-c` or `--config` appears at multiple subcommand levels. (#56022)
+X11. [0.164.0] Queued prompts now wait for pending permission selections to resolve before continuing. (#55682)
+X12. [0.164.0] Hardened sandbox checks for case-variant metadata paths on macOS and replaceable symlinks used to locate executables. (#54273, #55384)
+X13. [0.164.0] Reduced disk usage by pruning unused installations, cleaning abandoned marketplace checkouts, and bounding daemon logs. (#53827, #55149, #55689, #55690, #55856)
+X14. [0.164.0] Updated the embedded JavaScript runtime with safety checks for optimized `Array.sort` operations. (#54519)

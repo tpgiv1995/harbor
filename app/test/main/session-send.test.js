@@ -265,6 +265,58 @@ test('damaged divider: real confirmation remains blocked and refuses a send', as
   await assert.rejects(send.send({ sessionId: 'synthetic-confirm', text: 'blue blocks', pane: { paneId: 'pane-1' } }));
   assert.equal(h.sent.length, 0);
 });
+// Claude Code's cold-resume warning (2.1.304 turned it on for Pro and Max; the
+// server switch `tengu_amber_tally` was already live on four of Pat's homes on
+// 2026-10-24). It asks before a send into an inactive conversation whose resume
+// would cost 5% or more of the 5-hour limit, keeps the typed message in the
+// box, and when another server switch is on puts the default focus on "Start a
+// new conversation", so a blind Enter would leave the conversation. Harbor must
+// refuse the send and type nothing. Synthetic screens built from the dialog's
+// strings in the 2.1.310 binary: the resume trigger numbers its rows, the idle
+// trigger hides the numbers.
+test('the cold-resume usage warning blocks a send: no key reaches it', async () => {
+  const body = 'This conversation has been inactive for 3h 12m and is 812.4k tokens long. Resuming it will use about 9% of your 5-hour usage limit.';
+  const screens = [
+    ['Resume this conversation?', body, '❯ 1. Resume', '  2. Start a new conversation',
+      '     Claude can look this one up if you refer to it later', 'Enter to confirm · Esc to resume'],
+    ['Resume this conversation?', body, 'Your unsent message will still be there after you answer.',
+      '  Resume', '❯ Start a new conversation', '↑/↓ to pick a row first · Enter to confirm · Esc to dismiss'],
+  ];
+  for (const lines of screens) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    h.deps.readPane = async () => lines.join('\n');
+    const send = createSessionSend(h.deps);
+    await assert.rejects(send.send({ sessionId: 'synthetic-cold-resume', text: 'carry on', pane: { paneId: 'pane-1' } }));
+    assert.equal(h.sent.length, 0, lines[3]);
+  }
+});
+// The idle trigger draws the same warning AFTER the Enter that would have
+// submitted (the composer's text moves into the dialog's hidden draft), so the
+// post-Enter watcher meets it instead of the conversation. Exactly one Enter may
+// reach the pane: a spare one would confirm the focused row.
+test('a cold-resume warning that appears after the Enter gets no spare key', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const divider = '─'.repeat(60);
+  let draft = '';
+  let warned = false;
+  h.prompt.echo = false;
+  h.deps.readPane = async () => (warned
+    ? ['Resume this conversation?', 'This conversation has been inactive for 3h 12m and is 812.4k tokens long. Resuming it will use about 9% of your 5-hour usage limit.',
+      'Your unsent message will still be there after you answer.', '  Resume', '❯ Start a new conversation',
+      '↑/↓ to pick a row first · Enter to confirm · Esc to dismiss'].join('\n')
+    : `conversation\n${divider}\n❯ ${draft}\n${divider}\n  personal  ·  Opus 5.5\n  ⏵⏵ auto mode on`);
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    const result = sendInput(paneId, text);
+    if (text === '\r') warned = true;
+    else draft += text.replace(/\x1b\[20[01]~/g, '');
+    return result;
+  };
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 'synthetic-cold-resume-idle', text: 'carry on', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }).catch(() => {});
+  assert.equal(typed(h).filter((text) => text === '\r').length, 1);
+  assert.equal(typed(h).at(-1), '\r');
+});
 test('damaged divider: Enter watcher distinguishes stranded from submitted text', () => {
   assert.equal(composerSendState([damagedDivider, '\u276f blue blocks', damagedDivider].join('\n'), { text: 'blue blocks' }), 'holds');
   assert.equal(composerSendState(['\u276f blue blocks', damagedDivider, '\u276f', damagedDivider].join('\n'), { text: 'blue blocks' }), 'taken');

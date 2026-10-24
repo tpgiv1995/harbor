@@ -119,7 +119,23 @@ const IMPACT_FLAGS = {
       id: 'ask-dialog',
       // `rm prompts` (2026-10-15, 2.1.299): the CLI's rm check is a permission
       // prompt with no "permission" in the changelog line.
-      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt|\brm prompts?\b/i,
+      // 2026-10-24 (2.1.304 to 2.1.310): "PowerShell permission checks
+      // auto-approving some `Set-Location` ... these now prompt", "Bash
+      // permission checks not prompting for some compound commands", "`sed -i`
+      // ... the standard Bash prompt" and "auto mode's prompt before the first
+      // read outside the working directories" all matched nothing, and each one
+      // changes WHEN a permission card appears. Any permission CHECK line
+      // counts: each one moves a command between asking and not asking
+      // (measured over 2.1.250 to 2.1.310: 26 lines, all of that kind). A
+      // permission RULE line counts only when it also says prompt, because a
+      // rule-syntax line draws nothing (that clause also catches 2.1.307's
+      // OpenTelemetry safety_event line, which is harmless). The adversarial
+      // review of the same cycle found more dialog lines: the rm "safety
+      // prompt" for mounted drives, the Consumer Terms notice (a startup screen
+      // Harbor has no handling for) and the numbered /artifacts delete
+      // "confirmation" (3 and 8 lines over the same range). A bracketed
+      // [VSCode] or [Claude Tag] line is not this terminal.
+      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt|\brm prompts?\b|^(?!\[).*\bpermission checks?\b|^(?!\[)(?=.*\bpermission rules?\b)(?=.*\bprompt)|^(?!\[).*\b(?:Bash|PowerShell) prompt\b|auto mode's prompt|^(?!\[).*\bsafety prompt\b|Consumer Terms|^(?!\[).*\bconfirmation\b/i,
       why: 'Harbor answers AskUserQuestion, permission and resume dialogs by WALKING THE PTY SCREEN, not the transcript. A change to how a dialog is drawn breaks the ask sheet.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
@@ -158,7 +174,12 @@ const IMPACT_FLAGS = {
       // "resumed" too (2026-10-09): 2.1.295 "the removed turns coming back,
       // when the session was ... resumed after being killed" matched nothing,
       // and dormancy kills and Harbor resumes sessions every day.
-      re: /transcript|\.jsonl|jsonl|projects director|session id|--session-id|\bresum(?:e|ed|es|ing)\b|--continue|\B-p\b/i,
+      // 2026-10-24 (2.1.310): "background cleanup deleting some recent files
+      // ... when `cleanupPeriodDays` is set to a very large value" matched
+      // nothing, and every home sets cleanupPeriodDays to 36500; the retention
+      // sweep is what deletes files under ~/.claude, transcripts included.
+      // "session file size" (2.1.304) is the transcript's own size.
+      re: /transcript|\.jsonl|jsonl|projects director|session id|--session-id|\bresum(?:e|ed|es|ing)\b|--continue|\B-p\b|cleanupPeriodDays|session file size/i,
       why: 'The history index, the transcript parser, resume and the minted --session-id all read ~/.claude/projects. A transcript or session-id change is felt by every rail row and every conversation window.',
       verify: 'npm test -- transcript',
     },
@@ -201,7 +222,12 @@ const IMPACT_FLAGS = {
       // a bracketed [VSCode] or [Claude Tag] line is not this terminal. Measured
       // over 2.1.250 to 2.1.303: 4 lines, including 2.1.295's "link address ...
       // where it wraps in a table or a question preview".
-      re: /emoji|wrap(ped|ping)? line|word wrap|alternate screen|\bANSI\b|\bcolumns?\b|repaint|redraw|terminal (width|size|render)|^(?=.*\b(?:terminal|fullscreen|pty)\b).*(?:resiz(?:e|ed|es|ing)\b|\bblank\b)|\bOSC ?\d+\b|\btab stops?\b|\bbidirectional\b|^(?!\[)(?=.*\b(?:hyperlinks?|links?|URLs?)\b)(?=.*\b(?:rows?|wrap(?:s|ped|ping)?)\b)/i,
+      // 2026-10-24 (2.1.305): "startup warnings printing as raw text above the
+      // logo ... show as warning rows under the banner" matched nothing, and
+      // the startup screen is what Harbor's readiness wait and prompt gate
+      // read before the first send. Measured over 2.1.250 to 2.1.310: 9
+      // startup-warning lines, all drawn around the banner.
+      re: /emoji|wrap(ped|ping)? line|word wrap|alternate screen|\bANSI\b|\bcolumns?\b|repaint|redraw|terminal (width|size|render)|^(?=.*\b(?:terminal|fullscreen|pty)\b).*(?:resiz(?:e|ed|es|ing)\b|\bblank\b)|\bOSC ?\d+\b|\btab stops?\b|\bbidirectional\b|^(?!\[)(?=.*\b(?:hyperlinks?|links?|URLs?)\b)(?=.*\b(?:rows?|wrap(?:s|ped|ping)?)\b)|^(?!\[).*\bstart-?up warnings?\b/i,
       why: 'The daemon models the pty SCREEN. Width, emoji width and alternate-screen changes desync that model, which is exactly what broke the ask card on 2026-09-03.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
@@ -310,7 +336,7 @@ const IMPACT_FLAGS = {
   codex: [
     {
       id: 'rollout',
-      re: /rollout|session_meta|item_completed|event_msg|response_item/i,
+      re: /rollout|session_meta|item_completed|event_msg|response_item|compressed histor|\bcompaction\b/i,
       why: 'transcript.js applyCodexLine parses the rollout item stream. 0.147.0 moved the conversation once already and Harbor rendered empty windows over live sessions until it was found.',
       verify: 'npm test -- transcript',
     },
@@ -328,7 +354,7 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'config-toml',
-      re: /config\.toml|CODEX_HOME|\bprofile\b/i,
+      re: /config\.toml|CODEX_HOME|\bprofiles?\b|thread settings|configuration overrides|--config\b|(?:^|\s|`)-c(?:\s|`|$)/i,
       why: 'A codex profile travels as CODEX_HOME, and ~/.codex/config.toml is the file that decides model, approvals and MCP for that home.',
       verify: 'npm test -- providers',
     },
@@ -342,7 +368,7 @@ const IMPACT_FLAGS = {
       id: 'visibility',
       // "Enabled fullscreen transcripts by default" (0.157.0) matched nothing
       // here, and it moved the whole pane onto the alternate screen.
-      re: /visibilit|\bTUI\b|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|\/keymap\b/i,
+      re: /visibilit|\bTUI\b|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|\/keymap\b|\/presets\b|keyboard menu|\b(?:Kitty|Sixel)\b|inline image previews?/i,
       why: 'The codex pane is read through the same pty screen model as claude; a TUI rewrite changes what Harbor sees. bin/ai pins tui.fullscreen_transcript=false so panes keep the inline transcript Harbor was proven against.',
       verify: 'npm test -- screen',
     },
@@ -357,7 +383,7 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'startup-screen',
-      re: /migration (prompt|notice)|model migration|startup (prompt|screen|dialog)|onboarding|\brecovery (choice|prompt)s?\b|\bmodal\b/i,
+      re: /migration (prompt|notice)|model migration|startup (prompt|screen|dialog)|onboarding|setup wizard|\brecovery (choice|prompt)s?\b|\bmodal\b/i,
       why: 'Harbor types into a codex pane once its screen settles. A startup screen that takes Enter eats that message: the model-migration screen also writes model = ... into config.toml. bin/ai acknowledges every migration models_cache.json lists; a new startup screen needs the same treatment.',
       verify: 'npm test -- ai-launch-argv',
     },
@@ -369,7 +395,7 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'composer',
-      re: /\bsteer(?:s|ed|ing)?\b|follow-up.*responding|\binterrupt(?:s|ed|ing)?\b|\bpast(?:e|es|ed|ing)\b|Ctrl\+V|Shift\+Insert/i,
+      re: /\bsteer(?:s|ed|ing)?\b|follow-up.*responding|\binterrupt(?:s|ed|ing)?\b|\bpast(?:e|es|ed|ing)\b|Ctrl\+V|Shift\+Insert|\/presets\b|keyboard menu|queued prompts?/i,
       why: 'Harbor sends Codex text through bracketed paste then Enter, including during a working turn. Input routing, paste and interrupt changes can alter what that send does.',
       verify: 'npm test -- session-send',
     },
@@ -638,6 +664,8 @@ function emptyState() {
  *                                        state used INSTEAD of the network so a
  *                                        drive can see the chip without one.
  * @param {Function} [options.log]
+ * @param {string}   [options.execPath]   this process's binary (process.execPath)
+ * @param {Function} [options.isFile]     sync path -> boolean, for the node.exe lookup
  */
 function createCliUpdateChecker(options = {}) {
   const env = options.env || process.env;
@@ -651,6 +679,25 @@ function createCliUpdateChecker(options = {}) {
   const mkdir = options.mkdir || fsp.mkdir;
   const readdir = options.readdir || fsp.readdir;
   const execFile = options.execFile || require('node:util').promisify(require('node:child_process').execFile);
+  const execPath = options.execPath || process.execPath;
+  const isFile = options.isFile || ((file) => { try { return require('node:fs').statSync(file).isFile(); } catch { return false; } });
+
+  // The interpreter for a JavaScript bin entry (codex.js). Under Electron it is
+  // NOT this process's own binary when a real node is on PATH (2026-10-24):
+  // Electron is a GUI program, so run as Node it has no console, and the native
+  // codex.exe that codex.js starts got a NEW, VISIBLE console window on Pat's
+  // screen at the end of every Codex install (ConsoleSentinel logged it, chain
+  // codex.exe <- electron.exe codex.js --version <- Harbor). A console node.exe
+  // started with windowsHide gets a hidden console its child inherits. Electron
+  // stays the last resort for a machine with no Node, as in bin/harbor-mcp-login.
+  const jsRunner = () => {
+    if (!/electron/i.test(path.basename(execPath))) return execPath;
+    const exe = process.platform === 'win32' ? 'node.exe' : 'node';
+    for (const dir of String(env.PATH || env.Path || '').split(path.delimiter)) {
+      if (dir && isFile(path.join(dir, exe))) return path.join(dir, exe);
+    }
+    return execPath;
+  };
 
   // Shared app state lives at ~/.harbor on win32, deliberately outside
   // %APPDATA% (the MSIX virtualization rule); same home as config.json.
@@ -798,10 +845,12 @@ function createCliUpdateChecker(options = {}) {
       const binary = path.resolve(root, entry);
       if (!binary.startsWith(root + path.sep)) throw new Error('bin entry is outside its package');
       const javascript = /\.[cm]?js$/i.test(binary);
-      const result = await execFile(javascript ? process.execPath : binary,
+      const runner = javascript ? jsRunner() : binary;
+      const asNode = javascript && runner === execPath;
+      const result = await execFile(runner,
         javascript ? [binary, '--version'] : ['--version'], {
           windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024,
-          env: { ...env, ...(javascript ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
+          env: { ...env, ...(asNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
         });
       const output = String(result?.stdout || '').trim();
       const match = id === 'claude'

@@ -159,6 +159,49 @@ function checkerFor(fixture, extra = {}) {
   });
 }
 
+test('codex notes identify presets, image protocols, setup, restored settings and queued input', () => {
+  const cases = [
+    ['Save prompts in numbered /presets slots with a keyboard menu.', 'composer'],
+    ['Save prompts in numbered /presets slots with a keyboard menu.', 'visibility'],
+    ['Inline image previews use Kitty or Sixel graphics.', 'visibility'],
+    ['The Bedrock setup wizard is now enabled by default.', 'startup-screen'],
+    ['Resuming sessions finds compressed histories and restores saved thread settings.', 'rollout'],
+    ['Resuming sessions finds compressed histories and restores saved thread settings.', 'config-toml'],
+    ['Configuration overrides are preserved when -c or --config occurs at multiple subcommand levels.', 'config-toml'],
+    ['Queued prompts wait for pending permission selections to resolve.', 'composer'],
+    ['Failed compaction no longer leaves partial summaries in conversation history.', 'rollout'],
+  ];
+  assert.deepEqual(cases.filter(([line, id]) => !tagLine('codex', line).flags.some(flag => flag.id === id)), []);
+  for (const line of ['Updated the JavaScript runtime.', 'Reduced package download size.', 'Changed a web image search ranking.']) {
+    assert.ok(!tagLine('codex', line).flags.some(flag => ['composer', 'visibility', 'startup-screen', 'rollout', 'config-toml'].includes(flag.id)), line);
+  }
+});
+
+// The same flags against the 0.164.0 notes word for word (the spec above uses
+// paraphrases, and a paraphrase proves nothing about the real wording: X3 is
+// caught by "Kitty"/"Sixel", not by "inline image previews").
+test('codex 0.164.0 notes, verbatim, carry the flags the review relied on', () => {
+  const cases = [
+    ['Save reusable prompts and slash commands in ten numbered `/presets` slots, with a keyboard menu for quick access. (#54380, #54381)', ['visibility', 'composer']],
+    ['Set model, reasoning effort, speed, and permission profiles directly with inline `/model` and `/permissions` arguments. (#54378, #54383)', ['sandbox', 'config-toml', 'models']],
+    ['Preview viewed and generated images in the fullscreen transcript on terminals supporting Kitty or Sixel graphics. (#54216)', ['visibility']],
+    ['The Amazon Bedrock setup wizard is now enabled by default, with API key entry grouped alongside other AWS sign-in methods when credentials are detected. (#56033, #56023)', ['startup-screen']],
+    ['Failed compaction no longer leaves partial summaries in conversation history, and background compaction failures fall back without panicking. (#53932, #55581)', ['rollout']],
+    ['Resuming sessions now finds compressed histories and restores saved thread settings instead of replacing them with global defaults. (#54008, #55923)', ['rollout', 'resume', 'config-toml']],
+    ['CLI configuration overrides are preserved when `-c` or `--config` appears at multiple subcommand levels. (#56022)', ['config-toml']],
+    ['Queued prompts now wait for pending permission selections to resolve before continuing. (#55682)', ['sandbox', 'composer']],
+    ['Reduced disk usage by pruning unused installations, cleaning abandoned marketplace checkouts, and bounding daemon logs. (#53827, #55149, #55689, #55690, #55856)', ['daemon']],
+  ];
+  for (const [line, want] of cases) {
+    const got = tagLine('codex', line).flags.map((flag) => flag.id);
+    for (const id of want) assert.ok(got.includes(id), `${id}: ${line}`);
+  }
+  for (const line of [
+    'Mask credentials during supported remote Bash commands and Zsh snapshot sessions, including credentials from custom providers. (#54309, #54432, #56049)',
+    'Updated the embedded JavaScript runtime with safety checks for optimized `Array.sort` operations. (#54519)',
+  ]) assert.deepEqual(tagLine('codex', line).flags.filter((flag) => flag.id !== 'reverted').map((flag) => flag.id), [], line);
+});
+
 test('codex notes flag input routing, Daybreak, persistent hints and shell notices', () => {
   const cases = [
     ['Daybreak is enabled by default for eligible accounts.', 'daybreak'],
@@ -583,6 +626,35 @@ test('agents view, its footer hint and wrapped hyperlink lines carry a flag', ()
   // Narrow on purpose: a VSCode footer pill or a subagent is not the agents view.
   assert.equal(ids('[VSCode] Fixed the footer\'s model pill and Remote Control pill waiting for the new tab\'s Claude process to start').includes('agents-view'), false);
   assert.equal(ids('Changed fork subagents (`subagent_type: "fork"`) to be on by default in the desktop app').includes('agents-view'), false);
+});
+
+// The 2026-10-24 review (claude 2.1.304 to 2.1.310) found lines with no flag
+// that change when a permission card or a dialog appears, what the startup
+// screen draws, and what the retention sweep deletes from ~/.claude. Every
+// line here is verbatim from the changelog, negatives included.
+test('permission-check, dialog, startup-warning and cleanup lines carry a flag', () => {
+  const ids = (line) => tagLine('claude', line).flags.map((f) => f.id);
+  const dialogs = [
+    'Windows: Fixed PowerShell permission checks auto-approving some `Set-Location` or `cd` commands that target the current directory and carry extra arguments; these now prompt for approval',
+    'Fixed Bash permission checks not prompting for some compound commands that change directory before running git when the `cd` is wrapped or prefixed, as they do for a plain `cd`',
+    'Fixed the Bash permission check trusting a variable set by a command whose redirect can fail to open',
+    'Changed `sed -i` to get the standard Bash prompt and run as written, not a simulated file-edit preview; like other Bash edits, it is no longer restored by `/rewind`',
+    'Improved auto mode\'s prompt before the first read outside the working directories: it now says when blocking those reads makes shell commands ask for permission',
+    'Fixed `rm -r` of a mounted drive or a folder at its top level (`/Volumes`, `/media`, WSL\'s `/mnt/c`) not getting the safety prompt that `rm -rf /Applications` gets',
+    'Fixed the Consumer Terms notice being skipped for a day or longer after a server error',
+    'Changed the `/artifacts` delete confirmation to show numbered choices: 1 or Enter keeps the artifact, 2 deletes it, and y, n and Esc still work',
+  ];
+  for (const line of dialogs) assert.ok(ids(line).includes('ask-dialog'), line);
+  assert.ok(ids('Fixed startup warnings printing as raw text above the logo: they now go to the debug log, and permission rules that restrict nothing show as warning rows under the banner').includes('screen'));
+  for (const line of [
+    'Fixed background cleanup deleting some recent files, such as pasted images, when `cleanupPeriodDays` is set to a very large value',
+    'Improved session file size in auto mode: the safety classifier\'s context is no longer stored with every request',
+  ]) assert.ok(ids(line).includes('transcript'), line);
+  // A rule-syntax line draws no prompt, and a bracketed product line is not
+  // this terminal.
+  assert.equal(ids('Fixed Bash permission rules with a mid-pattern `:*` being skipped in settings files while `--allowedTools` honored them; they now work from every source, with a startup warning on how they match').includes('ask-dialog'), false);
+  assert.equal(ids('[Cloud sessions] Changed turning on Cloud sessions or Remote Control in admin settings to ask for confirmation and list the custom roles that have that permission').includes('ask-dialog'), false);
+  assert.equal(ids('[VSCode] Improved startup time in workspaces without a Python environment by starting Claude while the Python extension loads').includes('screen'), false);
 });
 
 test('check reads installed versions off disk and latest off the network, per provider', async () => {

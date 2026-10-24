@@ -52,3 +52,52 @@ for (const provider of ['claude', 'codex']) {
     }
   }
 }
+
+// A JS bin entry (codex.js) run under Electron's own binary had no console, so
+// the native codex.exe it starts opened a NEW, VISIBLE console window at the
+// end of every Codex install (2026-10-24, ConsoleSentinel: codex.exe <-
+// electron.exe codex.js --version <- Harbor). Under Electron the probe takes a
+// real node from PATH, whose hidden console the child inherits; with no node
+// on PATH it falls back to Electron as Node.
+for (const nodeOnPath of [true, false]) {
+  test(`codex executable verification under Electron ${nodeOnPath ? 'runs a real node from PATH' : 'falls back to Electron as Node'}`, async (t) => {
+    const root = await fs.mkdtemp(path.join(realTmpDir(), 'cli-executable-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const dir = path.join(root, 'npm', 'node_modules', '@openai/codex');
+    await fs.mkdir(dir, { recursive: true });
+    const manifest = (version) => JSON.stringify({ version, bin: { codex: 'bin/codex.js' } });
+    await fs.writeFile(path.join(dir, 'package.json'), manifest('9.8.6'));
+    const nodeDir = path.join(root, 'nodebin');
+    const exe = process.platform === 'win32' ? 'node.exe' : 'node';
+    const electron = path.join(root, 'electron', process.platform === 'win32' ? 'electron.exe' : 'electron');
+    const probes = [];
+    const checker = createCliUpdateChecker({
+      homedir: () => path.join(root, 'home'),
+      env: { HARBOR_NPM_PREFIX: path.join(root, 'npm'), LOCALAPPDATA: root, PATH: [path.join(root, 'empty'), nodeDir].join(path.delimiter) },
+      stateFile: path.join(root, 'state.json'),
+      execPath: electron,
+      isFile: (file) => nodeOnPath && file === path.join(nodeDir, exe),
+      execFile: async (file, args, options) => {
+        if (args.includes('install')) {
+          await fs.writeFile(path.join(dir, 'package.json'), manifest('9.8.7'));
+          return { stdout: 'installed' };
+        }
+        probes.push({ file, args, options });
+        return { stdout: 'codex-cli 9.8.7\n' };
+      },
+    });
+    const result = await checker.install('codex', '9.8.7');
+    assert.equal(result.ok, true);
+    assert.equal(probes.length, 1);
+    const [probe] = probes;
+    assert.deepEqual(probe.args, [path.join(dir, 'bin/codex.js'), '--version']);
+    assert.equal(probe.options.windowsHide, true);
+    if (nodeOnPath) {
+      assert.equal(probe.file, path.join(nodeDir, exe));
+      assert.equal(probe.options.env.ELECTRON_RUN_AS_NODE, undefined);
+    } else {
+      assert.equal(probe.file, electron);
+      assert.equal(probe.options.env.ELECTRON_RUN_AS_NODE, '1');
+    }
+  });
+}

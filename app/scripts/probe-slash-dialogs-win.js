@@ -149,7 +149,9 @@ function heading(screen) {
       await client.request('input', { id: paneId, text: `/${name}` });
       // The highlighted entry: "❯ /mcp    Manage MCP servers" (a no-break space
       // after the pointer; the prompt's own "❯ /mcp" has no description).
-      const menuOf = (text) => text.split('\n').map((l) => /^\s*❯[\s\u00a0]+(\/[\w:.-]+)[\s\u00a0]{2,}\S/u.exec(l)?.[1]).filter(Boolean);
+      // 2.1.310 draws a command's alias beside it, "❯ /plugin (plugins)   Manage
+      // Claude Code plugins", so an alias in parentheses may sit between them.
+      const menuOf = (text) => text.split('\n').map((l) => /^\s*❯[\s\u00a0]+(\/[\w:.-]+)(?:[\s\u00a0]\([\w:., -]+\))?[\s\u00a0]{2,}\S/u.exec(l)?.[1]).filter(Boolean);
       let typed = '';
       let suggestions = [];
       for (let read = 0, prev = null; read < 8; read += 1) {
