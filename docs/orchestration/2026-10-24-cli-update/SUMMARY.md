@@ -13,7 +13,7 @@ None of the three releases breaks a Harbor contract. Harbor changes:
 ## What was proven
 
 - Claude 2.1.310 (scratch install): same 19 model ids and 102 slash commands; no screen literal Harbor reads left the binary; the AskUserQuestion hook lane (bypass and default), the Bash permission card, the prompt gate, resume then send, the answer sheet and eight slash dialogs pass on the real CLI; a headless worker with the orchestration fleet's exact flags succeeds; the Bash tool still halves backslash runs.
-- Codex 0.164.0 (Astra, re-checked): unchanged catalogs and rollout record kinds; the pane proof draws the v0.164.0 banner under every pin with `--strict-config`; Harbor renders only message and tool-call records, so the new on-by-default `incremental_tools` records never show; every Harbor launch keeps its `-c` pins at one level. Behavior change: a Harbor resume carries no model pins, so 0.164.0 restores the thread's own model and effort.
+- Codex 0.164.0 (Astra, re-checked): unchanged catalogs and rollout record kinds; the pane proof draws the v0.164.0 banner under every pin with `--strict-config`; Harbor renders only message and tool-call records, so the new on-by-default `incremental_tools` records never show; every Harbor launch keeps its `-c` pins at one level. A Harbor resume carries no model pins and opens the thread on its own saved model and effort; measured after the install, 0.163.0 does exactly the same (one thread saved as gpt-6-astra high, seat default gpt-6.1-sol), so X8 changes nothing Harbor relies on. Both builds append a `thread_settings_applied` event to the rollout when a resume opens, which Harbor's parser ignores.
 - Cursor 2026.10.22: no flag, sign-in, trust or launch change; pane proof passes; package launchers byte-identical to the installed ones.
 - Unit filters: 878 passed, 0 failed, 6 skipped (known unported real-pty family and a missing large fixture).
 
@@ -21,6 +21,7 @@ None of the three releases breaks a Harbor contract. Harbor changes:
 
 - Cursor's native updater (2026.10.16 forward) starts detached cmd.exe waiters whose children open visible consoles; a review helper's rehearsals flashed 58 of them. Never run it outside an invisible desktop; land a reviewed build by extracting the hashed package into a staged sibling folder, hashing it, and renaming it into place.
 - A chip-flag spec must use verbatim note lines: a paraphrase proves nothing about the real wording.
+- A "behavior change" read from a release note is measured on the old build too before it is written down. This record first called X8 a change to Harbor's resumes from the note's wording; running the old build showed the same behavior.
 
 ## Follow-ups
 
