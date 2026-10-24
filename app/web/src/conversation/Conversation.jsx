@@ -80,7 +80,13 @@ const ActionBlock = memo(function ActionBlock({ block }) {
     <div className={`conv-act status-${block.status}`}>
       <div className="conv-act-row">
         <span className={`conv-act-k ${block.status}`} aria-hidden="true" />
-        <span className="conv-act-verb">{block.verb}</span>
+        {/* A described command reads as Claude's own sentence, the command
+            beside it (desktop twin: renderer/stage/Conversation.jsx). */}
+        {block.said ? (
+          <span className="conv-act-said">{block.status === 'run' ? block.saying || block.said : block.said}</span>
+        ) : (
+          <span className="conv-act-verb">{block.verb}</span>
+        )}
         {block.chip ? (
           <span className="conv-act-chip" title={block.chipTitle || undefined}>{block.chip}</span>
         ) : null}

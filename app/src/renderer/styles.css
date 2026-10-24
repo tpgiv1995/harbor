@@ -2616,6 +2616,44 @@ button { font-family: inherit; }
   font-size: 12px;
 }
 
+/* A described command: Claude's sentence leads and the command follows it.
+   When there is no room, the command wraps under the sentence (like the
+   terminal's own "$ command" line) rather than shrinking to a sliver. */
+.conv-act-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 5px;
+}
+
+.conv-act-said {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 12.5px;
+}
+
+/* The command keeps the sentence's line while at least 140px is left for it
+   (ellipsized), and only wraps below when less is. */
+.conv-act-main .conv-act-chip {
+  flex: 1 1 140px;
+  max-width: max-content;
+  color: var(--fnt);
+}
+
+/* The status mark stays beside the sentence when the command wraps below it. */
+.conv-act-row:has(> .conv-act-main) > .conv-act-k {
+  align-self: flex-start;
+  margin-top: 5px;
+}
+
 .conv-act-chip {
   flex: 0 1 auto;
   min-width: 0;

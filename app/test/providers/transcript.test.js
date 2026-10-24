@@ -105,7 +105,9 @@ test('codex tool input that is not an exec snippet is unchanged', () => {
     payload: { type: 'custom_tool_call', call_id: 'call-3', name: 'exec', input: 'not json and no tools call' },
   });
   assert.equal(p.blocks[0].chip, "awk '{print $1}' access.log");
-  assert.equal(p.blocks[1].verb, 'Wait');
+  // A plain-JSON call keeps its JSON input; `wait` is labeled since 2026-10-24.
+  assert.equal(p.blocks[1].verb, 'Waited');
+  assert.equal(p.blocks[1].chip, 'for command output');
   assert.equal(p.blocks[2].verb, 'Exec');
   assert.equal(p.blocks[2].chip, 'not json and no tools call');
 });
@@ -815,6 +817,62 @@ test('a PowerShell call is a command row, like Bash', () => {
   const p = new TranscriptParser();
   p.applyLine(assistantLine([{ type: 'tool_use', id: 'ps1', name: 'PowerShell', input: { command: 'Get-Process node' } }]));
   assert.equal(p.workingState(Date.now(), Date.now(), true).text, 'Running Get-Process node…');
+});
+
+test('a described command shows its description, past tense when done and -ing while running', () => {
+  const p = new TranscriptParser();
+  p.applyLine(assistantLine([{ type: 'tool_use', id: 'd1', name: 'Bash', input: { command: 'ls /c/tools/py-spy; python -m pip install py-spy', description: 'Install py-spy into C:\\tools for stack dumps' } }]));
+  const row = p.blocks[0];
+  assert.equal(row.verb, 'Ran');
+  assert.equal(row.said, 'Installed py-spy into C:\\tools for stack dumps');
+  assert.equal(row.chip, 'ls /c/tools/py-spy; python -m pip install py-spy');
+  assert.equal(p.workingState(Date.now(), Date.now(), true).text, 'Installing py-spy into C:\\tools for stack dumps…');
+  const plain = actionForToolUse({ name: 'PowerShell', input: { command: 'Get-Process', description: 'Final process listing' } });
+  assert.equal(plain.said, 'Final process listing');
+  assert.equal(actionForToolUse({ name: 'Bash', input: { command: 'ls' } }).said, undefined);
+});
+
+// Each pair is a tool the CLIs really call (2026-10-24 survey) that Harbor drew
+// as an unknown tool, counted as "ran N tools" instead of what it is.
+test('tools that are a command, edit, read or search are labeled as one', () => {
+  const monitor = actionForToolUse({ name: 'Monitor', input: { command: 'tail -f log', description: 'Watch the test log' } });
+  assert.deepEqual([monitor.verb, monitor.said], ['Ran', 'Watched the test log']);
+  assert.equal(actionForToolUse({ name: 'TaskCreate', input: { subject: 'Verify coverage', description: 'x', activeForm: 'Verifying' } }).verb, 'Updated todos');
+  assert.equal(actionForToolUse({ name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } }).chip, '#1 completed');
+  const message = actionForToolUse({ name: 'SendMessage', input: { to: 'demo-94', summary: 'Tell it which test deadlocks', message: 'm' } });
+  assert.deepEqual([message.verb, message.chip, message.chipTitle], ['Messaged', 'demo-94', 'Tell it which test deadlocks']);
+  assert.equal(actionForToolUse({ name: 'ToolSearch', input: { query: 'select:SendMessage' } }).chip, 'SendMessage');
+  assert.equal(actionForToolUse({ name: 'TaskStop', input: { task_id: 'bqtvyah0a' } }).verb, 'Stopped');
+  assert.equal(actionForToolUse({ name: 'ScheduleWakeup', input: { delaySeconds: 1200, reason: 'r' } }).chip, 'in 20 min');
+  assert.equal(actionForToolUse({ name: 'StrReplace', input: { path: 'C:\\w\\src\\nav.css', old_string: 'a', new_string: 'b\nc' } }).verb, 'Edited');
+  assert.equal(actionForToolUse({ name: 'ReadFile', input: { path: 'C:\\w\\src\\math.js' } }).chip, 'math.js');
+  assert.equal(actionForToolUse({ name: 'rg', input: { pattern: 'sumAll', path: 'C:\\w' } }).verb, 'Searched');
+  assert.equal(actionForToolUse({ name: 'CallDynamicTool', input: { toolName: 'ReadFile', arguments: { path: '/w/a.md' } } }).verb, 'Read');
+  const patch = actionForToolUse({ name: 'ApplyPatch', input: '*** Begin Patch\n*** Update File: C:\\w\\src\\math.js\n@@\n-old\n+new\n+more\n*** End Patch' });
+  assert.deepEqual([patch.verb, patch.chip, patch.pill.text], ['Edited', 'math.js', '+2 −1']);
+});
+
+test('a Windows path in a file action shows just the file name', () => {
+  assert.equal(actionForToolUse({ name: 'Read', input: { file_path: 'C:\\dev\\harbor\\app\\src\\main\\providers\\transcript.js' } }).chip, 'transcript.js');
+  assert.equal(actionForToolUse({ name: 'Edit', input: { file_path: 'C:\\dev\\x\\styles.css', old_string: 'a', new_string: 'b' } }).chip, 'styles.css');
+  assert.equal(actionForToolUse({ name: 'Read', input: { file_path: '/w/src/nav.css' } }).chip, 'nav.css');
+});
+
+// Real cells from the codex store (2026-10-24): JavaScript with bare keys, a
+// patch as a string argument, a poll before the real call, a built-up path.
+test('codex exec cells written as JavaScript name the command, patch, or image', () => {
+  const p = new TranscriptParser('codex');
+  const cell = (id, input) => p.applyLine({ timestamp: TS, type: 'response_item', payload: { type: 'custom_tool_call', call_id: id, name: 'exec', input } });
+  cell('c1', 'text(await tools.write_stdin({session_id:12071,chars:"",yield_time_ms:1000}));\ntext(await tools.exec_command({cmd:"Get-Content C:\\\\Users\\\\x\\\\SKILL.md","max_output_tokens":1400}));\n');
+  cell('c2', 'text(await tools.apply_patch("*** Begin Patch\\n*** Add File: C:/dev/x/capture.mjs\\n+import fs from \'node:fs\';\\n*** End Patch"));');
+  cell('c3', "for(const n of ['a','b'])image((await tools.view_image({path:'C:/dev/x/screens/'+n+'.png'})).image_url);");
+  cell('c4', 'text(await tools.write_stdin({session_id:84806,chars:"\\u0003"}));');
+  assert.deepEqual(p.blocks.map((b) => [b.verb, b.chip]), [
+    ['Ran', 'Get-Content C:\\Users\\x\\SKILL.md'],
+    ['Wrote', 'capture.mjs'],
+    ['Viewed', '*.png'],
+    ['Typed', 'Ctrl+C'],
+  ]);
 });
 
 test('a long running command ends in one ellipsis, not two', () => {

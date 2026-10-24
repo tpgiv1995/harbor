@@ -102,10 +102,27 @@ const ActionBlock = memo(function ActionBlock({ block }) {
     <div className={`conv-act status-${block.status}`}>
       <div className="conv-act-row">
         <span className={`conv-act-k ${block.status}`} aria-hidden="true" />
-        <span className="conv-act-verb">{block.verb}</span>
-        {block.chip ? (
-          <span className="conv-act-chip" title={block.chipTitle || undefined}>{block.chip}</span>
-        ) : null}
+        {/* A described command reads as Claude's own sentence ("Installed
+            py-spy into C:\tools", "Installing ..." while it runs), the command
+            after it, dropping to its own line when the window is narrow; see
+            commandAction in transcript.js. */}
+        {block.said ? (
+          <span className="conv-act-main">
+            <span className="conv-act-said" title={block.said}>
+              {block.status === 'run' ? block.saying || block.said : block.said}
+            </span>
+            {block.chip ? (
+              <span className="conv-act-chip" title={block.chipTitle || undefined}>{block.chip}</span>
+            ) : null}
+          </span>
+        ) : (
+          <>
+            <span className="conv-act-verb">{block.verb}</span>
+            {block.chip ? (
+              <span className="conv-act-chip" title={block.chipTitle || undefined}>{block.chip}</span>
+            ) : null}
+          </>
+        )}
         {block.pill ? (
           <span className={`conv-act-pill tone-${block.pill.tone}`}>{block.pill.text}</span>
         ) : block.cv ? (

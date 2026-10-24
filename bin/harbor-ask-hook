@@ -47,7 +47,13 @@ async function main() {
   let input;
   try { input = JSON.parse(raw); } catch { return stepAside('unreadable stdin'); }
   const prompt = proto.promptForInput(input);
-  if (!prompt) return stepAside(`unsupported prompt (${input.hook_event_name || input.tool_name})`);
+  // Name the tool and the suggestion shape (never the command), so the next
+  // unsupported card can be measured from the log: 68 PermissionRequest step-
+  // asides by 2026-10-24 did not say which tool they were for.
+  if (!prompt) {
+    const shape = (input.permission_suggestions || []).map((s) => `${s?.type || '?'}${s?.rules ? `:${s.rules.map((r) => r?.toolName).join('+')}` : ''}${s?.destination ? `@${s.destination}` : ''}`).join(',');
+    return stepAside(`unsupported prompt (${[input.hook_event_name, input.tool_name].filter(Boolean).join(' ')}${shape ? `; suggestions ${shape}` : ''})`);
+  }
   const { kind } = prompt;
   const heartbeatFresh = () => proto.heartbeatFresh(dir, now(), proto.HEARTBEAT_STALE_MS, kind);
   if (!heartbeatFresh()) return stepAside('no fresh Harbor heartbeat for this lane');

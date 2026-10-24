@@ -351,6 +351,23 @@
   color: var(--sub);
 }
 
+/* A described command: Claude's sentence leads; on a phone there is no room
+   for the command beside it, so the sentence takes the row, up to two lines. */
+.conv-act-said {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.35;
+  color: var(--tx);
+}
+
+.conv-act-said + .conv-act-chip {
+  display: none;
+}
+
 .conv-act-chip {
   overflow: hidden;
   text-overflow: ellipsis;

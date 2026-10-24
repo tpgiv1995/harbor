@@ -18,6 +18,7 @@ const path = require('node:path');
 const readline = require('node:readline');
 const { readSessionBeacon, readOwnerProcessAlive } = require('./session-owner.js');
 const { processAliveFromEvidence } = require('../../shared/session-run-state.cjs');
+const { pastTense, progressive } = require('./plain-english.js');
 
 
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
@@ -195,9 +196,11 @@ function countLines(text) {
   return s.split('\n').length;
 }
 
+// Both separators: on Windows Claude, codex and cursor all write backslash
+// paths, and splitting on '/' alone put the whole C:\dev\... path in the chip.
 function basename(p) {
-  const s = String(p || '');
-  return s.includes('/') ? s.slice(s.lastIndexOf('/') + 1) : s;
+  const s = String(p || '').replace(/[\\/]+$/, '');
+  return s.slice(Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')) + 1);
 }
 
 // Cursor's munge collapses every RUN of non-alphanumerics to one dash
@@ -365,9 +368,18 @@ async function readTranscriptLastSignal(transcriptPath, provider = 'claude') {
 // One tool_use -> one action row: verb + mono chip + optional right-hand pill,
 // in the design's vocabulary. The chip shows the thing acted on; the full value
 // rides in chipTitle for hover.
+//
+// Every name below was measured in the real stores (2026-10-24 survey of 45
+// days of Claude transcripts, 20 days of codex rollouts and cursor agent
+// transcripts). A tool missing here still renders, as its own name, but it is
+// counted as "ran N tools" and never as the command, edit or read it is: on
+// Windows every PowerShell call read "ran 1 tool" while the CLI's own screen
+// called it a shell command. When a CLI adds or renames a tool, add it here.
 function actionForToolUse(block) {
   const name = String(block.name || 'Tool');
-  const input = block.input || {};
+  // cursor's ApplyPatch passes the patch itself as its whole input.
+  const raw = block.input;
+  const input = raw && typeof raw === 'object' ? raw : {};
   // `path` and `contents` are cursor's spelling of the same two arguments
   // (Read{path}, Write{path,contents}); without them a cursor file action drew
   // a verb with no filename and "0 lines" beside it.
@@ -379,7 +391,8 @@ function actionForToolUse(block) {
     ...extra,
   });
   switch (name) {
-    case 'Edit': {
+    case 'Edit':
+    case 'StrReplace': {
       const added = countLines(input.new_string);
       const removed = countLines(input.old_string);
       return mk('Edited', basename(file), {
@@ -393,42 +406,176 @@ function actionForToolUse(block) {
       });
     case 'NotebookEdit':
       return mk('Edited', basename(file));
+    case 'apply_patch':
+    case 'ApplyPatch':
+      return patchAction(mk, typeof raw === 'string' ? raw : (input.input ?? input.patch ?? input.command));
     case 'Read':
+    case 'ReadFile':
       return mk('Read', basename(file), {
         cv: input.pages ? `p. ${input.pages}` : (input.offset ? `from :${input.offset}` : null),
       });
+    case 'view_image':
+      return mk('Viewed', basename(file));
+    case 'Monitor':
+      if (typeof input.command !== 'string') break;
+      return commandAction(mk, input);
     case 'Bash':
+    case 'bash':
     case 'PowerShell':
     case 'Shell':
     case 'exec_command':
-      return mk('Ran', input.command, { cv: null });
+      return commandAction(mk, input);
     case 'Grep':
+    case 'rg':
       return mk('Searched', input.pattern, { cv: input.path ? basename(input.path) : null });
     case 'Glob':
       return mk('Globbed', input.pattern);
     case 'Task':
     case 'Agent':
       return mk('Delegated', input.description || input.subagent_type || 'subagent');
+    case 'Workflow':
+      return mk('Delegated', input.description || /\bname:\s*['"`]([^'"`]+)/.exec(input.script || '')?.[1] || 'workflow');
+    case 'spawn_agent':
+    case 'followup_task':
+      return mk('Delegated', input.task_name || input.target || 'agent');
     case 'TodoWrite':
       return mk('Updated todos', null);
+    // The CLI's todo list moved from TodoWrite to these (2026-10).
+    case 'TaskCreate':
+      return mk('Updated todos', input.subject || null);
+    case 'TaskUpdate':
+      return mk('Updated todos', [input.taskId ? `#${input.taskId}` : null, input.status].filter(Boolean).join(' ') || null);
+    case 'TaskList':
+    case 'TaskGet':
+      return mk('Checked todos', null);
+    case 'TaskStop':
+    case 'KillShell':
+      return mk('Stopped', input.task_id || input.shell_id ? `background task ${input.task_id || input.shell_id}` : 'background task');
+    case 'TaskOutput':
+    case 'BashOutput':
+      return mk('Checked output', input.task_id || input.bash_id || null);
+    case 'AwaitShell':
+    case 'wait':
+    case 'wait_agent':
+      return mk('Waited', name === 'wait_agent' ? 'for agent' : 'for command output');
+    case 'sleep':
+      return mk('Waited', Number.isFinite(Number(input.duration_ms)) ? `${Math.round(Number(input.duration_ms) / 1000)}s` : null);
+    case 'write_stdin':
+      return input.chars ? mk('Typed', typedKeys(String(input.chars))) : mk('Waited', 'for command output');
+    case 'SendMessage':
+    case 'send_message':
+      // codex encrypts its agent messages, so only the recipient is shown.
+      return mk('Messaged', input.to || input.recipient || input.target || null, input.summary ? { chipTitle: clip(input.summary, 400) } : {});
+    case 'ListAgents':
+    case 'list_agents':
+      return mk('Listed agents', null);
+    case 'ToolSearch':
+    case 'tool_search_tool':
+      return mk('Loaded tools', input.query ? String(input.query).replace(/^select:/, '') : null);
+    case 'ScheduleWakeup':
+      if (input.stop) return mk('Stopped loop', null);
+      return mk('Scheduled wakeup', Number.isFinite(Number(input.delaySeconds)) ? `in ${Math.max(1, Math.round(Number(input.delaySeconds) / 60))} min` : null,
+        input.reason ? { chipTitle: clip(input.reason, 400) } : {});
+    case 'CronCreate':
+      return mk('Scheduled', input.cron || null);
+    case 'CronDelete':
+      return mk('Unscheduled', input.id || null);
+    case 'CronList':
+      return mk('Listed schedules', null);
+    case 'SendUserFile': {
+      const files = Array.isArray(input.files) ? input.files : [];
+      return mk('Sent file', files.length ? `${basename(files[0])}${files.length > 1 ? ` +${files.length - 1} more` : ''}` : null);
+    }
+    case 'EnterWorktree':
+      return mk('Entered worktree', basename(input.path || input.name || '') || null);
+    case 'ExitWorktree':
+      return mk('Left worktree', null);
+    case 'ReportFindings':
+      return mk('Reported findings', Array.isArray(input.findings) ? `${input.findings.length} found` : null);
+    case 'SendFeedback':
+      return mk('Drafted feedback', input.title || null);
     case 'WebFetch':
       return mk('Fetched', hostOf(input.url));
     case 'WebSearch':
       return mk('Searched web', input.query);
+    case 'web__run':
+    case 'run': {
+      const query = Array.isArray(input.search_query) ? input.search_query[0]?.q : null;
+      if (query) return mk('Searched web', query);
+      const open = Array.isArray(input.open) ? input.open[0]?.ref_id : null;
+      if (open) return mk('Fetched', hostOf(open));
+      break;
+    }
+    case 'clock__curr_time':
+      return mk('Checked the time', null);
     case 'Skill':
       return mk('Skill', input.skill || input.command);
     case 'AskUserQuestion':
       return mk('Asked', firstQuestion(input));
+    case 'request_user_input_async':
+      return mk('Asked', clip(input.questions?.[0]?.question || input.questions?.[0]?.title || '', 80) || null);
     case 'ExitPlanMode':
       return mk('Proposed plan', null);
     case 'EnterPlanMode':
       return mk('Entered plan mode', null);
-    default: {
-      const mcp = name.match(/^mcp__(.+?)__(.+)$/);
-      if (mcp) return mk(prettyToolName(mcp[2]), null, { cv: mcp[1].replace(/^claude_ai_/, '') });
-      return mk(prettyToolName(name), primaryInputValue(input));
+    case 'CallDynamicTool':
+      // cursor's wrapper around a tool it loaded on demand.
+      if (input.toolName) return actionForToolUse({ name: input.toolName, input: input.arguments || {} });
+      break;
+    default:
+      break;
+  }
+  const mcp = name.match(/^mcp__(.+?)__(.+)$/);
+  if (mcp) return mk(prettyToolName(mcp[2]), null, { cv: mcp[1].replace(/^claude_ai_/, '') });
+  return mk(prettyToolName(name), primaryInputValue(input));
+}
+
+// A shell command row. Claude writes a plain-English description on almost
+// every call; the CLI shows it while the command runs, so Harbor does too:
+// `said` is the finished row ("Installed py-spy into C:\tools"), `saying` the
+// working line ("Installing py-spy into C:\tools…"). The command stays as the
+// chip. A description that does not open with a known verb is shown as written.
+function commandAction(mk, input) {
+  const described = typeof input.description === 'string' ? input.description.replace(/\s+/g, ' ').trim() : '';
+  const extra = { cv: null };
+  if (described) {
+    extra.said = clip(pastTense(described) || described, 200);
+    extra.saying = clip(progressive(described) || described, 200);
+  }
+  return mk('Ran', input.command, extra);
+}
+
+// codex's apply_patch and cursor's ApplyPatch carry one patch in the
+// `*** Begin Patch` format; the row names the file(s) and counts the lines.
+function patchAction(mk, patch) {
+  const files = [];
+  let added = 0;
+  let removed = 0;
+  let created = 0;
+  for (const line of String(patch || '').split('\n')) {
+    const header = /^\*\*\* (Update|Add|Delete) File: (.+?)\s*$/.exec(line);
+    if (header) {
+      files.push(header[2]);
+      if (header[1] === 'Add') created += 1;
+    } else if (!line.startsWith('***')) {
+      if (line.startsWith('+')) added += 1;
+      else if (line.startsWith('-')) removed += 1;
     }
   }
+  if (!files.length) return mk('Edited', null);
+  const chip = `${basename(files[0])}${files.length > 1 ? ` +${files.length - 1} more` : ''}`;
+  return mk(created === files.length ? 'Wrote' : 'Edited', chip, {
+    chipTitle: clip(files.join('\n'), 400),
+    pill: { text: `+${added} −${removed}`, tone: 'ok' },
+  });
+}
+
+// What codex typed into a running command: a lone control key reads as the key
+// ("Ctrl+C"), anything else as the quoted text.
+function typedKeys(chars) {
+  const code = chars.length === 1 ? chars.charCodeAt(0) : -1;
+  if (code >= 1 && code <= 26) return `Ctrl+${String.fromCharCode(64 + code)}`;
+  return JSON.stringify(chars);
 }
 
 function prettyToolName(name) {
@@ -454,37 +601,159 @@ function firstQuestion(input) {
 // the shape of nearly every action row a codex session has. Pulling the inner
 // call back out gives the row a codex user would recognise (`Ran  npm test`),
 // and anything that does not match falls through to the JSON path unchanged.
-const CODEX_TOOL_SNIPPET_RE = /\btools\.([A-Za-z_]\w*)\s*\(\s*\{/;
+//
+// Codex now writes the snippet as ordinary JavaScript, not JSON inside a call:
+// bare keys (`{cmd:"ls"}`), a string argument (`tools.apply_patch("*** Begin
+// Patch...")`), and several calls in one cell (poll the last command, then run
+// the next). JSON.parse refused all of it, so 21,028 of the 24,289 codex rows
+// in the week to 2026-10-24 read `Exec  text(await tools.exec_command({cmd:...`
+// again. readJsLiteral reads exactly the literal syntax codex writes, and the
+// row names the call that does the work rather than the poll before it.
+const CODEX_CALL_RE = /\btools\.([A-Za-z_]\w*)\s*\(/g;
+const CODEX_POLL = (call) => call.name === 'wait' || call.name === 'sleep' || call.name === 'clock__curr_time'
+  || (call.name === 'write_stdin' && !call.input.chars);
 
 function codexToolSnippet(source) {
   const text = String(source);
-  const match = CODEX_TOOL_SNIPPET_RE.exec(text);
-  if (!match) return null;
-  const open = text.indexOf('{', match.index);
-  // Balanced and string-aware, because a brace inside a quoted command must not
-  // close the object early: `{"cmd":"awk '{print $1}' log"}` is an ordinary line.
-  let depth = 0;
-  let quote = null;
-  let end = -1;
-  for (let i = open; i < text.length; i += 1) {
-    const ch = text[i];
-    if (quote) {
-      if (ch === '\\') { i += 1; continue; }
-      if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { quote = ch; continue; }
-    if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) { end = i; break; }
-    }
+  const calls = [];
+  for (const match of text.matchAll(CODEX_CALL_RE)) {
+    const read = readJsLiteral(text, match.index + match[0].length);
+    if (!read) continue;
+    const arg = read.value;
+    if (arg && typeof arg === 'object' && !Array.isArray(arg)) calls.push({ name: match[1], input: arg });
+    else if (typeof arg === 'string') calls.push({ name: match[1], input: { input: arg } });
   }
-  if (end < 0) return null;
-  let input;
-  try { input = JSON.parse(text.slice(open, end + 1)); } catch { return null; }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
-  return { name: match[1], input };
+  if (!calls.length) return null;
+  return calls.find((call) => !CODEX_POLL(call)) || calls[0];
+}
+
+// One JavaScript literal at text[start]: an object (bare or quoted keys), an
+// array, a string in any of the three quotes, a number, or true/false/null.
+// Anything else (a variable, an expression) is kept as its source text, so a
+// path built as `...${size}.png` still names its file. Null when unreadable.
+function readJsLiteral(text, start) {
+  let i = start;
+  const skip = () => { while (i < text.length && /\s/.test(text[i])) i += 1; };
+  const fail = () => { throw new Error('not a literal'); };
+  // A part that is not literal (`${size}`, `+ n +`) reads as "*", so a loop
+  // over screenshots still names its files: "Viewed *.png".
+  const string = () => {
+    const quote = text[i];
+    i += 1;
+    let out = '';
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '\\') {
+        const next = text[i + 1];
+        const hex = next === 'u' ? /^u(?:\{([0-9a-fA-F]+)\}|([0-9a-fA-F]{4}))/.exec(text.slice(i + 1, i + 12))
+          : next === 'x' ? /^x([0-9a-fA-F]{2})/.exec(text.slice(i + 1, i + 4)) : null;
+        if (hex) {
+          out += String.fromCodePoint(parseInt(hex[1] || hex[2], 16));
+          i += 1 + hex[0].length;
+        } else {
+          out += ({ n: '\n', t: '\t', r: '\r', 0: '\0' })[next] ?? next ?? '';
+          i += 2;
+        }
+      } else if (ch === quote) {
+        i += 1;
+        return out;
+      } else if (quote === '`' && ch === '$' && text[i + 1] === '{') {
+        const close = text.indexOf('}', i);
+        if (close < 0) return fail();
+        out += '*';
+        i = close + 1;
+      } else {
+        out += ch;
+        i += 1;
+      }
+    }
+    return fail();
+  };
+  const joined = () => {
+    let out = string();
+    for (;;) {
+      const from = i;
+      skip();
+      if (text[i] !== '+') { i = from; return out; }
+      i += 1;
+      skip();
+      if (text[i] === '"' || text[i] === "'" || text[i] === '`') out += string();
+      else {
+        const id = /^[A-Za-z_$][\w$.]*/.exec(text.slice(i, i + 200));
+        if (!id) return fail();
+        out += '*';
+        i += id[0].length;
+      }
+    }
+  };
+  const bare = () => {
+    const from = i;
+    let depth = 0;
+    let quote = null;
+    while (i < text.length) {
+      const ch = text[i];
+      if (quote) {
+        if (ch === '\\') i += 1;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'" || ch === '`') quote = ch;
+      else if ('([{'.includes(ch)) depth += 1;
+      else if (')]}'.includes(ch)) { if (depth === 0) break; depth -= 1; }
+      else if (ch === ',' && depth === 0) break;
+      i += 1;
+    }
+    const raw = text.slice(from, i).trim();
+    if (!raw) return fail();
+    if (/^-?\d+(?:\.\d+)?$/.test(raw)) return Number(raw);
+    if (raw === 'true' || raw === 'false') return raw === 'true';
+    if (raw === 'null' || raw === 'undefined') return null;
+    return raw;
+  };
+  const value = () => {
+    skip();
+    const ch = text[i];
+    if (ch === '{') {
+      i += 1;
+      const object = {};
+      for (;;) {
+        skip();
+        if (text[i] === '}') { i += 1; return object; }
+        let key;
+        if (text[i] === '"' || text[i] === "'") key = string();
+        else {
+          const id = /^[A-Za-z_$][\w$]*/.exec(text.slice(i, i + 200));
+          if (!id) return fail();
+          key = id[0];
+          i += key.length;
+        }
+        skip();
+        if (text[i] === ':') { i += 1; object[key] = value(); }
+        else object[key] = key; // shorthand {path}
+        skip();
+        if (text[i] === ',') i += 1;
+        else if (text[i] !== '}') return fail();
+      }
+    }
+    if (ch === '[') {
+      i += 1;
+      const array = [];
+      for (;;) {
+        skip();
+        if (text[i] === ']') { i += 1; return array; }
+        array.push(value());
+        skip();
+        if (text[i] === ',') i += 1;
+        else if (text[i] !== ']') return fail();
+      }
+    }
+    if (ch === '"' || ch === "'" || ch === '`') return joined();
+    return bare();
+  };
+  try {
+    const result = value();
+    return { value: result, end: i };
+  } catch {
+    return null;
+  }
 }
 
 function primaryInputValue(input) {
@@ -608,6 +877,28 @@ const PRESENT_TENSE = {
   'Updated todos': 'Updating todos',
   Asked: 'Asking',
   Skill: 'Running skill',
+  Viewed: 'Viewing',
+  'Checked todos': 'Checking todos',
+  Stopped: 'Stopping',
+  'Checked output': 'Checking output',
+  Waited: 'Waiting',
+  Typed: 'Typing',
+  Messaged: 'Messaging',
+  'Listed agents': 'Listing agents',
+  'Loaded tools': 'Loading tools',
+  'Stopped loop': 'Stopping loop',
+  'Scheduled wakeup': 'Scheduling wakeup',
+  Scheduled: 'Scheduling',
+  Unscheduled: 'Unscheduling',
+  'Listed schedules': 'Listing schedules',
+  'Sent file': 'Sending file',
+  'Entered worktree': 'Entering worktree',
+  'Left worktree': 'Leaving worktree',
+  'Reported findings': 'Reporting findings',
+  'Drafted feedback': 'Drafting feedback',
+  'Checked the time': 'Checking the time',
+  'Proposed plan': 'Proposing plan',
+  'Entered plan mode': 'Entering plan mode',
 };
 
 class TranscriptParser {
@@ -1063,8 +1354,10 @@ class TranscriptParser {
     if (this.header.lastSignal === 'tool-pending') {
       const pending = [...this.pendingTools.values()].pop();
       if (!pending) return { working: true, text: 'Working…' };
+      // A described command reads the way the CLI's own screen says it
+      // ("Installing py-spy into C:\tools…"); anything else is verb + chip.
       const doing = PRESENT_TENSE[pending.verb] || `Running ${pending.verb.toLowerCase()}`;
-      const what = pending.chip ? `${doing} ${pending.chip}` : doing;
+      const what = pending.saying || (pending.chip ? `${doing} ${pending.chip}` : doing);
       // A long command's chip is already clipped with its own "…"; adding
       // another drew "2>/dev/n……" in the header (2026-10-24).
       return { working: true, text: clip(what.endsWith('…') ? what : `${what}…`, 90) };
