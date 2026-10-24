@@ -804,6 +804,27 @@ test('action mapping covers the everyday tools', () => {
   assert.equal(actionForToolUse({ name: 'TodoWrite', input: {} }).verb, 'Updated todos');
 });
 
+// On Windows the PowerShell tool is a shell command exactly like Bash, and the
+// CLI's own screen counts both as "shell commands". Unmapped, it fell to the
+// generic tool row, so a turn with one of each read "Ran 1 command, ran 1 tool"
+// (Pat, 2026-10-24, comparing a window with its >_ view).
+test('a PowerShell call is a command row, like Bash', () => {
+  const ps = actionForToolUse({ name: 'PowerShell', input: { command: 'Get-Process node', description: 'List node' } });
+  assert.equal(ps.verb, 'Ran');
+  assert.equal(ps.chip, 'Get-Process node');
+  const p = new TranscriptParser();
+  p.applyLine(assistantLine([{ type: 'tool_use', id: 'ps1', name: 'PowerShell', input: { command: 'Get-Process node' } }]));
+  assert.equal(p.workingState(Date.now(), Date.now(), true).text, 'Running Get-Process node…');
+});
+
+test('a long running command ends in one ellipsis, not two', () => {
+  const p = new TranscriptParser();
+  const command = `ls /c/tools/py-spy 2>/dev/null; python -m pip --version 2>/dev/null; mkdir -p /c/tools/py-spy`;
+  p.applyLine(assistantLine([{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command } }]));
+  const text = p.workingState(Date.now(), Date.now(), true).text;
+  assert.equal(text, `Running ${command.slice(0, 64)}…`);
+});
+
 test('userTextFor strips reminders but keeps the human text around them', () => {
   const mixed = userTextFor('do it\n<system-reminder>noise</system-reminder>');
   assert.equal(mixed.text, 'do it');

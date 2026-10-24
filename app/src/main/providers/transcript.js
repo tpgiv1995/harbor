@@ -398,6 +398,7 @@ function actionForToolUse(block) {
         cv: input.pages ? `p. ${input.pages}` : (input.offset ? `from :${input.offset}` : null),
       });
     case 'Bash':
+    case 'PowerShell':
     case 'Shell':
     case 'exec_command':
       return mk('Ran', input.command, { cv: null });
@@ -1064,7 +1065,9 @@ class TranscriptParser {
       if (!pending) return { working: true, text: 'Working…' };
       const doing = PRESENT_TENSE[pending.verb] || `Running ${pending.verb.toLowerCase()}`;
       const what = pending.chip ? `${doing} ${pending.chip}` : doing;
-      return { working: true, text: clip(`${what}…`, 90) };
+      // A long command's chip is already clipped with its own "…"; adding
+      // another drew "2>/dev/n……" in the header (2026-10-24).
+      return { working: true, text: clip(what.endsWith('…') ? what : `${what}…`, 90) };
     }
     if (this.header.lastSignal === 'user-turn') return { working: true, text: 'Thinking…' };
     return { working: false, text: null };
