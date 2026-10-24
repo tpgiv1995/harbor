@@ -62,3 +62,26 @@ test('no pane means no terminal, whatever the flags say', () => {
     session: { id: 'live:p1', provider: 'codex' }, data: null, pane: null, tty: true,
   }).showTerminal, false);
 });
+
+// Where the keyboard goes when a window is clicked (2026-10-24, /mcp + >_):
+// the window's focus button kept keyboard focus after a click, so keys meant
+// for the terminal went nowhere. scripts/drive-mcp-tty-win.js drives it.
+const view = require('../../src/renderer/stage/terminal-view.cjs');
+
+test('a click on a window showing its terminal arms the terminal, not the command bar', () => {
+  assert.equal(view.windowClickArms?.({ showTerminal: true }), 'terminal');
+  assert.equal(view.windowClickArms?.({ showTerminal: false }), 'composer');
+});
+
+test('a click on something interactive or a finished selection arms nothing', () => {
+  for (const showTerminal of [true, false]) {
+    assert.equal(view.windowClickArms?.({ showTerminal, interactive: true }), null);
+    assert.equal(view.windowClickArms?.({ showTerminal, selecting: true }), null);
+  }
+});
+
+test('header buttons keep the keys in a showing terminal, and only then', () => {
+  assert.equal(view.headerKeepsKeys?.({ showTerminal: true, onButton: true }), true);
+  assert.equal(view.headerKeepsKeys?.({ showTerminal: true, onButton: false }), false);
+  assert.equal(view.headerKeepsKeys?.({ showTerminal: false, onButton: true }), false);
+});

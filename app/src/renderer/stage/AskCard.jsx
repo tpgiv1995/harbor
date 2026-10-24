@@ -47,6 +47,133 @@ function FallbackScreen({ lines }) {
   return <pre className="ask-screen" ref={ref}>{text}</pre>;
 }
 
+// A built-in LIST dialog (/mcp and its kin; main/generic-list.js): every row
+// the CLI drew, the highlighted one marked and kept in view, a click to pick a
+// row (main walks the "❯" there, verifying each step, then presses Enter), and
+// Esc to back out. Section headers and notes are shown, never clickable.
+// The keys the list's own dialog uses: ←/→ for a tabbed one (/plugin,
+// /config's tabs) or a footer that names them, Space where the footer says it
+// toggles. Never a key the dialog does not take.
+function listKeys(list) {
+  const footer = list.footer || '';
+  const tabbed = /←|→|tab to switch/i.test(footer) || (list.title?.[0] || '').trim().split(/\s{2,}/).length >= 3;
+  return [
+    ['up', '↑'], ['down', '↓'],
+    ...(tabbed ? [['left', '←'], ['right', '→']] : []),
+    ...(/\bspace\b/i.test(footer) ? [['space', 'Space']] : []),
+    ...(list.search ? [['backspace', '⌫']] : []),
+    ['enter', 'Enter'], ['esc', 'Esc'],
+  ];
+}
+
+function ListCard({ list, busy, error, onAction }) {
+  const selectedRef = useRef(null);
+  const [query, setQuery] = useState('');
+  // "Type to search" / "Type to filter": the dialog takes typing, so the card
+  // types into it too (no Enter: the list re-filters and the card follows).
+  const typable = /type to (?:search|filter)/i.test(list.footer || '');
+  useEffect(() => {
+    selectedRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [list.selectedIndex, list.signature]);
+  const [title, ...sub] = list.title || [];
+  return (
+    <div className="ask ask-fallback ask-list" role="group" aria-label={title || 'Choose from this list'} onClick={(e) => e.stopPropagation()}>
+      <div className="ask-head">
+        <span className="ask-dot" aria-hidden="true" />
+        <span className="ask-eyebrow">Needs your answer</span>
+        <span className="ask-count">{list.rows.length} {list.rows.length === 1 ? 'item' : 'items'}</span>
+      </div>
+      {title ? <p className="ask-q-text">{title}</p> : null}
+      {sub.length ? <p className="ask-list-sub">{sub.join(' · ')}</p> : null}
+      <div className="ask-list-rows" role="listbox" aria-label={title || 'List'}>
+        {list.items.map((item, n) => {
+          if (item.type === 'header') return <div key={`h${n}`} className="ask-list-h">{item.text}</div>;
+          if (item.type === 'note') {
+            return (
+              <div key={`n${n}`} className="ask-list-note">
+                {item.text}
+                {item.more?.length ? <span className="ask-list-more">{item.more.join(' ')}</span> : null}
+              </div>
+            );
+          }
+          return (
+            <button
+              key={`r${n}`}
+              type="button"
+              role="option"
+              aria-selected={item.selected}
+              ref={item.selected ? selectedRef : undefined}
+              className={`ask-list-row${item.selected ? ' sel' : ''}`}
+              disabled={busy}
+              title={item.selected ? 'Highlighted in the terminal; click to choose it' : 'Click to choose'}
+              onClick={(e) => { e.stopPropagation(); onAction({ type: 'list-pick', label: item.label, occurrence: item.occurrence || 0 }); }}
+            >
+              <span className="ask-list-mark" aria-hidden="true">{item.selected ? '❯' : ''}</span>
+              {item.glyph ? <span className={`ask-list-glyph${item.tone ? ` tone-${item.tone}` : ''}`} aria-hidden="true">{item.glyph}</span> : null}
+              <span className="ask-list-label">
+                {item.label}
+                {item.more?.length ? <span className="ask-list-desc">{item.more.join(' ')}</span> : null}
+              </span>
+              {item.detail ? <span className={`ask-list-detail${item.tone ? ` tone-${item.tone}` : ''}`}>{item.detail}</span> : null}
+            </button>
+          );
+        })}
+      </div>
+      {list.more?.above || list.more?.below ? (
+        <p className="ask-list-sub">
+          {[list.more.above ? `${list.more.above} more above` : null, list.more.below ? `${list.more.below} more below` : null].filter(Boolean).join(' · ')}
+          {' '}(the terminal shows part of the list; ↑ and ↓ scroll it)
+        </p>
+      ) : null}
+      {list.hints?.length ? <p className="ask-list-sub">{list.hints.join(' · ')}</p> : null}
+      <div className="ask-keys">
+        {listKeys(list).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            className="ask-keybtn"
+            disabled={busy}
+            aria-label={key === 'esc' ? 'Cancel this list (Esc)' : `Send ${label} to the list`}
+            onClick={(e) => { e.stopPropagation(); onAction({ type: 'key', key }); }}
+          >
+            {key === 'esc' ? 'Cancel (Esc)' : label}
+          </button>
+        ))}
+      </div>
+      {typable ? (
+        <div className={`ask-text${busy ? ' busy' : ''}`}>
+          <input
+            className="ask-input"
+            type="text"
+            value={query}
+            disabled={busy}
+            placeholder={list.search ? `Searching for "${list.search}": type to add to it, ⌫ erases` : 'Type to search this list'}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={async (e) => {
+              if (e.key === 'Enter' && query) {
+                e.preventDefault();
+                if (await onAction({ type: 'raw', text: query, perKey: true })) setQuery('');
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="ask-send"
+            disabled={busy || !query}
+            aria-label="Type this into the list's search"
+            title="Type this into the list's search (no Enter is sent)"
+            onClick={async (e) => { e.stopPropagation(); if (await onAction({ type: 'raw', text: query, perKey: true })) setQuery(''); }}
+          >
+            ⌨
+          </button>
+        </div>
+      ) : null}
+      {error ? <div className="ask-err">{error}</div> : null}
+    </div>
+  );
+}
+
 function Keycap({ children }) {
   return <kbd className="ask-kbd">{children}</kbd>;
 }
@@ -273,6 +400,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
   // The no-dead-end panel: an unrecognized blocker shows its raw screen tail
   // and direct keys, so ANY dialog shape is answerable in the window. Enter is
   // never implied (a blind Enter once compacted a 559k-token session).
+  if (menu.fallback && menu.list) return <ListCard list={menu.list} busy={busy} error={error} onAction={run} />;
   if (menu.fallback) {
     return (
       <div className="ask ask-fallback" role="group" aria-label="Answer this prompt" onClick={(e) => e.stopPropagation()}>

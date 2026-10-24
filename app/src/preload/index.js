@@ -261,6 +261,21 @@ const api = {
       return () => ipcRenderer.removeListener('setup:open', handler);
     },
   },
+  // Connections: Harbor's own /mcp (main/providers/mcp-connections.js).
+  connections: {
+    list: (payload) => ipcRenderer.invoke('connections:list', payload),
+    signIn: (payload) => ipcRenderer.invoke('connections:sign-in', payload),
+    cancel: (payload) => ipcRenderer.invoke('connections:cancel', payload),
+    signOut: (payload) => ipcRenderer.invoke('connections:sign-out', payload),
+    act: (payload) => ipcRenderer.invoke('connections:act', payload),
+    jobs: (payload) => ipcRenderer.invoke('connections:jobs', payload),
+    openUrl: (payload) => ipcRenderer.invoke('connections:open-url', payload),
+    onUpdate: (listener) => {
+      const handler = (_event, payload) => listener(payload);
+      ipcRenderer.on('connections:update', handler);
+      return () => ipcRenderer.removeListener('connections:update', handler);
+    },
+  },
   capabilities: {
     get: (payload) => ipcRenderer.invoke('capabilities:get', payload),
     permissionMode: (payload) => ipcRenderer.invoke('capabilities:permission-mode', payload),

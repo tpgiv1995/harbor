@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+'use strict';
+
+// harbor-mcp-login: sign one MCP server or claude.ai connector in, for ONE
+// config home, the way `claude mcp login` does it, without a terminal window.
+//
+// Runs `claude mcp login --no-browser <server>` inside a real pseudo-terminal,
+// because the CLI refuses to finish an OAuth sign-in when stdin is not a
+// terminal ("stdin isn't a terminal, so authentication can't be completed
+// here"). --no-browser makes the CLI print the authorization address instead of
+// opening a browser itself, so the caller decides where it opens (Harbor hands
+// it to the default browser through its own guarded opener). For an HTTP/SSE
+// server the CLI then waits for the browser to come back to its local callback
+// and exits 0 with "Authenticated with ..."; for a claude.ai connector it only
+// prints the claude.ai address and exits (the sign-in finishes on claude.ai).
+//
+// Usage: harbor-mcp-login --claude <bin> --home <config dir> --cwd <dir> --name <server>
+//   [--timeout-ms N]
+// stdout, one JSON object per line:
+//   {"event":"started"}
+//   {"event":"url","url":"https://..."}           the authorization address
+//   {"event":"exit","code":0,"output":"..."}      the CLI's own words, ANSI stripped
+// stdin, one command per line: "cancel", or "redirect <url>" (the CLI's paste
+// fallback when the browser cannot reach its callback).
+// A --claude ending in .js/.cjs/.mjs (an npm install's cli.js, a test
+// stand-in) runs under a real node.exe from PATH: Electron's binary run as
+// Node inside a ConPTY gets no console and exits 0 without printing a word
+// (measured 2026-10-24), so this same process's execPath is only the last
+// resort, for a machine with no Node at all.
+
+const path = require('node:path');
+
+const args = process.argv.slice(2);
+const opt = (name, fallback = null) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : fallback;
+};
+const claude = opt('claude');
+const home = opt('home');
+const cwd = opt('cwd') || process.cwd();
+const name = opt('name');
+const timeoutMs = Number(opt('timeout-ms', String(10 * 60 * 1000)));
+
+const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
+if (!claude || !home || !name) {
+  emit({ event: 'exit', code: 2, output: 'usage: harbor-mcp-login --claude <bin> --home <config dir> --cwd <dir> --name <server>' });
+  process.exit(2);
+}
+
+let pty;
+try {
+  pty = require(path.join(path.dirname(__dirname), 'app', 'src', 'daemon', 'node_modules', 'node-pty'));
+} catch (error) {
+  emit({ event: 'exit', code: 3, output: `node-pty is not available: ${error.message}` });
+  process.exit(3);
+}
+
+// The CLI writes the address as an OSC 8 link (ESC ] 8 ; ; <url> BEL) around
+// the same text, so the link target is the exact address even if a terminal
+// would have wrapped the visible text.
+const OSC8_RE = /\x1b\]8;[^;\x07\x1b]*;(https?:\/\/[^\x07\x1b]+)(?:\x07|\x1b\\)/;
+const URL_RE = /(https?:\/\/[^\s"'<>]+)/;
+// ConPTY re-renders output with cursor positioning, so a cursor move to a new
+// row stands for the line break the CLI wrote.
+const stripAnsi = (s) => s
+  .replace(/\x1b\[\d*(?:;\d*)?[Hf]/g, '\n')
+  .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+  .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+  .replace(/\x1b[()][A-Za-z0-9]/g, '')
+  .replace(/\x1b[=>78]/g, '');
+
+const env = { ...process.env, CLAUDE_CONFIG_DIR: home, TERM: 'xterm-256color' };
+// A worker or harness env can switch claude.ai connectors off or swap the
+// account for an API key; either would make the CLI unable to find or sign in
+// the connector this home sees.
+for (const key of ['ENABLE_CLAUDEAI_MCP_SERVERS', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT']) delete env[key];
+const script = /\.(?:c|m)?js$/i.test(claude);
+function realNode() {
+  if (!/electron/i.test(path.basename(process.execPath))) return process.execPath;
+  const fs = require('node:fs');
+  const exe = process.platform === 'win32' ? 'node.exe' : 'node';
+  for (const dir of String(process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, exe);
+    try { if (fs.statSync(candidate).isFile()) return candidate; } catch { /* not here */ }
+  }
+  return process.execPath;
+}
+const file = script ? realNode() : claude;
+const argv = [...(script ? [claude] : []), 'mcp', 'login', '--no-browser', name];
+if (script) env.ELECTRON_RUN_AS_NODE = '1';
+else delete env.ELECTRON_RUN_AS_NODE;
+
+let term;
+try {
+  term = pty.spawn(file, argv, { name: 'xterm-256color', cols: 1000, rows: 50, cwd, env });
+} catch (error) {
+  emit({ event: 'exit', code: 4, output: `could not start ${claude}: ${error.message}` });
+  process.exit(4);
+}
+emit({ event: 'started' });
+
+let raw = '';
+let urlSent = false;
+term.onData((data) => {
+  raw += data;
+  if (raw.length > 200000) raw = raw.slice(-100000);
+  if (urlSent) return;
+  const osc = OSC8_RE.exec(raw);
+  const plain = osc ? null : URL_RE.exec(stripAnsi(raw));
+  const url = osc ? osc[1] : (plain && /authoriz|visit|open/i.test(stripAnsi(raw).slice(0, plain.index)) ? plain[1] : null);
+  if (url) {
+    urlSent = true;
+    emit({ event: 'url', url: url.trim() });
+  }
+});
+
+let done = false;
+const finish = (code, extra = {}) => {
+  if (done) return;
+  done = true;
+  const output = stripAnsi(raw).replace(/\r/g, '').split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).join('\n');
+  emit({ event: 'exit', code, output: output.slice(-4000), ...extra });
+  setTimeout(() => process.exit(0), 50);
+};
+term.onExit(({ exitCode }) => finish(exitCode));
+
+const timer = setTimeout(() => {
+  try { term.kill(); } catch { /* gone */ }
+  finish(null, { timedOut: true });
+}, timeoutMs);
+timer.unref?.();
+
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  let nl;
+  while ((nl = input.indexOf('\n')) >= 0) {
+    const line = input.slice(0, nl).trim();
+    input = input.slice(nl + 1);
+    if (line === 'cancel') {
+      try { term.write('\x03'); } catch { /* gone */ }
+      setTimeout(() => { try { term.kill(); } catch { /* gone */ } finish(null, { cancelled: true }); }, 500);
+    } else if (line.startsWith('redirect ')) {
+      try { term.write(`${line.slice('redirect '.length)}\r`); } catch { /* gone */ }
+    }
+  }
+});
+// The caller going away cancels the sign-in rather than leaving a CLI waiting.
+process.stdin.on('end', () => {
+  if (done) return;
+  try { term.kill(); } catch { /* gone */ }
+  finish(null, { cancelled: true });
+});

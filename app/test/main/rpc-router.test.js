@@ -18,6 +18,13 @@ LIVE_METHODS.push(
   'cli-updates:install', 'cli-updates:dismiss',
   'cli-updates:config-diff', 'cli-updates:restore-config',
 );
+// Connections, Harbor's own /mcp (2026-10-24): seven methods, all local-only
+// (each runs the Claude CLI on this machine, opens this machine's browser, or
+// types into a local session), and one push.
+const CONNECTIONS_METHODS = ['connections:list', 'connections:sign-in', 'connections:cancel', 'connections:sign-out', 'connections:act', 'connections:jobs', 'connections:open-url'];
+LIVE_METHODS.push(...CONNECTIONS_METHODS);
+LIVE_PUSH_CHANNELS.push('connections:update');
+LIVE_PUSH_CHANNELS.sort();
 LIVE_METHODS.sort();
 const LOCAL_ONLY_METHODS = `artifacts:open-external artifacts:show-in-folder cli-updates:config-diff cli-updates:install cli-updates:restore-config clipboard:image-data-uri clipboard:read-image clipboard:save-image clipboard:write-formatted clipboard:write-image context-menu:add-to-dictionary context-menu:edit-action context-menu:replace-misspelling context-menu:spell-status e2e:emit-launched e2e:get-launch-calls e2e:get-metrics e2e:mark-interactive e2e:quit e2e:session-owner-pid e2e:set-ask-transcript e2e:set-link pick-files pick-folder project-icons:reveal setup:login setup:pick-folder setup:symlink-apply taskbar-badge:set tasks:reveal window:close window:get-bounds window:is-maximized window:menu-action window:minimize window:open-board window:set-bounds window:toggle-maximize`.split(' ');
 const MUTATING_METHODS = `artifacts:thumb ask:answer ask:decline capabilities:cycle-permission-mode cli-updates:check cli-updates:dismiss daemon:retry new-session notes:mutate orchestration:kickoff-execute orchestration:kickoff-research pane:focus resume-session session:cancel-send session:delete session:interrupt session:menu-answer session:menu-state session:send session:takeover setup:save tasks:mutate terminal:blur-pane terminal:close-tab terminal:close-workspace terminal:create-tab terminal:create-workspace terminal:focus-pane terminal:focus-tab terminal:focus-workspace terminal:rename-tab terminal:resize-pane terminal:send-input terminal:set-visible-panes upload:image voice:token whisper:transcribe whiteboard:create whiteboard:delete whiteboard:rename whiteboard:write worker:close workflow:run`.split(' ');
@@ -82,12 +89,12 @@ test('router emits named pushes without a transport dependency', () => {
 // Claude's composer suggestion, read for the desktop command bar (2026-10-05).
 LIVE_METHODS.push('session:suggestion', 'session:work-meter');
 LIVE_METHODS.sort();
-test('channel metadata covers exactly the captured 130 methods and 26 pushes', () => {
+test('channel metadata covers exactly the captured 137 methods and 27 pushes', () => {
   const { METHOD_CHANNELS, PUSH_CHANNELS } = require('../../src/main/rpc/channels.js');
   assert.deepEqual([...METHOD_CHANNELS.map(({ method }) => method)].sort(), LIVE_METHODS);
   assert.deepEqual([...PUSH_CHANNELS].sort(), LIVE_PUSH_CHANNELS);
-  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 130);
-  assert.equal(new Set(PUSH_CHANNELS).size, 26);
+  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 137);
+  assert.equal(new Set(PUSH_CHANNELS).size, 27);
   assert.ok(METHOD_CHANNELS.every(({ capability }) => (
     ['local-only', 'remote-safe', 'mutating'].includes(capability)
   )));
@@ -97,12 +104,12 @@ test('channel metadata covers exactly the captured 130 methods and 26 pushes', (
       METHOD_CHANNELS.filter((entry) => entry.capability === capability).length,
     ])),
     // session:work-meter moved local-only -> remote-safe 2026-10-11 (phone header).
-    { 'local-only': 42, 'remote-safe': 45, mutating: 43 },
+    { 'local-only': 49, 'remote-safe': 45, mutating: 43 },
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'local-only')
       .map(({ method }) => method).sort(),
-    [...LOCAL_ONLY_METHODS, 'usage:get-plans', 'usage:get-lean', 'usage:set-lean', 'session:suggestion'].sort(),
+    [...LOCAL_ONLY_METHODS, ...CONNECTIONS_METHODS, 'usage:get-plans', 'usage:get-lean', 'usage:set-lean', 'session:suggestion'].sort(),
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'mutating')

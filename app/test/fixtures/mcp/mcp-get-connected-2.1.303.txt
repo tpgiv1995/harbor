@@ -1,0 +1,3 @@
+claude.ai Meetings:
+  Scope: claude.ai config
+  Status: ✔ Connected

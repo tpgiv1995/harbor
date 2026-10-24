@@ -1,0 +1,33 @@
+ ▝▝   ▝▝   ~\work\demo-project
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Manage MCP servers
+   20 servers
+
+     User MCPs (C:\Users\you\.claude\.claude.json)                                                                                                ↑   
+   ❯ ✔ sandbox-api                       9 tools                                                                                                    ┃   
+     ✔ browser                           24 tools                                                                                                   ┃   
+     ✔ graph                             31 tools                                                                                                   ┃   
+     ✔ gateway                           3 tools                                                                                                    ┃   
+                                                                                                                                                    ┃   
+     claude.ai                                                                                                                                      ┃   
+     ✔ claude.ai Design Suite            132 tools                                                                                                  ┃   
+     ✔ claude.ai Docs Search             8 tools                                                                                                    ┃   
+     ✔ claude.ai File Box                25 tools                                                                                                   ┃   
+     ✔ claude.ai Whiteboard              42 tools                                                                                                   ┃   
+     ✔ claude.ai Web Crawl               10 tools                                                                                                   ┃   
+     ✔ claude.ai Video Studio            15 tools                                                                                                   ┃   
+     ✔ claude.ai Diagrams                35 tools                                                                                                   ┃   
+     ✔ claude.ai Office Mail             50 tools                                                                                                   ┃   
+     ✔ claude.ai Boards                  54 tools                                                                                                   ┃   
+     ⚠ claude.ai Automations             needs authentication                                                                                       ┃   
+     ✔ claude.ai Meeting Notes           14 tools                                                                                                   ┃   
+     ✔ claude.ai Team Chat               27 tools                                                                                                   ┃   
+     ✔ claude.ai Sheets                  41 tools                                                                                                   ┃   
+     ⚠ claude.ai Surveys                 needs authentication                                                                                       ┃   
+     ⚠ claude.ai Meetings                needs authentication                                                                                       │   
+     claude.ai Hosting · ◯ hidden — same URL as your server 'plugin:deploy-skills:deploy'                                                         │   
+       To use this connector instead, disable the plugin server in /plugins                                                                         │   
+     ↓ 1 more                                                                                                                                       ↓   
+   https://code.claude.com/docs/en/mcp for help
+   ↑/↓ to navigate · Enter to confirm · Esc to cancel

@@ -104,6 +104,7 @@ class ScreenModel {
       visible: visible.join('\n'),
       scrollback_lines: visibleStart,
       suggestion: safeSuggestion(this.terminal),
+      modes: inputModes(this.terminal),
     };
   }
 }
@@ -115,4 +116,35 @@ function safeSuggestion(terminal) {
   try { return composerSuggestion(terminal); } catch { return null; }
 }
 
-module.exports = { ScreenModel, windowsPtyCompat, composerSuggestion };
+// THE INPUT MODES A NEW VIEW MUST COPY (2026-10-24, Pat on /mcp: "if you toggle
+// it back to the terminal then that doesnt work either"). A >_ view is a FRESH
+// xterm fed a plain-text backfill and then live frames, so it knows only the
+// modes the CLI switches on AFTER it attached. Claude Code turns on mouse
+// reporting (?1000/?1002/?1003 with SGR ?1006) once at startup and repeats it
+// only on a real size change or certain keys (measured on 2.1.303 with /mcp
+// open: a same-size resize, a focus event and an arrow key repeat nothing), and
+// the view's own first resize reaches the pty before its observer is attached.
+// So the view never learned that clicks should go to the CLI: a click on a
+// /mcp row, which the CLI opens on one click, only selected text. This model
+// has seen every byte since the session started, so it states the modes and
+// the view applies them with its backfill (terminal-bridge.js modeSequence).
+// Reads internals for the mouse encoding and cursor visibility, so any fault is
+// "unknown", never a failed read.
+function inputModes(terminal) {
+  try {
+    const modes = terminal.modes;
+    const core = terminal._core;
+    return {
+      mouseTracking: modes.mouseTrackingMode,
+      mouseEncoding: core?.coreMouseService?.activeEncoding || null,
+      bracketedPaste: Boolean(modes.bracketedPasteMode),
+      applicationCursorKeys: Boolean(modes.applicationCursorKeysMode),
+      sendFocus: Boolean(modes.sendFocusMode),
+      cursorHidden: typeof core?.coreService?.isCursorHidden === 'boolean' ? core.coreService.isCursorHidden : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { ScreenModel, windowsPtyCompat, composerSuggestion, inputModes };

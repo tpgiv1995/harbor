@@ -51,6 +51,16 @@ const LOCAL_ONLY = new Set([
   // live — but remote-safe meant a future "drive the gate from my phone"
   // would have inherited no-auth access to quitting the app and rewriting
   // test fixtures. Local-only: a phone has no e2e surface.
+  // Connections (Harbor's own /mcp, 2026-10-24): each one runs the Claude CLI
+  // on this machine for one of its config homes, opens this machine's browser,
+  // or types into a local session, so none of them leaves this machine.
+  'connections:list',
+  'connections:sign-in',
+  'connections:cancel',
+  'connections:sign-out',
+  'connections:act',
+  'connections:jobs',
+  'connections:open-url',
   'e2e:get-launch-calls',
   'e2e:set-link',
   'e2e:set-ask-transcript',
@@ -275,6 +285,13 @@ const METHOD_NAMES = [
   'capabilities:get',
   'capabilities:permission-mode',
   'capabilities:cycle-permission-mode',
+  'connections:list',
+  'connections:sign-in',
+  'connections:cancel',
+  'connections:sign-out',
+  'connections:act',
+  'connections:jobs',
+  'connections:open-url',
   'cli-updates:get-state',
   'cli-updates:check',
   'cli-updates:notes',
@@ -371,6 +388,7 @@ const METHOD_CHANNELS = Object.freeze(METHOD_NAMES.map((method) => Object.freeze
 const PUSH_CHANNELS = Object.freeze([
   'app:update-available',
   'cli-updates:changed',
+  'connections:update',
   'provider-models:changed',
   'context-menu:show',
   'daemon:banner',

@@ -42,9 +42,11 @@ test('no arrow key is forwarded to the pty from the card', () => {
   // The old card sent ↑/↓/←/→ as raw keys and waited a poll for the pointer
   // to move. The sheet moves a LOCAL highlight and delivers once; the only
   // raw keys left are the fallback panel's and the clipped-pane row's, both
-  // of which drive the terminal highlight by hand on purpose and say so.
+  // of which drive the terminal highlight by hand on purpose and say so, and
+  // (2026-10-24) the generic list card's key row, which offers only the keys
+  // its own dialog's footer names; a click on a ROW there is a verified walk.
   const keySends = askCardSource.match(/type: 'key'/g) || [];
-  assert.equal(keySends.length, 3, 'exactly three places send raw keys: the fallback panel, the clipped-pane keys, and the review\'s labelled ← Back');
+  assert.equal(keySends.length, 4, 'exactly four places send raw keys: the fallback panel, the list card\'s key row, the clipped-pane keys, and the review\'s labelled ← Back');
   assert.doesNotMatch(askCardSource, /key: 'right'/, 'next-question never goes to the pty');
   const lefts = askCardSource.match(/key: 'left'/g) || [];
   assert.equal(lefts.length, 1, 'one ← only: the review screen\'s way back to the open questions');

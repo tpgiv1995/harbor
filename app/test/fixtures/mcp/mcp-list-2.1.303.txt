@@ -1,0 +1,13 @@
+Checking MCP server health…
+
+claude.ai Docs Search: https://api.example.com/v1/pages/mcp - ✔ Connected
+claude.ai File Box: https://mcp.example.com/claude_app_mcp - ✔ Connected
+claude.ai Meetings: https://mcp.example.org/mcp/meetings/streamable - ! Needs authentication
+claude.ai Surveys: https://mcp.example.net/mcp - ! Needs authentication
+plugin:deploy-skills:deploy: https://deploy.example.com/mcp (HTTP) - ✔ Connected
+sandbox-api: https://mcp.example.com/mcp (HTTP) - ✔ Connected
+graph: C:\Program Files\nodejs\node.exe C:\tools\graph\graph.mjs --name graph -- C:\Program Files\nodejs\node.exe C:\tools\graph\server.mjs - ✔ Connected
+browser: C:\Program Files\nodejs\node.exe C:\tools\browser\cli.js --cdp-endpoint=http://127.0.0.1:9222 --timeout-action=15000 - ✗ Failed to connect
+team-wiki: https://wiki.example.com/sse (SSE) - ! Needs authentication
+local-notes: node notes-server.js - ⊘ Disabled for this project (re-enable via /mcp)
+repo-tools: npx repo-tools-mcp - ⏸ Pending approval (run `claude` to approve)

@@ -1,0 +1,29 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Plugins  Discover   Installed   Marketplaces   Errors   Stats
+                                                                                                                        
+  Plugin details
+  
+  figma
+  from claude-plugins-official
+  Last updated: Oct 15, 2026
+
+  Figma design platform integration. Access design files, extract component information, read design tokens, and
+  translate designs into code. Bridge the gap between design and development workflows.
+
+  Will install:
+  · Skills: figma-create-new-file, figma-implement-motion, figma-use-motion, figma-code-connect, figma-shaders, 
+  figma-code-workflows, figma-generate-library, figma-spec, figma-design-to-code, figma-use, figma-generative-plugins,
+  figma-swiftui, figma-generate-design, figma-use-figjam, figma-generate-diagram, figma-use-slides
+  · MCP Servers: figma
+
+  ⚠ Make sure you trust a plugin before installing, updating, or using it. Anthropic does not control what MCP 
+    servers, files, or other software are included in plugins and cannot verify that they will work as intended or 
+    that they won't change. See each plugin's homepage for more information.
+
+  ❯ Install for you (user scope)
+    Install for all collaborators on this repository (project scope)
+    Install for you, in this repo only (local scope)
+    Open homepage
+    Back to plugin list
+
+  Enter to select · Esc to go back

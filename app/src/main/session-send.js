@@ -14,6 +14,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { StringDecoder } = require('node:string_decoder');
 const { parseMenu, menuArrowToward, MENU_KEYS } = require('./menu-parse.js');
+const { parseGenericList, locateRow } = require('./generic-list.js');
 const { parseWorkMeter } = require('./work-meter.js');
 const { isDividerLine } = require('../shared/divider.cjs');
 const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFromStrip, CHAT_ROW_RE } = require('./ask-question.js');
@@ -311,6 +312,13 @@ const BLOCKED_CHROME_RE = /(Press Enter to continue|Enter to select|Enter to con
 // Dialogs render the key name as "Esc". Lowercase "esc to cancel" also appears
 // in auto-continue and other status lines, which must not block sends.
 const DIALOG_CANCEL_RE = /Esc to cancel/;
+// Every built-in dialog names its way out with a capital "Esc to ...", and not
+// always at the bottom: /mobile draws it above a tall QR code, /skills at the
+// top of its list, /workflows and /feedback say "Esc to close", /config "Esc to
+// clear" (measured on 2.1.303, 2026-10-24: each of those showed NO card, a dead
+// end). Read over the whole screen, and only once the tail has shown there is
+// no prompt and no working turn, so a hint in old scrollback cannot raise one.
+const DIALOG_ESC_HINT_RE = /Esc to (?:cancel|close|clear|go back|back|exit)\b/;
 // A confirmation question, which a dialog draws on its OWN line. Claude's prose
 // says "do you want me to ..." mid-sentence constantly ("Ready to dig in, or do
 // you want me to dive deeper on anything?"), and matching that inside a
@@ -1363,6 +1371,19 @@ function createSessionSend(deps) {
     return null;
   };
 
+  // A generic list dialog (generic-list.js) read off the GRID first: the walk
+  // below steers by where the "❯" is NOW, and a full-screen redraw can leave
+  // the recent buffer holding an older frame whose pointer never moves.
+  const readList = async (paneId) => {
+    for (const source of ['visible', 'recent']) {
+      let screen = '';
+      try { screen = await readPane(paneId, MENU_READ_LINES, source); } catch { return null; }
+      const list = parseGenericList(screen);
+      if (list) return list;
+    }
+    return null;
+  };
+
   // ---- the no-dead-end guard (Pat mandate 2026-07-21) ---------------------
   // Six dialog shapes were each fixed only after Pat hit them live. The
   // structural inversion: a blocked pane whose screen the parser does NOT
@@ -1416,7 +1437,11 @@ function createSessionSend(deps) {
     // the tail answers "is this over?" and the whole screen answers "is there
     // something to answer?". A composer in the tail already short-circuits
     // above, which is what keeps the ghost-card rule intact.
-    if (!(isBlockedScreen(bottom) || POINTER_ROW_RE.test(screen) || blockedHint)) return null;
+    // A built-in list dialog is a blocker whatever its footer says ("Esc to go
+    // back", /plugin): before 2026-10-24 that footer matched nothing here, and
+    // the window showed no card at all while the dialog waited.
+    if (!(isBlockedScreen(bottom) || POINTER_ROW_RE.test(screen) || blockedHint || parseGenericList(screen)
+      || DIALOG_ESC_HINT_RE.test(screen))) return null;
     return { lines };
   };
 
@@ -1470,10 +1495,63 @@ function createSessionSend(deps) {
       if (!observe) await answerMenu(paneId, pane.workspaceId, { type: 'key', key: 'enter' }).catch(() => {});
       return null;
     }
-    await captureUnrecognized(paneId, screen);
     let tail = blocked.lines;
     while (tail.length && !tail.at(-1).trim()) tail = tail.slice(0, -1);
+    // A built-in LIST dialog (/mcp and its kin, 2026-10-24) is still the
+    // fallback panel, with the whole list attached so the window shows every
+    // row and a click picks one. Only a screen none of the five recognized
+    // shapes took ever gets here, so this cannot claim one of theirs.
+    const list = parseGenericList(screen) || (await readList(paneId));
+    if (list) return { fallback: true, screen: tail.slice(-FALLBACK_SCREEN_LINES), list };
+    await captureUnrecognized(paneId, screen);
     return { fallback: true, screen: tail.slice(-FALLBACK_SCREEN_LINES) };
+  };
+
+  // Click a row of a generic list: steer the "❯" there one arrow at a time,
+  // re-reading after every key, and press Enter only once the highlight is
+  // VERIFIED on that row (the same self-correcting walk as a numbered menu,
+  // keyed on the row's label because these rows carry no number). A row the
+  // CLI skips (a section header in an older layout) is never reached, so the
+  // walk stops instead of confirming whatever it overshot onto.
+  const pickListRow = async (paneId, workspaceId, action) => {
+    const want = { label: String(action.label || ''), occurrence: Number(action.occurrence) || 0 };
+    if (!want.label) return { ok: false, reason: 'no row to pick' };
+    let list = await readList(paneId);
+    if (!list) return { ok: false, reason: 'the list is no longer on screen' };
+    let direction = 0;
+    let turns = 0;
+    const limit = list.rows.length * 2 + 6;
+    for (let step = 0; step <= limit; step += 1) {
+      const at = locateRow(list, want);
+      if (at && at.current === at.target) {
+        await typeInto(paneId, workspaceId, MENU_KEYS.enter);
+        return { ok: true, action: 'list-pick', label: want.label };
+      }
+      // The search field has the highlight (/plugin while typing): one ↓
+      // steps into the list, and the walk carries on from what that shows.
+      if (at && at.current == null && list.searchable && !direction) {
+        direction = 1;
+        await typeInto(paneId, workspaceId, MENU_KEYS.down);
+        await sleep(90);
+        const into = await readList(paneId);
+        if (!into || into.selectedIndex == null) return { ok: false, reason: 'could not move from the search field into the list' };
+        list = into;
+        continue;
+      }
+      if (at?.current == null || at.current < 0) return { ok: false, reason: 'cannot tell which row is highlighted; use the keys below' };
+      // Off screen (a list that scrolls): keep going the way we were.
+      const next = at ? Math.sign(at.target - at.current) : direction;
+      if (!next) return { ok: false, reason: `"${want.label}" is not in this list any more` };
+      if (direction && next !== direction) turns += 1;
+      if (turns > 1) return { ok: false, reason: `"${want.label}" cannot be selected in this list` };
+      direction = next;
+      await typeInto(paneId, workspaceId, next > 0 ? MENU_KEYS.down : MENU_KEYS.up);
+      await sleep(70);
+      const after = await readList(paneId);
+      if (!after) return { ok: false, reason: 'the list closed before that row was reached' };
+      list = after;
+    }
+    return { ok: false, reason: `could not reach "${want.label}"` };
   };
 
   // Navigate to targetIndex and press Enter, or cancel with Esc. Selection is a
@@ -1495,6 +1573,8 @@ function createSessionSend(deps) {
     esc: MENU_KEYS.cancel,
     space: ' ',
     tab: '\t',
+    // Erases one character of a list's search (the generic list card).
+    backspace: '\x7f',
     // Previous / next question in a batch. Both spellings are offered because
     // the dialog takes both and a future re-skin may drop one; the card sends
     // the arrows, which are what its own tab strip advertises.
@@ -1568,9 +1648,17 @@ function createSessionSend(deps) {
       await typeInto(paneId, workspaceId, bytes);
       return { ok: true, action: 'key', key: action.key };
     }
+    if (action.type === 'list-pick') return pickListRow(paneId, workspaceId, action);
     if (action.type === 'raw') {
       const text = String(action.text || '');
       if (!text) return { ok: false, reason: 'nothing to type' };
+      // A dialog's own text field (a list's search box) drops text that
+      // arrives in one chunk and takes it one key at a time (measured on
+      // /plugin, 2.1.303), so the list card types key by key.
+      if (action.perKey && !text.includes('\n')) {
+        for (const ch of text) { await typeInto(paneId, workspaceId, ch); await sleep(40); }
+        return { ok: true, action: 'raw' };
+      }
       const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
       await typeInto(paneId, workspaceId, payload);
       return { ok: true, action: 'raw' };

@@ -34,6 +34,36 @@ const BACKFILL_LINES = 200;
 const LIVE_BOTTOM_KEY = '\x1b[1;5F';
 const LIVE_BOTTOM_AGENTS = new Set(['claude']);
 
+// A >_ VIEW STARTS WITH THE PANE'S INPUT MODES (2026-10-24). The view is a fresh
+// xterm, and the CLI switched mouse reporting on long before it existed and
+// repeats that only on some triggers, so a view used to open with clicks
+// selecting text instead of reaching the CLI (a click on a /mcp row opens it in
+// a real terminal). The daemon's screen model reports the modes it has seen
+// (src/daemon/screen.js inputModes) and the backfill carries them as the same
+// switches the CLI sent. Local to the view: the pty never sees these bytes. A
+// keeper started before this change reports no modes, and the view behaves as
+// it did (the session gets it on its next start).
+const MOUSE_TRACKING_SET = { x10: 9, vt200: 1000, drag: 1002, any: 1003 };
+const MOUSE_ENCODING_SET = { SGR: 1006, SGR_PIXELS: 1016, URXVT: 1015, UTF8: 1005 };
+function modeSequence(modes) {
+  if (!modes || typeof modes !== 'object') return '';
+  const set = (n, on) => `\x1b[?${n}${on ? 'h' : 'l'}`;
+  let out = '';
+  const tracking = MOUSE_TRACKING_SET[modes.mouseTracking];
+  if (tracking) {
+    out += set(tracking, true);
+    const encoding = MOUSE_ENCODING_SET[modes.mouseEncoding];
+    if (encoding) out += set(encoding, true);
+  } else if (modes.mouseTracking === 'none') {
+    out += set(1003, false) + set(1002, false) + set(1000, false) + set(9, false);
+  }
+  if (typeof modes.bracketedPaste === 'boolean') out += set(2004, modes.bracketedPaste);
+  if (typeof modes.applicationCursorKeys === 'boolean') out += set(1, modes.applicationCursorKeys);
+  if (typeof modes.sendFocus === 'boolean') out += set(1004, modes.sendFocus);
+  if (typeof modes.cursorHidden === 'boolean') out += set(25, !modes.cursorHidden);
+  return out;
+}
+
 function layoutsToMap(layouts) {
   const map = {};
   for (const layout of layouts || []) map[layout.tab_id] = layout;
@@ -343,9 +373,11 @@ function createTerminalBridge(options = {}) {
         strip_ansi: true,
       });
       const text = res?.read?.text;
+      // The pane's live input modes ride after the text (modeSequence above).
+      const modes = modeSequence(res?.screen?.modes);
       // pane.read returns LF-terminated text; a terminal needs CRLF or every
       // line starts at the previous line's end column (staircase).
-      if (text) emitter.emit('backfill', { paneId, text: text.replace(/\r?\n/g, '\r\n') });
+      if (text || modes) emitter.emit('backfill', { paneId, text: `${(text || '').replace(/\r?\n/g, '\r\n')}${modes}` });
     } catch (error) {
       emitter.emit('error', error);
     }
@@ -1074,4 +1106,5 @@ module.exports = {
   applyTabEvent,
   applyLayoutEvent,
   layoutsToMap,
+  modeSequence,
 };

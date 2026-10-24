@@ -1,0 +1,55 @@
+/* Connections: Harbor's own /mcp (2026-10-24). Slate tokens, the new-session
+   modal's surface, and no animation: a busy row says so in words. Column flex
+   so only the server list scrolls and the header and footer stay on screen
+   (the same rule as .new-session-popover). */
+.conn-panel{box-sizing:border-box;width:min(820px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:20px 22px 14px;border:1px solid rgba(255,255,255,.14);border-radius:16px;background:#11151d;color:#f5f7fa;box-shadow:0 28px 80px rgba(0,0,0,.55);display:flex;flex-direction:column;gap:14px;overflow:hidden;outline:none}
+.conn-panel>*{flex:0 0 auto}
+.conn-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+.conn-head-text{min-width:0}
+.conn-eyebrow{display:block;margin-bottom:6px;color:#8e98a8;font-size:10px;font-weight:700;letter-spacing:.14em}
+.conn-head h2{margin:0;font-size:20px;font-weight:650}
+.conn-sub{margin-top:5px;color:#8e98a8;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:560px}
+.conn-head-ctl{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+.conn-scroll{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid rgba(255,255,255,.08);border-bottom:1px solid rgba(255,255,255,.08);padding:4px 2px 10px}
+.conn-scroll::-webkit-scrollbar{width:10px}
+.conn-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:6px;border:2px solid #11151d}
+.conn-group{padding-top:10px}
+.conn-group-h{padding:6px 4px;color:#8e98a8;font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-group-path{margin-left:6px;font:10.5px var(--font-mono);font-weight:400;letter-spacing:0;text-transform:none;color:#6c7686}
+.conn-row{border-radius:10px;padding:2px 4px}
+.conn-row:hover{background:rgba(255,255,255,.035)}
+.conn-row-main{display:grid;grid-template-columns:10px minmax(0,1fr) auto auto;align-items:center;gap:10px;min-height:40px}
+.conn-dot{width:8px;height:8px;border-radius:50%;background:#5b6474}
+.conn-dot.tone-ok{background:var(--live)}
+.conn-dot.tone-warn{background:var(--warn)}
+.conn-dot.tone-err{background:var(--err)}
+.conn-dot.tone-pending{background:var(--ac2)}
+.conn-dot.tone-off{background:transparent;border:1.5px solid #5b6474;box-sizing:border-box}
+.conn-id{min-width:0}
+.conn-name{font-size:13.5px;color:#eef1f6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-target{margin-top:1px;color:#727c8c;font:11px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-status{padding:3px 8px;border-radius:999px;font-size:11px;white-space:nowrap;color:#aab2c0;background:rgba(255,255,255,.06)}
+.conn-status.tone-ok{color:#8fd8b6;background:rgba(36,178,124,.12)}
+.conn-status.tone-warn{color:#f0cf7f;background:rgba(212,165,55,.14)}
+.conn-status.tone-err{color:#f0b3b3;background:rgba(217,138,138,.14)}
+.conn-status.tone-pending{color:#a9c4ff;background:rgba(67,127,254,.14)}
+.conn-acts{display:flex;gap:6px;justify-content:flex-end;min-width:156px}
+.conn-btn{height:28px;padding:0 11px;border:1px solid #303744;border-radius:8px;background:#171c25;color:#cfd5de;font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.conn-btn:hover:not(:disabled){border-color:#4a5468;color:#fff}
+.conn-btn:disabled{opacity:.5;cursor:default}
+.conn-btn.primary{border-color:rgb(var(--ac-rgb) / 70%);background:rgb(var(--ac-rgb) / 22%);color:#fff}
+.conn-btn.primary:hover:not(:disabled){background:rgb(var(--ac-rgb) / 34%)}
+.conn-job{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:0 0 8px 20px;padding:8px 11px;border-radius:9px;background:rgba(255,255,255,.045);font-size:12px;line-height:1.45}
+.conn-job.tone-ok{background:rgba(36,178,124,.10)}
+.conn-job.tone-warn{background:rgba(212,165,55,.11)}
+.conn-job.tone-err{background:rgba(217,138,138,.12)}
+.conn-job.tone-pending{background:rgba(67,127,254,.11)}
+.conn-job-label{font-weight:650;color:#eef1f6}
+.conn-job-msg{color:#b7bfcb;min-width:0;overflow-wrap:anywhere}
+.conn-job-ctl{display:flex;gap:12px;margin-left:auto}
+.conn-link{border:0;padding:0;background:transparent;color:var(--ac2);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.conn-link:hover{text-decoration:underline}
+.conn-empty{padding:28px 6px;color:#8e98a8;font-size:13px;text-align:center}
+.conn-error{margin:12px 4px;padding:10px 12px;border-radius:9px;background:rgba(217,138,138,.12);color:#f0b3b3;font-size:12.5px;overflow-wrap:anywhere}
+.conn-foot{display:flex;justify-content:space-between;align-items:baseline;gap:16px;color:#8e98a8;font-size:11.5px}
+.conn-foot-note{text-align:right}

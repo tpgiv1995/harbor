@@ -10,6 +10,8 @@ import slashTokens from './slash-tokens.cjs';
 import handoffChainLib from './handoff-chain.cjs';
 import { ComposeEditor } from './ComposeEditor.jsx';
 import { ImagePreview } from './ImagePreview.jsx';
+import { ConnectionsPanel } from './ConnectionsPanel.jsx';
+import connectionsModel from './connections-model.cjs';
 
 const {
   appendTranscription, attachmentsAfterSend, attachmentKind, fileAttachmentsFromPaths, imageAttachment,
@@ -157,6 +159,8 @@ export function CommandBar({
   const [plusCmdSearch, setPlusCmdSearch] = useState('');
   const [plusExpanded, setPlusExpanded] = useState({ slash: false, connectors: false, plugins: false });
   const [caps, setCaps] = useState(null);
+  // Harbor's own /mcp (ConnectionsPanel.jsx).
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
   const [capsError, setCapsError] = useState(null);
   const [permMode, setPermMode] = useState(undefined); // undefined=unread, null=unreadable
   const [cycling, setCycling] = useState(false);
@@ -191,6 +195,7 @@ export function CommandBar({
     setPlusMenuOpen(false);
     setSlashDismissed(false);
     setPlusExpanded({ slash: false, connectors: false, plugins: false });
+    setConnectionsOpen(false);
   }, [session?.id]);
 
   useEffect(() => {
@@ -350,6 +355,16 @@ export function CommandBar({
 
   const submit = async () => {
     if (window.__harborUiDebug) console.log('[ui] submit', JSON.stringify({ canType, pending, phase: sendState?.phase, text, dead }));
+    // A bare /mcp opens Harbor's own Connections panel instead of the CLI's
+    // list, which Harbor can only show as a raw screen (2026-10-24). The CLI's
+    // inline forms (/mcp reconnect|enable|disable <server>) still go through.
+    if (session && !readOnly && (session.provider || 'claude') === 'claude' && !questionReply
+      && attachments.length === 0 && connectionsModel.isBareMcpCommand(text)) {
+      onDraftClear?.(session.id);
+      setSlashDismissed(false);
+      setConnectionsOpen(true);
+      return;
+    }
     if (!canType || submittingRef.current) return;
     // Everything this send changes afterwards belongs to the window it was sent
     // FROM. The callbacks below run after an await and resolve to the LATEST
@@ -904,6 +919,14 @@ export function CommandBar({
                     if ((e.key === 'Tab' || e.key === 'Enter') && !e.shiftKey) {
                       e.preventDefault();
                       const pick = slashMatches[slashHighlight] || slashMatches[0];
+                      // Enter on /mcp runs it, and /mcp is Harbor's panel; Tab
+                      // still only completes the token.
+                      if (pick?.name === '/mcp' && e.key === 'Enter' && (session?.provider || 'claude') === 'claude' && !readOnly
+                        && connectionsModel.isBareMcpCommand(pick.name) && attachments.length === 0 && /^\s*\/[a-z]*\s*$/i.test(text)) {
+                        onDraftClear?.(session.id);
+                        setConnectionsOpen(true);
+                        return;
+                      }
                       if (pick) completeSlash(pick.name);
                     }
                   }}
@@ -1285,12 +1308,19 @@ export function CommandBar({
                     <span className="plus-sec-label">Connectors</span>
                   </button>
                   {plusExpanded.connectors ? (
-                    caps.mcpServers.length ? (
-                      <div className="cap-mcp">
-                        <span className="cap-mcp-lbl">MCP</span>
-                        <span className="cap-mcp-names">{caps.mcpServers.join(', ')}</span>
-                      </div>
-                    ) : <div className="cap-note">no connectors</div>
+                    <>
+                      {caps.mcpServers.length ? (
+                        <div className="cap-mcp">
+                          <span className="cap-mcp-lbl">MCP</span>
+                          <span className="cap-mcp-names">{caps.mcpServers.join(', ')}</span>
+                        </div>
+                      ) : <div className="cap-note">no connectors</div>}
+                      {(session?.provider || 'claude') === 'claude' && !readOnly ? (
+                        <button type="button" className="plus-action" role="menuitem" onClick={() => { setPlusMenuOpen(false); setConnectionsOpen(true); }}>
+                          <span>Manage connections…</span>
+                        </button>
+                      ) : null}
+                    </>
                   ) : null}
                 </div>
 
@@ -1472,6 +1502,11 @@ export function CommandBar({
                       <span className="cap-mcp-names">{caps.mcpServers.join(', ')}</span>
                     </div>
                   ) : null}
+                  {(session?.provider || 'claude') === 'claude' && !readOnly ? (
+                    <button type="button" className="cap-action" onClick={() => { setMenuOpen(false); setConnectionsOpen(true); }}>
+                      Connections: sign in, reconnect, enable or disable…
+                    </button>
+                  ) : null}
                 </div>
 
                 {/* ── (7) SLASH COMMANDS (searchable, insert-not-send) ── */}
@@ -1514,6 +1549,14 @@ export function CommandBar({
       ) : null}
       {preview ? (
         <ImagePreview src={preview.src} name={preview.name} onClose={() => setPreview(null)} />
+      ) : null}
+      {connectionsOpen && session ? (
+        <ConnectionsPanel
+          session={session}
+          pane={pane}
+          planLabel={profiles.find((p) => p.id === session.home)?.label || null}
+          onClose={() => { setConnectionsOpen(false); inputRef.current?.focus(); }}
+        />
       ) : null}
     </div>
   );

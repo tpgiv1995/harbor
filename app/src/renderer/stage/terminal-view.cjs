@@ -29,4 +29,25 @@ function terminalView({ session, data, pane, tty } = {}) {
   };
 }
 
-module.exports = { terminalView };
+// WHERE THE KEYBOARD GOES WHEN A WINDOW IS CLICKED (2026-10-24, Pat on /mcp:
+// "if you toggle it back to the terminal then that doesnt work either"). He
+// opened >_ and clicked the window's focus button a second later; the button
+// kept keyboard focus, so every key he pressed went to it and the dialog in
+// the terminal never moved (driven: three Down presses after that click left
+// the /mcp pointer where it was; a click inside the terminal fixed it, and
+// nothing on screen said so). A window showing its terminal is a terminal: a
+// click on its header buttons keeps the keys in the terminal (`headerKeepsKeys`,
+// so the mousedown must not move focus), and a click elsewhere on the window
+// arms the terminal, not the command bar. Anything interactive (a button, an
+// input, the terminal itself) and a finished text selection are left alone,
+// as before.
+function windowClickArms({ showTerminal = false, interactive = false, selecting = false } = {}) {
+  if (interactive || selecting) return null;
+  return showTerminal ? 'terminal' : 'composer';
+}
+
+function headerKeepsKeys({ showTerminal = false, onButton = false } = {}) {
+  return Boolean(showTerminal && onButton);
+}
+
+module.exports = { terminalView, windowClickArms, headerKeepsKeys };

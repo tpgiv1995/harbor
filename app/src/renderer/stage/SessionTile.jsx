@@ -11,7 +11,7 @@ import { PromptForm } from './PromptForm.jsx';
 import { useTerminalDialogs } from './use-dialog-state.js';
 import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
-import { terminalView } from './terminal-view.cjs';
+import { terminalView, windowClickArms, headerKeepsKeys } from './terminal-view.cjs';
 import { copyText } from './md.jsx';
 import { runStateCue } from '../../shared/session-run-state.cjs';
 import { createPortal } from 'react-dom';
@@ -258,11 +258,16 @@ export const SessionTile = memo(forwardRef(function SessionTile({
         // click into the text box), except when the click was aimed at
         // something interactive inside the window (an ask-panel input, the
         // raw terminal, any button) or just finished selecting conversation
-        // text, where stealing focus would break the thing being done.
-        if (event.target.closest('button, input, textarea, select, a, [contenteditable], .terminal-pane')) return;
+        // text, where stealing focus would break the thing being done. A
+        // window showing its raw terminal arms the TERMINAL (terminal-view.cjs).
         const selection = window.getSelection();
-        if (selection && !selection.isCollapsed) return;
-        window.dispatchEvent(new CustomEvent('harbor-focus-composer'));
+        const arms = windowClickArms({
+          showTerminal,
+          interactive: Boolean(event.target.closest('button, input, textarea, select, a, [contenteditable], .terminal-pane')),
+          selecting: Boolean(selection && !selection.isCollapsed),
+        });
+        if (arms === 'terminal') event.currentTarget.querySelector('.terminal-pane textarea')?.focus();
+        else if (arms === 'composer') window.dispatchEvent(new CustomEvent('harbor-focus-composer'));
       }}
       onPointerDown={onHeaderPointerDown}
       role="group"
@@ -270,6 +275,11 @@ export const SessionTile = memo(forwardRef(function SessionTile({
     >
       <div
         className="wh drag-handle"
+        // With the raw terminal showing, a header button must not take the
+        // keyboard from it (terminal-view.cjs headerKeepsKeys).
+        onMouseDown={(event) => {
+          if (headerKeepsKeys({ showTerminal, onButton: Boolean(event.target.closest('button')) })) event.preventDefault();
+        }}
       >
         {/* Top row: the project name grows and truncates, and the window controls
             pin to the top-right on the SAME row (Pat, 2026-08-31: "controls should

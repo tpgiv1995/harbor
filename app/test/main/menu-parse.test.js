@@ -666,3 +666,15 @@ test('an answered effort-switch warning above a composer is history, not a quest
   const answered = `${screen}\n${'─'.repeat(120)}\n❯ \n${'─'.repeat(120)}\n`;
   assert.equal(parseMenu(answered), null);
 });
+
+// The status line drawn into the dialog's top edge (2026-10-24, the real
+// per-server screen /mcp opens on Claude Code 2.1.303): "▔▔▔…▔ ○ low · /effort ▔".
+// The edge test wanted a line of ONLY "▔", so the question read the session
+// banner and the edge as its first lines.
+test('a ▔ edge carrying the status line still ends the question at the dialog', () => {
+  const screen = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'generic-list', 'mcp-server-menu-2.1.303.txt'), 'utf8');
+  const menu = parseMenu(screen);
+  assert.deepEqual(menu.options.map((o) => o.label), ['Authenticate', 'Disable']);
+  assert.match(menu.question, /^Claude\.ai Surveys MCP Server/);
+  assert.doesNotMatch(menu.question, /Claude Code v|demo-project|\/effort|▔/);
+});

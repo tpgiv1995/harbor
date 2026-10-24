@@ -3577,6 +3577,65 @@ button { font-family: inherit; }
 .ask-keybtn:hover:not(:disabled) { background: rgb(var(--ac-rgb) / 16%); border-color: rgb(var(--ac-rgb) / 50%); }
 .ask-keybtn:disabled { cursor: default; opacity: 0.5; }
 
+/* A built-in LIST dialog (/mcp and kin, 2026-10-24): every row the CLI drew,
+   the highlighted one tinted and marked with its "❯", the list scrolling
+   inside the card so the highlight is never cut off. */
+.ask-list .ask-q-text { margin-top: 1px; }
+.ask-list-sub { margin: -4px 0 0; color: var(--sub); font-size: 11.5px; line-height: 1.35; }
+.ask-list-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: min(62vh, 620px);
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--ln);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.22);
+}
+.ask-list-rows > * { flex: 0 0 auto; }
+.ask-list-h {
+  padding: 8px 8px 3px;
+  color: var(--sub);
+  font: 600 9.5px/1.3 var(--font-mono);
+  letter-spacing: 0.06em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ask-list-h:first-child { padding-top: 3px; }
+.ask-list-note { padding: 3px 8px 3px 30px; color: var(--fnt); font-size: 11px; line-height: 1.35; }
+.ask-list-more { display: block; color: var(--fnt); }
+.ask-list-row {
+  display: grid;
+  grid-template-columns: 12px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--tx);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+.ask-list-row:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+.ask-list-row.sel,
+.ask-list-row.sel:hover:not(:disabled) { background: rgb(var(--ac-rgb) / 16%); border-color: rgb(var(--ac-rgb) / 42%); }
+.ask-list-row:disabled { cursor: default; opacity: 0.6; }
+.ask-list-mark { color: var(--ac); font-weight: 700; }
+.ask-list-glyph { color: var(--sub); }
+.ask-list-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ask-list-desc { display: block; overflow: hidden; color: var(--sub); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ask-list-detail { color: var(--sub); font: 11px var(--font-mono); white-space: nowrap; }
+.ask-list .tone-ok { color: var(--live); }
+.ask-list .tone-warn { color: var(--warn); }
+.ask-list .tone-err { color: var(--err); }
+.ask-list .ask-list-detail.tone-ok { color: var(--sub); }
+
 /* A narrow window (the 3x3 and 4x4 grids) keeps the body: the hint goes, the
    step chips shrink, and the footer buttons stay one tap wide. The card is its
    own container so this keys off the card's width, not the viewport's. */

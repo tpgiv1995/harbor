@@ -1,0 +1,11 @@
+ ▐▛███▛█   Claude Code v2.1.303
+▝▜██████▀  Haiku 5.5 with low effort · Claude Max
+ ▝▝   ▝▝   C:\dev\demo-project
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ○ low · /effort ▔
+   Claude.ai Surveys MCP Server                                                                                    
+   Status:           ⚠ needs authentication
+   URL:              https://mcp.surveys.example.com
+   Config location:  claude.ai
+   ❯ 1. Authenticate
+     2. Disable                                                                                                         
+   ↑/↓ to navigate · Enter to select · Esc to back

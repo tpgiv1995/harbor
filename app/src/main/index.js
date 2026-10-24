@@ -54,7 +54,8 @@ const { createSingleFlight } = require('./single-flight.js');
 const {
   configureModelCatalog, createCapabilitiesProvider, newSessionOptions, modelCatalog, MODEL_VERSION_SEED,
 } = require('./providers/capabilities.js');
-const { compareVersionsDesc } = require('./providers/model-catalog.js');
+const { compareVersionsDesc, resolveClaudeBinary } = require('./providers/model-catalog.js');
+const { createMcpConnections } = require('./providers/mcp-connections.js');
 const { createCliUpdateChecker } = require('./providers/cli-updates.js');
 const { createDelegateProvider, deriveRun, findQueueForWorkspace, queuePath } = require('./providers/delegate.js');
 const { createTranscriptProvider, waitForHandoffPath, findProviderTranscript, readTranscriptLastSignal } = require('./providers/transcript.js');
@@ -321,6 +322,7 @@ async function liveAskFor(sessionId) {
 }
 let sessionSend = null;
 let capabilitiesProvider = null;
+let connectionsProvider = null;
 let paneLinks = null;
 let stopMainLagMonitor = null;
 let usageTimer = null;
@@ -1338,6 +1340,29 @@ function registerIpc() {
     } catch (error) {
       return { ok: false, reason: error.message };
     }
+  });
+  // Connections (Harbor's own /mcp): every fact from the Claude CLI for the
+  // session's home and folder; see main/providers/mcp-connections.js.
+  const connectionsCall = (name) => async (_event, payload) => {
+    try {
+      if (!connectionsProvider) throw new Error('connections are still starting');
+      return { ok: true, ...(await connectionsProvider[name](payload || {})) };
+    } catch (error) {
+      return { ok: false, reason: error.message };
+    }
+  };
+  ipcMain.handle('connections:list', connectionsCall('list'));
+  ipcMain.handle('connections:sign-in', connectionsCall('signIn'));
+  ipcMain.handle('connections:sign-out', connectionsCall('signOut'));
+  ipcMain.handle('connections:act', connectionsCall('act'));
+  ipcMain.handle('connections:cancel', (_event, payload) => connectionsProvider?.cancel(payload || {}) || { ok: false });
+  ipcMain.handle('connections:jobs', (_event, payload) => ({ ok: true, jobs: connectionsProvider?.jobs(payload || {}) || [] }));
+  // Only the addresses the CLI itself handed out (a sign-in page, a claude.ai
+  // page to disconnect a connector), through the guarded opener.
+  ipcMain.handle('connections:open-url', (_event, { url } = {}) => {
+    if (!/^https?:\/\//i.test(String(url || ''))) return { ok: false, reason: 'not a web address' };
+    openExternalLink(String(url));
+    return { ok: true };
   });
   ipcMain.handle('capabilities:permission-mode', async (_event, { paneId }) => {
     if (!paneId) return { mode: null };
@@ -3015,6 +3040,36 @@ app.whenReady().then(async () => {
     launchedHome: (id) => sidebarBridge?.getLaunchedHome?.(id) ?? null,
   });
   capabilitiesProvider = createCapabilitiesProvider({ accounts: accountsProvider });
+  connectionsProvider = createMcpConnections({
+    // The session's config home (the same resolution the capability menu
+    // uses, with the window's plan as the fallback a brand-new session needs)
+    // and its folder (the transcript's, else the live pane's).
+    resolveContext: async ({ sessionId, cwd, home } = {}) => {
+      const resolved = await accountsProvider.resolveSession(sessionId).catch(() => null);
+      const profile = (harborConfig.profiles || []).find((p) => p.id === (resolved?.account || home) && (p.provider || 'claude') === 'claude');
+      const configHome = resolved?.home || profile?.configHome || null;
+      let dir = null;
+      for (const candidate of [resolved?.meta?.cwd, cwd]) {
+        if (typeof candidate !== 'string' || !candidate) continue;
+        try { if ((await fs.stat(candidate)).isDirectory()) { dir = candidate; break; } } catch { /* gone */ }
+      }
+      return { home: configHome, cwd: dir || configHome, account: resolved?.account || profile?.id || null };
+    },
+    claudeBin: async () => (await resolveClaudeBinary(process.env))?.path || null,
+    // A harness may run only a pinned stand-in CLI, never the real one.
+    allowRun: () => {
+      const policy = resolveLaunchPolicy({ userDataPath: app.getPath('userData'), defaultUserDataPath: path.join(app.getPath('appData'), app.getName()) });
+      if (policy.allowed || process.env.HARBOR_CLAUDE_BIN) return { allowed: true };
+      return { allowed: false, reason: 'refusing to run the real Claude CLI from an isolated Harbor profile (pin HARBOR_CLAUDE_BIN to a stand-in)' };
+    },
+    openExternal: (url) => openExternalLink(url),
+    sendCommand: async ({ sessionId, pane, text }) => {
+      if (sidebarBridge.isDelegated(sessionId)) return { ok: false, reason: 'Delegated agents are read-only.' };
+      return sessionSend.send({ sessionId, pane, text, provider: 'claude' });
+    },
+    transcriptPathFor: (sessionId) => askTranscript.resolve(sessionId),
+    onUpdate: (job) => sendToRenderer('connections:update', job),
+  });
 
   // Notification driver (R8): Electron supplies the native implementation.
   notifier = createNotifier({

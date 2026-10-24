@@ -447,7 +447,11 @@ function parseMenuScreen(screen) {
   // of "▔" (upper eighth blocks), which the shared divider rule does not cover;
   // without this the question read the status line above and the whole edge.
   // Kept local to this scan: the shared rule decides composers too.
-  const isDialogEdge = (line) => isDivider(line) || /^[▔▁]{3,}$/.test(String(line).trim());
+  // The status line can also be drawn INTO that edge ("▔▔▔…▔ ○ low · /effort ▔",
+  // the per-server screen /mcp opens, 2026-10-24), so a long run of "▔"
+  // opening the line is the edge too; no question line opens that way.
+  const isDialogEdge = (line) => isDivider(line) || /^[▔▁]{3,}$/.test(String(line).trim())
+    || /^[▔▁]{8,}/.test(String(line).trim());
   let questionTop = 0;
   for (let i = firstOptionLine - 1; i >= 0; i -= 1) {
     if (isDialogEdge(lines[i])) { questionTop = i + 1; break; }
