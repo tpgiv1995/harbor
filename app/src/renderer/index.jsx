@@ -333,7 +333,7 @@ function App() {
     try { localStorage.setItem(VIEW_STORE_KEY, 'agents'); } catch { /* best effort */ }
   }, [orchEnabled, view]);
 
-  // The rail chip and the in-window Orch buttons land directly on a project's
+  // The in-window Orch buttons land directly on a project's
   // panel; the title-bar toggle lands on the picker.
   const openOrch = useCallback((proj) => {
     if (!orchEnabled) return;
@@ -1653,7 +1653,6 @@ function App() {
       ) : null}
       <main className="app-shell">
         <Sidebar
-          onOpenOrch={openOrch}
           onOpenSession={openSession}
           onCloseSession={closeTile}
           openSessionIds={openSessionIds}

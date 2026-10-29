@@ -10,7 +10,7 @@ import * as dateRoll from '../../shared/date-roll.js';
 import { homeLabel, projectRowFill } from '../stage/project-colors.js';
 import { ProjectIcon } from '../stage/ProjectIcon.jsx';
 import { providerIdentity, ProfileBadge, useProfiles } from '../providers.js';
-import { resumeCommandForProfile, railWidthForProfileCount, profileStyle } from '../profiles.cjs';
+import { resumeCommandForProfile, railLaunchPlan, railWidthForProfileCount, profileStyle } from '../profiles.cjs';
 import { ViewSwitch } from '../ViewSwitch.jsx';
 import { resetBadge, resetTooltip } from './usage-reset.cjs';
 import { collapseForView, planCollapseAll } from './collapse-policy.cjs';
@@ -424,7 +424,7 @@ function FilterChip({ label, active, onClick, dataFilter }) {
 // The rail: Harbor's one and only session browser. Clicking a row OPENS the
 // session as a window on the stage (read instantly; resume happens later, from
 // the command bar, only when Pat actually sends something).
-export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSession, openSessionIds, selectedSessionId, attention, searchRef, view, onViewChange, orchEnabled = true, taskAlert = 0 }) {
+export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessionIds, selectedSessionId, attention, searchRef, view, onViewChange, orchEnabled = true, taskAlert = 0 }) {
   const [clock, setClock] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setClock(Date.now()), 15_000);
@@ -566,9 +566,10 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
     return () => { delete window.__setRailModelForTest; };
   }, []);
 
+  const launchPlan = railLaunchPlan(profiles);
   useEffect(() => {
     if (!profiles.length) return;
-    const measured = railWidthForProfileCount(profiles.length);
+    const measured = railWidthForProfileCount(launchPlan.count);
     updateRailState((previous) => {
       if (previous.width === measured) return previous;
       try {
@@ -577,7 +578,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
       } catch { /* re-seed below */ }
       return { ...previous, width: measured };
     });
-  }, [profiles.length, updateRailState]);
+  }, [profiles.length, launchPlan.count, updateRailState]);
 
   useEffect(() => {
     window.harbor.accounts.readEmails().then(setAccountEmails).catch(() => {});
@@ -727,40 +728,49 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
     setMenu(null);
   }, [profiles]);
 
-  // Four or more profiles share the rail head and a hovered project row, so the
-  // buttons go compact (CSS [data-dense]) and drop the space in "+ P". Seven or
-  // more (five Claude plans and three codex plans since 2026-10-21) tighten once
-  // more (CSS [data-crowded]): at eight, the compact row needed a 302px rail and
-  // hung "+W" past Pat's 278px one.
-  const denseLaunch = profiles.length >= 4;
-  const crowdedLaunch = profiles.length >= 7;
-  const renderProfileLaunchButtons = (className, { folder, sessionId, immediate = false } = {}) => (
-    profiles.map((profile) => (
+  // The rail head and a hovered project row carry one button per Claude plan
+  // and one "+O" for everything else (railLaunchPlan, 2026-10-29). Four or more
+  // buttons go compact (CSS [data-dense]) and drop the space in "+ P"; seven or
+  // more tighten once more (CSS [data-crowded]): at eight, the compact row
+  // needed a 302px rail and hung "+W" past Pat's 278px one.
+  const denseLaunch = launchPlan.count >= 4;
+  const crowdedLaunch = launchPlan.count >= 7;
+  const renderProfileLaunchButtons = (className, { folder, sessionId, immediate = false } = {}) => {
+    const launch = async (request) => {
+      let resolvedFolder = folder;
+      if (!resolvedFolder) {
+        resolvedFolder = await window.harbor.session.pickFolder();
+        if (!resolvedFolder) return;
+      }
+      onNewSession({ ...request, folder: resolvedFolder, sessionId });
+    };
+    const label = (letter) => (denseLaunch ? `+${letter}` : `+ ${letter}`);
+    return [
+      ...launchPlan.direct.map((profile) => (
+        <button
+          type="button"
+          key={profile.id}
+          className={`${className} ${profile.id}`}
+          style={profileStyle(profile)}
+          title={`New ${profile.label} session${folder ? ` in ${folder}` : ''}${accountEmails[profile.id] ? `: ${accountEmails[profile.id]}` : ''}`}
+          onClick={() => launch({ account: profile.id, provider: profile.provider || 'claude', immediate })}
+        >
+          {label(profile.letter)}
+        </button>
+      )),
+      // Never immediate: the point of "+O" is choosing the provider and plan in
+      // the Session configuration window.
       <button
         type="button"
-        key={profile.id}
-        className={`${className} ${profile.id}`}
-        style={profileStyle(profile)}
-        title={`New ${profile.label} session${folder ? ` in ${folder}` : ''}${accountEmails[profile.id] ? `: ${accountEmails[profile.id]}` : ''}`}
-        onClick={async () => {
-          let resolvedFolder = folder;
-          if (!resolvedFolder) {
-            resolvedFolder = await window.harbor.session.pickFolder();
-            if (!resolvedFolder) return;
-          }
-          onNewSession({
-            account: profile.id,
-            provider: profile.provider || 'claude',
-            folder: resolvedFolder,
-            sessionId,
-            immediate,
-          });
-        }}
+        key="launch-other"
+        className={`${className} launch-other`}
+        title={`New session on another plan${folder ? ` in ${folder}` : ''}: choose Codex, Cursor or any plan`}
+        onClick={() => launch(launchPlan.otherProvider ? { provider: launchPlan.otherProvider } : {})}
       >
-        {denseLaunch ? `+${profile.letter}` : `+ ${profile.letter}`}
-      </button>
-    ))
-  );
+        {label('O')}
+      </button>,
+    ];
+  };
 
   const handleSessionContextMenu = useCallback((event, session) => {
     // Right-click opens a small options menu (copy resume command, archive,
@@ -803,11 +813,8 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
         return !best || (s.lastActiveMs || 0) > (best.lastActiveMs || 0) ? s : best;
       }, null)?.id || null;
       const newSessionFolder = project.newSessionCwd || null;
-      // Orch asks a different question than the launch anchor above: it only
-      // needs a project root, which a LIVE session answers just as well. Using
-      // the dead-session anchor here hid the chip from all-live projects.
-      const canOrch = !project.isDateGroup && !project.isWindowsEra
-        && sidebarModel.projectRootSessionId(project) && onOpenOrch;
+      // No per-project Orch chip since 2026-10-29 (Pat trimmed the row to the
+      // Claude plans and "+O"); the Orch view's own project picker opens it.
       const liveCount = project.sessions.filter((s) => s.isLive && !subSessionReadOnly(s)).length;
       const projectAttention = project.sessions.reduce((totals, s) => {
         const state = attention?.get?.(s.id);
@@ -856,22 +863,12 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
             </span>
           </button>
           {!project.isDateGroup && !project.isWindowsEra && newSessionFolder && profiles.length > 0 ? (
-            <div className="sidebar-project-actions" data-profile-count={profiles.length} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
+            <div className="sidebar-project-actions" data-launch-count={launchPlan.count} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
               {renderProfileLaunchButtons('sidebar-proj-new', {
                 folder: newSessionFolder,
                 sessionId: newSessionId,
                 immediate: true,
               })}
-              {canOrch && (
-                <button
-                  type="button"
-                  className="sidebar-orch-btn"
-                  title="Open orchestration panel"
-                  onClick={() => onOpenOrch(project)}
-                >
-                  Orch
-                </button>
-              )}
             </div>
           ) : null}
         </div>
@@ -950,7 +947,7 @@ export function Sidebar({ onOpenOrch, onOpenSession, onCloseSession, onNewSessio
         </span>
         <div className="rail-head-actions">
           {profiles.length > 0 ? (
-            <div className="rail-new-split" data-profile-count={profiles.length} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
+            <div className="rail-new-split" data-launch-count={launchPlan.count} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
               {renderProfileLaunchButtons('sidebar-global-new')}
             </div>
           ) : profilesLoaded ? (

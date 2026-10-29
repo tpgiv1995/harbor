@@ -6,6 +6,12 @@
 // COPY of the real ~/.harbor/config.json, so it renders exactly the profile list the
 // live app does: five Claude plans and three codex plans, eight in all.
 //
+// Since 2026-10-29 (a sixth Claude plan, I, and Pat: "remove all the buttons in the side panel
+// except for the claude plan buttons ... keep one 'o' button for other ... via the modal") the
+// rail head and a hovered project row draw one button per Claude plan plus one "+O", and no
+// per-project Orch chip; "+O" must open the Session configuration window on the first other
+// provider with that provider's plans in its Plan picker.
+//
 // What it proves, at the rail widths that matter (the default the app picks for this
 // profile count, Pat's own 278px at his 120% zoom, and the widest the rail is ever dragged):
 //   - the rail head's "+letter" launch row keeps one line, never hangs past the rail,
@@ -29,7 +35,7 @@ const ELECTRON = path.join(APP_DIR, 'node_modules', 'electron', 'dist', 'electro
 const PORT = 9351;
 const OUT = path.join(os.tmpdir(), 'harbor-drive-plan-surfaces');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const { railWidthForProfileCount } = require('../src/renderer/profiles.cjs');
+const { railLaunchPlan, railWidthForProfileCount } = require('../src/renderer/profiles.cjs');
 
 class Cdp {
   constructor(ws) {
@@ -107,13 +113,20 @@ const railGeometry = (width) => `(() => {
   if (actions) {
     actions.style.display = 'flex';
     const boxes = [...actions.querySelectorAll('.sidebar-proj-new')].map((b) => b.getBoundingClientRect());
-    project = { count: boxes.length, overhang: boxes.length ? Math.round((Math.max(...boxes.map((b) => b.right)) - inner) * 10) / 10 : null,
+    project = { count: boxes.length, letters: [...actions.querySelectorAll('.sidebar-proj-new')].map((b) => b.textContent.trim()).join(' '),
+      orchChip: Boolean(actions.querySelector('.sidebar-orch-btn')) || [...actions.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Orch'), overhang: boxes.length ? Math.round((Math.max(...boxes.map((b) => b.right)) - inner) * 10) / 10 : null,
       oneLine: new Set(boxes.map((b) => Math.round(b.top))).size <= 1 };
     actions.style.display = '';
   }
   return {
+    requested: ${width},
     width: Math.round(railBox.width),
+    computed: getComputedStyle(rail).width,
+    inline: rail.style.getPropertyValue('--rail-width'),
+    zoom: getComputedStyle(document.documentElement).zoom + '/' + getComputedStyle(document.body).zoom + '/' + devicePixelRatio,
+    firstLeft: head.length ? Math.round(head[0].left) : null,
     buttons: head.length,
+    letters: [...document.querySelectorAll('.rail-head .sidebar-global-new')].map((b) => b.textContent.trim()).join(' '),
     oneLine: tops.size === 1,
     overhang: Math.round((Math.max(...head.map((b) => b.right)) - inner) * 10) / 10,
     eyebrowWidth: Math.round(eyebrow.width),
@@ -144,6 +157,8 @@ async function main() {
   }
   const profiles = realConfig.profiles || [];
   const claudeProfiles = profiles.filter((p) => (p.provider || 'claude') === 'claude');
+  const launch = railLaunchPlan(profiles);
+  const otherProfiles = profiles.filter((p) => p.provider === launch.otherProvider);
   realConfig.paths = {
     ...realConfig.paths,
     cacheDir,
@@ -177,8 +192,9 @@ async function main() {
   let failure = '';
   try {
     let target = null;
-    // An isolated boot takes ~40s on this machine (measured 2026-10-21), past the 30s other drives allow.
-    for (let i = 0; i < 240 && !target; i += 1) {
+    // An isolated boot took ~40s on this machine (measured 2026-10-21), past the 30s other drives allow;
+    // by 2026-10-29 the cold codex/cursor rescan E2E mode forces ran past 120s, so wait up to 6 minutes.
+    for (let i = 0; i < 720 && !target; i += 1) {
       await sleep(500);
       try {
         const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
@@ -195,19 +211,25 @@ async function main() {
     // pixel and a 956x574 CSS viewport. His rail is 500 device pixels = 278 CSS.
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 956, height: 574, deviceScaleFactor: 1.8, mobile: false });
 
-    await waitFor(cdp, `document.querySelectorAll('.rail-head .sidebar-global-new').length === ${profiles.length}`, 'one rail launch button per profile');
+    await waitFor(cdp, `document.querySelectorAll('.rail-head .sidebar-global-new').length === ${launch.count}`, 'one rail launch button per Claude plan, plus +O');
     await waitFor(cdp, `document.querySelectorAll('.rail-meters .rm-row:not(.rm-sys)').length === ${claudeProfiles.length}`, 'one meter row per Claude plan');
     await sleep(2500); // let the first usage read land so the meters show real values
 
     // 1. Rail head and hovered project row at each width that matters.
     const PAT_RAIL = 278;
-    const widths = [...new Set([railWidthForProfileCount(profiles.length), PAT_RAIL, 420])];
+    const widths = [...new Set([railWidthForProfileCount(launch.count), PAT_RAIL, 420])];
+    const wantLetters = [...claudeProfiles.map((p) => `+${p.letter}`), '+O'].join(' ');
     facts.rail = [];
     for (const width of widths) {
       const g = await cdp.eval(railGeometry(width));
       facts.rail.push(g);
+      // A measurement taken at the wrong width proves nothing (2026-10-29: every width read 340).
+      if (Math.abs(g.width - width) > 1) problems.push(`asked for a ${width}px rail, measured ${g.width}px`);
       if (!g.oneLine) problems.push(`rail head wraps at ${width}px`);
-      if (g.overhang > 0) problems.push(`rail head "+${profiles.at(-1).letter}" hangs ${g.overhang}px past the rail at ${width}px`);
+      if (g.overhang > 0) problems.push(`rail head "+O" hangs ${g.overhang}px past the rail at ${width}px`);
+      if (g.letters !== wantLetters) problems.push(`rail head reads "${g.letters}", want "${wantLetters}"`);
+      if (g.project && g.project.letters !== wantLetters) problems.push(`project row reads "${g.project.letters}", want "${wantLetters}"`);
+      if (g.project?.orchChip) problems.push('the project row still carries an Orch chip');
       if (g.project && (g.project.overhang > 0 || !g.project.oneLine)) problems.push(`hovered project row overflows at ${width}px (${JSON.stringify(g.project)})`);
     }
     // The narrowest width at which the head still fits, for the record.
@@ -222,6 +244,10 @@ async function main() {
     if (fits === null || fits > PAT_RAIL - 8) problems.push(`the rail head needs ${fits}px; Pat's rail is ${PAT_RAIL}px and wants 8px of slack`);
     await cdp.eval(railGeometry(PAT_RAIL));
     shots.push(await cdp.shot(`1-rail-at-${PAT_RAIL}`));
+    // The hovered project row, held open the way :hover opens it (buttons shown, the age label hidden), so its buttons are seen, not just measured.
+    await cdp.eval(`(() => { const a = document.querySelector('.sidebar-project-actions'); if (!a) return false; a.style.display = 'flex'; const m = a.closest('.sidebar-project-wrap')?.querySelector('.pg-meta'); if (m) m.style.display = 'none'; return true; })()`);
+    shots.push(await cdp.shot(`1b-project-row-at-${PAT_RAIL}`));
+    await cdp.eval(`(() => { const a = document.querySelector('.sidebar-project-actions'); if (!a) return true; a.style.display = ''; const m = a.closest('.sidebar-project-wrap')?.querySelector('.pg-meta'); if (m) m.style.display = ''; return true; })()`);
 
     // 2. Rail meters: one row per Claude plan, config order, the profile's colour.
     facts.meters = await cdp.eval(`[...document.querySelectorAll('.rail-meters .rm-row:not(.rm-sys)')].map((row) => ({
@@ -232,11 +258,10 @@ async function main() {
     const meterLetters = facts.meters.map((m) => m.letter).join(' ');
     if (meterLetters !== facts.claude) problems.push(`meter rows read "${meterLetters}", config says "${facts.claude}"`);
     for (const m of facts.meters) if (m.clipped) problems.push(`meter row ${m.letter} is clipped`);
-    const g = claudeProfiles.find((p) => p.letter === 'G');
-    if (g) {
-      const [r, gg, b] = [1, 3, 5].map((i) => parseInt(g.color.slice(i, i + 2), 16));
-      const row = facts.meters.find((m) => m.letter === 'G');
-      if (!row || row.color !== `rgb(${r}, ${gg}, ${b})`) problems.push(`the G meter row is ${row?.color}, expected rgb(${r}, ${gg}, ${b})`);
+    for (const p of claudeProfiles) {
+      const [r, gg, b] = [1, 3, 5].map((i) => parseInt(p.color.slice(i, i + 2), 16));
+      const row = facts.meters.find((m) => m.letter === p.letter);
+      if (!row || row.color !== `rgb(${r}, ${gg}, ${b})`) problems.push(`the ${p.letter} meter row is ${row?.color}, expected rgb(${r}, ${gg}, ${b})`);
     }
 
     // 3. File menu: one "New <plan> session" per profile.
@@ -282,6 +307,28 @@ async function main() {
     if (await cdp.eval('Boolean(document.querySelector(".new-session-popover"))')) {
       await cdp.eval(click('.new-session-popover .cap-close, .new-session-popover [aria-label="Close"], .menu-backdrop'));
       await sleep(300);
+    }
+
+    // 5b. "+O" opens the Session configuration window on the first other provider, whose Plan
+    // picker lists that provider's plans.
+    if (launch.otherProvider) {
+      await cdp.eval(click('.rail-head .sidebar-global-new.launch-other'));
+      await waitFor(cdp, 'Boolean(document.querySelector(".new-session-popover"))', 'the Session configuration window from +O');
+      await sleep(800);
+      facts.otherWindow = await cdp.eval(`(() => ({
+        provider: document.querySelector('.new-session-providers button.active')?.textContent.trim() || null,
+        plans: [...document.querySelectorAll('.config-account button')].map((b) => b.textContent.trim()),
+        active: document.querySelector('.config-account button.active')?.textContent.trim() || null,
+      }))()`);
+      shots.push(await cdp.shot('4b-plus-o-session-config'));
+      if (facts.otherWindow.plans.length !== otherProfiles.length) problems.push(`+O window shows ${facts.otherWindow.plans.length} plans, config has ${otherProfiles.length} ${launch.otherProvider} plans`);
+      for (const p of otherProfiles) if (!facts.otherWindow.plans.some((label) => label.includes(p.label))) problems.push(`+O window lacks the ${p.label} plan`);
+      await cdp.eval(escape);
+      await sleep(300);
+      if (await cdp.eval('Boolean(document.querySelector(".new-session-popover"))')) {
+        await cdp.eval(click('.new-session-popover .new-session-close'));
+        await sleep(300);
+      }
     }
 
     // 6. Title-bar Plan usage menu: every plan, grouped by provider.

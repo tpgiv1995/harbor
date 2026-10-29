@@ -611,17 +611,18 @@ test('a project root never resolves to a live: pane row, which holds no session 
   assert.equal(projectRootSessionId(undefined), null);
 });
 
-test('the rail gates Orch on the project root, not on the dead-session launch anchor', () => {
-  const orchLine = sidebarSource.split('\n').find((line) => line.includes('const canOrch'));
-  assert.ok(orchLine, 'canOrch still exists');
-  assert.ok(
-    /projectRootSessionId/.test(sidebarSource.slice(sidebarSource.indexOf('const canOrch'), sidebarSource.indexOf('const canOrch') + 260)),
-    'canOrch resolves the root itself',
+// The rail's per-project Orch chip is gone since 2026-10-29 (Pat trimmed the
+// row to the Claude plans and "+O"); the Orch view's project picker is the way
+// in, and it keeps the rule the chip had: gate on the project root, which a
+// LIVE session answers, never on the dead-session launch anchor.
+test('Orch opens from the picker, gated on the project root; the rail row has no Orch chip', () => {
+  assert.ok(!/canOrch|sidebar-orch-btn/.test(sidebarSource), 'the rail project row grew an Orch chip back');
+  const pickerSource = fs.readFileSync(
+    path.resolve(__dirname, '../../src/renderer/orchestration/OrchProjectPicker.jsx'),
+    'utf8',
   );
-  assert.ok(
-    !/const canOrch[\s\S]{0,200}newSessionId/.test(sidebarSource),
-    'canOrch no longer depends on the dead-session anchor',
-  );
+  assert.match(pickerSource, /projectRootSessionId\(project\)/, 'the picker resolves the root itself');
+  assert.doesNotMatch(pickerSource, /newSessionId|newSessionCwd/, 'the picker never uses the dead-session anchor');
 });
 
 // Throwaway working directories are not projects. The batch-1..13 port

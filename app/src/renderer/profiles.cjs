@@ -82,6 +82,23 @@ function launchDefaults(options) {
   };
 }
 
+// The rail's launch buttons (Pat, 2026-10-29, with six Claude plans and three
+// codex plans configured: "remove all the buttons in the side panel except for
+// the claude plan buttons ... keep one 'o' button for other and have that be my
+// way of opening a session for another plan (one of the codex/cursor ones) via
+// the modal"). One button per Claude plan, then ONE "+O" that opens the Session
+// configuration window, preselected on the first other provider in the list,
+// where its Plan picker reaches every remaining home. `count` is the number of
+// buttons the row actually draws, the number the rail's width and density follow.
+function railLaunchPlan(profiles) {
+  const list = Array.isArray(profiles) ? profiles : [];
+  const isClaude = (profile) => (profile.provider || 'claude') === 'claude';
+  const direct = list.filter(isClaude);
+  const firstOther = list.find((profile) => !isClaude(profile)) || null;
+  return { direct, otherProvider: firstOther ? firstOther.provider : null, count: direct.length + 1 };
+}
+
+// Takes the number of launch BUTTONS in the rail head (railLaunchPlan().count).
 function railWidthForProfileCount(count) {
   if (count <= 1) return 260;
   if (count <= 3) return 292;
@@ -100,5 +117,6 @@ module.exports = {
   profileStyle,
   resumeCommandForProfile,
   launchDefaults,
+  railLaunchPlan,
   railWidthForProfileCount,
 };

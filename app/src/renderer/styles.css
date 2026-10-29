@@ -589,6 +589,17 @@ button { font-family: inherit; }
   background: rgba(255, 255, 255, 0.09);
 }
 
+/* "+O", the one button for every plan that is not a Claude plan (2026-10-29):
+   it belongs to no profile, so it takes the rail's neutral ink, never a plan's
+   colour (the I plan is white). */
+.sidebar-global-new.launch-other,
+.sidebar-proj-new.launch-other {
+  border-color: var(--ln);
+  color: var(--sub);
+}
+.sidebar-global-new.launch-other:hover,
+.sidebar-proj-new.launch-other:hover { color: var(--tx); }
+
 /* Four or more profiles (Pat's three Claude plans plus three codex plans since
    2026-09-28): the buttons go compact so the whole row keeps its one line at
    the default rail width instead of hanging "+W" past the rail's edge. */
@@ -1140,19 +1151,6 @@ button { font-family: inherit; }
 .sidebar-project-wrap.date-group:hover .pg-meta { display: inline; }
 
 .sidebar-proj-new { height: 20px; padding: 0 6px; font-size: 10px; }
-
-.sidebar-orch-btn {
-  height: 20px;
-  padding: 0 7px;
-  border: 1px solid var(--ln);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--sub);
-  cursor: pointer;
-  font-size: 10px;
-}
-
-.sidebar-orch-btn:hover { background: rgba(255, 255, 255, 0.09); color: var(--tx); }
 
 /* Session rows */
 .sr {

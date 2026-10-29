@@ -11,6 +11,7 @@ const {
   defaultProfileId,
   profileStyle,
   resumeCommandForProfile,
+  railLaunchPlan,
   railWidthForProfileCount,
 } = require('../../src/renderer/profiles.cjs');
 const { normalizeHome: sidebarNormalizeHome } = require('../../src/shared/sidebar-model.cjs');
@@ -91,6 +92,28 @@ test('rail width scales with profile count without shrinking the three-profile c
   assert.equal(railWidthForProfileCount(8), 340);
 });
 
+// Pat, 2026-10-29, with six Claude plans and three codex plans: "remove all the
+// buttons in the side panel except for the claude plan buttons ... keep one 'o'
+// button for other ... via the modal". The rail draws one button per Claude plan
+// and one "+O"; its width and density follow that count, not the profile count.
+test('the rail launches Claude plans directly and folds every other plan into one +O', () => {
+  const nine = [
+    ...['P', 'T', 'S', 'R', 'G', 'I'].map((letter) => ({ id: letter.toLowerCase(), letter, provider: 'claude' })),
+    { id: 'codex-a', letter: 'X', provider: 'codex' },
+    { id: 'codex-b', letter: 'C', provider: 'codex' },
+    { id: 'codex-c', letter: 'W', provider: 'codex' },
+  ];
+  const plan = railLaunchPlan(nine);
+  assert.deepEqual(plan.direct.map((p) => p.letter), ['P', 'T', 'S', 'R', 'G', 'I']);
+  assert.equal(plan.otherProvider, 'codex');
+  assert.equal(plan.count, 7);
+  assert.equal(railWidthForProfileCount(plan.count), 340);
+  // A profile with no provider is a Claude profile (the pre-codex config shape).
+  assert.deepEqual(railLaunchPlan([{ id: 'personal', letter: 'P' }]), { direct: [{ id: 'personal', letter: 'P' }], otherProvider: null, count: 2 });
+  // Nothing configured is still a well-formed plan.
+  assert.deepEqual(railLaunchPlan(undefined), { direct: [], otherProvider: null, count: 1 });
+});
+
 test('renderer sources no longer hardcode the lab account id', () => {
   const files = [
     '../../src/renderer/sidebar/Sidebar.jsx',
@@ -111,7 +134,8 @@ test('sidebar launch buttons are profile-driven', () => {
     path.resolve(__dirname, '../../src/renderer/sidebar/Sidebar.jsx'),
     'utf8',
   );
-  assert.match(sidebarSource, /profiles\.map\(\(profile\)/);
+  assert.match(sidebarSource, /launchPlan\.direct\.map\(\(profile\)/);
+  assert.match(sidebarSource, /railLaunchPlan\(profiles\)/);
   assert.match(sidebarSource, /renderProfileLaunchButtons/);
   assert.doesNotMatch(sidebarSource, /account: 'personal'/);
 });
