@@ -12,6 +12,7 @@ const {
   claudeProjectDir,
   providerTranscriptDirs,
   composerSendState,
+  codexBoxState,
   isFleetView,
 } = require('../../src/main/session-send.js');
 
@@ -507,6 +508,57 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
 }
 
 const typed = (h) => h.sent.map(({ text }) => text);
+
+// A Codex 0.165.0 pane, drawn the way the real one is (fixtures/codex-box): the
+// transcript echoes each submitted prompt with "›", the box is the last "›"
+// line with its text wrapped under it, and one footer line names the model,
+// folder and thread title. On Windows a paste reaches Codex as keystrokes, so
+// for `burstReads` reads after typing the box shows nothing (the paste-burst
+// buffer), and `swallowEnters` Enters land inside the burst as a newline.
+// `screen` replaces the whole pane (a dialog instead of the box); `dropTyping`
+// loses what is typed; `reads` counts every read. A paste that is only an
+// image path becomes "[Image #N] " in the box, numbered per message, as Codex's
+// handle_paste_image_path draws it.
+function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTyping = false, title = 'proof', frames = false, failUntil = null } = {}) {
+  let draft = '';
+  let swallowed = 0;
+  let hidden = 0;
+  let frame = 0;
+  let images = 0;
+  const echoed = [];
+  const state = { reads: 0 };
+  h.prompt.echo = false;
+  const wrap = (text) => text.split('\n').flatMap((line) => {
+    const out = [];
+    for (let at = 0; at < line.length || at === 0; at += 116) out.push(line.slice(at, at + 116));
+    return out;
+  }).join('\n  ');
+  const box = (text) => ([...text].length > 1000 ? `[Pasted Content ${[...text].length} chars]` : wrap(text));
+  h.deps.readPane = async () => {
+    state.reads += 1;
+    if (failUntil && failUntil()) throw new Error('pane unreadable');
+    if (screen) return screen;
+    const shown = hidden > 0 ? '' : draft;
+    if (hidden > 0) hidden -= 1;
+    const above = echoed.map((text) => `› ${box(text)}\n\n• OK\n`).join('\n');
+    const busy = frames ? `\n• Working (${frame += 1}s • esc to interrupt)\n` : '';
+    return `  >_ OpenAI Codex (v0.165.0)\n\n${above}${busy}\n› ${shown ? box(shown) : 'Ask Codex to do anything'}\n\n  GPT-6.1-Sol low · ~\\dev\\proof · ${title}`;
+  };
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    const result = sendInput(paneId, text);
+    if (screen || dropTyping) return result;
+    if (text === '\r') {
+      if (swallowed < swallowEnters) { swallowed += 1; draft += '\n'; } else if (draft.trim()) { echoed.push(draft.trim()); draft = ''; images = 0; }
+    } else {
+      const pasted = text.replace(/\x1b\[20[01]~/g, '');
+      if (/^"?[^"\n]+\.(png|jpe?g|gif|webp)"?$/i.test(pasted)) { images += 1; draft += `[Image #${images}] `; } else draft += pasted;
+      hidden = burstReads;
+    }
+    return result;
+  };
+  return Object.assign(state, { get draft() { return draft; }, get echoed() { return echoed; } });
+}
 
 test('an Enter Claude swallowed is pressed again while the message still sits in its composer', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
@@ -1022,10 +1074,8 @@ test('a message already sitting in the prompt from an earlier attempt is submitt
 // sends into a busy codex.
 test('a FRESH codex pane is allowed to settle before anything is typed into it', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  const order = [];
-  let reads = 0;
   // A stable, non-shell screen: two identical reads is what "settled" means.
-  h.deps.readPane = async () => { reads += 1; order.push('read'); return 'codex\n> '; };
+  const pane = codexPane(h);
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 'pane:fresh-codex',
@@ -1033,10 +1083,8 @@ test('a FRESH codex pane is allowed to settle before anything is typed into it',
     provider: 'codex',
     pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
   });
-  const typedAt = h.sent.length ? order.indexOf('type') : -1;
-  assert.ok(reads >= 2, `a fresh pane must be READ until it settles before typing, saw ${reads} reads`);
+  assert.ok(pane.reads >= 2, `a fresh pane must be READ until it settles before typing, saw ${pane.reads} reads`);
   assert.match(h.sent.map(({ text }) => text).join(''), /the whole message must survive/);
-  void typedAt;
 });
 
 test('a FRESH cursor pane settles too: the gate is not codex-only', async () => {
@@ -1090,10 +1138,9 @@ test('a fresh pane that is drawing but never settles still gives up on the old 1
   let t = 0;
   h.deps.clock = () => t;
   h.deps.sleep = async (ms) => { t += ms; };
-  let frame = 0;
   let typedAt = null;
   // Mid-turn output: never two identical reads.
-  h.deps.readPane = async () => `codex\nworking ${frame += 1}`;
+  codexPane(h, { frames: true });
   const input = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => { if (typedAt === null) typedAt = t; return input(paneId, text); };
   const send = createSessionSend(h.deps);
@@ -1113,10 +1160,7 @@ test('a fresh pane whose reads fail keeps the old 15 s budget', async () => {
   h.deps.sleep = async (ms) => { t += ms; };
   let gateReads = 0;
   // Throw through the settle gate, then answer normally so delivery can finish.
-  h.deps.readPane = async () => {
-    if (t < 16_000) { gateReads += 1; throw new Error('pane unreadable'); }
-    return 'codex\n> ';
-  };
+  codexPane(h, { failUntil: () => { if (t >= 16_000) return false; gateReads += 1; return true; } });
   let typedAt = null;
   const input = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => { if (typedAt === null) typedAt = t; return input(paneId, text); };
@@ -1136,15 +1180,14 @@ test('a fresh pane whose reads fail keeps the old 15 s budget', async () => {
 test('an unresolved provider is taken from the session, not defaulted to claude', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   h.deps.getSessionMeta = async () => ({ provider: 'codex', cwd: '/tmp/x' });
-  let reads = 0;
-  h.deps.readPane = async () => { reads += 1; return 'codex\n> '; };
+  const pane = codexPane(h);
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 'pane:unresolved',
     text: 'this is a codex session even though nobody said so',
     pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
   });
-  assert.ok(reads >= 2, `an unresolved provider must still settle, saw ${reads} reads`);
+  assert.ok(pane.reads >= 2, `an unresolved provider must still settle, saw ${pane.reads} reads`);
 });
 
 // Codex 0.159.3 can draw an account-security banner over an EMPTY composer that
@@ -1155,7 +1198,7 @@ test('an unresolved provider is taken from the session, not defaulted to claude'
 // message always goes in as one; claude keeps its measured raw single line.
 test('a single-line codex message is pasted, so a banner over the empty composer cannot take its first key', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  h.deps.readPane = async () => 'codex\n> ';
+  codexPane(h);
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 'pane:codex-banner', text: '1. fix the header', provider: 'codex',
@@ -1168,20 +1211,137 @@ test('a single-line codex message is pasted, so a banner over the empty composer
 
 test('an established codex pane is NOT re-settled on every send', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  let reads = 0;
-  h.deps.readPane = async () => { reads += 1; return 'codex\n> '; };
+  const pane = codexPane(h);
   const send = createSessionSend(h.deps);
   const payload = (text) => ({
     sessionId: 'pane:fresh-codex', text, provider: 'codex',
     pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
   });
   await send.send(payload('first'));
-  const afterFirst = reads;
+  const afterFirst = pane.reads;
   await send.send(payload('second'));
   assert.ok(
-    reads - afterFirst < afterFirst,
-    `the second send must not repeat the settle: ${afterFirst} reads then ${reads - afterFirst}`,
+    pane.reads - afterFirst < afterFirst,
+    `the second send must not repeat the settle: ${afterFirst} reads then ${pane.reads - afterFirst}`,
   );
+});
+
+// CODEX'S BOX, READ FROM REAL CAPTURES (Codex 0.165.0, 120 columns, 2026-10-29,
+// scripts/drive-codex-send-win.js under load; only the temp-home warning Codex
+// prints for a throwaway CODEX_HOME was cut). "stuck" screens are messages
+// Harbor reported as sent that sat in the box; "taken" is one Codex submitted.
+const codexFixture = (name) => fs.readFileSync(path.join(__dirname, '../fixtures/codex-box', name), 'utf8');
+const proofWords = 'the quick brown fox jumps over the lazy dog ';
+test('codexBoxState reads the real Codex box: stuck, taken, placeholder, footer title and the update screen', () => {
+  const stuck = codexFixture('codex-0.165.0-stuck-300-120.txt');
+  assert.equal(codexBoxState(stuck, { text: `Reply with just OK. ${proofWords.repeat(6)}codex-proof-cbf58805` }), 'exact');
+  // The earlier message is in the transcript above, not in the box.
+  assert.equal(codexBoxState(stuck, { text: 'Reply with just OK. codex-proof-ddd816c8' }), 'other');
+  const taken = codexFixture('codex-0.165.0-taken-120.txt');
+  assert.equal(codexBoxState(taken, { text: 'Reply with just OK. codex-proof-ddd816c8' }), 'other');
+  // 2,020 characters drawn as 2,021: the swallowed Enter joined the paste.
+  const placeholder = codexFixture('codex-0.165.0-stuck-placeholder-120.txt');
+  assert.equal(codexBoxState(placeholder, { text: `Reply with just OK. ${proofWords.repeat(45)}codex-proof-f00df00d` }), 'exact');
+  assert.equal(codexBoxState(placeholder, { text: `Reply with just OK. ${proofWords.repeat(30)}codex-proof-f00df00d` }), 'other');
+  // The footer's thread title repeats the first message; it is not the box.
+  const emptyBox = stuck.replace(/\n› Reply with just OK\. the quick[\s\S]*?(?=\n\s+GPT-6\.1-Sol)/, '\n› Ask Codex to do anything');
+  assert.match(emptyBox.trimEnd(), /· Reply with OK codex-proof-ddd816c8$/, 'the real footer carries the title');
+  assert.equal(codexBoxState(emptyBox, { text: 'Reply with OK codex-proof-ddd816c8' }), 'other');
+  // "› 1. Update now" over key hints is a dialog, never the box.
+  assert.equal(codexBoxState(codexFixture('codex-0.165.0-update-screen-120.txt'), { text: 'x' }), 'noprompt');
+});
+
+test('a Codex message that starts "1. " is still the box: it sits over the model footer', () => {
+  const screen = '› Reply with just OK.\n\n• OK\n\n› 1. fix the header\n\n  GPT-6.1-Sol low · ~\\dev\\proof · proof';
+  assert.equal(codexBoxState(screen, { text: '1. fix the header' }), 'exact');
+  // Codex's "open in another app" lock dialog (transcribed from a live pane,
+  // docs/orchestration/2026-10-28-codex-ux) draws no box at all.
+  const locked = '  This conversation is open in another app          r to retry\n      Close it there and press R to continue here.\n   r retry   f fork   esc/ctrl+c/q exit   ctrl+t transcript';
+  assert.equal(codexBoxState(locked, { text: 'hello' }), 'noprompt');
+});
+
+test('an Enter Codex swallowed into the paste is pressed again while the message still sits in its box', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { swallowEnters: 1, burstReads: 2 });
+  const send = createSessionSend(h.deps);
+  const text = `Reply with just OK. ${proofWords.repeat(6)}marker`;
+  await send.send({ sessionId: 'pane:codex-swallow', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), [`\x1b[200~${text}\x1b[201~`, '\r', '\r']);
+  assert.equal(pane.draft, '');
+  assert.deepEqual(pane.echoed, [text]);
+});
+
+test('an Enter Codex took is never pressed twice, and the long-paste placeholder counts as the message', async () => {
+  for (const text of ['Reply with just OK.', `Reply with just OK. ${proofWords.repeat(45)}marker`]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const pane = codexPane(h, { burstReads: 3 });
+    const send = createSessionSend(h.deps);
+    await send.send({ sessionId: 'pane:codex-taken', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    assert.deepEqual(typed(h), [`\x1b[200~${text}\x1b[201~`, '\r'], `${text.length} characters`);
+    assert.deepEqual(pane.echoed, [text]);
+  }
+});
+
+test('a Codex box that never shows the text gets no Enter and an honest refusal', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { dropTyping: true });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 'pane:codex-dropped', text: 'this never reaches the box', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PROMPT_NEVER_HELD' && /Codex's box never showed your text/.test(error.message),
+  );
+  assert.equal(typed(h).includes('\r'), false, 'no Enter into a box that does not hold the message');
+});
+
+test('with no Codex box on screen (the update screen) nothing is typed at all', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { screen: codexFixture('codex-0.165.0-update-screen-120.txt') });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 'pane:codex-update', text: '2026-10-28 notes: please read', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_NO_PROMPT',
+  );
+  assert.deepEqual(typed(h), [], 'not one key: the update screen takes 1, 2, 3 and Enter');
+});
+
+// Both effort menus send "/effort <level>" for every provider. Codex has no
+// /effort ("Unrecognized command"); /model --reasoning=<level> keeps its model
+// and changes the effort (Codex 0.165.0 chatwidget/model_command.rs).
+test('an effort change into a codex pane goes in as /model --reasoning=<level>; claude keeps /effort', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h);
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 'pane:codex-effort', text: '/effort high', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), ['/model ', '--reasoning=high', '\r']);
+  const c = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(c);
+  await createSessionSend(c.deps).send({ sessionId: 's-claude-effort', text: '/effort high', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(typed(c)[0], '/effort ');
+});
+
+test('a Codex thread locked by the Codex app gets no keys and a refusal that says to close it there', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { screen: '  This conversation is open in another app          r to retry\n      Close it there and press R to continue here.\n   r retry   f fork   esc/ctrl+c/q exit   ctrl+t transcript' });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 'pane:codex-locked', text: 'quick fix please', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_NO_PROMPT' && /open in the Codex app/.test(error.message),
+  );
+  assert.deepEqual(typed(h), [], 'r, f and q are that dialog\'s keys');
+});
+
+test('Codex swallowing both Enters is an honest error, and the resend presses Enter without typing it twice', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { swallowEnters: 2 });
+  const send = createSessionSend(h.deps);
+  const text = `Reply with just OK. ${proofWords.repeat(6)}marker`;
+  const payload = { sessionId: 'pane:codex-stuck', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } };
+  await assert.rejects(send.send(payload), (error) => error.code === 'CODEX_NOT_SUBMITTED');
+  assert.deepEqual(typed(h), [`\x1b[200~${text}\x1b[201~`, '\r', '\r']);
+  h.sent.length = 0;
+  await send.send(payload);
+  assert.deepEqual(typed(h), ['\r'], 'the message already in the box is submitted, not typed again');
+  assert.deepEqual(pane.echoed, [text]);
 });
 
 // harbor-server is headless, so it never passes setXClipboardImage and there is
@@ -1226,20 +1386,45 @@ test('two headless images are both delivered, one quoted path per line, ahead of
   assert.doesNotMatch(body, /Images?:/);
 });
 
-test('a headless image into a codex pane keeps the labelled line', async () => {
+// Codex attaches a paste that is only an image path (handle_paste_image_path),
+// so a Codex pane gets each image as its own pasted, quoted path, desktop and
+// phone alike; the "Images:" label left Codex a path to read (2026-10-29).
+test('images into a codex pane are attached by their pasted paths, from the phone and the desktop', async () => {
+  for (const clipboard of [false, true]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const pane = codexPane(h);
+    const clipped = [];
+    if (clipboard) h.deps.setXClipboardImage = async (file) => { clipped.push(file); };
+    else delete h.deps.setXClipboardImage;
+    const send = createSessionSend(h.deps);
+    await send.send({
+      sessionId: 's-codex-images',
+      text: 'compare these',
+      images: ['/srv/upload/a.png', '/srv/upload/b.png'],
+      provider: 'codex',
+      pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
+    });
+    assert.deepEqual(typed(h), [
+      '\x1b[200~"/srv/upload/a.png"\x1b[201~',
+      '\x1b[200~"/srv/upload/b.png"\x1b[201~',
+      '\x1b[200~compare these\x1b[201~',
+      '\r',
+    ], clipboard ? 'desktop' : 'phone');
+    assert.deepEqual(pane.echoed, ['[Image #1] [Image #2] compare these']);
+    assert.deepEqual(clipped, [], 'no clipboard and no paste chord for codex');
+  }
+});
+
+test('an image Codex never attaches stops the send before the text or Enter', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h);
   delete h.deps.setXClipboardImage;
   const send = createSessionSend(h.deps);
-  await send.send({
-    sessionId: 's-headless-codex',
-    text: 'compare these',
-    images: ['/srv/upload/a.png', '/srv/upload/b.png'],
-    provider: 'codex',
-    pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
-  });
-  const body = h.sent.map(({ text }) => text).join('');
-  assert.match(body, /Images: \/srv\/upload\/a\.png \/srv\/upload\/b\.png/);
-  assert.ok(body.indexOf('/srv/upload/a.png') < body.indexOf('compare these'), 'images lead the prompt');
+  await assert.rejects(
+    send.send({ sessionId: 's-codex-bad-image', text: 'look', images: ['/srv/upload/notes.txt'], provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    /Codex never attached the image/,
+  );
+  assert.deepEqual(typed(h), ['\x1b[200~"/srv/upload/notes.txt"\x1b[201~'], 'nothing after the path');
 });
 
 test('clipboard failure is an honest send error before Ctrl+V or text', async () => {
@@ -1629,7 +1814,9 @@ test('a non-Claude provider send refuses the dead shell and resumes through bin/
     panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1' }],
     controlled: 'pane-1',
   });
-  h.deps.readPane = async (paneId) => (paneId === 'pane-1' ? CRASHED_SHELL_SCREEN : '──────\n❯\n──────');
+  codexPane(h);
+  const codexRead = h.deps.readPane;
+  h.deps.readPane = async (paneId, ...rest) => (paneId === 'pane-1' ? CRASHED_SHELL_SCREEN : codexRead(paneId, ...rest));
   const providerResumes = [];
   h.deps.launchActions.resumeProviderSession = async (args) => {
     providerResumes.push(args);

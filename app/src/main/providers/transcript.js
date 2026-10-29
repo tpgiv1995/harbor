@@ -613,6 +613,16 @@ const CODEX_CALL_RE = /\btools\.([A-Za-z_]\w*)\s*\(/g;
 const CODEX_POLL = (call) => call.name === 'wait' || call.name === 'sleep' || call.name === 'clock__curr_time'
   || (call.name === 'write_stdin' && !call.input.chars);
 
+// The command a Codex CommandExecution ran, as the cell wrote it: Codex
+// records the argv it spawned (`powershell.exe -Command <cmd>`, `bash -lc
+// <cmd>`), and the cell's `cmd` is that last argument.
+function codexCommandText(command) {
+  if (typeof command === 'string') return command;
+  if (!Array.isArray(command) || !command.length) return '';
+  const at = command.findIndex((arg) => /^-(?:Command|l?c)$/i.test(String(arg)));
+  return String(at >= 0 && at + 1 < command.length ? command[at + 1] : command.join(' '));
+}
+
 function codexToolSnippet(source) {
   const text = String(source);
   const calls = [];
@@ -906,6 +916,10 @@ class TranscriptParser {
     this.provider = provider;
     this.blocks = [];
     this.pendingTools = new Map(); // tool_use id -> action block
+    // Codex code mode: command text -> the action rows that name it and have
+    // not yet seen its CommandExecution. See applyCodexLine.
+    this.codexNamed = new Map();
+    this.codexCodeMode = false;
     // The task in flight: the user prompt that opened it and the output tokens
     // each API message spent on it. See noteTurnUsage.
     this.turn = null;
@@ -1283,30 +1297,79 @@ class TranscriptParser {
         if (text) {
           const user = item.type === 'UserMessage';
           this.push({ kind: user ? 'user' : 'assistant', text: clipProse(text), ts });
-          this.header.lastSignal = user ? 'user-turn' : 'idle';
+          // Codex narrates mid-turn ("phase": "commentary"); only its final
+          // answer ends the turn (2026-10-29: 13 of 15 messages in one real
+          // session were commentary, so the window read idle while it worked).
+          this.header.lastSignal = user ? 'user-turn' : (item.phase === 'commentary' ? 'user-turn' : 'idle');
+        }
+      } else if (item.type === 'CommandExecution' && this.codexCodeMode) {
+        // ONE ROW PER COMMAND (2026-10-29, Pat: "cant see any agent work").
+        // Codex code mode runs its shell work inside `exec` cells of
+        // JavaScript, often several commands to a cell, and the cell's row
+        // names only the first working call: across 3,239 real cells, 2,059
+        // of 5,292 calls (39 percent) never got a row, while Codex's own
+        // screen prints a line for each. Each command reports itself here
+        // when it finishes. A command a row already names (in this cell or an
+        // earlier one: a long command can finish during a later cell) only
+        // gives that row its real exit status; any other command gets its own
+        // row, so nothing is drawn twice. Matched by the exact command text
+        // (949 of 962 in the 2026-10-28 rollouts; the rest were built in a
+        // loop and really were hidden).
+        const command = codexCommandText(item.command);
+        const exit = Number.isInteger(item.exit_code) ? item.exit_code : null;
+        const status = exit === null ? (item.status === 'failed' ? 'err' : 'ok') : (exit === 0 ? 'ok' : 'err');
+        const named = command ? this.codexNamed.get(command) : null;
+        if (named?.length) {
+          const row = named.shift();
+          if (!named.length) this.codexNamed.delete(command);
+          row.codexStatus = status;
+          if (!row.toolId || !this.pendingTools.has(row.toolId)) { row.status = status; changed.push(row.key); }
+        } else if (command) {
+          this.push({ kind: 'action', toolId: null, status, ts, ...actionForToolUse({ name: 'exec_command', input: { command } }) });
         }
       }
     } else if (obj.type === 'response_item' && ['function_call', 'custom_tool_call'].includes(payload.type)) {
       let name = payload.name || 'Tool';
       let input = payload.arguments ?? payload.input ?? {};
+      let code = false;
       if (typeof input === 'string') {
         const snippet = codexToolSnippet(input);
         if (snippet) ({ name, input } = snippet);
         else { try { input = JSON.parse(input); } catch { input = { command: input }; } }
+        code = Boolean(snippet) && payload.type === 'custom_tool_call';
       }
+      if (code) this.codexCodeMode = true;
       if (input.cmd && !input.command) input.command = input.cmd;
       const tool = { name, input };
       const action = this.push({ kind: 'action', toolId: payload.call_id || payload.id || null, status: 'run', ts, ...actionForToolUse(tool) });
       if (action.toolId) this.pendingTools.set(action.toolId, action);
+      if (name === 'exec_command' && typeof input.command === 'string') {
+        const rows = this.codexNamed.get(input.command) || [];
+        rows.push(action);
+        this.codexNamed.set(input.command, rows);
+      }
       this.header.lastSignal = 'tool-pending';
     } else if (obj.type === 'response_item' && ['function_call_output', 'custom_tool_call_output'].includes(payload.type)) {
       const action = this.pendingTools.get(payload.call_id);
       if (action) {
-        action.status = /Process exited with code [1-9]|error/i.test(String(payload.output || '')) ? 'err' : 'ok';
+        action.status = action.codexStatus
+          || (/Process exited with code [1-9]|error/i.test(String(payload.output || '')) ? 'err' : 'ok');
         this.pendingTools.delete(payload.call_id);
         changed.push(action.key);
       }
     } else if (obj.type === 'event_msg' && ['task_complete', 'task_completed'].includes(payload.type)) {
+      this.header.lastSignal = 'idle';
+    } else if (obj.type === 'compacted') {
+      this.push({ kind: 'note', text: 'Session compacted: earlier context was summarized.', ts });
+    } else if (obj.type === 'event_msg' && payload.type === 'turn_aborted') {
+      // An interrupt ends the turn with its tools unanswered; without this the
+      // window said "Running ..." for as long as the process lived.
+      for (const action of this.pendingTools.values()) {
+        action.status = 'err';
+        changed.push(action.key);
+      }
+      this.pendingTools.clear();
+      this.push({ kind: 'note', text: 'Interrupted', ts });
       this.header.lastSignal = 'idle';
     }
     return changed;

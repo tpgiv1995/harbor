@@ -178,6 +178,67 @@ test('codex 0.147.0: the conversation is the item stream, and scaffolding never 
   assert.equal(p.header.lastSignal, 'idle');
 });
 
+// CODE MODE GETS ONE ROW PER COMMAND (2026-10-29). Codex runs its shell work in
+// `exec` cells of JavaScript, often several commands to a cell, and the cell's
+// row names only the first; 39 percent of real calls had no row. Each command
+// reports itself as an item_completed CommandExecution when it finishes (real
+// record order: the cell, then one CommandExecution per command as it ends,
+// then the cell's output). Shapes follow the 0.165.0 bytes; content is synthetic.
+const codexCell = (callId, input) => ({ timestamp: TS, type: 'response_item', payload: { type: 'custom_tool_call', call_id: callId, name: 'exec', input } });
+const codexCellOutput = (callId) => ({ timestamp: TS, type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: callId, output: [{ type: 'input_text', text: 'Script completed' }] } });
+const codexCommandDone = (cmd, exitCode) => ({ timestamp: TS,
+  type: 'event_msg',
+  payload: { type: 'item_completed',
+    item: { type: 'CommandExecution', id: `e-${cmd}`, process_id: '1', command: ['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', '-Command', cmd], cwd: 'C:\\work', source: 'unified_exec_startup', status: exitCode === 0 ? 'completed' : 'failed', aggregated_output: '', exit_code: exitCode, duration: { secs: 0, nanos: 1 } } } });
+const ranRows = (p) => p.blocks.filter((block) => block.kind === 'action').map((block) => `${block.verb} ${block.chip}:${block.status}`);
+
+test('a codex cell running three commands draws three rows, each with its own exit status', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexCell('c1', 'const r = await Promise.allSettled([\n  tools.exec_command({cmd:"git status --short",workdir:"C:\\\\work"}),\n  tools.exec_command({cmd:"npm test",workdir:"C:\\\\work"}),\n  tools.exec_command({cmd:"git log -1",workdir:"C:\\\\work"}),\n]);\ntext(r)'));
+  p.applyLine(codexCommandDone('git log -1', 0));
+  p.applyLine(codexCommandDone('npm test', 1));
+  p.applyLine(codexCommandDone('git status --short', 0));
+  p.applyLine(codexCellOutput('c1'));
+  const rows = ranRows(p);
+  assert.equal(rows.length, 3, JSON.stringify(rows));
+  assert.ok(rows.some((row) => /git status/.test(row) && row.endsWith(':ok')), 'the named command keeps its row, with its real status');
+  assert.ok(rows.some((row) => /npm test/.test(row) && row.endsWith(':err')), 'a failing hidden command shows, red');
+  assert.ok(rows.some((row) => /git log/.test(row) && row.endsWith(':ok')));
+});
+
+test('a long codex command that finishes during a later cell is not drawn twice', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexCell('c1', 'text(await tools.exec_command({cmd:"npm run build",yield_time_ms:1000}))'));
+  p.applyLine(codexCellOutput('c1'));
+  p.applyLine(codexCell('c2', 'text(await tools.write_stdin({session_id:7,chars:"",yield_time_ms:30000}))'));
+  p.applyLine(codexCommandDone('npm run build', 0));
+  p.applyLine(codexCellOutput('c2'));
+  assert.equal(ranRows(p).filter((row) => /npm run build/.test(row)).length, 1, JSON.stringify(ranRows(p)));
+});
+
+test('codex commentary keeps the turn working; only the final answer ends it', () => {
+  const p = new TranscriptParser('codex');
+  const message = (phase, text) => ({ timestamp: TS, type: 'event_msg', payload: { type: 'item_completed', item: { type: 'AgentMessage', id: phase, content: [{ type: 'Text', text }], phase } } });
+  p.applyLine({ timestamp: TS, type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', id: 'u', content: [{ type: 'text', text: 'fix it' }] } } });
+  p.applyLine(message('commentary', 'Reading the file first.'));
+  assert.equal(p.workingState(Date.now(), Date.now(), true).working, true, 'narration is not the end of the turn');
+  p.applyLine(message('final_answer', 'Fixed.'));
+  assert.equal(p.workingState(Date.now(), Date.now(), true).working, false);
+});
+
+test('a codex interrupt ends the turn: no "Running" forever, and the window says so', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexCell('c1', 'text(await tools.exec_command({cmd:"npm test"}))'));
+  assert.match(p.workingState(Date.now(), Date.now(), true).text, /npm test/);
+  p.applyLine({ timestamp: TS, type: 'event_msg', payload: { type: 'turn_aborted', root_turn_id: 't', turn_id: 't', reason: 'interrupted', started_at: 1 } });
+  assert.equal(p.workingState(Date.now(), Date.now(), true).working, false);
+  assert.deepEqual(ranRows(p).map((row) => row.split(':').pop()), ['err']);
+  assert.equal(p.blocks.at(-1).kind, 'note');
+  assert.equal(p.blocks.at(-1).text, 'Interrupted');
+  p.applyLine({ timestamp: TS, type: 'compacted', payload: { message: '' } });
+  assert.match(p.blocks.at(-1).text, /Session compacted/);
+});
+
 test('Cursor agent transcript maps content blocks and tool calls without duplicates', () => {
   const p = new TranscriptParser('cursor');
   p.applyLine({ role: 'user', message: { content: [{ type: 'text', text: 'Check Cursor.' }] } });

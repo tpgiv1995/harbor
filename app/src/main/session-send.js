@@ -298,6 +298,54 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
   return 'pending';
 }
 
+// CODEX'S PROMPT BOX (Codex 0.165.0, read from real 120-column captures,
+// 2026-10-29). The box is the LAST line that starts with "›" plus the lines
+// wrapped under it; the transcript draws earlier prompts with the same glyph,
+// which is why it is the last one. Under the box sits one footer line
+// ("GPT-6.1-Sol low · <folder> · <thread title>"), and the title can repeat a
+// message, so the footer is never read as part of the box (the default status
+// line, tui/src/chatwidget.rs DEFAULT_STATUS_LINE_ITEMS; no home sets its own).
+// A selection list draws its highlighted row with the same glyph ("› 1. Update
+// now", "› 1. Trust and continue") and has no model footer, only key hints
+// ("enter continue · esc skip"), so a numbered row over no footer is a dialog;
+// a message that starts "1. " still sits over the footer. A paste over 1,000
+// characters is drawn as "[Pasted Content N chars]", N counting characters (an
+// Enter Codex swallowed into the paste adds one).
+const CODEX_PROMPT_RE = /^›(?:\s|$)/u;
+const CODEX_LIST_ROW_RE = /^›\s*\d+\.\s/u;
+const CODEX_FOOTER_RE = /^\s+\S.*?\s·\s(?:~|[A-Za-z]:|\/)/u;
+const CODEX_PASTE_RE = /^\[PastedContent(\d+)chars\](?:#\d+)?$/;
+const CODEX_LARGE_PASTE_CHARS = 1000;
+function codexPromptBox(screen) {
+  const lines = String(screen || '').split('\n');
+  while (lines.length && !lines.at(-1).trim()) lines.pop();
+  const footer = lines.length > 1 && CODEX_FOOTER_RE.test(lines.at(-1));
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (!CODEX_PROMPT_RE.test(lines[i])) continue;
+    if (CODEX_LIST_ROW_RE.test(lines[i]) && !footer) return null;
+    const end = footer && lines.length - 1 > i ? lines.length - 1 : lines.length;
+    return { inside: squashSpace(lines.slice(i, end).join('\n').replace(CODEX_PROMPT_RE, '')) };
+  }
+  return null;
+}
+// 'noprompt' (no box: a dialog, a list, a TUI still starting), 'exact' (the box
+// holds this message and nothing else), 'holds' (the box ends with it), or
+// 'other' (empty, its dim hint, or something else).
+function codexBoxState(screen, { text = '', imageMarker = null } = {}) {
+  const box = codexPromptBox(screen);
+  if (!box) return 'noprompt';
+  const shown = squashSpace(text);
+  if (!shown) {
+    const marker = squashSpace(imageMarker);
+    return marker && box.inside.endsWith(marker) ? 'holds' : 'other';
+  }
+  const chars = [...String(text)].length;
+  const placeholder = box.inside.replace(IMAGE_CHIPS_RE, '').match(CODEX_PASTE_RE);
+  if (chars >= CODEX_LARGE_PASTE_CHARS && placeholder && Math.abs(Number(placeholder[1]) - chars) <= 2) return 'exact';
+  if (box.inside === shown) return 'exact';
+  return box.inside.endsWith(shown.slice(-SEND_TAIL_CHARS)) ? 'holds' : 'other';
+}
+
 // CLAUDE'S SESSIONS VIEW IS NOT THIS CONVERSATION (measured on CLI 2.1.295,
 // 2026-10-09). The ← key at an empty prompt moves the conversation "to the
 // background" and opens a list of sessions whose input reads "describe a task
@@ -926,6 +974,29 @@ function createSessionSend(deps) {
     throw new Error(`Claude never confirmed the image attachment; image and text were NOT sent (no marker beyond #${beforeMax} within ${timeoutMs}ms)`);
   };
 
+  // CODEX ATTACHES A PASTED PATH ITSELF (Codex 0.165.0, 2026-10-29): a paste
+  // that is nothing but an image file's path, bare or quoted, becomes an image
+  // in the box (chat_composer.rs handle_paste_image_path) with "[Image #N]"
+  // drawn in its place, no clipboard needed, so the desktop and the phone take
+  // the same route. The label the phone used ("Image: <path>") defeated it and
+  // left Codex a path to read. Codex numbers images per message, so an older
+  // "[Image #1]" in the transcript says nothing; only the box is counted.
+  const codexBoxImages = (screen) => {
+    const box = codexPromptBox(screen);
+    return box ? countImageChips(box.inside) : 0;
+  };
+  const pasteCodexImage = async (paneId, workspaceId, imagePath, { timeoutMs = 12000 } = {}) => {
+    const before = codexBoxImages(await readScreen(paneId, CODEX_READ_LINES));
+    await typeInto(paneId, workspaceId, `\x1b[200~"${imagePath}"\x1b[201~`);
+    for (let poll = 0; poll * CODEX_POLL_MS < timeoutMs; poll += 1) {
+      await sleep(CODEX_POLL_MS);
+      const box = codexPromptBox(await readScreen(paneId, CODEX_READ_LINES));
+      const count = box ? countImageChips(box.inside) : 0;
+      if (count > before) return (box.inside.match(IMAGE_CHIPS_RE) || []).at(-1).replace('#', ' #');
+    }
+    throw new Error(`Codex never attached the image (no new [Image #N] in its box within ${timeoutMs / 1000} s); the image and text were NOT sent. Check the >_ terminal: the path may be sitting in the box as text`);
+  };
+
   // Cached Claude conversations may ask for a second confirmation after a
   // /model or /effort command has already been submitted. This is deliberately
   // separate from assertComposerSafe: that guard protects text before send;
@@ -1121,6 +1192,80 @@ function createSessionSend(deps) {
     return error;
   };
 
+  // CODEX TAKES ENTER ONLY ONCE ITS BOX SHOWS THE MESSAGE (2026-10-29, Pat:
+  // "have to send like every message in terminal view"). Codex on Windows reads
+  // raw key events, so a paste reaches it as a stream of keystrokes, and its
+  // paste-burst rule (tui/src/bottom_pane/paste_burst.rs) holds that stream
+  // undrawn until it goes quiet and turns any Enter arriving within 120 ms of it
+  // into a newline. Harbor pressed Enter 160 ms after writing and never looked
+  // again, so under load every message longer than a line sat in Codex's box
+  // until it was submitted by hand from the >_ terminal, while Harbor said "sent"
+  // (scripts/drive-codex-send-win.js reproduced 4 of 5). Now: refuse before
+  // typing when no box is drawn (a dialog types its hotkeys: the lock dialog's
+  // r/f/q, the update screen's 1/2/3), wait until the box shows the message
+  // (the burst has then flushed), let the Enter window pass, press Enter, and
+  // confirm the box let go of it, pressing once more if Codex swallowed it.
+  const CODEX_READ_LINES = 60;
+  const CODEX_POLL_MS = 250;
+  const CODEX_PROMPT_POLLS = 20;
+  const CODEX_HOLD_POLLS = 60;
+  const CODEX_ENTER_SETTLE_MS = 250;
+  const CODEX_ENTER_POLLS = 8;
+  // Codex Desktop holds a thread it has open (thread-writer-locks), and a
+  // resume of that thread lands on "This conversation is open in another app",
+  // whose keys are r (retry), f (fork) and q (quit): the one recorded Codex
+  // image failure (2026-10-28) was a send into it.
+  const CODEX_LOCKED_RE = /This conversation is open in another app/i;
+  const codexNoPromptError = (screen = '') => {
+    const error = new Error(CODEX_LOCKED_RE.test(screen)
+      ? 'This Codex conversation is open in the Codex app, which keeps it locked, so Harbor typed and sent nothing. Your text is kept. Close it in the Codex app, then send again'
+      : 'Codex is not showing its prompt box (a dialog or a list may be open, or it is still starting), so Harbor typed and sent nothing. Your text is kept. Check the >_ terminal');
+    error.code = 'CODEX_NO_PROMPT';
+    return error;
+  };
+  const codexNeverHeldError = () => {
+    const error = new Error('Codex\'s box never showed your text, so Harbor did not press Enter and nothing was sent. Your text is kept. The text may still appear in the box, so check the >_ terminal before sending again');
+    error.code = 'PROMPT_NEVER_HELD';
+    return error;
+  };
+  const codexNotSubmittedError = () => {
+    const error = new Error('Your message is in Codex\'s box, but Codex did not take the Enter (twice). Open the >_ terminal and press Enter there; sending again presses Enter for it without typing it twice');
+    error.code = 'CODEX_NOT_SUBMITTED';
+    return error;
+  };
+  const waitForCodexBox = async (paneId, sent, done, polls) => {
+    let screen = '';
+    let state = 'noprompt';
+    for (let poll = 0; poll < polls; poll += 1) {
+      screen = await readScreen(paneId, CODEX_READ_LINES);
+      state = codexBoxState(screen, sent);
+      if (done(state)) break;
+      await sleep(CODEX_POLL_MS);
+    }
+    return { state, screen };
+  };
+  const watchCodexEnter = async (paneId, workspaceId, sent) => {
+    for (let attempt = 0; ; attempt += 1) {
+      let state = 'holds';
+      let screen = '';
+      for (let poll = 0; poll < CODEX_ENTER_POLLS; poll += 1) {
+        await sleep(CODEX_POLL_MS);
+        screen = await readScreen(paneId, CODEX_READ_LINES);
+        state = codexBoxState(screen, sent);
+        if (state === 'other') return attempt ? 'taken-after-retry' : 'taken';
+      }
+      // Something other than the box took the screen: never Enter into it.
+      if (state === 'noprompt') return 'unconfirmed';
+      if (attempt > 0) {
+        logSend({ paneId, phase: 'codex-not-submitted' });
+        await captureSendScreen(paneId, 'codex-not-submitted', screen);
+        throw codexNotSubmittedError();
+      }
+      logSend({ paneId, phase: 'enter-retry', attempt: 1 });
+      await typeInto(paneId, workspaceId, '\r');
+    }
+  };
+
   // What Harbor typed into a pane whose prompt never showed it. It may still be
   // in Claude's startup buffer (see waitForPromptToHold), so the next send into
   // that pane types NOTHING and waits for it instead: typing again is how one
@@ -1204,6 +1349,18 @@ function createSessionSend(deps) {
         const settled = await waitForProviderReady(paneId, { timeoutMs: 15_000, blankTimeoutMs: 45_000 });
         if (!settled) debug('deliver: fresh', provider, 'pane never settled; sending anyway');
       }
+      // A Codex message (not a slash command: its popup draws over the box) is
+      // typed only into a drawn box and submitted only once the box shows it;
+      // see waitForCodexBox.
+      const codexGated = provider === 'codex' && !isSlashCommand(text);
+      if (codexGated) {
+        const ready = await waitForCodexBox(paneId, { text: '' }, (state) => state !== 'noprompt', CODEX_PROMPT_POLLS);
+        if (ready.state === 'noprompt') {
+          logSend({ paneId, phase: 'codex-no-prompt' });
+          await captureSendScreen(paneId, 'codex-no-prompt', ready.screen);
+          throw codexNoPromptError(ready.screen);
+        }
+      }
       debug('deliver: composer safe after', Date.now() - t0, 'ms');
       // Images have TWO delivery routes, and which one is available depends on
       // whether there is a clipboard to put them on.
@@ -1236,6 +1393,7 @@ function createSessionSend(deps) {
       const pathOnlyImages = [];
       let lastImageMarker = null;
       for (const imagePath of images) {
+        if (codexGated) { lastImageMarker = await pasteCodexImage(paneId, workspaceId, imagePath); continue; }
         if (!canPaste) { pathOnlyImages.push(imagePath); continue; }
         let beforeMax = 0;
         try { beforeMax = maxImageMarker(await readPane(paneId)); } catch { /* polling still verifies an increase */ }
@@ -1247,7 +1405,8 @@ function createSessionSend(deps) {
         // Claude: one quoted path per line, nothing else on it, so each
         // converts to an attachment (see textAfterImageChips). Quoted, because a
         // bare POSIX path would start the message with "/" and be typed as a
-        // slash command (isSlashCommand). Other CLIs read the label.
+        // slash command (isSlashCommand). Codex attaches its own
+        // (pasteCodexImage); cursor reads the label.
         const prefix = pathOnlyImages.length === 1 ? 'Image:' : 'Images:';
         const line = provider === 'claude' ? pathOnlyImages.map((p) => `"${p}"`).join('\n') : `${prefix} ${pathOnlyImages.join(' ')}`;
         text = text ? `${line}\n${text}` : line;
@@ -1282,6 +1441,13 @@ function createSessionSend(deps) {
           await captureSendScreen(paneId, 'holds-more', screen);
           throw promptHoldsMoreError();
         }
+      }
+      // A send whose earlier try is still sitting in Codex's box (the error
+      // below says so) presses Enter for it instead of typing it twice.
+      if (codexGated && text && !lastImageMarker
+        && codexBoxState(await readScreen(paneId, CODEX_READ_LINES), sent) === 'exact') {
+        alreadyInPrompt = true;
+        logSend({ paneId, phase: 'already-in-prompt' });
       }
       // Typed earlier and never shown: wait for THAT, type nothing new.
       const awaitEarlier = Boolean(gated && text && !lastImageMarker && earlier && !alreadyInPrompt);
@@ -1334,6 +1500,14 @@ function createSessionSend(deps) {
           logSend({ paneId, phase: 'earlier-typing-landed' });
           throw earlierLandedError();
         }
+      } else if (codexGated) {
+        const held = await waitForCodexBox(paneId, sent, (state) => state === 'exact' || state === 'holds', CODEX_HOLD_POLLS);
+        if (held.state !== 'exact' && held.state !== 'holds') {
+          logSend({ paneId, phase: 'prompt-never-held', state: held.state });
+          await captureSendScreen(paneId, `codex-${held.state}`, held.screen);
+          throw codexNeverHeldError();
+        }
+        await sleep(CODEX_ENTER_SETTLE_MS);
       } else {
         await sleep(160);
       }
@@ -1345,6 +1519,9 @@ function createSessionSend(deps) {
       let enterState = 'unconfirmed';
       if (gated) {
         enterState = await watchEnterTaken(paneId, workspaceId, sent);
+        logSend({ paneId, phase: 'enter-state', state: enterState });
+      } else if (codexGated) {
+        enterState = await watchCodexEnter(paneId, workspaceId, sent);
         logSend({ paneId, phase: 'enter-state', state: enterState });
       }
       await resolveClaudeSwitchConfirm(paneId, workspaceId, text, provider);
@@ -2266,7 +2443,12 @@ function createSessionSend(deps) {
 
   const runSend = async ({ sessionId, text, images = [], pane, detectedHome, provider, resumeOnly = false }) => {
     provider = await resolveProvider(sessionId, provider);
-    const trimmed = String(text ?? '').replace(/\r\n/g, '\n').trim();
+    // Codex has no /effort (both effort menus send it for every provider); its
+    // /model takes --reasoning=<level> and keeps the current model (Codex
+    // 0.165.0 chatwidget/model_command.rs). Typed as-is, Codex only answered
+    // "Unrecognized command '/effort'".
+    const codexEffort = provider === 'codex' ? /^\/effort\s+([\w-]+)\s*$/i.exec(String(text ?? '').trim()) : null;
+    const trimmed = codexEffort ? `/model --reasoning=${codexEffort[1].toLowerCase()}` : String(text ?? '').replace(/\r\n/g, '\n').trim();
     const imagePaths = Array.isArray(images) ? images.filter(Boolean) : [];
     if (!trimmed && imagePaths.length === 0 && !resumeOnly) throw new Error('nothing to send');
     const slash = isSlashCommand(trimmed);
@@ -2756,5 +2938,6 @@ module.exports = {
   claudeProjectDir,
   providerTranscriptDirs,
   composerSendState,
+  codexBoxState,
   isFleetView,
 };
