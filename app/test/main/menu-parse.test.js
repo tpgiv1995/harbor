@@ -661,6 +661,36 @@ for (const [fixtureName, level] of [['claude-2.1.303-effort-xhigh-120.txt', 'xhi
   });
 }
 
+// Claude Code 2.1.312's cache warning after /model (captured 2026-10-28 in both
+// layouts): the title is "Switch model?", which no reader matched (they had
+// guessed "Change model?"), and 2.1.312 cut "on your next message" from the
+// sentence. The dialog draws no footer, so it fell to the raw-screen panel.
+// Edited out of the real captures: live plan usage on the fullscreen top edge
+// (now a plain edge) and the inline capture's earlier /effort command.
+for (const fixtureName of ['claude-2.1.312-model-sonnet-120.txt', 'claude-2.1.312-model-sonnet-fullscreen-120.txt']) {
+  test(`parseMenu reads the 2.1.312 model-switch cache warning from ${fixtureName}`, () => {
+    const screen = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', fixtureName), 'utf8');
+    const menu = parseMenu(screen);
+    assert.ok(menu, 'the dialog parses');
+    assert.deepEqual(
+      menu.options.map(({ index, label, selected }) => ({ index, label, selected })),
+      [
+        { index: 1, label: 'Yes, switch to Sonnet 5.5', selected: true },
+        { index: 2, label: 'No, go back', selected: false },
+      ],
+    );
+    assert.equal(menu.selectedIndex, 0);
+    assert.match(menu.question, /^Switch model\? /, 'the question starts at the dialog title');
+    assert.ok(menu.question.endsWith('Switching to Sonnet 5.5 means the full history gets re-read.'), menu.question);
+    assert.doesNotMatch(menu.question, /▔|─|done \d|\/model sonnet/);
+    assert.deepEqual(menu.questionParagraphs, [
+      'Switch model?',
+      'Your next response will be slower and use more tokens',
+      'This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.',
+    ]);
+  });
+}
+
 test('an answered effort-switch warning above a composer is history, not a question', () => {
   const screen = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch/claude-2.1.303-effort-high-120.txt'), 'utf8');
   const answered = `${screen}\n${'─'.repeat(120)}\n❯ \n${'─'.repeat(120)}\n`;

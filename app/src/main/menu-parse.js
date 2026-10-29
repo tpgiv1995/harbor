@@ -50,12 +50,14 @@ const RESUME_SENTINEL_RE = /Resuming the full session will consume|Resume from s
 // fallback panel: answerable, but presented as a shape Harbor had never seen.
 const SUBMIT_SENTINEL_RE = /Ready to submit your answers\?/i;
 // The cache warning after /effort or /model in a cached conversation: "Change
-// effort level?" (or "Change model?") over "1. Yes, switch to <level>" and
+// effort level?" or "Switch model?" over "1. Yes, switch to <level>" and
 // "2. No, go back". It draws NO footer either (Claude Code 2.1.303, fixtures
 // test/fixtures/effort-switch/), so it fell to the raw-screen panel as an
 // "unrecognized prompt" (Pat, 2026-10-21). Matched as its own title line, which
-// prose never is.
-const SWITCH_SENTINEL_RE = /^\s*Change (?:effort level|model)\?\s*$/i;
+// prose never is. The model title is "Switch model?" (2.1.310 and 2.1.312
+// binaries, captured 2026-10-28); "Change model?" was a guess no build draws
+// and is kept only as a harmless spare.
+const SWITCH_SENTINEL_RE = /^\s*(?:Change effort level|Switch model|Change model)\?\s*$/i;
 const FOOTERLESS_SENTINEL_RE = new RegExp(`${RESUME_SENTINEL_RE.source}|${SUBMIT_SENTINEL_RE.source}|${SWITCH_SENTINEL_RE.source}`, 'i');
 // An option row: optional indent, optional "❯" pointer (selected), then "N. label".
 const OPTION_RE = /^\s*(❯)?\s*(\d+)\.\s+(.+?)\s*$/;

@@ -72,6 +72,22 @@ test('codex 0.163 panes disable the new default Daybreak picker on launch and re
   }
 });
 
+test('codex 0.164+ panes never open on the update screen, whose Enter is "Update now"', () => {
+  for (const args of [
+    ['--provider', 'codex', 'hello'],
+    ['--provider', 'codex', '--resume-id', 'synthetic-session', 'hello'],
+  ]) {
+    for (const version of ['0.164.0', '0.165.0']) {
+      const command = argv(args, { HARBOR_CODEX_VERSION: version });
+      assert.match(command, /-c check_for_update_on_startup=false/);
+      assert.ok(command.indexOf('check_for_update_on_startup=false') < command.lastIndexOf('hello'));
+    }
+    for (const version of ['0.163.0', 'unreadable']) {
+      assert.doesNotMatch(argv(args, { HARBOR_CODEX_VERSION: version }), /check_for_update_on_startup/);
+    }
+  }
+});
+
 test('the CLI selector defaults to sessiond and names the retired backend clearly', () => {
   assert.equal(argv([], { HARBOR_SESSION_BACKEND: '' }), CLAUDE);
   assert.equal(argv([], { HARBOR_SESSION_BACKEND: 'sessiond' }), CLAUDE);
@@ -234,7 +250,7 @@ test('codex >= 0.156.0 panes run without the shared server and keep the inline t
   for (const [version, migrations] of [
     ['0.156.0', ''], ['0.157.0', ''], ['0.158.0', bundledAcks],
     ['0.163.0', ' -c features.cli_daybreak=false' + bundledAcks],
-    ['1.0.0', ' -c features.cli_daybreak=false' + bundledAcks],
+    ['1.0.0', ' -c features.cli_daybreak=false -c check_for_update_on_startup=false' + bundledAcks],
   ]) {
     assert.equal(
       argv(['--provider', 'codex', '--model', 'gpt-6-sol', '--effort', 'high'], { HARBOR_CODEX_VERSION: version }),

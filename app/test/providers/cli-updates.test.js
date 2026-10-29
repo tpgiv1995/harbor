@@ -202,6 +202,26 @@ test('codex 0.164.0 notes, verbatim, carry the flags the review relied on', () =
   ]) assert.deepEqual(tagLine('codex', line).flags.filter((flag) => flag.id !== 'reverted').map((flag) => flag.id), [], line);
 });
 
+test('codex 0.165.0 notes retain model, input, reviewer and memory usage contacts', () => {
+  const cases = [
+    ['Added GPT-6.1 Terra to the model catalogs. (#57337)', ['models']],
+    ['Added a repository filter to the session picker and directory grouping to the agent command center, making it easier to navigate sessions across linked worktrees. (#56308)', ['visibility']],
+    ['Enabled reasoning effort changes during a conversation by default for supported models. (#56163)', ['models']],
+    ['Enabled memory v2 by default for fresh profiles and added support for importing external-agent memories into it. (#56211, #56414)', ['memory', 'config-toml']],
+    ['Fixed fresh TUI sessions to honor the server’s default approval reviewer when no explicit override is provided. (#56090)', ['sandbox', 'visibility']],
+    ['Prevented queued agent messages from restarting work after an interrupt or a switch to Plan mode. (#56330)', ['composer']],
+    ['Stopped retrying when a provider reports that a model was not found, preserving its error message. (#56445)', ['models']],
+  ];
+  const missing = cases.flatMap(([line, wanted]) => {
+    const got = tagLine('codex', line).flags.map(flag => flag.id);
+    return wanted.filter(id => !got.includes(id)).map(id => ({ line, id }));
+  });
+  assert.deepEqual(missing, []);
+  for (const line of ['Reduced memory allocation in the renderer.', 'Updated model benchmark fixtures.']) {
+    assert.ok(!tagLine('codex', line).flags.some(flag => ['memory', 'models'].includes(flag.id)), line);
+  }
+});
+
 test('codex notes flag input routing, Daybreak, persistent hints and shell notices', () => {
   const cases = [
     ['Daybreak is enabled by default for eligible accounts.', 'daybreak'],
@@ -655,6 +675,26 @@ test('permission-check, dialog, startup-warning and cleanup lines carry a flag',
   assert.equal(ids('Fixed Bash permission rules with a mid-pattern `:*` being skipped in settings files while `--allowedTools` honored them; they now work from every source, with a startup warning on how they match').includes('ask-dialog'), false);
   assert.equal(ids('[Cloud sessions] Changed turning on Cloud sessions or Remote Control in admin settings to ask for confirmation and list the custom roles that have that permission').includes('ask-dialog'), false);
   assert.equal(ids('[VSCode] Improved startup time in workspaces without a Python environment by starting Claude while the Python extension loads').includes('screen'), false);
+});
+
+// The 2026-10-28 review (claude 2.1.311 and 2.1.312): the cache-warning line
+// was the one that broke Harbor (the /model dialog Harbor answers stopped
+// matching) and it raised only `model`, whose check is the catalog scan; the
+// pasted-image-path line, which changes how a phone image reaches Claude,
+// raised nothing. Verbatim from the changelog, negatives included.
+test('the /model cache-warning and pasted-image lines carry a flag', () => {
+  const ids = (line) => tagLine('claude', line).flags.map((f) => f.id);
+  for (const line of [
+    'Fixed the `/model` and `/effort` cache warning saying the re-read waits for your next message; a change made while Claude is working can trigger it sooner',
+    'Fixed `/model` and `/effort` showing a prompt-cache warning after rewinding a conversation back to empty',
+  ]) assert.ok(ids(line).includes('ask-dialog'), line);
+  for (const line of [
+    'Fixed pasting text that mentions an image file, such as `! open /tmp/shot.png` or `/review look at /tmp/shot.png`, attaching the image and dropping its path from the prompt',
+    'Fixed Read deny rules not applying to image paths pasted or dragged into the prompt, or to file names listed for an @-mentioned folder',
+  ]) assert.ok(ids(line).includes('composer'), line);
+  // A VSCode paste is not this terminal; a re-read that is not a dialog is not one.
+  assert.equal(ids('[VSCode] Fixed pasting a screenshot on WSL2/WSLg inserting raw image bytes into the chat input; the image is now attached when the clipboard provides it, otherwise the paste is ignored').includes('composer'), false);
+  assert.equal(ids('Fixed LSP diagnostics from before an edit appearing after it, causing the model to re-read files it just edited').includes('ask-dialog'), false);
 });
 
 test('check reads installed versions off disk and latest off the network, per provider', async () => {

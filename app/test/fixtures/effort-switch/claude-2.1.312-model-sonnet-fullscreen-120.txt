@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.312
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   ~\AppData\Local\Temp\harbor-cap-1028
+
+
+❯ Reply with only the word ok.
+
+● ok
+
+✻ Baked for 1s · done 10:49 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Switch model?
+   Your next response will be slower and use more tokens
+                                                                                                    
+   This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.      
+
+   ❯ 1. Yes, switch to Sonnet 5.5                                                                                       
+     2. No, go back
+                                                                                                                        

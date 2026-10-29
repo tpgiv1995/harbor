@@ -135,8 +135,13 @@ const IMPACT_FLAGS = {
       // Harbor has no handling for) and the numbered /artifacts delete
       // "confirmation" (3 and 8 lines over the same range). A bracketed
       // [VSCode] or [Claude Tag] line is not this terminal.
-      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt|\brm prompts?\b|^(?!\[).*\bpermission checks?\b|^(?!\[)(?=.*\bpermission rules?\b)(?=.*\bprompt)|^(?!\[).*\b(?:Bash|PowerShell) prompt\b|auto mode's prompt|^(?!\[).*\bsafety prompt\b|Consumer Terms|^(?!\[).*\bconfirmation\b/i,
-      why: 'Harbor answers AskUserQuestion, permission and resume dialogs by WALKING THE PTY SCREEN, not the transcript. A change to how a dialog is drawn breaks the ask sheet.',
+      // 2026-10-28 (2.1.312): "the `/model` and `/effort` cache warning saying
+      // the re-read waits for your next message" raised only `model`, and it
+      // reworded the very dialog session-send answers after a /model or
+      // /effort send. "cache warning" is in 2 lines of the whole changelog,
+      // both this dialog.
+      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt|\brm prompts?\b|^(?!\[).*\bpermission checks?\b|^(?!\[)(?=.*\bpermission rules?\b)(?=.*\bprompt)|^(?!\[).*\b(?:Bash|PowerShell) prompt\b|auto mode's prompt|^(?!\[).*\bsafety prompt\b|Consumer Terms|^(?!\[).*\bconfirmation\b|cache warning/i,
+      why: 'Harbor answers AskUserQuestion, permission and resume dialogs, and the /model and /effort cache warning, by WALKING THE PTY SCREEN, not the transcript. A change to how a dialog is drawn breaks the ask sheet.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
     {
@@ -287,11 +292,16 @@ const IMPACT_FLAGS = {
     // prompt sent just after `←` being run twice"): `←` at an empty prompt opens
     // the sessions view session-send refuses to type into (FLEET_VIEW). Only
     // the key cited alone in backticks: "effort ←/→" is the /model slider.
+    // 2026-10-28 (2.1.311): "pasting text that mentions an image file ...
+    // attaching the image" matched nothing, and the phone server delivers an
+    // image exactly that way (its path typed on an "Image:" line, which
+    // 2.1.299 drew as an [Image #N] chip). An unbracketed line that pastes an
+    // image counts.
     {
       id: 'composer',
-      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bbackgrounding\b|`←`/i,
-      why: 'session-send confirms a delivery by reading the composer box and the echo above it, and sends every message as a bracketed paste plus Enter. A change to either is felt by every send.',
-      verify: 'node_modules/electron/dist/electron.exe scripts/drive-resume-hooks-win.js',
+      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bbackgrounding\b|`←`|^(?!\[).*\bpast(?:e|es|ed|ing)\b.*\bimages?\b|^(?!\[).*\bimages?\b.*\bpast(?:e|es|ed|ing)\b/i,
+      why: 'session-send confirms a delivery by reading the composer box and the echo above it, sends every message as a bracketed paste plus Enter, and attaches images by paste (Alt+V on the desktop, the file path from the phone) before waiting for the [Image #N] chip. A change to any of it is felt by every send.',
+      verify: 'node_modules/electron/dist/electron.exe scripts/drive-resume-hooks-win.js, then scripts/drive-prompt-gate-win.js (it sends a phone image)',
     },
     // 2026-10-18 (2.1.302): "the `← for agents` footer hint ... hide 10 seconds
     // after a session opens" and "rows in the agents view staying blank"
@@ -360,7 +370,7 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'models',
-      re: /models_cache|model picker|model catalog|model (list|id|name|slug)|default model|\/model\b|\bGPT-\d/i,
+      re: /models_cache|model picker|model catalog|model (list|id|name|slug)|default model|reasoning effort|model (?:was )?not found|\/model\b|\bGPT-\d/i,
       why: 'Harbor discovers codex models from models_cache.json for the new-session popover.',
       verify: 'npm test -- capabilities',
     },
@@ -368,9 +378,15 @@ const IMPACT_FLAGS = {
       id: 'visibility',
       // "Enabled fullscreen transcripts by default" (0.157.0) matched nothing
       // here, and it moved the whole pane onto the alternate screen.
-      re: /visibilit|\bTUI\b|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|\/keymap\b|\/presets\b|keyboard menu|\b(?:Kitty|Sixel)\b|inline image previews?/i,
+      re: /visibilit|\bTUI\b|session picker|agent command center|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|\/keymap\b|\/presets\b|keyboard menu|\b(?:Kitty|Sixel)\b|inline image previews?/i,
       why: 'The codex pane is read through the same pty screen model as claude; a TUI rewrite changes what Harbor sees. bin/ai pins tui.fullscreen_transcript=false so panes keep the inline transcript Harbor was proven against.',
       verify: 'npm test -- screen',
+    },
+    {
+      id: 'memory',
+      re: /\bmemory v\d|\bmemories\b|memory (?:import|consolidation|summary)/i,
+      why: 'Codex memory generation can run background model work and write files in CODEX_HOME. Check feature and profile defaults, plan usage, and any import prompt before accepting a change.',
+      verify: 'npm test -- plan-usage',
     },
     // 2026-09-25: codex 0.157.0 "Enabled automatic background-server startup"
     // and "migration prompts for older models" both matched NO flag, and they

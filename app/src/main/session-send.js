@@ -235,6 +235,16 @@ const squashSpace = (value) => String(value || '').replace(/\s+/g, '');
 // no image could be read the CLI inserts the paste unchanged, so both forms
 // count. Returns the (whitespace-free) text that follows the chips and how many
 // images the paste names, or null for a send with no image path in it.
+//
+// 2.1.311 STOPPED ATTACHING A PATH THAT SHARES ITS LINE WITH OTHER WORDS
+// (2026-10-28; changelog: "pasting text that mentions an image file ...
+// attaching the image and dropping its path"). A line now converts only when
+// every segment of it is a path, so "Image: <path>" stayed literal text: the
+// image reached Claude as a path to Read and never as an attachment
+// (drive-prompt-gate-win.js on 2.1.312). A Claude pane therefore gets each
+// path quoted on a line of its own, which converts on 2.1.299 through 2.1.312
+// alike, before or after the text (measured with no model turn, 2.1.310 and
+// 2.1.312: "[Image #1]FYI").
 const IMAGE_PATH_RE = /\.(png|jpe?g|gif|webp)$/i;
 const IMAGE_CHIPS_RE = /\[Image#\d+\]/g;
 const countImageChips = (inside) => (inside.match(IMAGE_CHIPS_RE) || []).length;
@@ -928,8 +938,14 @@ function createSessionSend(deps) {
   // morning stopped on the raw-screen panel. The screen is matched with its
   // whitespace collapsed, and the dialog's own title and answer pair are
   // accepted as well, so a reworded explanation does not break it either.
+  //
+  // 2.1.312 (2026-10-28) did reword it: the sentence ends "gets re-read." with
+  // no "on your next message", and the /model dialog's title is "Switch
+  // model?" (2.1.310 and 2.1.312), not the "Change model?" this match guessed, so a
+  // model change stopped on the open dialog. Both endings and the real title
+  // are accepted now (fixtures claude-2.1.312-model-sonnet-*.txt).
   const SWITCH_COMMAND_RE = /^\/(model|effort)(?:\s|$)/i;
-  const SWITCH_CONFIRM_RE = /Switching to .*? means the full history gets re-read on your next message\..{0,240}?1\.\s*Yes.{0,120}?2\.\s*No|Change (?:effort level|model)\?.{0,600}?1\.\s*Yes, switch to.{0,120}?2\.\s*No, go back/i;
+  const SWITCH_CONFIRM_RE = /Switching to .*? means the full history gets re-read(?: on your next message)?\..{0,240}?1\.\s*Yes.{0,120}?2\.\s*No|(?:Change effort level|Switch model|Change model)\?.{0,600}?1\.\s*Yes, switch to.{0,120}?2\.\s*No, go back/i;
   const showsSwitchConfirm = (screen) => SWITCH_CONFIRM_RE.test(String(screen || '').replace(/\s+/g, ' '));
 
   const resolveClaudeSwitchConfirm = async (paneId, workspaceId, text, provider) => {
@@ -1228,8 +1244,12 @@ function createSessionSend(deps) {
         lastImageMarker = `[Image #${await waitForImageMarker(paneId, beforeMax)}]`;
       }
       if (pathOnlyImages.length) {
+        // Claude: one quoted path per line, nothing else on it, so each
+        // converts to an attachment (see textAfterImageChips). Quoted, because a
+        // bare POSIX path would start the message with "/" and be typed as a
+        // slash command (isSlashCommand). Other CLIs read the label.
         const prefix = pathOnlyImages.length === 1 ? 'Image:' : 'Images:';
-        const line = `${prefix} ${pathOnlyImages.join(' ')}`;
+        const line = provider === 'claude' ? pathOnlyImages.map((p) => `"${p}"`).join('\n') : `${prefix} ${pathOnlyImages.join(' ')}`;
         text = text ? `${line}\n${text}` : line;
       }
       // A Claude message (not a slash command: its picker draws over the box and

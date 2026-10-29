@@ -1,0 +1,35 @@
+ ▐▛███▛█   Claude Code v2.1.312
+▝▜██████▀  Haiku 5.5 with low effort · Claude Max
+ ▝▝   ▝▝   ~\AppData\Local\Temp\harbor-cap-1028
+
+  Updated to latest. Got 26 features, 225 bugfixes, and 105 other changes.
+  code.claude.com/docs/en/changelog for details
+
+▎ Auto mode is now Claude Code's default permission mode.
+▎ Auto mode lets Claude handle permission prompts automatically. Claude checks each tool call for risky actions and     
+▎ prompt injection before executing, runs the ones it assesses as lower-risk, and blocks the rest.
+▎ https://code.claude.com/docs/en/permission-modes
+
+❯ Reply with only the word ok.
+
+● ok
+
+✻ Baked for 2s · done 10:41 PM
+
+❯ /model sonnet
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Switch model?
+  Your next response will be slower and use more tokens
+
+  This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.
+
+  ❯ 1. Yes, switch to Sonnet 5.5
+    2. No, go back
+
+
+
+
+
+
+

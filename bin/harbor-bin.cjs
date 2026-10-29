@@ -635,6 +635,13 @@ function codexPaneControls({ version, codexHome }) {
   // Preserve the previous pane behavior on both launch and resume, without
   // changing the home's saved preference or the separate exec worker path.
   if (semverAtLeast(version, [0, 163, 0])) controls.push('-c', 'features.cli_daybreak=false');
+  // A pane must never open on Codex's own "Update available" screen: it drops
+  // the pasted message (keys 1/2/3 pick a row, everything else is ignored) and
+  // its highlighted row is "Update now", so Harbor's Enter would quit Codex and
+  // run an unreviewed `npm install -g @openai/codex@latest`. Updates go through
+  // Harbor's chip after review (cli-updates.js). The key gates both the startup
+  // check and the screen (tui/src/updates.rs, 0.164.0 and 0.165.0 binaries).
+  if (semverAtLeast(version, [0, 164, 0])) controls.push('-c', 'check_for_update_on_startup=false');
   const acks = codexHome ? codexMigrationAcks(codexHome, version) : null;
   if (acks) controls.push('-c', acks);
   return controls;

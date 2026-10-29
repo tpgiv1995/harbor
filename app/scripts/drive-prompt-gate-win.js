@@ -29,13 +29,20 @@
 //   (2.1.299) draws that path as an [Image #N] chip. "FYI" plus a screenshot
 //   was refused after three minutes because the check still wanted the path.
 //   It must land once, with the image attached. Last, because the pre-fix code
-//   leaves it sitting in the prompt.
+//   leaves it sitting in the prompt. 2.1.311 stopped attaching a path that
+//   shares its line with "Image:", so it now goes quoted on a line of its own
+//   (2026-10-28), and the image must arrive ATTACHED, not as a path to Read.
+//   then a /model switch in the now-cached conversation (2026-10-28, 2.1.312):
+//   Claude asks "Switch model?" and Harbor must answer it; 2.1.312 reworded
+//   the dialog and the pre-fix match left it open. The target is
+//   claude-opus-5-5, the model every config home already pins, so the switch
+//   the CLI saves changes nothing on disk.
 //
 // Usage (from app/, Windows):
 //   ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe scripts/drive-prompt-gate-win.js
 //   HARBOR_DRIVE_SEND_MODULE=<path> ... runs the same drive against another copy
 //   of session-send.js (the pre-fix HEAD, for the two-sided proof).
-// Needs a signed-in claude; costs three tiny haiku turns. The probe session's
+// Needs a signed-in claude; costs five tiny haiku turns. The probe session's
 // transcript is deleted afterwards so it never reaches the rail.
 
 const { execPath: guiNodeExec } = require('../test/support/gui-node.js');
@@ -177,8 +184,10 @@ async function main() {
   cleanup.transcriptDir = path.dirname(transcript);
   console.log(`spawned pane ${paneId}, claude session ${claudeSession}`);
 
+  let sawSwitchDialog = false;
   const readScreen = async (lines, source) => {
     const screen = await client.request('screen', { id: paneId, scrollback: lines });
+    if (/Switch model\?/.test(String(screen.visible || '') + String(screen.text || ''))) sawSwitchDialog = true;
     const text = String(source === 'visible' ? screen.visible : screen.text).split('\n');
     while (text.length && !text.at(-1).trim()) text.pop();
     return text.slice(-lines).join('\n');
@@ -298,19 +307,40 @@ async function main() {
         .filter((line) => line.includes(marker))
         .map((line) => { try { return JSON.parse(line); } catch { return null; } })
         .find((entry) => entry?.type === 'user' && !entry.isMeta);
-      const content = Array.isArray(record?.message?.content) ? record.message.content : [];
+      // A message with no attachment is stored as a plain string, not blocks.
+      const raw = record?.message?.content;
+      const content = Array.isArray(raw) ? raw : [{ type: 'text', text: String(raw || '') }];
       const text = content.filter((block) => block.type === 'text').map((block) => block.text).join(' ');
       const attached = content.some((block) => block.type === 'image');
       console.log(`  Claude received: ${JSON.stringify(text.slice(0, 80))}, image attached: ${attached}`);
-      if (!attached && !text.includes(PHONE_IMAGE)) failures.push(`${scenario.name}: the image reached Claude neither attached nor as a path`);
+      if (!attached) failures.push(`${scenario.name}: the image was not attached${text.includes(PHONE_IMAGE) ? ' (it reached Claude only as a path to Read)' : ''}`);
     }
+  }
+
+  {
+    const name = 'a /model switch in the cached conversation';
+    written.length = 0;
+    sawSwitchDialog = false;
+    let thrown = null;
+    try {
+      await desktop.send({ sessionId: claudeSession, text: '/model claude-opus-5-5', pane: { paneId, workspaceId: 'ws' } });
+    } catch (error) { thrown = error; }
+    await sleep(3000);
+    const after = await readScreen(60, 'visible');
+    const stillOpen = /Switch model\?/.test(after);
+    const set = /Set model to|model to Opus/i.test(after);
+    console.log(`\n${name}: ${thrown ? `REFUSED: ${thrown.message}` : 'reported sent'}`);
+    console.log(`  keystrokes: ${written.join(' ')}`);
+    console.log(`  dialog seen: ${sawSwitchDialog}, still open: ${stillOpen}, model set: ${set}`);
+    if (!sawSwitchDialog) failures.push(`${name}: no "Switch model?" dialog appeared, so nothing was proven`);
+    else if (thrown || stillOpen || !set) failures.push(`${name}: Harbor did not answer the dialog`);
   }
 
   if (failures.length) {
     console.log(`\nPROOF FAILED:\n  ${failures.join('\n  ')}`);
     process.exitCode = 1;
   } else {
-    console.log('\nPROOF OK: every message the prompt showed landed once (one shown 20 s late included), and a prompt that never showed it got no Enter and an honest refusal');
+    console.log('\nPROOF OK: every message the prompt showed landed once (one shown 20 s late included), a prompt that never showed it got no Enter and an honest refusal, the phone image arrived attached, and the /model cache warning was answered');
   }
 }
 

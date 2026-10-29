@@ -460,11 +460,22 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
   h.prompt.echo = false; // this stand-in draws its own prompt
   const drawPaste = (text) => {
     if (!pathChips) return text;
+    // 2.1.311 and later: a line converts only when every segment of it is a
+    // path; any other line stays literal (binary, read 2026-10-28).
+    if (pathChips === 'whole-line') {
+      const lines = text.split('\n').filter((l) => l.trim());
+      const isPathLine = (l) => l.split(PASTE_SEGMENT_SPLIT).filter((s) => s.trim()).every((s) => IMAGE_FILE.test(s.trim().replace(/^"(.*)"$/, '$1')));
+      const pathLines = lines.filter(isPathLine);
+      if (!pathLines.length) return text;
+      const chips = pathLines.flatMap((l) => l.split(PASTE_SEGMENT_SPLIT).filter((s) => s.trim())).map(() => { images += 1; return `[Image #${images}]`; }).join('');
+      return `${chips}${lines.filter((l) => !isPathLine(l)).join('\n  ')}`;
+    }
     const segments = text.split(PASTE_SEGMENT_SPLIT).flatMap((s) => s.split('\n')).filter((s) => s.trim());
-    const paths = segments.filter((s) => IMAGE_FILE.test(s.trim()));
+    const isPath = (s) => IMAGE_FILE.test(s.trim().replace(/^"(.*)"$/, '$1'));
+    const paths = segments.filter(isPath);
     if (!paths.length) return text;
     const chips = paths.map(() => { images += 1; return `[Image #${images}]`; }).join('');
-    return `${chips}${segments.filter((s) => !IMAGE_FILE.test(s.trim())).join('\n  ')}`;
+    return `${chips}${segments.filter((s) => !isPath(s)).join('\n  ')}`;
   };
   // A submitted prompt is echoed above the box, as Claude draws it; a busy CLI
   // shows nothing new for `renderDelayReads` reads after each keystroke.
@@ -663,23 +674,50 @@ test('a short phone message with an image is sent when Claude draws the path as 
   await send.send({ sessionId: 's-phone-fyi', text: 'What\u2019s the deal? Fix please', images: [PHONE_SHOT], pane: target });
 
   assert.deepEqual(typed(h), [
-    `\x1b[200~Image: ${PHONE_SHOT}\nFYI\x1b[201~`, '\r',
-    `\x1b[200~Image: ${PHONE_SHOT}\nWhat\u2019s the deal? Fix please\x1b[201~`, '\r',
+    `\x1b[200~"${PHONE_SHOT}"\nFYI\x1b[201~`, '\r',
+    `\x1b[200~"${PHONE_SHOT}"\nWhat\u2019s the deal? Fix please\x1b[201~`, '\r',
   ], 'each typed once, each submitted with one Enter');
   assert.equal(pane.draft, '');
-  assert.deepEqual(pane.echoed, ['[Image #13]Image:\n  FYI', '[Image #14]Image:\n  What\u2019s the deal? Fix please']);
+  assert.deepEqual(pane.echoed, ['[Image #13]FYI', '[Image #14]What\u2019s the deal? Fix please']);
+});
+
+// 2026-10-28, Claude Code 2.1.311: a path that shares its line with other words
+// is no longer attached, so the old "Image: <path>" line reached Claude as
+// literal text (drive-prompt-gate-win.js on 2.1.312: "image attached: false").
+// The path on a line of its own still converts, on 2.1.299 and on 2.1.312.
+test('a phone image is attached by Claude 2.1.311 and later: its path goes on a line of its own (two-sided)', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  delete h.deps.setXClipboardImage;
+  const pane = composerPane(h, { pathChips: 'whole-line', imagesBefore: 12 });
+  const send = createSessionSend(h.deps);
+
+  await send.send({ sessionId: 's-phone-2-1-311', text: 'FYI', images: [PHONE_SHOT], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(typed(h), [`\x1b[200~"${PHONE_SHOT}"\nFYI\x1b[201~`, '\r']);
+  assert.deepEqual(pane.echoed, ['[Image #13]FYI'], 'the image is attached and the path is gone from the message');
+});
+
+test('two phone images each get a line of their own', async () => {
+  const second = PHONE_SHOT.replace('387201e8', '5c0d9a11');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  delete h.deps.setXClipboardImage;
+  const pane = composerPane(h, { pathChips: 'whole-line', imagesBefore: 2 });
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 's-phone-two', text: 'compare these', images: [PHONE_SHOT, second], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), [`\x1b[200~"${PHONE_SHOT}"\n"${second}"\ncompare these\x1b[201~`, '\r']);
+  assert.deepEqual(pane.echoed, ['[Image #3][Image #4]compare these']);
 });
 
 test('a phone image message already in the prompt as a chip is submitted, not typed again', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   delete h.deps.setXClipboardImage;
-  const pane = composerPane(h, { pathChips: true, initialDraft: '[Image #13]Image:\n  FYI', imagesBefore: 13 });
+  const pane = composerPane(h, { pathChips: true, initialDraft: '[Image #13]FYI', imagesBefore: 13 });
   const send = createSessionSend(h.deps);
 
   await send.send({ sessionId: 's-phone-again', text: 'FYI', images: [PHONE_SHOT], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
 
   assert.deepEqual(typed(h), ['\r'], 'nothing typed on top of it');
-  assert.deepEqual(pane.echoed, ['[Image #13]Image:\n  FYI']);
+  assert.deepEqual(pane.echoed, ['[Image #13]FYI']);
 });
 
 test('the sessions view is recognized by its own box and key hints, never by prose that quotes it', () => {
@@ -1170,7 +1208,10 @@ test('with no clipboard, an image is delivered as a path instead of a paste', as
   assert.match(body, /what is wrong with this screen\?/, 'the typed text must survive alongside it');
 });
 
-test('two headless images are both delivered, on one line, ahead of the text', async () => {
+// Claude 2.1.311 attaches a pasted path only when it has its line to itself, so
+// a Claude pane gets one quoted path per line (a bare POSIX path would start the
+// message with "/" and be typed as a slash command); another CLI keeps the label.
+test('two headless images are both delivered, one quoted path per line, ahead of the text', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   delete h.deps.setXClipboardImage;
   const send = createSessionSend(h.deps);
@@ -1178,6 +1219,22 @@ test('two headless images are both delivered, on one line, ahead of the text', a
     sessionId: 's-headless-two',
     text: 'compare these',
     images: ['/srv/upload/a.png', '/srv/upload/b.png'],
+    pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
+  });
+  const body = h.sent.map(({ text }) => text).join('');
+  assert.equal(body, '\x1b[200~"/srv/upload/a.png"\n"/srv/upload/b.png"\ncompare these\x1b[201~\r', 'one paste, never a slash command typed raw');
+  assert.doesNotMatch(body, /Images?:/);
+});
+
+test('a headless image into a codex pane keeps the labelled line', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  delete h.deps.setXClipboardImage;
+  const send = createSessionSend(h.deps);
+  await send.send({
+    sessionId: 's-headless-codex',
+    text: 'compare these',
+    images: ['/srv/upload/a.png', '/srv/upload/b.png'],
+    provider: 'codex',
     pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
   });
   const body = h.sent.map(({ text }) => text).join('');
@@ -2031,6 +2088,81 @@ for (const [fixtureName, level] of [['claude-2.1.303-effort-xhigh-120.txt', 'xhi
     });
 
     assert.deepEqual(h.sent.map(({ text }) => text), ['/effort ', level, '\r', '1', '\r']);
+  });
+}
+
+// Claude Code 2.1.312 (captured 2026-10-28, both layouts): the /model warning is
+// titled "Switch model?" and its sentence now ends "gets re-read." without "on
+// your next message". Neither half of the old match fit it, so a model change
+// from Harbor stopped on the open dialog. Two lines were edited out of the real
+// captures: the fullscreen top edge carried live plan usage (now a plain edge),
+// and the inline capture's earlier /effort command and its result were removed.
+for (const fixtureName of ['claude-2.1.312-model-sonnet-120.txt', 'claude-2.1.312-model-sonnet-fullscreen-120.txt']) {
+  test(`Claude /model confirms the real 2.1.312 cache warning (${fixtureName})`, async () => {
+    const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', fixtureName), 'utf8');
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
+    h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+    const send = createSessionSend(h.deps);
+
+    await send.send({
+      sessionId: `s-model-2-1-312-${fixtureName.length}`,
+      text: '/model sonnet',
+      provider: 'claude',
+      pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
+    });
+
+    assert.deepEqual(h.sent.map(({ text }) => text), ['/model ', 'sonnet', '\r', '1', '\r']);
+  });
+}
+
+// SYNTHETIC regression guard, not a capture: the /effort dialog is the same
+// 2.1.312 component with "Change effort level?" and "for the current effort
+// level" (binary template, 2026-10-28). A live probe does not type /effort any
+// more, because it saves the level into the real config home (it did once).
+// The title alone already matched before 2.1.312, so this pins, it does not prove.
+test('SYNTHETIC: Claude /effort confirms the 2.1.312 sentence without "on your next message"', async () => {
+  const dialog = [
+    '   Change effort level?',
+    '   Your next response will be slower and use more tokens',
+    '',
+    '   This conversation is cached for the current effort level. Switching to high means the full history gets re-read.',
+    '',
+    '   ❯ 1. Yes, switch to high',
+    '     2. No, go back',
+  ].join('\n');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
+  h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+  const send = createSessionSend(h.deps);
+
+  await send.send({
+    sessionId: 's-effort-2-1-312',
+    text: '/effort high',
+    provider: 'claude',
+    pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
+  });
+
+  assert.deepEqual(h.sent.map(({ text }) => text), ['/effort ', 'high', '\r', '1', '\r']);
+});
+
+// The sentence alone, with no title in view (a short read can lose the top of
+// the dialog), must be enough for both endings. Red before 2.1.312's ending was
+// accepted: this is the spec that isolates the optional "on your next message".
+for (const ending of ['re-read on your next message.', 're-read.']) {
+  test(`Claude /model confirms the cache warning from its sentence alone ("...${ending}")`, async () => {
+    const dialog = [
+      `This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets ${ending}`,
+      '',
+      '❯ 1. Yes, switch to Sonnet 5.5',
+      '  2. No, go back',
+    ].join('\n');
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
+    h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+    const send = createSessionSend(h.deps);
+    await send.send({ sessionId: `s-sentence-${ending.length}`, text: '/model sonnet', provider: 'claude', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    assert.deepEqual(h.sent.map(({ text }) => text), ['/model ', 'sonnet', '\r', '1', '\r']);
   });
 }
 
