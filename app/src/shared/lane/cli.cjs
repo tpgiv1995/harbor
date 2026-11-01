@@ -9,6 +9,7 @@ const COMMANDS = {
   status: [],
   release: ['lane', 'token', 'generation', 'final'],
   checkpoint: ['lane', 'token', 'generation', 'final'],
+  reopen: ['lane', 'token', 'generation', 'owner-pid'],
   recover: ['repo', 'slot', 'token', 'generation'],
   quarantine: ['lane', 'token', 'generation', 'reason'],
   'env-begin': ['lane', 'token', 'generation'],
@@ -21,7 +22,8 @@ const RETRY = new Set(['POOL_FULL', 'LOCK_BUSY', 'LOCK_STALE', 'BRANCH_TAKEN', '
 const REQUIRED = {
   'init-repo': ['repo', 'path', 'poolRoot', 'size'], lease: ['repo', 'lane', 'base', 'type'],
   resume: ['lane', 'token', 'generation', 'ownerPid'], release: ['lane', 'token', 'generation', 'final'],
-  checkpoint: ['lane', 'token', 'generation', 'final'], recover: ['repo', 'slot', 'token', 'generation'],
+  checkpoint: ['lane', 'token', 'generation', 'final'], reopen: ['lane', 'token', 'generation', 'ownerPid'],
+  recover: ['repo', 'slot', 'token', 'generation'],
   quarantine: ['lane', 'token', 'generation', 'reason'], 'env-begin': ['lane', 'token', 'generation'],
   'env-ready': ['lane', 'token', 'generation', 'fingerprint'], 'recover-lock': ['name'],
   'bind-session': ['lane', 'token', 'generation', 'provider', 'configHome', 'session'],
@@ -51,7 +53,7 @@ function main(argv = process.argv.slice(2)) {
     const pool = new Pool();
     const actions = {
       'init-repo': () => pool.init(options), lease: () => pool.lease(options), resume: () => pool.resume(options), status: () => pool.status(),
-      release: () => pool.release(options), checkpoint: () => pool.checkpoint(options), recover: () => pool.recover(options), quarantine: () => pool.quarantine(options),
+      release: () => pool.release(options), checkpoint: () => pool.checkpoint(options), reopen: () => pool.reopen(options), recover: () => pool.recover(options), quarantine: () => pool.quarantine(options),
       'env-begin': () => pool.environment(options, false), 'env-ready': () => pool.environment(options, true),
       'bind-session': () => pool.bindSession(options), 'resolve-session': () => pool.resolveSession(options), 'recover-lock': () => pool.store.recoverLock(options.name),
     };

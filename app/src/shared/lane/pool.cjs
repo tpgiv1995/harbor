@@ -251,6 +251,25 @@ class Pool {
       return this.result(repo, lane, slot);
     });
   }
+  // A revision before release: the sealed lane runs again in the same slot under a new owner.
+  // The token and generation renew so the previous capability cannot release the slot while
+  // the revision writes. The slot must still hold the sealed deliverable, clean and unmoved.
+  reopen(options) {
+    integer(options.ownerPid, 'owner-pid', 1, 2147483647);
+    return this.transaction(state => this.lane(state, options.lane).repo, state => {
+      const { lane, repo, slot } = this.guarded(state, options, ['awaiting-review']);
+      insist(slot, 'INVALID_ARGUMENT', 'Only a lane that holds a slot can be reopened');
+      const head = this.checkCurrent(repo, lane, slot, false, false);
+      insist(lane.finalSha === head && ws.sha(repo.canonical, `refs/lanes/${lane.id}/final`) === head, 'TIP_MOVED', 'The slot no longer holds the sealed deliverable');
+      lane.owner = this.identities.identity(options.ownerPid);
+      lane.generation = slot.generation + 1;
+      lane.token = crypto.randomUUID(); lane.state = 'running'; lane.reason = null;
+      Object.assign(slot, { generation: lane.generation, token: lane.token, state: 'running', reason: null });
+      for (const session of Object.values(state.sessions)) if (session.lane === lane.id) session.generation = lane.generation;
+      this.store.save(state, 'lane-reopened');
+      return this.result(repo, lane, slot);
+    });
+  }
   finish(state, lane, repo, slot, checked = false) {
     if (slot && !checked) {
       const head = this.checkCurrent(repo, lane, slot, lane.state === 'quarantined');

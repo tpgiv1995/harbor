@@ -1,8 +1,8 @@
 # Workspace-pool core
 
-The plain-Node implementation is in `C:\dev\.orch\harbor\lane-pool-1101\app\src\shared\lane\`.
-Its CLI entry is `C:\dev\.orch\harbor\lane-pool-1101\bin\harbor-lane`.
-This is the stages 1 and 2 core. It does not change launchers, sessiond, orchestration, or the live checkout.
+The plain-Node implementation is in `app\src\shared\lane\`.
+Its CLI entry is `bin\harbor-lane`.
+Stages 1 and 2 are the core. Stage 3 wires it into the worker launchers, opt-in (see Launcher adapters below). The pool does not change sessiond, orchestration, or the live checkout.
 
 ## Identity and persistence
 
@@ -20,7 +20,7 @@ Slots move through `free`, `preparing`, `running`, `awaiting-review`, `releasing
 
 New lanes use a resolved base SHA and a newly created branch. Existing branch names and lane ids are refused. Verify lanes stay detached. Release requires the coordinator's explicit final SHA, clean tracked/index/untracked state, no unfinished Git operation, and a matching branch. It seals `refs/lanes/<lane-id>/final`, records base and final SHA, and detaches before publishing free. It never commits anything. Ignored output is covered by the declared cleanup policy: everything outside the allowlist is discarded only on the next preparation.
 
-`checkpoint` seals a clean current commit for review without releasing. It can also seal a quarantined lane after the coordinator has repaired it. `recover` needs a provably gone owner, clean slot, no operation in progress, and an already recorded matching durable final ref. Dirty and unsealed slots remain quarantined, with the refusal reason recorded. A dead owner is not evidence that descendants stopped: the v1 coordinator must establish quiescence before checkpoint/release/recovery. The core never kills a process.
+`checkpoint` seals a clean current commit for review without releasing. It can also seal a quarantined lane after the coordinator has repaired it. `reopen` takes a sealed (`awaiting-review`) lane back to `running` for a revision before release: same slot and branch, a new owner PID, and a renewed token and generation, so the earlier capability cannot release the slot while the revision writes. The slot must still hold the sealed deliverable, clean and unmoved; a refused reopen leaves the lane sealed. A released lane comes back through `resume` instead. `recover` needs a provably gone owner, clean slot, no operation in progress, and an already recorded matching durable final ref. Dirty and unsealed slots remain quarantined, with the refusal reason recorded. A dead owner is not evidence that descendants stopped: the v1 coordinator must establish quiescence before checkpoint/release/recovery. The core never kills a process.
 
 Resume acquires only the original slot, restores the recorded final tip and renews token/generation. A busy original slot refuses even if another slot is free. A moved branch is refused instead of reset. A deleted branch can be recreated from the durable final ref. An active or quarantined lane cannot be resumed as a second writer. Resolve, review/recover if needed, then resume using the recorded lane capability.
 
@@ -44,4 +44,14 @@ Inspect hidden flags once during preparation or clean-tree verification; environ
 
 Keep one shared state directory for the machine-wide cap. Separate `HARBOR_LANES_DIR` values intentionally define separate isolated pools and cannot enforce a shared cap. Quarantined write slots conservatively continue to consume write capacity. Integration counts as a write lane. Verify lanes consume ordinary slots but not the write cap. Adapters still own their broader test/resource budget and legacy-worker accounting.
 
-Tests live in `C:\dev\.orch\harbor\lane-pool-1101\app\test\lane\` and use only synthetic temporary repositories, a temporary pool and relocated state. Run `npm test -- lane` from `C:\dev\.orch\harbor\lane-pool-1101\app`. Do not point this test run at the production pool or install dependencies through the worktree's node_modules junction.
+Tests live in `app\test\lane\` and use only synthetic temporary repositories, a temporary pool and relocated state. Run `npm test -- lane` from `app`. Never point a test run at the production pool.
+
+## Launcher adapters
+
+`C:\tools\lane-adapter\lane-adapter.mjs` is the launchers' side of the pool. `claude-worker`, `astra-run`, `cursor-worker` and `cursor-run` use it only when a launch passes `--lane`. Without it they behave exactly as before, with one addition: a start folder inside a registered slot is refused (exit 6), because the pool must know who writes there. That check reads `registry.json` with no subprocess, and does nothing when no pool exists.
+
+The launcher owns the lease (owner PID = the launcher process). A coordinator's commands run in short-lived shells, and the core quarantines a running lane whose owner is gone, so the coordinator cannot hold it. A new lane passes `--lane <id> --lane-repo <repo id> --lane-base <ref>`, optionally `--lane-branch` (default `lane/<id>`) and `--lane-type write|verify`. A revision passes `--lane <id> --lane-token <t> --lane-generation <g>` from the receipt; the adapter reopens a sealed lane or resumes a released one. Any launch may add `--lane-runtimes <json>`, `--lane-setup "<install command>"` (env-begin, the command in the slot, env-ready, only when the receipt is stale; its output goes to stderr) and `--lane-receipt <file>`.
+
+The lease is held for the whole launcher run: across astra-run's usage resets and resumes, and through cursor-worker's answer file and `--check`. Then the launcher seals: a clean slot is checkpointed at HEAD for review; a dirty slot, an unfinished operation or a refused checkpoint is quarantined explicitly with the reason. A launcher never releases. The coordinator reviews, then runs `release` with the token and generation from the receipt or the `lane:` stderr line. claude-worker binds its session id before the worker starts; astra-run binds the codex session at the end. Resuming a bound session without naming its lane is refused, because resume needs the original slot path. A launcher's own output file (`--out`, `-o`) inside the slot is refused because it would leave the slot unclean. Exit 6 means the pool refused; POOL_FULL, LANE_BUSY and LOCK_BUSY clear on their own. LOCK_STALE gets one `recover-lock` and one retry.
+
+`C:\dev\.orch\pool` is listed in `C:\tools\disk-hygiene\keep.txt`: the nightly janitor's idle-worktree rule must never remove a slot. Adapter tests: `node --test C:\tools\lane-adapter\lane-adapter.test.mjs C:\tools\lane-adapter\launchers.test.mjs` (synthetic repositories, a throwaway pool, and a compiled fake worker binary standing in for claude.exe and codex.exe; `LANE_TOOLS_ROOT` points them at a staged copy before install). Not yet done: lane identities in claude-delegate queue records and the orchestration recipe, and Harbor's launch and resume mapping (stage 4).
