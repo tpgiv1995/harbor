@@ -63,7 +63,10 @@ function cachedLaneAt(workspace) {
   const hit = lanesAt.get(key);
   if (hit && hit.stamp === stamp) return hit.value;
   const value = currentLaneAt(workspace);
-  lanesAt.set(key, { value, stamp });
+  // An unreadable snapshot (undefined) is never cached: the next lookup reads again, even if
+  // the file becomes readable without its stamp changing.
+  if (value === undefined) lanesAt.delete(key);
+  else lanesAt.set(key, { value, stamp });
   return value;
 }
 

@@ -38,3 +38,7 @@ Astra accepted the decision not to trap signals. The five partly resolved findin
 - C. claude-worker: an outer handler seals the lane on any exception after the lease; a test injects a temp-file failure between lease and spawn and proves it (the previous launcher left the lane running).
 - D. Queue pill: ownership is re-read whenever the registry stamp changes. Associating summaries with a session instead of a folder is open (renderer and `main/index.js`).
 - E. Command guard: git's `-c name=value` globals before `-C`, and escaped quotes in prose; fixtures for both.
+
+## Astra's confirmation round
+
+A, B, C and E resolved; D partly resolved by agreement (per-session summary association stays open stage 4 work). One new medium finding, fixed: the queue matcher cached an unreadable-registry answer against the file's stamp, so a registry that became readable again without a new write never re-read. Unreadable answers are no longer cached; a test pins the stamp to the same whole second and fails on the previous commit.

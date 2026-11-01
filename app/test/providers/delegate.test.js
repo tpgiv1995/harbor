@@ -563,3 +563,25 @@ test('lane ownership is re-read as soon as the pool registry changes', async (t)
   write('lane-b');
   assert.equal(findQueueForWorkspace([queueA, queueB], slot), queueB, 'no stale owner after the slot is reassigned');
 });
+
+test('an unreadable registry is retried on the next lookup, not cached', (t) => {
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'harbor-delegate-unreadable-'));
+  const prior = process.env.HARBOR_LANES_DIR;
+  process.env.HARBOR_LANES_DIR = dir;
+  t.after(() => { if (prior === undefined) delete process.env.HARBOR_LANES_DIR; else process.env.HARBOR_LANES_DIR = prior; fs.rmSync(dir, { recursive: true, force: true }); });
+  const slot = path.join(dir, 'pool', 'harbor', 'slot-01');
+  fs.mkdirSync(slot, { recursive: true });
+  const registry = path.join(dir, 'registry.json');
+  const queue = { workspace: 'C:\\dev\\HarborA', batches: [{ worktree: slot, lane: 'lane-a' }] };
+  const good = JSON.stringify({ repos: { harbor: { id: 'harbor', slots: [{ id: 1, path: slot, lane: 'lane-a', generation: 1 }] } }, lanes: {}, sessions: {} });
+  // A whole-second stamp, so restoring it below gives back exactly the same mtime.
+  const stamp = new Date(Math.floor(Date.now() / 1000) * 1000 - 60000);
+  fs.writeFileSync(registry, '{');
+  fs.utimesSync(registry, stamp, stamp);
+  assert.equal(findQueueForWorkspace([queue], slot), null, 'unreadable: no queue');
+  fs.writeFileSync(registry, good);
+  fs.utimesSync(registry, stamp, stamp);
+  assert.equal(fs.statSync(registry).mtimeMs, stamp.getTime(), 'the stamp really is unchanged');
+  assert.equal(findQueueForWorkspace([queue], slot), queue, 'readable again with the same stamp: found at once');
+});
