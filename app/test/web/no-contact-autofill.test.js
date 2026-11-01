@@ -68,4 +68,10 @@ test('the message box opts out of autofill outright', () => {
   const textarea = openingTags(composer).find((tag) => tag.text.startsWith('<textarea'));
   assert.ok(textarea, 'the composer renders a textarea');
   assert.match(textarea.text, /autoComplete="off"/);
+  // Safari honors "off" only sometimes; with no label or name it classified the
+  // box from the status text above it. A real label and a name stay fixed.
+  const id = /\bid="([^"]+)"/.exec(textarea.text)?.[1];
+  assert.ok(id, 'the message box has an id');
+  assert.match(textarea.text, /\bname="prompt"/);
+  assert.match(composer, new RegExp(`<label[^>]*htmlFor="${id}"`), 'a real label points at the message box');
 });

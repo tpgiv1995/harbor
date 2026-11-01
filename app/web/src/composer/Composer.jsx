@@ -305,7 +305,14 @@ export function Composer({
           </div>
         ) : null}
         <div className="composer-field">
+          {/* Safari only partly honors autoComplete="off" (2026-11-01): with no label
+              and no name it classified the box from the text above it (queue and
+              status lines change per session) and offered AutoFill Contact in busy
+              sessions. A real label and a name give it something fixed to read. */}
+          <label className="composer-label" htmlFor="harbor-composer-prompt">Prompt for this session</label>
           <textarea
+            id="harbor-composer-prompt"
+            name="prompt"
             autoComplete="off"
             ref={textareaRef}
             aria-label="Message"
