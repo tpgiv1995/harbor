@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+'use strict';
+
+process.exitCode = require('../app/src/shared/lane/cli.cjs').main();

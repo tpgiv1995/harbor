@@ -17,6 +17,7 @@ This file crossed the CLI's 150k-char auto-load limit on 2026-08-29 (156.3k char
 - `docs/claude/views.md`: the rail, stage window chrome, Tasks / Notes / Files / Orch views, project icons, usage meters, badges, and the per-session workflow strip (`providers/workflow-runs.js`). Load before touching `renderer/sidebar`, stage chrome, tasks / notes / artifacts / orchestration surfaces, workflow-run rendering, or their CLIs.
 - `docs/claude/board.md`: the whiteboard and `bin/harbor-board`. Load before touching anything board-related.
 - `docs/claude/providers.md`: launches, new-session config, config homes, model discovery, codex / cursor, the titler, the `bin/` organs. Load before touching launch actions, capabilities, homes, or provider history.
+- `docs/claude/lanes.md`: the workspace pool (`bin/harbor-lane`, `app/src/shared/lane/`): fixed reusable worktree slots leased per lane, the journaled state store, owner identity and lock recovery. Load before touching the lane core, its CLI, or any launcher that leases a workspace.
 
 A rule you did not load still binds you; when in doubt which file covers your change, read the candidates. Do not add doctrine back to this root unless it is genuinely cross-cutting, and never let this root grow past the limit again.
 
