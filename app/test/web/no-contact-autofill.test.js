@@ -63,15 +63,26 @@ test('every phone text field declares its autofill purpose', () => {
   assert.deepEqual(missing, [], 'these fields let iOS guess, and it guesses contact info');
 });
 
-test('the message box opts out of autofill outright', () => {
+test('the message box is an editable element, which Safari never autofills', () => {
+  // autoComplete="off" (c862829) and then a label plus a name (df53d18) did not
+  // stop Safari raising "AutoFill Contact" on the message box in a busy session:
+  // it classifies input, textarea and select by its own heuristics whatever
+  // they say. An editable element is outside its AutoFill entirely, which is
+  // what Claude, ChatGPT and Slack type into on the phone.
   const composer = fs.readFileSync(path.join(WEB_SRC, 'composer/Composer.jsx'), 'utf8');
-  const textarea = openingTags(composer).find((tag) => tag.text.startsWith('<textarea'));
-  assert.ok(textarea, 'the composer renders a textarea');
-  assert.match(textarea.text, /autoComplete="off"/);
-  // Safari honors "off" only sometimes; with no label or name it classified the
-  // box from the status text above it. A real label and a name stay fixed.
-  const id = /\bid="([^"]+)"/.exec(textarea.text)?.[1];
-  assert.ok(id, 'the message box has an id');
-  assert.match(textarea.text, /\bname="prompt"/);
-  assert.match(composer, new RegExp(`<label[^>]*htmlFor="${id}"`), 'a real label points at the message box');
+  assert.equal(openingTags(composer).filter((tag) => tag.text.startsWith('<textarea')).length, 0,
+    'the message box must not be a textarea');
+  assert.match(composer, /className="composer-input"/);
+  assert.match(composer, /contentEditable=\{disabled \? 'false' : 'plaintext-only'\}/,
+    'plain text only, so a paste never brings formatting into the draft');
+  assert.match(composer, /role="textbox"/);
+  assert.match(composer, /aria-multiline="true"/);
+});
+
+test('the typing layout recognises the message box as a field', () => {
+  // use-typing.js hides the tabs while a field has focus and the keyboard is up.
+  // Its selector named textarea and contenteditable="true" only, so the new box
+  // would have kept the tabs on screen while typing.
+  const typing = fs.readFileSync(path.join(WEB_SRC, 'shell/use-typing.js'), 'utf8');
+  assert.match(typing, /\[contenteditable="plaintext-only"\]/);
 });

@@ -49,7 +49,7 @@ export function SlashPalette({
       return undefined;
     }
     const update = () => {
-      const field = document.querySelector('.composer-field textarea');
+      const field = document.querySelector('.composer-field .composer-input');
       const stack = document.querySelector('.composer-field');
       if (!field || !stack) return;
       const rect = field.getBoundingClientRect();

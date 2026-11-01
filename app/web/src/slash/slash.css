@@ -4,7 +4,7 @@
   min-width: 0;
 }
 
-/* THE TEXTAREA PAINTS ITS OWN TEXT AND ITS OWN PILL. It used to be transparent
+/* THE TEXT BOX PAINTS ITS OWN TEXT AND ITS OWN PILL. It used to be transparent
  * over a `.slash-backdrop` mirror that re-rendered the draft and tinted the
  * slash token. That mirror is gone (2026-08-07): with the field transparent the
  * whole draft was invisible, and once the field was made readable the mirror's
@@ -13,7 +13,7 @@
  * A metric-matched mirror can never stay aligned with the field it shadows,
  * which is the same reason the desktop composer deleted its own. Slash validity
  * is the coloured card border below; the palette still does the useful work. */
-.composer-field textarea {
+.composer-field .composer-input {
   position: relative;
   z-index: 2;
   width: 100%;

@@ -138,7 +138,7 @@ async function main() {
   }
   // The field must still be wide enough to read what is being typed. This is
   // the regression six inline controls caused: it measured ~130px.
-  const fieldBox = await page.locator('.composer textarea').boundingBox();
+  const fieldBox = await page.locator('.composer .composer-input').boundingBox();
   report.detail.fieldWidth = fieldBox ? Math.round(fieldBox.width) : 0;
   report.checks.fieldWideEnoughToRead = report.detail.fieldWidth >= 240;
 

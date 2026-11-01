@@ -201,7 +201,7 @@ async function main() {
     const keyboardTop = visualTop + visualH;
 
     const composer = document.querySelector('.composer');
-    const textarea = document.querySelector('.composer textarea');
+    const textarea = document.querySelector('.composer .composer-input');
     const nav = document.querySelector('.shell-bottom-anchor');
     const lastBlock = document.querySelector('.conv-body > :last-child');
     const shell = document.querySelector('.app-shell');

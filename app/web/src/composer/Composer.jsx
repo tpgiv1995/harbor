@@ -10,6 +10,7 @@ import { LiveVoiceBar } from '../voice/LiveVoiceBar.jsx';
 import { SlashPalette, useSlashState } from '../slash/SlashPalette.jsx';
 import { useComposerLiveVoice } from './use-composer-live-voice.js';
 import { composerActions, hasDraft } from './composer-actions.cjs';
+import { readPlain, setSelectionOffsets, writePlain } from './plain-text.cjs';
 import './composer.css';
 import { replyStore, useQuestionReply } from '../../../src/renderer/stage/use-question-reply.js';
 import '../slash/slash.css';
@@ -70,8 +71,12 @@ export function Composer({
   });
   const [slashHighlight, setSlashHighlight] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
-  const textareaRef = useRef(null);
-  useEffect(() => { const focus = () => textareaRef.current?.focus(); window.addEventListener('harbor-focus-composer',focus); return () => window.removeEventListener('harbor-focus-composer',focus); }, []);
+  // The message box is a plain-text editable element, not a textarea: Safari's
+  // AutoFill offers contact details only in input/textarea/select (plain-text.cjs).
+  const boxRef = useRef(null);
+  // Where the caret goes after code (not typing) changes the draft.
+  const pendingCaret = useRef(null);
+  useEffect(() => { const focus = () => boxRef.current?.focus(); window.addEventListener('harbor-focus-composer',focus); return () => window.removeEventListener('harbor-focus-composer',focus); }, []);
   const client = useRpc();
   const { capabilities, error: capsError } = useCapabilities(
     client,
@@ -89,8 +94,9 @@ export function Composer({
   const slashOpen = slash.open && !slashDismissed;
 
   const onTranscribed = useCallback((append, transcription) => {
+    pendingCaret.current = { start: Infinity };
     setText((prev) => append(prev, transcription));
-    textareaRef.current?.focus();
+    boxRef.current?.focus();
   }, []);
 
   const { voiceState, toggle: toggleVoice } = useVoiceDraft({
@@ -99,9 +105,25 @@ export function Composer({
   });
   const liveVoice = useComposerLiveVoice();
 
+  // The box shows the draft. Typing flows the other way (onInput reads the box),
+  // so this writes only when the draft changed somewhere else: a saved draft, a
+  // session switch, a slash pick, a format button, voice, a send clearing it.
+  // Writing while the box already matches would move the caret and break iOS
+  // text composition (autocorrect, dictation, CJK input) mid-word.
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    if (readPlain(box) !== text) writePlain(box, text);
+    const caret = pendingCaret.current;
+    if (caret) {
+      pendingCaret.current = null;
+      setSelectionOffsets(box, caret.start, caret.end ?? caret.start);
+    }
+  }, [text, sessionId]);
+
   // Budget against the visible viewport, including tools and attachments.
   useLayoutEffect(() => {
-    const node = textareaRef.current;
+    const node = boxRef.current;
     if (!node) return undefined;
     const composer = node.closest('.composer');
     const resize = () => {
@@ -111,14 +133,13 @@ export function Composer({
         + (composer.querySelector('.composer-tools')?.offsetHeight || 0);
       const chrome = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 1;
       // The card around the text box (border, attachment chips, the toolbar) is
-      // part of the budget too. Measured with the box at its natural height, so
-      // the answer does not depend on what was typed.
-      node.style.height = 'auto';
+      // part of the budget too; the box's own height cancels out, so the answer
+      // does not depend on what was typed. The box grows with its text up to the
+      // cap and scrolls inside itself past it.
       const card = composer.querySelector('.composer-card');
       const cardChrome = Math.max(0, (card?.offsetHeight || 0) - (node.offsetHeight || 0));
       const cap = Math.max(44, Math.min(150, viewport * .4 - extras - chrome - cardChrome));
-      node.style.height = Math.min(node.scrollHeight, cap) + 'px';
-      node.style.overflowY = node.scrollHeight > cap ? 'auto' : 'hidden';
+      node.style.maxHeight = cap + 'px';
     };
     resize();
     const observer = new ResizeObserver(resize);
@@ -175,14 +196,18 @@ export function Composer({
   // jumped 90px and the first tap on Send was lost (2026-10-21, second review).
   // It also keeps the keyboard up for the next message.
   const keepFocus = (event) => {
-    if (document.activeElement === textareaRef.current) event.preventDefault();
+    if (document.activeElement === boxRef.current) event.preventDefault();
   };
 
   const pickSlash = (command) => {
+    if (slash.active && command?.name) {
+      const at = slash.active.start + command.name.length;
+      pendingCaret.current = { start: at };
+    }
     setText((prev) => insertSlashCommand(prev, slash.active, command));
     setSlashDismissed(false);
     setSlashHighlight(0);
-    textareaRef.current?.focus();
+    boxRef.current?.focus();
   };
 
   const toggleFormat = () => {
@@ -191,8 +216,10 @@ export function Composer({
       try { localStorage.setItem('harbor-compose-format', next ? '1' : '0'); } catch { /* ignore */ }
       return next;
     });
-    textareaRef.current?.focus();
+    boxRef.current?.focus();
   };
+
+  const placeholder = questionReply ? "Reply to Claude's questions" : 'Message this session';
 
   // Slash validity colours the card's border (it was an inset bar down the text
   // box's left edge, which a rounded card cannot hold cleanly).
@@ -236,7 +263,7 @@ export function Composer({
       <LiveVoiceBar liveVoice={liveVoice} />
       {formatOpen ? (
         <FormatToolbar
-          textareaRef={textareaRef}
+          editorRef={boxRef}
           text={text}
           onChange={setText}
           disabled={disabled}
@@ -305,23 +332,30 @@ export function Composer({
           </div>
         ) : null}
         <div className="composer-field">
-          {/* Safari only partly honors autoComplete="off" (2026-11-01): with no label
-              and no name it classified the box from the text above it (queue and
-              status lines change per session) and offered AutoFill Contact in busy
-              sessions. A real label and a name give it something fixed to read. */}
-          <label className="composer-label" htmlFor="harbor-composer-prompt">Prompt for this session</label>
-          <textarea
-            id="harbor-composer-prompt"
-            name="prompt"
-            autoComplete="off"
-            ref={textareaRef}
+          {/* A plain-text editable box, not a textarea (2026-11-01): Safari raised
+              "AutoFill Contact" and offered home and work addresses on a textarea
+              whatever its autoComplete, label or name said, and its AutoFill does
+              not look at editable elements at all. plain-text.cjs is its text model. */}
+          <div
+            ref={boxRef}
+            className="composer-input"
+            contentEditable={disabled ? 'false' : 'plaintext-only'}
+            role="textbox"
+            aria-multiline="true"
             aria-label="Message"
-            placeholder={questionReply ? "Reply to Claude's questions" : 'Message this session'}
-            rows={1}
-            value={text}
-            disabled={disabled}
-            onChange={(event) => {
-              setText(event.target.value);
+            aria-disabled={disabled ? 'true' : undefined}
+            aria-placeholder={placeholder}
+            data-placeholder={placeholder}
+            data-empty={text ? undefined : ''}
+            spellCheck
+            autoCorrect="on"
+            autoCapitalize="sentences"
+            inputMode="text"
+            onInput={(event) => {
+              // Typing owns the caret: a pick that left the draft unchanged must
+              // not move it on the next keystroke.
+              pendingCaret.current = null;
+              setText(readPlain(event.currentTarget));
               setSlashDismissed(false);
             }}
             onFocus={() => setFocused(true)}

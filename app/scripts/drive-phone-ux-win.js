@@ -27,7 +27,17 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { chromium, expect } = require('@playwright/test');
+const { chromium, webkit, expect } = require('@playwright/test');
+
+// --engine=webkit drives Safari's engine instead of Chromium (2026-11-01: the
+// phone message box became a contenteditable, whose editing rules are the
+// engine's own, and the phone is Safari). Needs `npx playwright install webkit`.
+const ENGINE = (process.argv.find((arg) => arg.startsWith('--engine=')) || '--engine=chromium').slice(9);
+function launchBrowser(env) {
+  if (ENGINE === 'webkit') return webkit.launch({ headless: true, env });
+  if (ENGINE !== 'chromium') throw new Error(`unknown --engine=${ENGINE} (chromium or webkit)`);
+  return chromium.launch({ headless: true, executablePath: chromium.executablePath(), env });
+}
 const { realTmpDir } = require('../test/support/real-tmpdir.js');
 const { parseMenu } = require('../src/main/menu-parse.js');
 
@@ -242,7 +252,7 @@ async function geometry(page) {
       header: box('.app-header'),
       nav: box('.bottom-nav'),
       composer: box('.composer'),
-      textarea: box('.composer-field textarea'),
+      textarea: box('.composer-field .composer-input'),
       conversation: box('.conv-scroll') || box('.conversation') || box('.conv-pane'),
       offlinePanel: box('.offline-panel'),
     };
@@ -258,7 +268,7 @@ async function assertTypingVisible(page, label) {
   assert.ok(g.textarea.bottom <= g.visibleHeight + 1, `${label}: text box bottom ${g.textarea.bottom} is above the keyboard (${g.visibleHeight})`);
   assert.ok(g.textarea.height >= 40, `${label}: text box shows at least a line (${g.textarea.height}px)`);
   const covered = await page.evaluate(() => {
-    const t = document.querySelector('.composer-field textarea').getBoundingClientRect();
+    const t = document.querySelector('.composer-field .composer-input').getBoundingClientRect();
     const points = [[t.left + 12, t.top + 8], [t.left + t.width / 2, t.top + t.height / 2], [t.right - 12, t.bottom - 8]];
     return points.map(([x, y]) => {
       const hit = document.elementFromPoint(x, y);
@@ -286,8 +296,8 @@ const STATES = {
   },
   async typingResize(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
-    await page.locator('.composer-field textarea').click();
-    await page.locator('.composer-field textarea').fill(LONG_DRAFT);
+    await page.locator('.composer-field .composer-input').click();
+    await page.locator('.composer-field .composer-input').fill(LONG_DRAFT);
     await page.setViewportSize({ width: PHONE.width, height: VISIBLE_WITH_KEYBOARD });
     await page.waitForTimeout(300);
     await assertTypingVisible(page, 'keyboard (resize)');
@@ -296,8 +306,8 @@ const STATES = {
   },
   async typingOverlay(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
-    await page.locator('.composer-field textarea').click();
-    await page.locator('.composer-field textarea').fill(LONG_DRAFT);
+    await page.locator('.composer-field .composer-input').click();
+    await page.locator('.composer-field .composer-input').fill(LONG_DRAFT);
     // Shrink only the visual viewport, as Safari does over a full-height layout.
     await page.evaluate((visible) => {
       const vv = window.visualViewport;
@@ -332,8 +342,8 @@ const STATES = {
     // title moved to its own row below it: one-line title 105px, two lines 124px.
     assert.ok(g.header.height <= 112, `offline, the header stays two blocks (${g.header.height}px)`);
     await shot(page, '05-offline');
-    await page.locator('.composer-field textarea').click();
-    await page.locator('.composer-field textarea').fill(LONG_DRAFT);
+    await page.locator('.composer-field .composer-input').click();
+    await page.locator('.composer-field .composer-input').fill(LONG_DRAFT);
     await page.setViewportSize({ width: PHONE.width, height: VISIBLE_WITH_KEYBOARD });
     await page.waitForTimeout(300);
     await shot(page, '06-offline-typing');
@@ -354,8 +364,8 @@ const STATES = {
   async askKeyboard(page) {
     await openChat(page, 'Kill and resume queued Claude sessions');
     await expect(page.locator('.ask-card')).toBeVisible({ timeout: 5000 });
-    await page.locator('.composer-field textarea').click();
-    await page.locator('.composer-field textarea').fill(LONG_DRAFT);
+    await page.locator('.composer-field .composer-input').click();
+    await page.locator('.composer-field .composer-input').fill(LONG_DRAFT);
     await page.setViewportSize({ width: PHONE.width, height: VISIBLE_WITH_KEYBOARD });
     await page.waitForTimeout(300);
     await assertTypingVisible(page, 'question card + keyboard');
@@ -374,19 +384,19 @@ const STATES = {
   // draft was gone.
   async draft(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
-    await page.locator('.composer-field textarea').fill('half-written thought about push 17');
+    await page.locator('.composer-field .composer-input').fill('half-written thought about push 17');
     await openChat(page, 'Kill and resume queued Claude sessions');
-    await expect(page.locator('.composer-field textarea')).toHaveValue('');
+    await expect(page.locator('.composer-field .composer-input')).toHaveText('');
     await page.getByRole('button', { name: 'Tasks' }).click();
     await page.getByRole('button', { name: 'Chat' }).click();
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
-    await expect(page.locator('.composer-field textarea')).toHaveValue('half-written thought about push 17');
+    await expect(page.locator('.composer-field .composer-input')).toHaveText('half-written thought about push 17');
   },
   // Second review, P1: the first tap on Send was lost to a layout jump.
   async sendTap(page, { fx }) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
-    await page.locator('.composer-field textarea').click();
-    await page.locator('.composer-field textarea').fill('one tap please');
+    await page.locator('.composer-field .composer-input').click();
+    await page.locator('.composer-field .composer-input').fill('one tap please');
     await page.setViewportSize({ width: PHONE.width, height: VISIBLE_WITH_KEYBOARD });
     await page.waitForTimeout(300);
     const before = fx.sends.length;
@@ -399,19 +409,82 @@ const STATES = {
   // Second review, P1: a late acknowledgment wiped text typed after the send.
   async draftInFlight(page, { fx }) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
-    const box = page.locator('.composer-field textarea');
+    const box = page.locator('.composer-field .composer-input');
     await box.fill('first message');
     await page.locator('.composer-send').click();
     await expect.poll(() => fx.sends.at(-1)?.text, { timeout: 3000 }).toBe('first message');
     await box.fill('second thought, typed while the first was sending');
     await page.waitForTimeout(1600);
-    await expect(box).toHaveValue('second thought, typed while the first was sending');
+    await expect(box).toHaveText('second thought, typed while the first was sending');
+  },
+  // 2026-11-01: the message box became a plain-text editable element so Safari
+  // stops offering AutoFill Contact (web/src/composer/plain-text.cjs). What goes
+  // out must be exactly what was typed, line breaks included, whichever way the
+  // engine stored them, and the box must behave like the textarea it replaced.
+  async plainBox(page, { fx }) {
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    const box = page.locator('.composer-field .composer-input');
+    const sendAndExpect = async (expected, label) => {
+      const before = fx.sends.length;
+      await page.locator('.composer-send').click();
+      await expect.poll(() => fx.sends.length, { timeout: 4000 }).toBe(before + 1);
+      assert.equal(fx.sends.at(-1).text, expected, `${label}: the sent text is exactly what was typed`);
+      await expect(box).toHaveText('');
+      await expect(page.locator('.composer-input[data-empty]')).toHaveCount(1);
+    };
+    assert.equal(await page.locator('textarea[aria-label="Message"], .composer textarea').count(), 0, 'the message box is not a textarea');
+    assert.equal(await box.getAttribute('contenteditable'), 'plaintext-only');
+    await expect(page.locator('.composer-input[data-empty]')).toHaveCount(1);
+    await shot(page, '21-plain-box-empty', { clip: { x: 0, y: PHONE.height - 260, width: PHONE.width, height: 260 } });
+
+    // Typed with the keyboard: Enter makes a line, a trailing Enter is kept.
+    await box.click();
+    await page.keyboard.type('first line');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('second line');
+    await expect(page.locator('.composer-input[data-empty]')).toHaveCount(0);
+    await shot(page, '22-plain-box-two-lines', { clip: { x: 0, y: PHONE.height - 300, width: PHONE.width, height: 300 } });
+    await sendAndExpect('first line\nsecond line', 'typed lines');
+    await box.click();
+    await page.keyboard.type('ends on an empty line');
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('after two');
+    await sendAndExpect('ends on an empty line\n\nafter two', 'blank line kept');
+
+    // Inserted multi-line text (a paste does the same) arrives as blocks.
+    await box.fill('alpha\nbeta\ngamma');
+    await sendAndExpect('alpha\nbeta\ngamma', 'inserted lines');
+
+    // Formatting a selection works by character offsets, as on the textarea.
+    await box.fill('make this bold');
+    await page.getByRole('button', { name: 'Show composer tools' }).click();
+    await page.getByRole('button', { name: 'Show formatting options' }).click();
+    await box.evaluate((el) => {
+      const node = el.firstChild;
+      const range = document.createRange();
+      range.setStart(node, 10);
+      range.setEnd(node, 14);
+      const sel = getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+    await page.getByRole('button', { name: 'Bold', exact: true }).click();
+    await expect(box).toHaveText('make this **bold**');
+    // The selection lands where the format put it (the wrapped word), and the
+    // caret carries on from its end.
+    assert.equal(await page.evaluate(() => getSelection().toString()), '**bold**', 'the formatted text stays selected');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.type('!');
+    await expect(box).toHaveText('make this **bold**!');
+    await page.getByRole('button', { name: 'Hide formatting options' }).click();
+    await sendAndExpect('make this **bold**!', 'formatted');
   },
   // Second review, P1: focus with no keyboard (hardware keyboard), or a keyboard
   // put away while focus stays, must not hide the tabs.
   async hardwareKeyboard(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
-    await page.locator('.composer-field textarea').click();
+    await page.locator('.composer-field .composer-input').click();
     await page.waitForTimeout(200);
     assert.equal(await page.locator('.app-shell').getAttribute('data-typing'), 'false', 'focus with no keyboard is not typing mode');
     await expect(page.locator('.bottom-nav')).toBeVisible();
@@ -421,7 +494,7 @@ const STATES = {
     await page.setViewportSize(PHONE);
     await page.waitForTimeout(200);
     await expect(page.locator('.bottom-nav')).toBeVisible();
-    assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'focus stayed in the box');
+    assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('composer-input')), true, 'focus stayed in the box');
   },
   // Second review, P0: a long explanation left the choices zero pixels tall.
   async tallQuestion(page) {
@@ -439,7 +512,7 @@ const STATES = {
   async fallbackFold(page) {
     await openChat(page, 'Unknown dialog on screen');
     await expect(page.locator('.ask-screen')).toBeVisible({ timeout: 5000 });
-    await page.locator('.composer-field textarea').click();
+    await page.locator('.composer-field .composer-input').click();
     await page.setViewportSize({ width: PHONE.width, height: VISIBLE_WITH_KEYBOARD });
     await page.waitForTimeout(300);
     await expect(page.locator('.question-fold')).toBeVisible();
@@ -544,7 +617,7 @@ async function main() {
   try {
     fx = await makeFixture(root);
     console.log(`isolated server: ${fx.baseUrl}; bundle ${DIST}; evidence ${EVIDENCE}`);
-    browser = await chromium.launch({ headless: true, executablePath: chromium.executablePath(), env: browserEnv });
+    browser = await launchBrowser(browserEnv);
     for (const [name, run] of Object.entries(STATES)) {
       if (ONLY.length && !ONLY.includes(name)) continue;
       // A fresh context per state, so one state's storage, focus and socket can

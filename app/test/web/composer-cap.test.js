@@ -5,8 +5,10 @@ const path = require('node:path');
 const React = require('react');
 const { buildSync } = require('esbuild');
 
-// Run the real component's sizing effect. Viewport and textarea measurements
+// Run the real component's sizing effect. Viewport and text box measurements
 // are inputs here; the hidden browser drive separately proves the CSS layout.
+// The box is an editable element (plain-text.cjs) that grows with its text, so
+// the effect sets its max-height; composer.css makes it scroll past that.
 for (const viewport of [844, 400]) for (const extras of [0, 100]) test(`composer caps a long draft at viewport ${viewport}, extra controls ${extras}`, () => {
   const effects = [], refs = []; const listeners = new Map();
   const node = { style: {}, scrollHeight: 280, closest: () => ({ querySelector: () => ({ scrollHeight: extras }) }) };
@@ -22,17 +24,18 @@ for (const viewport of [844, 400]) for (const extras of [0, 100]) test(`composer
     const code = buildSync({ entryPoints: [entry], bundle: true, external: ['*'], write: false, platform: 'node', format: 'cjs' }).outputFiles[0].text;
     const module = { exports: {} };
     const stubs = { useRpc: () => ({}), useSend: () => ({ queue: { count: 0 } }), useAttachments: () => ({ attachments: [] }), useCapabilities: () => ({ capabilities: {} }), useVoiceDraft: () => ({ voiceState: {} }), useSlashState: () => ({ chrome: {} }), useComposerLiveVoice: () => null, useQuestionReply: () => null,
-      composerActions: () => ({ stop: false, sendReady: false }), hasDraft: () => false };
+      composerActions: () => ({ stop: false, sendReady: false }), hasDraft: () => false,
+      readPlain: () => '', writePlain() {}, setSelectionOffsets() {} };
     new Function('require', 'module', 'exports', code)(id => id === 'react' ? react : stubs, module, module.exports);
-    // The textarea ref is the one that starts empty; the others hold the
-    // session id. Found by that, not by position, so a new ref cannot break it.
+    // The box ref is the first one that starts empty (the caret ref after it
+    // does too); the others hold the session id.
     module.exports.Composer({ sessionId: 'toy' }); refs.find((ref) => ref.current === null).current = node;
     for (const effect of effects) effect();
     const cap = Math.max(44, Math.min(150, viewport * .4 - extras - 17));
-    assert.ok(parseFloat(node.style.height) <= cap, `field ${node.style.height} exceeded ${cap}px`);
-    assert.equal(node.style.overflowY, 'auto');
+    assert.ok(parseFloat(node.style.maxHeight) <= cap, `field cap ${node.style.maxHeight} exceeded ${cap}px`);
+    assert.ok(parseFloat(node.style.maxHeight) >= Math.min(cap, 44), 'the cap is set, not left to the CSS default');
     window.visualViewport.height = 400;
     assert.equal(typeof listeners.get('resize'), 'function', 'keyboard opening must remeasure without another keystroke');
-    listeners.get('resize')(); assert.ok(parseFloat(node.style.height) <= Math.max(44, Math.min(150, 160 - extras - 17)));
+    listeners.get('resize')(); assert.ok(parseFloat(node.style.maxHeight) <= Math.max(44, Math.min(150, 160 - extras - 17)));
   } finally { for (const [key, descriptor] of prior) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } }
 });

@@ -242,7 +242,7 @@ async function main() {
     console.log('shot: 03-transcript.png');
 
     // 4. One send into the isolated session.
-    const field = page.locator('.composer-field textarea, textarea, [contenteditable="true"]').first();
+    const field = page.locator('.composer-field .composer-input, textarea, [contenteditable="true"]').first();
     await field.click();
     await field.fill('i4 isolated send probe');
     await page.keyboard.press('Enter');

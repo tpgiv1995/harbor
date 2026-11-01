@@ -17,7 +17,7 @@ test('MOBILE-OVERHAUL-4: composer sends the complete real payload from a button'
   const composer = source('composer/Composer.jsx');
   const sendHook = source('composer/use-send.js');
 
-  assert.match(composer, /<textarea/);
+  assert.match(composer, /contentEditable=\{disabled \? 'false' : 'plaintext-only'\}/);
   assert.match(composer, /type="button"/);
   assert.match(composer, /onKeyDown=\{.*slashOpen/s);
   assert.match(sendHook, /client\.call\('session:send',\s*\{/);

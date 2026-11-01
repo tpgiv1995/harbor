@@ -112,7 +112,7 @@ async function main() {
     }, session.id);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.locator('.app-shell[data-connection="online"]').waitFor({ timeout: 25000 });
-    await page.locator('textarea[aria-label="Message"]').waitFor({ timeout: 15000 });
+    await page.locator('[role="textbox"][aria-label="Message"]').waitFor({ timeout: 15000 });
 
     // 1) Voice to draft
     const audioPath = path.join(OUT, 'voice-sample.webm');
@@ -135,7 +135,7 @@ async function main() {
     const transcribe = await rpc(page, 'whisper:transcribe', { buffer: audioBytes, mimeType: 'audio/webm' });
     report.evidence.voiceToDraft = { audioPath, transcribe };
     if (transcribe?.ok && transcribe.text) {
-      await page.locator('textarea[aria-label="Message"]').fill(transcribe.text);
+      await page.locator('[role="textbox"][aria-label="Message"]').fill(transcribe.text);
       await page.screenshot({ path: path.join(OUT, '01-voice-to-draft.png') });
       report.shipped.push('voice-to-draft');
       fs.writeFileSync(path.join(OUT, '01-voice-transcript.txt'), transcribe.text);
@@ -148,7 +148,7 @@ async function main() {
     const commands = caps?.capabilities?.commands || [];
     const valid = commands[0]?.name || '/help';
     const invalid = '/not-a-real-harbor-command-xyz';
-    await page.locator('textarea[aria-label="Message"]').fill(`${invalid} hello ${valid}`);
+    await page.locator('[role="textbox"][aria-label="Message"]').fill(`${invalid} hello ${valid}`);
     await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(OUT, '02-slash-palette.png') });
     fs.writeFileSync(path.join(OUT, '02-slash-commands.json'), JSON.stringify({ valid, invalid, commandCount: commands.length, sample: commands.slice(0, 5) }, null, 2));
@@ -163,14 +163,14 @@ async function main() {
 
     // 3) Formatting
     await page.getByLabel('Show formatting options').click();
-    const message = page.locator('textarea[aria-label="Message"]');
+    const message = page.locator('[role="textbox"][aria-label="Message"]');
     await message.fill('format proof');
     await message.selectText();
     await page.getByLabel('Bold').click();
-    const markdown = await page.inputValue('[aria-label="Message"]');
+    const markdown = await message.textContent();
     await page.screenshot({ path: path.join(OUT, '03-formatting.png') });
     fs.writeFileSync(path.join(OUT, '03-format-markdown.txt'), markdown);
-    report.evidence.formatting = { markdown, approach: 'markdown-aware toolbar over plain textarea' };
+    report.evidence.formatting = { markdown, approach: 'markdown-aware toolbar over the plain-text editable box' };
     if (markdown.includes('**format proof**')) report.shipped.push('formatting');
     else report.notShipped.push('formatting (bold markdown missing)');
 

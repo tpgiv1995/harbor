@@ -87,7 +87,7 @@ const MEASURE = (keyboardTop) => {
     keyboardTop,
     shellH: Math.round(document.querySelector('.app-shell')?.getBoundingClientRect().height || 0),
     composer: box('.composer'),
-    textarea: box('.composer textarea'),
+    textarea: box('.composer .composer-input'),
     nav: box('.shell-bottom-anchor'),
     navDisplay: getComputedStyle(document.querySelector('.shell-bottom-anchor') || document.body).display,
     lastBlockBottom: last ? Math.round(last.bottom) : null,
@@ -150,11 +150,11 @@ async function main() {
   await page.screenshot({ path: path.join(OUT, 'kb-closed.png') });
 
   // Focus the composer, then signal the keyboard exactly as iOS does.
-  await page.locator('.composer textarea').click();
+  await page.locator('.composer .composer-input').click();
   await page.waitForTimeout(300);
   await page.evaluate(SHIM, VISUAL_H);
   await page.waitForTimeout(900);
-  await page.locator('.composer textarea').fill('typing with the keyboard up, can I see this line?');
+  await page.locator('.composer .composer-input').fill('typing with the keyboard up, can I see this line?');
   await page.waitForTimeout(600);
 
   report.open = await page.evaluate(MEASURE, VISUAL_H);

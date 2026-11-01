@@ -23,6 +23,9 @@ const EDITABLE = [
   'input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="reset"])',
   '[contenteditable=""]',
   '[contenteditable="true"]',
+  // The message box (composer/plain-text.cjs). Missing it here kept the tabs up
+  // while typing, the exact screen loss this hook exists to prevent.
+  '[contenteditable="plaintext-only"]',
 ].join(', ');
 // A visible area this much shorter than the tallest seen is a keyboard; the
 // iOS accessory bar alone, or a URL bar settling, is far less.

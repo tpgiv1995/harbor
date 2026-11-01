@@ -44,7 +44,7 @@ const RECORDER_SOURCE = String.raw`(function () {
       vvScale: Number(vv.scale.toFixed(3)),
       scrollY: Math.round(window.scrollY),
       composer: rect('.composer'),
-      textarea: rect('.composer textarea'),
+      textarea: rect('.composer .composer-input'),
       send: rect('.composer-send'),
       nav: rect('.shell-bottom-anchor'),
       shell: rect('.app-shell'),

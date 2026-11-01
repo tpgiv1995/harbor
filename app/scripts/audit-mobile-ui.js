@@ -73,7 +73,7 @@ const MEASURE = () => {
   if (out.keyboardOpen) {
     const keyboardTop = (window.visualViewport?.offsetTop || 0) + (window.visualViewport?.height || vh);
     const composer = document.querySelector('.composer')?.getBoundingClientRect() || null;
-    const textarea = document.querySelector('textarea[aria-label="Message"]')?.getBoundingClientRect() || null;
+    const textarea = document.querySelector('[role="textbox"][aria-label="Message"]')?.getBoundingClientRect() || null;
     const last = document.querySelector('.conv-body > :last-child')?.getBoundingClientRect() || null;
     const fixed = [...document.querySelectorAll('body *')].filter((el) => {
       const style = getComputedStyle(el);
@@ -221,7 +221,7 @@ async function main() {
   const auditBoth = async (name) => {
     await page.evaluate(() => window.__harborAuditKeyboard(false));
     await audit(name, 'closed');
-    const message = page.locator('textarea[aria-label="Message"]');
+    const message = page.locator('[role="textbox"][aria-label="Message"]');
     if (await message.count()) await message.focus();
     await page.evaluate(() => window.__harborAuditKeyboard(true));
     await page.locator('.app-shell[data-keyboard-open]').waitFor({ timeout: 3000 }).catch(() => {});

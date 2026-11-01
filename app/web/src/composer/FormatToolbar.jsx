@@ -1,5 +1,6 @@
 import React from 'react';
 import { applyFormat } from './format-markdown.cjs';
+import { getSelectionOffsets, setSelectionOffsets } from './plain-text.cjs';
 
 const BUTTONS = [
   { key: 'bold', label: 'B', title: 'Bold' },
@@ -13,17 +14,20 @@ const BUTTONS = [
   { key: 'codeblock', label: '{ }', title: 'Code block' },
 ];
 
-export function FormatToolbar({ textareaRef, text, onChange, disabled }) {
+// editorRef is the composer's plain-text editable box (plain-text.cjs), so the
+// selection is read and set as character offsets, the way a textarea's was.
+export function FormatToolbar({ editorRef, text, onChange, disabled }) {
   const run = (action) => {
-    const el = textareaRef.current;
+    const el = editorRef.current;
     if (!el || disabled) return;
-    const start = el.selectionStart ?? text.length;
-    const end = el.selectionEnd ?? text.length;
+    const selection = getSelectionOffsets(el);
+    const start = selection?.start ?? text.length;
+    const end = selection?.end ?? text.length;
     const next = applyFormat(text, start, end, action);
     onChange(next.text);
     requestAnimationFrame(() => {
       el.focus();
-      el.setSelectionRange(next.selectionStart, next.selectionEnd);
+      setSelectionOffsets(el, next.selectionStart, next.selectionEnd);
     });
   };
 

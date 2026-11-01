@@ -394,12 +394,12 @@ test.describe('MOBILE-OVERHAUL-6 real phone flow gate', () => {
     let electronApp;
     try {
       ({ electronApp, page: fx.page } = await launchPhone(fx));
-      const box = fx.page.locator('.composer-field textarea');
+      const box = fx.page.locator('.composer-field .composer-input');
       await box.waitFor();
       await box.fill('hello, can I read this');
 
       const seen = await fx.page.evaluate(() => {
-        const el = document.querySelector('.composer-field textarea');
+        const el = document.querySelector('.composer-field .composer-input');
         const parse = (value) => (value.match(/[\d.]+/g) || []).map(Number);
         // COMPOSITE the whole ancestor stack. A single lookup is not enough:
         // the field sits on rgba(255,255,255,0.1), a 10% white VEIL over a dark
@@ -470,7 +470,7 @@ test.describe('MOBILE-OVERHAUL-6 real phone flow gate', () => {
     let electronApp;
     try {
       ({ electronApp, page: fx.page } = await launchPhone(fx));
-      const box = fx.page.locator('.composer-field textarea');
+      const box = fx.page.locator('.composer-field .composer-input');
       await box.waitFor();
       const heightNow = () => box.evaluate((el) => el.getBoundingClientRect().height);
 
@@ -507,12 +507,12 @@ test.describe('MOBILE-OVERHAUL-6 real phone flow gate', () => {
     let electronApp;
     try {
       ({ electronApp, page: fx.page } = await launchPhone(fx));
-      await fx.page.locator('.composer-field textarea').waitFor();
+      await fx.page.locator('.composer-field .composer-input').waitFor();
       // Put text everywhere first: several defects only appear when a field is
       // non-empty, which is why a browse-only audit could not see them.
-      await fx.page.locator('.composer-field textarea').fill('readable?');
+      await fx.page.locator('.composer-field .composer-input').fill('readable?');
       await fx.page.screenshot({ path: screenshotPath('perception-plain-text.png') });
-      await fx.page.locator('.composer-field textarea').fill('/model sonnet and some plain words after it');
+      await fx.page.locator('.composer-field .composer-input').fill('/model sonnet and some plain words after it');
 
       const report = await fx.page.evaluate(() => {
         const parse = (v) => (v.match(/[\d.]+/g) || []).map(Number);
@@ -779,7 +779,7 @@ test.describe('MOBILE-OVERHAUL-6 real phone flow gate', () => {
       expect(geometry.docScrollable, JSON.stringify(geometry)).toBe(false);
       // And it has to be typeable, not merely present.
       await fx.page.getByLabel('Message', { exact: true }).fill('still reachable');
-      await expect(fx.page.getByLabel('Message', { exact: true })).toHaveValue('still reachable');
+      await expect(fx.page.getByLabel('Message', { exact: true })).toHaveText('still reachable');
     } finally {
       await closeUi(fx, electronApp);
     }
@@ -871,7 +871,7 @@ test.describe('MOBILE-STORM connection survival gate', () => {
       // The typed text is never thrown away: an undeliverable message the user
       // can still press Send on is the whole point of reporting rather than
       // swallowing.
-      await expect(field).toHaveValue('/clear');
+      await expect(field).toHaveText('/clear');
     } finally {
       await closeUi(fx, electronApp);
     }

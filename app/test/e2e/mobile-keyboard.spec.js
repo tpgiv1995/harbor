@@ -44,7 +44,7 @@ async function geometry(page) {
       visualBottom: window.visualViewport.offsetTop + window.visualViewport.height,
       shell: rect('.app-shell'),
       composer: rect('.composer'),
-      textarea: rect('textarea[aria-label="Message"]'),
+      textarea: rect('[role="textbox"][aria-label="Message"]'),
       send: rect('button[aria-label="Send"]'),
       lastBlock: lastBox ? { top: lastBox.top, bottom: lastBox.bottom } : null,
       fixedOverlaps: overlaps,

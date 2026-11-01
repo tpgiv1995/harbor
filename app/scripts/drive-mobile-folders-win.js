@@ -291,13 +291,13 @@ async function composerAttach(page) {
   await screenshot(page, '10-attached');
 
   await page.setViewportSize(KEYBOARD_UP);
-  await page.locator('.composer-field textarea').fill('A note about this screenshot that runs long enough to wrap onto a second line');
+  await page.locator('.composer-field .composer-input').fill('A note about this screenshot that runs long enough to wrap onto a second line');
   await plus.click();
   const tray = page.locator('.composer-tools');
   await expect(tray).toBeVisible();
   const trayBox = await tray.boundingBox();
   const attachBox = await page.locator('.composer-attach').boundingBox();
-  const field = await page.locator('.composer-field textarea').boundingBox();
+  const field = await page.locator('.composer-field .composer-input').boundingBox();
   assert.ok(attachBox.y >= 0 && attachBox.y + attachBox.height <= KEYBOARD_UP.height, `paperclip on screen with the keyboard up: ${JSON.stringify(attachBox)}`);
   assert.ok(field.height >= 44, `text box keeps a usable height: ${field.height}`);
   await expect(page.locator('.attach-chip')).toBeVisible();
@@ -307,7 +307,7 @@ async function composerAttach(page) {
   const stop = await page.getByRole('button', { name: 'Stop', exact: true }).boundingBox();
   const chip = await page.locator('.attach-chip').boundingBox();
   assert.ok(Math.abs(stop.y + stop.height / 2 - (chip.y + chip.height / 2)) < 2, 'Stop shares the attachment row');
-  const typing = await page.locator('.composer-field textarea').boundingBox();
+  const typing = await page.locator('.composer-field .composer-input').boundingBox();
   assert.ok(typing.height >= 80, `with the keyboard up the text box shows three lines: ${typing.height}`);
   await screenshot(page, '12-keyboard-up-closed');
   console.log(`PASS composer: tray closes after a pick, plus stays a plus; keyboard-up: paperclip on screen with the tray open (text box ${Math.round(field.height)}px), ${Math.round(typing.height)}px text box with it closed`);

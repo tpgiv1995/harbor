@@ -27,7 +27,17 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { chromium, expect } = require('@playwright/test');
+const { chromium, webkit, expect } = require('@playwright/test');
+
+// --engine=webkit drives Safari's engine instead of Chromium (2026-11-01: the
+// phone message box became a contenteditable, whose editing rules are the
+// engine's own, and the phone is Safari). Needs `npx playwright install webkit`.
+const ENGINE = (process.argv.find((arg) => arg.startsWith('--engine=')) || '--engine=chromium').slice(9);
+function launchBrowser(env) {
+  if (ENGINE === 'webkit') return webkit.launch({ headless: true, env });
+  if (ENGINE !== 'chromium') throw new Error(`unknown --engine=${ENGINE} (chromium or webkit)`);
+  return chromium.launch({ headless: true, executablePath: chromium.executablePath(), env });
+}
 const { realTmpDir } = require('../test/support/real-tmpdir.js');
 
 const APP_ROOT = path.resolve(__dirname, '..');
@@ -256,7 +266,8 @@ async function newPage(browser, fx, size, { clipboard = true, initScript = null 
   const context = await browser.newContext({
     viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce',
   });
-  if (clipboard) await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fx.baseUrl });
+  // WebKit has no clipboard permissions to grant (it allows a write inside a tap).
+  if (clipboard && ENGINE === 'chromium') await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: fx.baseUrl });
   if (initScript) await context.addInitScript(initScript);
   const page = await context.newPage();
   currentPage = page;
@@ -309,7 +320,7 @@ async function composerGeometry(page) {
     const q = (selector) => document.querySelector(selector);
     const card = q('.composer-card');
     const cardStyle = card ? getComputedStyle(card) : null;
-    const field = q('.composer-field textarea');
+    const field = q('.composer-field .composer-input');
     const fieldStyle = field ? getComputedStyle(field) : null;
     const stops = [...document.querySelectorAll('.composer button')].filter((b) => /^stop$/i.test((b.getAttribute('aria-label') || b.textContent || '').trim()));
     const send = q('.composer-send');
@@ -441,21 +452,21 @@ const STATES = {
         await openChat(page, 'Phone server restarts');
         const idle = await composerGeometry(page);
         await shot(page, `c1-idle-${size.name}`, { clip: { x: 0, y: size.height - 240, width: size.width, height: 240 } });
-        await tap(page, page.locator('.composer-field textarea'));
+        await tap(page, page.locator('.composer-field .composer-input'));
         await keyboardUp(page, size);
         const idleKeyboard = await composerGeometry(page);
         await shot(page, `k3-idle-keyboard-${size.name}`, { clip: { x: 0, y: 0, width: size.width, height: visibleWithKeyboard(size) } });
         await keyboardDown(page, size);
-        await page.locator('.composer-field textarea').blur();
+        await page.locator('.composer-field .composer-input').blur();
         await openChat(page, LONG_TITLE);
         await page.waitForTimeout(400);
         const working = await composerGeometry(page);
         await shot(page, `c2-working-empty-${size.name}`, { clip: { x: 0, y: size.height - 240, width: size.width, height: 240 } });
-        await page.locator('.composer-field textarea').fill(DRAFT);
+        await page.locator('.composer-field .composer-input').fill(DRAFT);
         await page.waitForTimeout(250);
         const draft = await composerGeometry(page);
         await shot(page, `c3-working-draft-${size.name}`, { clip: { x: 0, y: size.height - 260, width: size.width, height: 260 } });
-        await tap(page, page.locator('.composer-field textarea'));
+        await tap(page, page.locator('.composer-field .composer-input'));
         await keyboardUp(page, size);
         const draftKeyboard = await composerGeometry(page);
         await keyboardDown(page, size);
@@ -512,7 +523,7 @@ const STATES = {
       const { context, page, errors } = await newPage(browser, fx, size);
       try {
         await openChat(page, LONG_TITLE);
-        const box = page.locator('.composer-field textarea');
+        const box = page.locator('.composer-field .composer-input');
         const stopBtn = page.getByRole('button', { name: 'Stop', exact: true });
         // Empty box, keyboard down.
         await expect(stopBtn).toHaveCount(1);
@@ -528,7 +539,7 @@ const STATES = {
         before = fx.interrupts.length;
         await tap(page, stopBtn);
         await expect.poll(() => fx.interrupts.length, { timeout: 3000 }).toBe(before + 1);
-        await expect(box).toHaveValue(DRAFT);
+        await expect(box).toHaveText(DRAFT);
         // Keyboard up, draft in the box.
         await tap(page, box);
         await keyboardUp(page, size);
@@ -545,7 +556,7 @@ const STATES = {
         before = fx.interrupts.length;
         await tap(page, stopBtn);
         await expect.poll(() => fx.interrupts.length, { timeout: 3000 }).toBe(before + 1);
-        assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', `${size.name}: tapping Stop leaves focus in the box (no lost first tap)`);
+        assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('composer-input')), true, `${size.name}: tapping Stop leaves focus in the box (no lost first tap)`);
         assert.equal(await page.locator('.app-shell').getAttribute('data-typing'), 'true', `${size.name}: tapping Stop keeps the keyboard up`);
         // Keyboard up, empty box: Stop has not moved.
         await box.fill('');
@@ -558,7 +569,7 @@ const STATES = {
         before = fx.interrupts.length;
         await tap(page, stopBtn);
         await expect.poll(() => fx.interrupts.length, { timeout: 3000 }).toBe(before + 1);
-        assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', `${size.name}: focus stays in the box after Stop`);
+        assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('composer-input')), true, `${size.name}: focus stays in the box after Stop`);
         assert.deepEqual(errors, [], 'no browser runtime errors');
       } catch (error) { await failShot(page, error); throw error; } finally { await context.close(); }
     }
@@ -571,7 +582,7 @@ const STATES = {
     const { context, page, errors } = await newPage(browser, fx, size);
     try {
       await openChat(page, LONG_TITLE);
-      await page.locator('.composer-field textarea').fill(DRAFT);
+      await page.locator('.composer-field .composer-input').fill(DRAFT);
       const before = await composerGeometry(page);
       const sends = fx.sends.length;
       const interrupts = fx.interrupts.length;
@@ -582,7 +593,7 @@ const STATES = {
       await page.waitForTimeout(700);
       assert.equal(fx.sends.length, sends + 1, 'a double tap on Send sends once');
       assert.equal(fx.interrupts.length, interrupts, 'a double tap on Send does not stop the turn');
-      await expect(page.locator('.composer-field textarea')).toHaveValue('');
+      await expect(page.locator('.composer-field .composer-input')).toHaveText('');
       const after = await composerGeometry(page);
       sameBox(after.send, before.send, 'Send after sending');
       sameBox(after.stops[0], before.stops[0], 'Stop after sending');
@@ -617,7 +628,7 @@ const STATES = {
           assert.equal(g.stops.length, 0, `${size.name} idle with an attachment: no Stop`);
         }
         await shot(page, `a1-${kind}-attachment-${size.name}`, { clip: { x: 0, y: size.height - 270, width: size.width, height: 270 } });
-        await tap(page, page.locator('.composer-field textarea'));
+        await tap(page, page.locator('.composer-field .composer-input'));
         await keyboardUp(page, size);
         const typing = await composerGeometry(page);
         assert.ok(typing.bar.bottom <= typing.visible + 0.5, `${size.name} ${kind}: the toolbar is above the keyboard with an attachment`);
@@ -636,11 +647,11 @@ const STATES = {
         await openChat(page, LONG_TITLE);
         const g = await headerGeometry(page);
         // Typing: the same chat with the keyboard up.
-        await page.locator('.composer-field textarea').click();
+        await page.locator('.composer-field .composer-input').click();
         await keyboardUp(page, size);
         const typing = await headerGeometry(page);
         await keyboardDown(page, size);
-        await page.locator('.composer-field textarea').blur();
+        await page.locator('.composer-field .composer-input').blur();
         await page.waitForTimeout(250);
         results.header[size.name] = {
           title: g.title, titleLines: g.titleLines, titleClamped: g.titleClamped, header: g.header, headerTop: g.headerTop,
@@ -868,11 +879,11 @@ const STATES = {
       const { context, page, errors } = await newPage(browser, fx, size);
       try {
         await openChat(page, 'Phone server restarts');
-        const box = page.locator('.composer-field textarea');
+        const box = page.locator('.composer-field .composer-input');
         await box.fill(draft);
         await page.waitForTimeout(250);
         const idle = await composerGeometry(page);
-        const clipped = () => page.evaluate(() => { const t = document.querySelector('.composer-field textarea'); return { scroll: t.scrollHeight, client: t.clientHeight, width: t.offsetWidth, overflowY: getComputedStyle(t).overflowY }; });
+        const clipped = () => page.evaluate(() => { const t = document.querySelector('.composer-field .composer-input'); return { scroll: t.scrollHeight, client: t.clientHeight, width: t.offsetWidth, overflowY: getComputedStyle(t).overflowY }; });
         const before = await clipped();
         assert.ok(before.scroll <= before.client + 1, `${size.name} idle: the whole draft shows (${before.scroll} in ${before.client})`);
         assert.ok(idle.textarea.height > 80, `${size.name}: it really is several lines (${idle.textarea.height}px)`);
@@ -885,7 +896,10 @@ const STATES = {
         assert.ok(during.scroll <= during.client + 1, `${size.name} a turn starts: the last line does not clip (${during.scroll} in ${during.client})`);
         assert.equal(during.width, before.width, `${size.name}: the box did not change width when the turn started`);
         assert.ok(Math.abs(working.textarea.height - idle.textarea.height) <= 1, `${size.name}: the box kept its height (${idle.textarea.height} -> ${working.textarea.height})`);
-        assert.equal(await box.inputValue(), draft, `${size.name}: the draft is untouched`);
+        // The app's own reading of the box (the saved draft, what Send would send), not
+        // innerText: WebKit's innerText adds a newline after a final block line.
+        const saved = await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('harbor-draft:')).map((k) => localStorage.getItem(k)));
+        assert.ok(saved.includes(draft), `${size.name}: the draft is untouched (${JSON.stringify(saved)})`);
         await shot(page, `d2-draft-turn-starts-${size.name}`, { clip: { x: 0, y: size.height - 300, width: size.width, height: 300 } });
         // With the keyboard up the budget is tighter: still no clipped last line.
         await tap(page, box);
@@ -961,7 +975,7 @@ const STATES = {
       const { context, page, errors } = await newPage(browser, fx, size);
       try {
         await openChat(page, 'Phone server restarts');
-        const box = page.locator('.composer-field textarea');
+        const box = page.locator('.composer-field .composer-input');
         await tap(page, box);
         await box.fill('/mod');
         await expect(page.locator('.slash-palette')).toBeVisible();
@@ -1092,7 +1106,7 @@ async function main() {
   try {
     fx = await makeFixture(root);
     console.log(`isolated server: ${fx.baseUrl}; bundle ${DIST}; evidence ${EVIDENCE}${MEASURE ? '; MEASURE only' : ''}`);
-    browser = await chromium.launch({ headless: true, executablePath: chromium.executablePath(), env: browserEnv });
+    browser = await launchBrowser(browserEnv);
     const names = Object.keys(STATES).filter((name) => (!ONLY.length || ONLY.includes(name)) && (!MEASURE || /Widths$/.test(name)));
     for (const name of names) {
       try {
