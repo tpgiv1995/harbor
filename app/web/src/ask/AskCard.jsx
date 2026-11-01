@@ -183,6 +183,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
         </div>
         <div className={`ask-row text${busy ? ' busy' : ''}`}>
           <input
+            autoComplete="off"
             className="ask-input"
             type="text"
             value={draft}
@@ -292,6 +293,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
                 <div className={`ask-row text${busy ? ' busy' : ''}`}>
                   <span className="ask-num" aria-hidden="true">{option.index}</span>
                   <input
+                    autoComplete="off"
                     className="ask-input"
                     type="text"
                     value={draft}
@@ -362,6 +364,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
             {notesFor === option.index ? (
               <div className={`ask-row text${busy ? ' busy' : ''}`}>
                 <input
+                  autoComplete="off"
                   className="ask-input"
                   type="text"
                   autoFocus

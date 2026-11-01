@@ -306,6 +306,7 @@ export function Composer({
         ) : null}
         <div className="composer-field">
           <textarea
+            autoComplete="off"
             ref={textareaRef}
             aria-label="Message"
             placeholder={questionReply ? "Reply to Claude's questions" : 'Message this session'}

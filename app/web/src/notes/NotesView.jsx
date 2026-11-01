@@ -121,13 +121,13 @@ function NoteEditor({ note, opener, onClosed, mutate }) {
 
       <div className="ne-page">
         {saveError || edits.error ? <p className="notes-status" role="alert">{edits.error || saveError}</p> : null}
-        <input ref={titleRef} className="ne-title" value={title} onChange={(event) => { setTitle(event.target.value); edits.queue({ title: event.target.value }); }} maxLength={300} placeholder="Title" aria-label="Title" />
-        <textarea ref={bodyRef} key={note.id} className="ne-body" defaultValue={edits.draft.body ?? note.body} onChange={(event) => edits.queue({ body: event.target.value })} maxLength={MAX_BODY} placeholder="Start writing..." aria-label="Note" />
+        <input autoComplete="off" ref={titleRef} className="ne-title" value={title} onChange={(event) => { setTitle(event.target.value); edits.queue({ title: event.target.value }); }} maxLength={300} placeholder="Title" aria-label="Title" />
+        <textarea autoComplete="off" ref={bodyRef} key={note.id} className="ne-body" defaultValue={edits.draft.body ?? note.body} onChange={(event) => edits.queue({ body: event.target.value })} maxLength={MAX_BODY} placeholder="Start writing..." aria-label="Note" />
       </div>
 
       <footer className="ne-tags">
         <span className="ne-tags-hash" aria-hidden="true">#</span>
-        <input value={tags} onChange={(event) => { setTags(event.target.value); edits.queue({ tags: tagsFromDraft(event.target.value) }); }} placeholder="Add tags, comma separated" aria-label="Tags" />
+        <input autoComplete="off" value={tags} onChange={(event) => { setTags(event.target.value); edits.queue({ tags: tagsFromDraft(event.target.value) }); }} placeholder="Add tags, comma separated" aria-label="Tags" />
       </footer>
 
       {menuOpen ? <button type="button" className="ne-scrim" tabIndex={-1} aria-hidden="true" onClick={() => setMenuOpen(false)} /> : null}
@@ -181,7 +181,7 @@ export function NotesView({ doc, error, notice, dismissNotice, mutate }) {
     <div className="notes-mobile" aria-label="Notes">
       <div className="notes-top">
         <h1 className="notes-h1">Notes</h1>
-        <label className="notes-search"><span aria-hidden="true">⌕</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search" aria-label="Search notes" /></label>
+        <label className="notes-search"><span aria-hidden="true">⌕</span><input autoComplete="off" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search" aria-label="Search notes" /></label>
       </div>
 
       {!notes.length ? (

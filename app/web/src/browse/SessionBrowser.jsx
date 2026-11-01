@@ -167,6 +167,7 @@ export function SessionBrowser({
             <path d="m10.2 10.2 3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
           <input
+            autoComplete="off"
             type="search"
             placeholder="Search sessions"
             value={query}

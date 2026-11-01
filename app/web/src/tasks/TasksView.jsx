@@ -166,6 +166,7 @@ export function TasksView({ client }) {
 
       <div className="tasks-mobile-search">
         <input
+          autoComplete="off"
           type="search"
           placeholder="Search"
           value={query}
@@ -177,6 +178,7 @@ export function TasksView({ client }) {
       {view !== 'completed' ? (
         <form className="tasks-mobile-add" onSubmit={addTask}>
           <input
+            autoComplete="off"
             value={addDraft}
             onChange={(e) => setAddDraft(e.target.value)}
             placeholder="Add a task"

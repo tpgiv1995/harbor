@@ -98,6 +98,7 @@ export function SessionSheet({
         <div className="session-browser-toolbar">
           <div className="sheet-search">
             <input
+              autoComplete="off"
               type="search"
               placeholder="Search sessions"
               value={query}
