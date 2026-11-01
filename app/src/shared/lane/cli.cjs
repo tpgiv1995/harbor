@@ -9,7 +9,7 @@ const COMMANDS = {
   status: [],
   release: ['lane', 'token', 'generation', 'final'],
   checkpoint: ['lane', 'token', 'generation', 'final'],
-  reopen: ['lane', 'token', 'generation', 'owner-pid'],
+  reopen: ['lane', 'token', 'generation', 'owner-pid', 'runtimes'],
   recover: ['repo', 'slot', 'token', 'generation'],
   quarantine: ['lane', 'token', 'generation', 'reason'],
   'env-begin': ['lane', 'token', 'generation'],

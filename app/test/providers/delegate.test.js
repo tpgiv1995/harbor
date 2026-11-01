@@ -370,8 +370,12 @@ test('a reused workspace-pool slot never ties a session to an old queue', () => 
   const slot = 'C:\\dev\\.orch\\pool\\harbor\\slot-01';
   const earlier = { workspace: 'C:\\dev\\Harbor', batches: [{ id: 'a', worktree: slot, lane: 'run1-a', lane_generation: '1' }] };
   const later = { workspace: 'C:\\dev\\Harbor', batches: [{ id: 'b', worktree: slot, lane: 'run2-b', lane_generation: '2' }] };
-  assert.equal(findQueueForWorkspace([earlier, later], slot, 'win32'), null);
-  assert.equal(findQueueForWorkspace([earlier, later], 'c:\\dev\\harbor', 'win32'), earlier, 'the queue is still found through its own workspace');
+  const holding = (lane) => ({ laneAt: () => lane });
+  assert.equal(findQueueForWorkspace([earlier, later], slot, 'win32', holding({ lane: 'run2-b', generation: 2 })), later, 'the lane the slot holds now names its queue');
+  assert.equal(findQueueForWorkspace([earlier, later], slot, 'win32', holding({ lane: 'run1-a', generation: 1 })), earlier);
+  assert.equal(findQueueForWorkspace([earlier, later], slot, 'win32', holding({ lane: null, generation: 3 })), null, 'a released slot names no queue');
+  assert.equal(findQueueForWorkspace([earlier, later], slot, 'win32', holding(undefined)), null, 'an unreadable pool names no queue');
+  assert.equal(findQueueForWorkspace([earlier, later], 'c:\\dev\\harbor', 'win32', holding(null)), earlier, 'the queue is still found through its own workspace');
 });
 
 test('real abandoned and live queues are classified without changing delegate batch statuses', async () => {

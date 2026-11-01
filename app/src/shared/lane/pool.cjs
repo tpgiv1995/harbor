@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { Store } = require('./store.cjs');
+const lookup = require('./lookup.cjs');
 const identities = require('./identity.cjs');
 const { fail, insist } = require('./errors.cjs');
 const ws = require('./workspace.cjs');
@@ -108,6 +109,8 @@ class Pool {
       insist(typeof options.path === 'string' && path.isAbsolute(options.path) && typeof options.poolRoot === 'string' && path.isAbsolute(options.poolRoot), 'INVALID_ARGUMENT', 'path and pool-root must be absolute paths');
       const canonical = fs.realpathSync.native(path.resolve(options.path));
       insist(fs.existsSync(options.poolRoot), 'VOLUME_MISSING', 'Configured pool root does not exist; registration never creates it');
+      // A root named `pool` lets launch guards recognise a slot by its shape when the registry snapshot is unreadable.
+      insist(path.basename(path.resolve(options.poolRoot)).toLowerCase() === 'pool', 'INVALID_ARGUMENT', 'The pool root must be a folder named pool');
       const poolRoot = fs.realpathSync.native(path.resolve(options.poolRoot));
       ws.noLinks(poolRoot);
       insist(ws.samePath(ws.git(canonical, ['rev-parse', '--show-toplevel']), canonical), 'INVALID_ARGUMENT', 'path must be the repository root');
@@ -256,10 +259,14 @@ class Pool {
   // the revision writes. The slot must still hold the sealed deliverable, clean and unmoved.
   reopen(options) {
     integer(options.ownerPid, 'owner-pid', 1, 2147483647);
+    const nextRuntimes = options.runtimes === undefined ? undefined : runtimes(options.runtimes);
     return this.transaction(state => this.lane(state, options.lane).repo, state => {
       const { lane, repo, slot } = this.guarded(state, options, ['awaiting-review']);
       insist(slot, 'INVALID_ARGUMENT', 'Only a lane that holds a slot can be reopened');
-      const head = this.checkCurrent(repo, lane, slot, false, false);
+      // Admission boundary: the full environment link scan runs here as on prepare, and new
+      // runtime inputs re-fingerprint the slot so a stale environment shows as stale.
+      if (nextRuntimes) lane.runtimes = nextRuntimes;
+      const head = this.checkCurrent(repo, lane, slot, false, true);
       insist(lane.finalSha === head && ws.sha(repo.canonical, `refs/lanes/${lane.id}/final`) === head, 'TIP_MOVED', 'The slot no longer holds the sealed deliverable');
       lane.owner = this.identities.identity(options.ownerPid);
       lane.generation = slot.generation + 1;
@@ -341,9 +348,7 @@ class Pool {
   }
   sessionKey(options) {
     insist(['claude', 'codex', 'cursor'].includes(options.provider) && typeof options.configHome === 'string' && path.isAbsolute(options.configHome) && options.session, 'INVALID_ARGUMENT', 'provider, absolute config-home and session are required');
-    const resolved = fs.existsSync(options.configHome) ? fs.realpathSync.native(options.configHome) : path.resolve(options.configHome);
-    const home = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-    return crypto.createHash('sha256').update(JSON.stringify([options.provider, home, options.session])).digest('hex');
+    return lookup.sessionKey(options);
   }
   bindSession(options) {
     return this.transaction(state => this.lane(state, options.lane).repo, state => {

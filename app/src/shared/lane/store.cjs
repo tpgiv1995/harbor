@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { defaultStateDir } = require('./lookup.cjs');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { identity, ownerState } = require('./identity.cjs');
@@ -31,7 +32,8 @@ function recordHash(record) {
   return crypto.createHash('sha256').update(JSON.stringify({ format: record.format, revision: record.revision, previous: record.previous, changes: record.changes })).digest('hex');
 }
 class Store {
-  constructor(dir = process.env.HARBOR_LANES_DIR || path.join(process.env.USERPROFILE || os.homedir(), '.harbor', 'lanes')) {
+  // The real profile, never a redirected USERPROFILE (Cursor workers run with a shadow home).
+  constructor(dir = defaultStateDir(process.env)) {
     insist(path.isAbsolute(dir), 'INVALID_ARGUMENT', 'HARBOR_LANES_DIR must be an absolute path');
     this.dir = path.resolve(dir);
     fs.mkdirSync(this.dir, { recursive: true });

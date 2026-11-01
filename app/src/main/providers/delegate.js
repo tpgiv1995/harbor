@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { deriveDefaults } = require('../config/defaults.js');
+const { currentLaneAt } = require('../../shared/lane/resume-guard.cjs');
 
 const DONE_STATUSES = new Set(['done', 'completed', 'success']);
 const RECENT_DONE_MS = 10 * 60 * 1000;
@@ -49,14 +50,30 @@ function sameWorkspace(left, right, platform = process.platform) {
   return platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-// A batch that ran in a workspace-pool lane (`batch.lane`, 2026-11-01) never matches by its
-// worktree path: pool slots are reused, so that folder later holds other lanes and other runs'
-// batches, and the first queue that ever used the slot would claim every later session there.
-// Such a queue is still found through its own workspace (docs/claude/lanes.md).
-function findQueueForWorkspace(queues, workspace, platform = process.platform) {
+// A batch that ran in a workspace-pool lane (`batch.lane`, 2026-11-01) matches its slot only while
+// the pool says that slot holds that lane. Slots are reused, so a bare path match would tie every
+// later session there to the first queue that ever used the slot. Lane ids are never reused, so
+// the id alone names the batch's lane (docs/claude/lanes.md).
+const LANE_TTL_MS = 5_000;
+const lanesAt = new Map();
+function cachedLaneAt(workspace) {
+  const key = String(workspace);
+  const hit = lanesAt.get(key);
+  if (hit && Date.now() - hit.at < LANE_TTL_MS) return hit.value;
+  const value = currentLaneAt(workspace);
+  lanesAt.set(key, { value, at: Date.now() });
+  return value;
+}
+
+function findQueueForWorkspace(queues, workspace, platform = process.platform, { laneAt = cachedLaneAt } = {}) {
+  const batchMatches = (batch) => {
+    if (!batch.worktree || !sameWorkspace(batch.worktree, workspace, platform)) return false;
+    if (!batch.lane) return true;
+    return laneAt(workspace)?.lane === batch.lane;
+  };
   return (queues || []).find((queue) => queue?.workspace && (
     sameWorkspace(queue.workspace, workspace, platform)
-    || (queue.batches || []).some((batch) => batch.worktree && !batch.lane && sameWorkspace(batch.worktree, workspace, platform))
+    || (queue.batches || []).some(batchMatches)
   )) || null;
 }
 

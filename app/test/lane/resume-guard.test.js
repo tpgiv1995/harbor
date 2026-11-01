@@ -2,7 +2,7 @@
 
 // Harbor never starts or resumes a session inside a workspace-pool slot (stage 4, 2026-11-01).
 const { test, assert, fs, path, spawnSync, fixture, commit, sha } = require('./support.cjs');
-const { poolSlotRefusal } = require('../../src/shared/lane/resume-guard.cjs');
+const { poolSlotRefusal, currentLaneAt } = require('../../src/shared/lane/resume-guard.cjs');
 
 const ai = path.resolve(__dirname, '../../../bin/ai');
 const SESSION = '11111111-2222-4333-8444-555555555555';
@@ -50,4 +50,31 @@ test('bin/ai refuses a launch in a slot and runs as before without a pool', t =>
   assert.equal(noPool.status, 0, noPool.stderr);
   assert.equal(sha(lane.path, 'HEAD'), f.base, 'the refused launch touched nothing');
   assert.equal(fs.existsSync(path.join(f.root, 'no-pool')), false);
+});
+
+test('a pool whose snapshot cannot be read refuses slot-shaped folders and nothing else', t => {
+  const f = fixture(t);
+  const lane = f.lease();
+  const env = { HARBOR_LANES_DIR: f.dir };
+  const registry = path.join(f.dir, 'registry.json');
+  fs.writeFileSync(registry, '{"repos": {"sample": ');
+  assert.match(poolSlotRefusal({ provider: 'claude', cwd: lane.path }, { env }), /looks like a workspace-pool slot, and the pool's registry snapshot cannot be read \(registry.json is not usable/);
+  assert.equal(poolSlotRefusal({ provider: 'claude', cwd: f.repo }, { env }), null);
+  fs.rmSync(registry);
+  assert.match(poolSlotRefusal({ provider: 'codex', cwd: lane.path, session: SESSION, configHome: f.root }, { env }), /registry.json is missing beside an existing journal/);
+  assert.equal(currentLaneAt(lane.path, { env }), undefined);
+});
+
+test('pool state follows the real profile, not a redirected USERPROFILE', () => {
+  const lookup = path.resolve(__dirname, '../../src/shared/lane/lookup.cjs');
+  const env = { ...process.env, USERPROFILE: 'C:\\tools\\cursor-orch-home', HOME: 'C:\\tools\\cursor-orch-home' };
+  delete env.HARBOR_LANES_DIR;
+  const r = spawnSync(process.execPath, ['-e', `console.log(require(${JSON.stringify(lookup)}).defaultStateDir())`], { env, encoding: 'utf8', windowsHide: true });
+  assert.equal(r.stdout.trim(), path.join(require('node:os').userInfo().homedir, '.harbor', 'lanes'));
+});
+
+test('the launch guard loads no mutable pool implementation', () => {
+  const guard = path.resolve(__dirname, '../../src/shared/lane/resume-guard.cjs');
+  const r = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(guard)}); console.log(Object.keys(require.cache).map((f) => require('path').basename(f)).join(','))`], { encoding: 'utf8', windowsHide: true });
+  assert.deepEqual(r.stdout.trim().split(',').sort(), ['lookup.cjs', 'resume-guard.cjs']);
 });

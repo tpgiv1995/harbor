@@ -82,3 +82,32 @@ test('the CLI reopens a sealed lane', t => {
   assert.equal(answer.result.state, 'running');
   assert.equal(answer.result.generation, review.generation + 1);
 });
+
+test('reopen re-fingerprints new runtimes, so a changed environment shows as stale', t => {
+  const f = fixture(t);
+  const lane = f.lease('first', { runtimes: { npm: 'ci' } });
+  const begin = f.pool.environment(lane, false);
+  f.pool.environment({ ...lane, fingerprint: begin.environment.expected }, true);
+  const final = commit(lane.path, 'first\n');
+  const review = f.pool.checkpoint({ ...lane, final });
+  const same = f.pool.reopen({ ...review, ownerPid: process.pid });
+  assert.equal(same.environment.stale, false, 'unchanged runtimes keep the installed environment');
+  const resealed = f.pool.checkpoint({ ...same, final });
+  const changed = f.pool.reopen({ ...resealed, ownerPid: process.pid, runtimes: { npm: 'install' } });
+  assert.equal(changed.environment.stale, true, 'a new package-manager option needs a reinstall');
+});
+
+test('reopen scans the environment: a dependency folder linked outside the slot is refused', t => {
+  const f = fixture(t);
+  const { lane, sealed: review } = sealed(f);
+  const outside = path.join(f.root, 'outside'); fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(lane.path, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+  throwsCode(() => f.pool.reopen({ ...review, ownerPid: process.pid }), 'ENVIRONMENT_UNSAFE');
+  assert.equal(f.pool.status().lanes.first.state, 'awaiting-review');
+});
+
+test('registration insists on a pool root named pool', t => {
+  const f = fixture(t, { register: false });
+  const odd = path.join(f.root, 'slots'); fs.mkdirSync(odd);
+  throwsCode(() => f.pool.init({ repo: 'sample', path: f.repo, poolRoot: odd, size: 1 }), 'INVALID_ARGUMENT');
+});
