@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { createBackgroundState, applyBackgroundLine, backgroundSnapshot, interestingLine } = require('./background-tasks.js');
-const { readSessionOwner } = require('./session-owner.js');
+const { readSessionOwner, buildBeaconIndex } = require('./session-owner.js');
 const RECENT_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 // THE FOLD RESUMES WHERE IT STOPPED, ACROSS RESTARTS (2026-10-09). Each file's
@@ -25,7 +25,9 @@ const FOLD_FORMAT = (() => {
 // These releases used the identical fold/scanner; only worker IPC changed.
 // Include LF/CRLF checkout combinations. Retire these aliases if fold rules change.
 const COMPATIBLE_FOLDS = new Set(['da8a47743f347015', 'b7d5c8c82fa4a0d8', '3bacf1adab371f28', 'b6ab383315834542',
-  '772090574c4aa232', '095de10019fae719', 'fa5791d81001f1bc', '98053b8e3ca2e151']);
+  '772090574c4aa232', '095de10019fae719', 'fa5791d81001f1bc', '98053b8e3ca2e151',
+  // 2026-11-01: the beacon lookup moved to one listing per pass; the fold is unchanged.
+  'edac2ffdfbfcb8c3', '898e84a73e350754', '140424c8e7ee8d85', '268dc9637646bb64']);
 
 function createScanner() {
   const files = new Map();
@@ -120,6 +122,12 @@ const scan = createScanner();
 let loadedCacheFile = null;
 async function scanRows(rows, liveIds = [], now = Date.now(), ownerOptions) {
   const live = new Set(liveIds); const parents = []; const providers = [];
+  // One listing of each home's beacon folder for the whole pass (session-owner.js).
+  let beaconIndex = null;
+  const ownerFor = async (id) => {
+    if (!beaconIndex) beaconIndex = await buildBeaconIndex(ownerOptions?.homes);
+    return readSessionOwner(id, { ...ownerOptions, beaconIndex });
+  };
   for (const row of rows) {
     if (!row.path) continue;
     if (row.provider === 'codex') {
@@ -128,7 +136,7 @@ async function scanRows(rows, liveIds = [], now = Date.now(), ownerOptions) {
       if (!live.has(row.id) && Date.parse(row.lastActive) < now - RECENT_WINDOW_MS) continue;
       try {
         const entry = await scan(row.path);
-        const ownerEvidence = { ...await readSessionOwner(row.id, ownerOptions), lastWriteMs: entry.mtimeMs };
+        const ownerEvidence = { ...await ownerFor(row.id), lastWriteMs: entry.mtimeMs };
         parents.push({ ...row, isLive: live.has(row.id), ownerEvidence, background: backgroundSnapshot(entry.state, now) });
       } catch { /* unreadable file is retried */ }
     }

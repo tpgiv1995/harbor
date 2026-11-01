@@ -408,12 +408,74 @@ function createHistoryIndex(options = {}) {
     return directories.some((directory) => file.startsWith(directory + path.sep));
   }
 
+  // RE-CHECK ONLY WHAT CHANGED (2026-11-01). discover() lists every project
+  // folder and stats every transcript: 4,064 folders and 8,638 transcripts on
+  // the Legion that night, every pass, in the desktop and again in the phone
+  // server, while agents wrote a line a second. The app's watcher already knows
+  // which file changed, so once it starts sending those names (noteChanged), a
+  // pass re-checks only the reported transcripts, re-lists only a reported
+  // project folder, and walks everything only on its first pass, after a
+  // nameless event, or while a folder would not list. Without hints (the CLI
+  // picker, tests, the oracle comparisons) every pass is discover(), unchanged.
+  let hinting = false;
+  let fullWalkNeeded = true;
+  let lastFound = null; // file -> [id, file, mt, sz], in discover order
+  const dirtyFiles = new Set();
+  const dirtyDirs = new Set();
+
+  function noteChanged(names) {
+    hinting = true;
+    for (const name of names || []) {
+      if (name == null) { fullWalkNeeded = true; continue; }
+      const parts = String(name).split(/[\\/]+/).filter(Boolean);
+      if (parts.length === 2 && UUID_RE.test(parts[1])) dirtyFiles.add(path.join(projectsDir, parts[0], parts[1]));
+      else if (parts.length === 1) dirtyDirs.add(path.join(projectsDir, parts[0]));
+      // Deeper paths (subagent transcripts, tool results) are never listed.
+    }
+  }
+
+  function entryFor(file) {
+    try {
+      const stat = fsImpl.statSync(file);
+      return stat.isFile() ? [path.basename(file).slice(0, -6), file, stat.mtimeMs / 1000, stat.size] : null;
+    } catch { return null; }
+  }
+
+  function discoverForPass() {
+    if (!hinting || fullWalkNeeded || !lastFound) {
+      const result = discover();
+      lastFound = new Map(result.found.map((entry) => [entry[1], entry]));
+      fullWalkNeeded = result.unlisted.length > 0;
+      dirtyFiles.clear();
+      dirtyDirs.clear();
+      return result;
+    }
+    for (const directoryPath of dirtyDirs) {
+      for (const file of [...lastFound.keys()]) if (file.startsWith(directoryPath + path.sep)) lastFound.delete(file);
+      let names = [];
+      try { if (fsImpl.statSync(directoryPath).isDirectory()) names = fsImpl.readdirSync(directoryPath); } catch { /* gone */ }
+      for (const name of names) {
+        if (!UUID_RE.test(name)) continue;
+        const entry = entryFor(path.join(directoryPath, name));
+        if (entry) lastFound.set(entry[1], entry);
+      }
+    }
+    for (const file of dirtyFiles) {
+      const entry = entryFor(file);
+      if (entry) lastFound.set(file, entry); else lastFound.delete(file);
+    }
+    dirtyFiles.clear();
+    dirtyDirs.clear();
+    return { found: [...lastFound.values()], unlisted: [] };
+  }
+
   function refreshIndex(rebuild = false, env = process.env) {
     if (!rebuild && lastResult && nowMs() - lastRefreshAt < refreshFloorMs) return lastResult;
     const cache = rebuild ? {} : loadCache();
     const fresh = {};
     const pending = [];
-    const { found, unlisted } = discover();
+    if (rebuild) fullWalkNeeded = true;
+    const { found, unlisted } = discoverForPass();
     for (const [id, file, mt, sz] of found) {
       const cached = cache[file];
       if (cached && cached.mt === mt && cached.sz === sz) fresh[file] = cached;
@@ -715,7 +777,7 @@ function createHistoryIndex(options = {}) {
     throw new Error('harbor-index: invalid command');
   }
 
-  return { run, refreshIndex, buildHomeMap, parseTranscript, projectLabel, migrateEntries };
+  return { run, refreshIndex, buildHomeMap, parseTranscript, projectLabel, migrateEntries, noteChanged };
 }
 
 function createHistoryIndexWorker(options = {}) {
@@ -787,6 +849,7 @@ function createHistoryIndexWorker(options = {}) {
     run: (argv, env = {}) => request('run', [argv, env]),
     buildHomeMap: () => request('buildHomeMap'),
     migrateEntries: (limit) => request('migrateEntries', [limit]),
+    noteChanged: (names) => request('noteChanged', [names]),
     close: async () => {
       if (closed) return;
       closed = true;
@@ -817,6 +880,8 @@ if (!isMainThread && workerData && workerData.historyIndexWorker) {
         result = index.buildHomeMap();
       } else if (message.method === 'migrateEntries') {
         result = index.migrateEntries(...message.args);
+      } else if (message.method === 'noteChanged') {
+        result = index.noteChanged(...message.args);
       } else {
         throw new Error(`unknown history index worker method: ${message.method}`);
       }

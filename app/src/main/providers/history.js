@@ -88,13 +88,26 @@ function createHistoryProvider(options = {}) {
   // debounceMs; a stream that never pauses refreshes at least every maxWaitMs.
   // The consumer's refresh stays single-flight (sidebar-bridge.js), so this
   // can never start overlapping scans.
-  const changed = () => {
+  // The names the watcher reported since the last refresh go to the index in
+  // one message just before the refresh it triggers, so a pass re-checks only
+  // those transcripts (history-index.js noteChanged, 2026-11-01). A nameless
+  // event or a watcher error sends null: the next pass walks everything.
+  const reported = new Set();
+  const sendReported = () => {
+    if (!reported.size || typeof historyIndex.noteChanged !== 'function') { reported.clear(); return; }
+    const names = [...reported];
+    reported.clear();
+    Promise.resolve(historyIndex.noteChanged(names)).catch(() => {});
+  };
+  const changed = (eventType, filename) => {
+    reported.add(filename ?? null);
     const at = now();
     if (firstChangeAt === null) firstChangeAt = at;
     clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
       firstChangeAt = null;
+      sendReported();
       provider.emit('history-changed');
     }, Math.max(0, Math.min(debounceMs, firstChangeAt + maxWaitMs - at)));
   };
@@ -116,7 +129,7 @@ function createHistoryProvider(options = {}) {
   try {
     watcher = watchFactory(projectsPath, changed);
     if (watcher && typeof watcher.on === 'function') {
-      watcher.on('error', (error) => provider.emit('watch-error', error));
+      watcher.on('error', (error) => { reported.add(null); provider.emit('watch-error', error); });
     }
   } catch (error) {
     watcher = null;

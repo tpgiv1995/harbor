@@ -210,6 +210,22 @@ function createProviderHistory(options = {}) {
   let durableMetadata = null;
   const watchers = [];
   let changedTimer = null;
+  const watchFactory = options.watchFactory || ((dir, opts, listener) => watchPath(dir, opts, listener));
+
+  // RE-CHECK ONLY WHAT CHANGED (2026-11-01). Every refresh used to walk every
+  // codex and cursor log (about 4,000 files across three codex homes) because
+  // ANY change anywhere (a claude transcript line included) refreshes the rail.
+  // With agents writing all night that was a full walk every 5 to 30 s in the
+  // desktop and again in the phone server, measured at about half a core each.
+  // The watchers already say which file changed, so a refresh after the first
+  // full walk re-checks only those files and rebuilds the rest from memory.
+  // A full walk still runs on the first listing, when a watcher reports no
+  // filename or a folder-level change it cannot map to one log, after a
+  // watcher error, and always when a configured root could not be watched.
+  const known = new Map(); // file path -> { provider, id, profileId, configHome, projectHint, order }
+  const dirty = new Set();
+  let fullScanNeeded = true;
+  let rootsUnwatched = 0;
 
   const scheduleChanged = () => {
     clearTimeout(changedTimer);
@@ -217,12 +233,48 @@ function createProviderHistory(options = {}) {
     changedTimer.unref?.();
   };
 
-  const watchDir = (dir, { recursive = false } = {}) => {
+  const watchDir = (dir, { recursive = false, onEvent = null } = {}) => {
     try {
-      const watcher = watchPath(dir, { recursive }, scheduleChanged);
-      watcher.on('error', () => { /* dir may vanish; rescan re-arms nothing */ });
+      const watcher = watchFactory(dir, { recursive }, (eventType, filename) => {
+        if (onEvent) onEvent(filename);
+        scheduleChanged();
+      });
+      watcher.on?.('error', () => { fullScanNeeded = true; });
       watchers.push(watcher);
-    } catch { /* provider not installed on this machine */ }
+      return true;
+    } catch { return false; /* provider not installed on this machine */ }
+  };
+
+  const relParts = (filename) => String(filename).split(/[\\/]+/).filter(Boolean);
+  const noteCodexEvent = (root) => (filename) => {
+    if (filename == null) { fullScanNeeded = true; return; }
+    const parts = relParts(filename);
+    if (parts.length === 4 && CODEX_ID_RE.test(parts[3])) { dirty.add(path.join(root, ...parts)); return; }
+    // A year, month or day folder appearing or going away: rare, walk again.
+    if (parts.length && parts.length < 4 && !/\.[^\\/]+$/.test(parts[parts.length - 1])) fullScanNeeded = true;
+  };
+  const noteCursorEvent = (filename) => {
+    if (filename == null) { fullScanNeeded = true; return; }
+    const parts = relParts(filename);
+    if (parts.length === 4 && parts[1] === 'agent-transcripts' && UUID_RE.test(parts[2]) && parts[3] === `${parts[2]}.jsonl`) {
+      dirty.add(path.join(cursorRoot, ...parts));
+      return;
+    }
+    // A project folder, or one chat's folder, appearing or going away. Worker
+    // logs and terminals inside a project (the churn) change nothing listed.
+    if (parts.length === 1 || (parts.length === 3 && parts[1] === 'agent-transcripts')) fullScanNeeded = true;
+  };
+
+  // Codex's native title index is re-read only when it changes.
+  const titlesByHome = new Map(); // home -> { size, mtimeMs, titles }
+  const titlesFor = async (home) => {
+    const stat = await fsp.stat(path.join(home, 'session_index.jsonl')).catch(() => null);
+    const hit = titlesByHome.get(home);
+    if (stat && hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.titles;
+    const titles = await readCodexTitles(home);
+    if (stat) titlesByHome.set(home, { size: stat.size, mtimeMs: stat.mtimeMs, titles });
+    else titlesByHome.delete(home);
+    return titles;
   };
 
   const loadMetadata = async () => {
@@ -308,7 +360,11 @@ function createProviderHistory(options = {}) {
     return row;
   };
 
-  const scanCodexRoot = async (rows, { root: codexRoot, profileId, configHome }) => {
+  const rootInfo = (item) => (typeof item === 'string' ? { root: item, profileId: null, configHome: null } : item);
+
+  // Walks one codex root into `into` (file -> entry) and `stats` (file -> stat).
+  const walkCodexRoot = async (into, stats, rank) => {
+    const { root: codexRoot, profileId = null, configHome = null } = rootInfo(codexRoots[rank]);
     const years = await fsp.readdir(codexRoot).catch(() => []);
     for (const year of years) {
       const months = await fsp.readdir(path.join(codexRoot, year)).catch(() => []);
@@ -323,26 +379,15 @@ function createProviderHistory(options = {}) {
             const file = path.join(dir, name);
             const stat = await fsp.stat(file).catch(() => null);
             if (!stat) continue;
-            rows.push(await rowFor(file, 'codex', { id, stat, profileId, configHome }));
+            into.set(file, { provider: 'codex', id, profileId, configHome, projectHint: null, rank });
+            stats.set(file, stat);
           }
         }
       }
     }
   };
 
-  const scanCodex = async (rows) => {
-    for (const root of codexRoots) await scanCodexRoot(rows, typeof root === 'string' ? { root } : root);
-  };
-
-  const scanCursor = async (rows, knownCwds) => {
-    // Reverse the cwd munge from cwds Harbor already knows (claude history,
-    // codex session_meta, live workspaces): a cursor transcript itself never
-    // records its cwd. An unmatched project dir still lists, labeled by its
-    // munged name, with cwd honestly null.
-    const unmunge = new Map();
-    for (const cwd of knownCwds || []) {
-      if (cwd) unmunge.set(mungeCwd(cwd), cwd);
-    }
+  const walkCursor = async (into, stats) => {
     const projects = await fsp.readdir(cursorRoot).catch(() => []);
     for (const project of projects) {
       const transcriptsDir = path.join(cursorRoot, project, 'agent-transcripts');
@@ -352,25 +397,106 @@ function createProviderHistory(options = {}) {
         const file = path.join(transcriptsDir, id, `${id}.jsonl`);
         const stat = await fsp.stat(file).catch(() => null);
         if (!stat) continue;
-        rows.push(await rowFor(file, 'cursor', {
-          id,
-          stat,
-          cwdHint: unmunge.get(project) || null,
-          projectHint: project,
-        }));
+        into.set(file, { provider: 'cursor', id, profileId: null, configHome: null, projectHint: project, rank: codexRoots.length });
+        stats.set(file, stat);
       }
     }
   };
 
+  // Which listed log a reported path is, or null (the same tests the walk applies).
+  const entryForPath = (file) => {
+    for (let rank = 0; rank < codexRoots.length; rank += 1) {
+      const { root, profileId = null, configHome = null } = rootInfo(codexRoots[rank]);
+      if (!file.startsWith(root + path.sep)) continue;
+      const parts = relParts(file.slice(root.length + 1));
+      const id = parts.length === 4 ? parts[3].match(CODEX_ID_RE)?.[1] : null;
+      return id ? { provider: 'codex', id, profileId, configHome, projectHint: null, rank } : null;
+    }
+    if (file.startsWith(cursorRoot + path.sep)) {
+      const parts = relParts(file.slice(cursorRoot.length + 1));
+      if (parts.length === 4 && parts[1] === 'agent-transcripts' && UUID_RE.test(parts[2]) && parts[3] === `${parts[2]}.jsonl`) {
+        return { provider: 'cursor', id: parts[2], profileId: null, configHome: null, projectHint: parts[0], rank: codexRoots.length };
+      }
+    }
+    return null;
+  };
+
+  // Brings `known` up to date and returns the stats taken this pass: everything
+  // on a full walk, only the reported files otherwise.
+  const refreshKnown = async () => {
+    const stats = new Map();
+    if (fullScanNeeded || rootsUnwatched || !watchers.length) {
+      fullScanNeeded = false;
+      dirty.clear();
+      const next = new Map();
+      for (let rank = 0; rank < codexRoots.length; rank += 1) await walkCodexRoot(next, stats, rank);
+      await walkCursor(next, stats);
+      for (const file of cache.keys()) if (!next.has(file)) cache.delete(file);
+      known.clear();
+      for (const [file, entry] of next) known.set(file, entry);
+      return stats;
+    }
+    const pending = [...dirty];
+    dirty.clear();
+    for (const file of pending) {
+      const entry = entryForPath(file);
+      if (!entry) continue;
+      const stat = await fsp.stat(file).catch(() => null);
+      if (!stat || !stat.isFile()) { known.delete(file); cache.delete(file); continue; }
+      known.set(file, entry);
+      stats.set(file, stat);
+    }
+    return stats;
+  };
+
+  // Codex roots in their configured order, then cursor; within each, the
+  // folder order NTFS hands back (case-insensitive). Both refresh paths list
+  // in this one order, so an incremental listing equals a full one.
+  const listingOrder = (a, b) => (a[1].rank - b[1].rank)
+    || (a[0].toLowerCase() < b[0].toLowerCase() ? -1 : a[0].toLowerCase() > b[0].toLowerCase() ? 1 : 0);
+
   const listSessions = async ({ knownCwds } = {}) => {
     const rows = [];
     await loadMetadata();
-    await scanCodex(rows);
-    await scanCursor(rows, knownCwds);
+    const fresh = await refreshKnown();
+    // Reverse the cwd munge from cwds Harbor already knows (claude history,
+    // codex session_meta, live workspaces): a cursor transcript itself never
+    // records its cwd. An unmatched project dir still lists, labeled by its
+    // munged name, with cwd honestly null.
+    const unmunge = new Map();
+    for (const cwd of knownCwds || []) {
+      if (cwd) unmunge.set(mungeCwd(cwd), cwd);
+    }
+    for (const [file, entry] of [...known].sort(listingOrder)) {
+      let stat = fresh.get(file);
+      const hit = cache.get(file);
+      if (!stat && hit) {
+        // Unchanged since it was last read: the cached row, with the keeper
+        // metadata applied exactly as a cache hit in rowFor applies it.
+        const metadata = durableMetadata?.[entry.id] || {};
+        rows.push({
+          ...hit.row,
+          cwd: hit.row.cwd || metadata.cwd || null,
+          profileId: hit.row.profileId || metadata.profileId || null,
+          configHome: hit.row.configHome || metadata.configHome || null,
+        });
+        continue;
+      }
+      if (!stat) stat = await fsp.stat(file).catch(() => null);
+      if (!stat) { known.delete(file); cache.delete(file); continue; }
+      rows.push(await rowFor(file, entry.provider, {
+        id: entry.id,
+        stat,
+        cwdHint: entry.provider === 'cursor' ? unmunge.get(entry.projectHint) || null : null,
+        projectHint: entry.projectHint,
+        profileId: entry.profileId,
+        configHome: entry.configHome,
+      }));
+    }
     const nativeByHome = new Map();
     for (const item of codexRoots) {
       const home = typeof item === 'string' ? path.dirname(item) : item.configHome || path.dirname(item.root);
-      nativeByHome.set(home, await readCodexTitles(home));
+      nativeByHome.set(home, await titlesFor(home));
     }
     for (const row of rows) {
       if (row.provider !== 'codex' || row.isInternalSession) continue;
@@ -405,13 +531,16 @@ function createProviderHistory(options = {}) {
     // the desktop's ~90, and the e2e harness daemon's reads went dark —
     // live-caught 2026-07-24 as spec 6 flaking). Cursor's non-transcript
     // churn (worker.log, terminals) is absorbed by the debounce.
+    rootsUnwatched = 0;
     for (const item of codexRoots) {
       const root = typeof item === 'string' ? item : item.root;
-      watchDir(root, { recursive: true });
-      // Renaming a chat changes this sibling index without touching its rollout.
+      if (!watchDir(root, { recursive: true, onEvent: noteCodexEvent(root) })) rootsUnwatched += 1;
+      // Renaming a chat changes this sibling index without touching its rollout
+      // (re-read through titlesFor's size and mtime check).
       watchDir(path.dirname(root));
     }
-    watchDir(cursorRoot, { recursive: true });
+    if (!watchDir(cursorRoot, { recursive: true, onEvent: noteCursorEvent })) rootsUnwatched += 1;
+    fullScanNeeded = true;
   };
 
   const migrateEntries = async (limit = 8) => {
