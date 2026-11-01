@@ -113,6 +113,34 @@ const REVERTED_FLAG = {
   verify: 'npm test -- --exclude daemon --exclude bin',
 };
 
+// USAGE and FOOTPRINT are provider-independent for the same reason (2026-10-31):
+// one CLI update can raise plan usage or disk use on every config home at once,
+// and a cost line rarely says "usage". Claude 2.1.316 dropped the server gate on
+// idle compaction and added a subagent effort switch, and the chip tagged
+// neither as a cost. A [bracketed] line is another product.
+const USAGE_FLAG = {
+  id: 'usage',
+  // Token counts only ("200K+ token", "reasoning-token", "token usage"): a
+  // sign-in token or a token endpoint is not spend. A subagent line counts when
+  // its model or effort moves, not when a header merely names the model. Env
+  // names sit inside longer ones (CLAUDE_CODE_SUBAGENT_MODEL_FORCE), where \b
+  // never matches, so they carry no word boundary.
+  re: /^(?!\[)(?=.*(?:\bidle compaction\b|\bsummariz(?:ed|es|ing|ation)\b|\bextra requests?\b|\bmodel calls?\b|\bAPI calls?\b|\b\d+[KkMm]?\+? tokens?\b|\b(?:reasoning|output|input|thinking)[- ]tokens?\b|\btoken (?:usage|accounting|counts?|budget|spend)\b|\bprompt cache\b|\bcache (?:TTL|lifetime|writes?|reads?)\b|SUBAGENT_(?:EFFORT|MODEL)|PROMPT_CACHE_TTL|IDLE_COMPACT|\beffort level subagents\b|\bsub-?agents?\b.*\b(?:inherit\w*|mov(?:e|es|ing) to|switch\w*)\b.*\bmodel\b|\bcontinu(?:e|es|ing) automatically\b|\bauto-?continue\b|\bretr(?:y|ies) on another model\b|\breviewers?\b|\bguardian\b))/i,
+  why: 'This line changes how many model calls, tokens, summaries or retries a session, subagent or worker spends, which is plan usage on every plan at once. Measure it before installing: read the gate in the new binary, read each config home\'s settings and flags, and replay a week of real transcripts to count how often it would have fired.',
+  verify: 'read the gate in the scratch binary; replay a week of transcripts (docs/claude/providers.md, newest CLI review)',
+};
+
+const FOOTPRINT_FLAG = {
+  id: 'footprint',
+  // A worktree line counts when worktrees are made, left or cleaned (Pat's
+  // October sprawl), not when a sandbox merely applies inside one; "on disk"
+  // alone is where a file sits, not how much of the disk it takes. A time limit
+  // on background commands is how long leftover processes may live.
+  re: /^(?!\[)(?=.*(?:\bdisk (?:space|usage|use)\b|\b(?:fill(?:s|ed|ing)?|free(?:s|d|ing)?) (?:up )?(?:the )?disk\b|\bstorage\b|\bgrow(?:s|ing)? without (?:limit|bound)\b|\.trash\b|\bfile ?system load\b|\bcleanupPeriodDays\b|\bmemory (?:use|usage|leaks?)\b|\bleak(?:s|ed|ing)?\b|\bleft running\b|\borphan(?:ed|s)?\b|\bzombies?\b|\b(?:does|did) not exit\b|\btime limits?\b.*\bbackground\b|\bbackground\b.*\btime limits?\b|\brun until they exit\b|\bworktrees?\b.*\b(?:left|leav\w*|creat\w*|remov\w*|clean\w*|prun\w*|cop(?:y|ies)|duplicat\w*)\b|\b(?:left|leav\w*|creat\w*|remov\w*|clean\w*|prun\w*|duplicat\w*)\b.*\bworktrees?\b|\bpackage size\b|\bstandalone executor\b|\bprun(?:e|es|ed|ing)\b|\blog files?\b))/i,
+  why: 'This line changes what the CLI writes to disk, keeps in memory or leaves running: caches, logs, worktrees, package copies, leftover processes. Harbor runs dozens of sessions and workers at once, so a small per-session cost multiplies. Measure the config home, the installed package and the process tree before and after one scratch launch, resume and worker run.',
+  verify: 'size the config home and package, and list the process tree, before and after a scratch launch, resume and worker run',
+};
+
 const IMPACT_FLAGS = {
   claude: [
     {
@@ -378,7 +406,7 @@ const IMPACT_FLAGS = {
       id: 'visibility',
       // "Enabled fullscreen transcripts by default" (0.157.0) matched nothing
       // here, and it moved the whole pane onto the alternate screen.
-      re: /visibilit|\bTUI\b|session picker|agent command center|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|\/keymap\b|\/presets\b|keyboard menu|\b(?:Kitty|Sixel)\b|inline image previews?/i,
+      re: /visibilit|\bTUI\b|session picker|agent command center|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|transcript selection|Markdown.*async questions|\/keymap\b|\/presets\b|keyboard menu|\b(?:Kitty|Sixel)\b|inline image previews?/i,
       why: 'The codex pane is read through the same pty screen model as claude; a TUI rewrite changes what Harbor sees. bin/ai pins tui.fullscreen_transcript=false so panes keep the inline transcript Harbor was proven against.',
       verify: 'npm test -- screen',
     },
@@ -410,8 +438,14 @@ const IMPACT_FLAGS = {
       verify: 'npm test -- ai-launch-argv',
     },
     {
+      id: 'runtime',
+      re: /standalone executor|release builds.*(?:Node\.js|Rust)/i,
+      why: 'Harbor launches the npm entry point under Node. Check package contents and disk growth, engine requirements, extra processes, hidden Windows launches and cleanup before installing.',
+      verify: 'npm test -- cli-updates',
+    },
+    {
       id: 'composer',
-      re: /\bsteer(?:s|ed|ing)?\b|follow-up.*responding|\binterrupt(?:s|ed|ing)?\b|\bpast(?:e|es|ed|ing)\b|Ctrl\+V|Shift\+Insert|\/presets\b|keyboard menu|queued prompts?/i,
+      re: /\bsteer(?:s|ed|ing)?\b|follow-up.*responding|selectable safer follow-up|transcript selection|local image attachments.*composer|\binterrupt(?:s|ed|ing)?\b|\bpast(?:e|es|ed|ing)\b|Ctrl\+V|Shift\+Insert|\/presets\b|keyboard menu|queued prompts?/i,
       why: 'Harbor sends Codex text through bracketed paste then Enter, including during a working turn. Input routing, paste and interrupt changes can alter what that send does.',
       verify: 'npm test -- session-send',
     },
@@ -439,7 +473,7 @@ const IMPACT_FLAGS = {
 };
 
 function flagsFor(provider) {
-  return [REVERTED_FLAG, ...(IMPACT_FLAGS[provider] || [])];
+  return [REVERTED_FLAG, USAGE_FLAG, FOOTPRINT_FLAG, ...(IMPACT_FLAGS[provider] || [])];
 }
 
 // Tag one note line with every flag it matches. Returns the flag descriptors
@@ -694,6 +728,20 @@ function createCliUpdateChecker(options = {}) {
   const writeFile = options.writeFile || fsp.writeFile;
   const mkdir = options.mkdir || fsp.mkdir;
   const readdir = options.readdir || fsp.readdir;
+  const rename = options.rename || fsp.rename;
+  const rmTree = options.rmTree || ((dir) => fsp.rm(dir, { recursive: true, force: true }));
+  const parkedInUse = options.parkedInUse || (async (dir) => {
+    const walk = async (d) => {
+      for (const e of await fsp.readdir(d, { withFileTypes: true })) {
+        const f = path.join(d, e.name);
+        if (e.isDirectory()) { if (await walk(f)) return true; continue; }
+        if (!/\.(exe|dll|node)$/i.test(e.name)) continue;
+        try { await (await fsp.open(f, 'r+')).close(); } catch (error) { if (error.code !== 'ENOENT') return true; }
+      }
+      return false;
+    };
+    return walk(dir);
+  });
   const execFile = options.execFile || require('node:util').promisify(require('node:child_process').execFile);
   const execPath = options.execPath || process.execPath;
   const isFile = options.isFile || ((file) => { try { return require('node:fs').statSync(file).isFile(); } catch { return false; } });
@@ -845,6 +893,48 @@ function createCliUpdateChecker(options = {}) {
     } catch {
       return null;
     }
+  };
+
+  // NPM PARKS A REPLACED PACKAGE IT CANNOT DELETE, ALWAYS UNDER THE SAME NAME
+  // (2026-10-31). On Windows a running pane holds files inside the old package,
+  // so npm renames it to @scope/.<name>-<8 characters> and never comes back for
+  // it (452 MB of an old Codex sat there for days). That name is derived, not
+  // random: the next install parks the current package under the SAME name,
+  // finds it taken by files still in use, and fails EBUSY (the 2026-10-31 Codex
+  // install failed twice that way until the old copy was renamed). So this runs
+  // BEFORE every npm install, and again after it. A parked copy no running
+  // program uses is deleted. One still in use (an .exe, .dll or .node inside
+  // cannot be opened for writing) is never touched inside, because its pane may
+  // still start programs from it; it is only renamed to a fresh parked name,
+  // which frees npm's name, and is named in the history entry until a later
+  // install finds it free. Only that exact shape in the package's own scope
+  // folder is touched.
+  const sweepParkedPackages = async (id) => {
+    const out = { removed: [], kept: [] };
+    const prefix = await npmPrefix();
+    const [scope, name] = String(PROVIDERS[id]?.pkg || '').split('/');
+    if (!prefix || !scope?.startsWith('@') || !name) return out;
+    const dir = path.join(prefix, 'node_modules', scope);
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const parked = new RegExp(`^\\.${escaped}-[A-Za-z0-9]{8}$`);
+    let names = [];
+    try { names = await readdir(dir); } catch { return out; }
+    for (const entry of names.filter((n) => parked.test(n))) {
+      const full = path.join(dir, entry);
+      try {
+        if (await parkedInUse(full)) {
+          const fresh = `.${name}-${require('node:crypto').randomBytes(6).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x').slice(0, 8)}`;
+          await rename(full, path.join(dir, fresh));
+          out.kept.push(fresh);
+          continue;
+        }
+        await rmTree(full);
+        out.removed.push(entry);
+      } catch {
+        out.kept.push(entry);
+      }
+    }
+    return out;
   };
 
   // Only an explicit install probes the executable. Package metadata can be
@@ -1364,6 +1454,8 @@ function createCliUpdateChecker(options = {}) {
       };
     }
 
+    // Free npm's parking name first (see sweepParkedPackages).
+    const parkedBefore = provider.source === 'npm' ? await sweepParkedPackages(id).catch(() => null) : null;
     const command = installCommand(id, target);
     let output = '';
     let ok = false;
@@ -1406,6 +1498,8 @@ function createCliUpdateChecker(options = {}) {
       ok = verified.ok;
       if (!ok) error = verified.error;
     }
+    const parkedAfter = ok && provider.source === 'npm' ? await sweepParkedPackages(id).catch(() => null) : null;
+    const parked = parkedBefore || parkedAfter ? { removed: [...(parkedBefore?.removed || []), ...(parkedAfter?.removed || [])], kept: parkedAfter ? parkedAfter.kept : (parkedBefore?.kept || []) } : null;
 
     // A successful entry names the build actually on disk. cursor-agent update
     // always takes Cursor's newest build, so a same-day rebuild published after
@@ -1414,6 +1508,7 @@ function createCliUpdateChecker(options = {}) {
     const entry = {
       from, to: ok && installed ? installed : target, at: now().toISOString(), ok, source: 'harbor', error: error || null, snapshot: snapshot?.id || null,
       ...(ok && installed && installed !== target ? { requested: target } : {}),
+      ...(parked && (parked.removed.length || parked.kept.length) ? { parked } : {}),
     };
     installedChanged(id, installed, 'harbor');
     const current = state.providers[id] || emptyProviderState(id);

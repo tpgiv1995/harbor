@@ -18,13 +18,18 @@ import { createPortal } from 'react-dom';
 
 const EFFORT_LABEL = { low: 'low', medium: 'med', high: 'high', xhigh: 'xhigh', max: 'max' };
 
+// Providers whose plan badge rides inside the model chip, so a codex window's
+// header reads like a claude one (2026-10-31). Any other provider that has a
+// home keeps the trailing pill.
+const PLAN_IN_CHIP = new Set(['claude', 'codex']);
+
 // Compact token count for the gauge's honest no-percent state ("151k").
 function formatContextTokens(tokens) {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
   return `${Math.max(1, Math.round(tokens / 1000))}k`;
 }
 
-function ContextGauge({ pct, tokens }) {
+function ContextGauge({ pct, tokens, provider = 'claude' }) {
   if (typeof pct === 'number') {
     const warn = pct >= 70;
     const color = warn ? 'var(--warn)' : 'var(--ac)';
@@ -38,13 +43,13 @@ function ContextGauge({ pct, tokens }) {
       </span>
     );
   }
-  // No percent is known yet (Claude has not reported its own math for this
+  // No percent is known yet (the CLI has not reported its window for this
   // session): show the real token count rather than a guessed fraction.
   if (typeof tokens === 'number' && tokens > 0) {
     return (
       <span
         className="gauge gauge-tokens"
-        title={`${tokens.toLocaleString()} tokens in context; window size not yet reported by Claude`}
+        title={`${tokens.toLocaleString()} tokens in context; window size not yet reported by ${providerIdentity(provider).label}`}
       >
         <span>{formatContextTokens(tokens)}</span>
       </span>
@@ -98,7 +103,7 @@ function ModelChip({ model, effort, provider = 'claude', home, profiles, onClick
       <img className="logomk" src={identity.logo} alt="" aria-hidden="true" />
       {label}
       {effort ? <span className="eff">{EFFORT_LABEL[effort] || effort}</span> : null}
-      {provider === 'claude' && home ? (
+      {PLAN_IN_CHIP.has(provider) && home ? (
         <ProfileBadge profileId={home} profiles={profiles} className="model-acct" />
       ) : null}
     </button>
@@ -140,9 +145,16 @@ const { parseTokenCount, liveMeterLabel } = turnMetaHelpers;
 // ticks locally from the task's prompt, and tokens are the larger of the last
 // count the CLI showed and the transcript's running total for the task
 // (turn-meta.cjs liveMeterLabel). Polled only while the window is working.
+//
+// A Codex window (2026-10-31) gets the same chip with nothing to read off the
+// pane: Codex records the task's output tokens in its rollout (turnMeta), and
+// the elapsed time ticks locally from the prompt, so the loop only skips the
+// pane poll. It needs no pane at all, since the transcript carries both halves.
 function useWorkMeter(session, pane, working, prompt) {
   const paneId = pane?.paneId || null;
-  const active = Boolean(working && paneId && (session.provider || 'claude') === 'claude');
+  const provider = session.provider || 'claude';
+  const polls = Boolean(paneId && provider === 'claude');
+  const active = Boolean(working && (polls || provider === 'codex'));
   const promptKey = prompt?.key || null;
   const [cli, setCli] = useState(null);
   const [now, setNow] = useState(() => Date.now());
@@ -152,7 +164,7 @@ function useWorkMeter(session, pane, working, prompt) {
     let alive = true;
     let timer = null;
     const tick = async () => {
-      const next = await window.harbor?.session?.workMeter?.({ pane, sessionId: session.id }).catch(() => null);
+      const next = polls ? await window.harbor?.session?.workMeter?.({ pane, sessionId: session.id }).catch(() => null) : null;
       if (!alive) return;
       // Keep the last count through the stretches the CLI hides its line.
       if (next) setCli((prev) => ({ elapsed: next.elapsed || prev?.elapsed || null, tokens: parseTokenCount(next.tokens) ?? prev?.tokens ?? null, verb: next.verb, thinking: next.thinking }));
@@ -393,12 +405,12 @@ export const SessionTile = memo(forwardRef(function SessionTile({
             profiles={profiles}
             onClick={readOnly ? () => {} : onOpenConfig}
           />
-          <ContextGauge pct={header?.contextPct} tokens={header?.contextTokens} />
+          <ContextGauge pct={header?.contextPct} tokens={header?.contextTokens} provider={session.provider || 'claude'} />
           <CacheChip touchedMs={header?.cacheTouchedMs} ttlMs={header?.cacheTtlMs} />
           {/* Account shown once: the ModelChip already carries a `.model-acct`
-              badge for a claude session, so the standalone `.apill` shows ONLY for
-              a non-claude provider whose chip carries none. */}
-          {session.home && session.provider !== 'claude' ? (
+              badge for a claude or codex session, so the standalone `.apill`
+              shows ONLY for a provider whose chip carries none. */}
+          {session.home && !PLAN_IN_CHIP.has(session.provider || 'claude') ? (
             <ProfileBadge profileId={session.home} profiles={profiles} className="apill" />
           ) : null}
         </div>

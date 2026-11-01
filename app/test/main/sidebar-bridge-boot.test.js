@@ -60,8 +60,16 @@ function sessionIds(model) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Polls instead of one fixed sleep, and every bridge is closed in t.after (2026-10-31): a fixed 200 ms
+// missed the retry on a loaded machine, and the failed assertion then skipped bridge.close(), whose retry
+// timer kept the test process alive, so the whole publish gate waited forever on this file.
+async function until(check, ms = 3000) {
+  const deadline = Date.now() + ms;
+  while (!check() && Date.now() < deadline) await sleep(20);
+  return check();
+}
 
-test('a history failure at boot degrades to live rows and the daemon still connects', async () => {
+test('a history failure at boot degrades to live rows and the daemon still connects', async (t) => {
   const history = fakeHistory({ failFirst: 1 });
   const bridge = createSidebarBridge({
     history,
@@ -70,6 +78,7 @@ test('a history failure at boot degrades to live rows and the daemon still conne
     createControlClient: () => fakeClient(),
     historyRetryMs: [10_000],
   });
+  t.after(() => bridge.close());
   const errors = [];
   const updates = [];
   bridge.emitter.on('error', (error) => errors.push(error));
@@ -80,10 +89,9 @@ test('a history failure at boot degrades to live rows and the daemon still conne
   assert.match(errors[0].message, /EPERM/);
   assert.deepEqual(sessionIds(bridge.getState().model), ['live-1'], 'the daemon connected: live rows are there without history');
   assert.ok(updates.length >= 1, 'the renderer was told what there is');
-  bridge.close();
 });
 
-test('after a failed refresh the bridge retries on its own clock and recovers the rows', async () => {
+test('after a failed refresh the bridge retries on its own clock and recovers the rows', async (t) => {
   const history = fakeHistory({ failFirst: 1 });
   const bridge = createSidebarBridge({
     history,
@@ -92,18 +100,18 @@ test('after a failed refresh the bridge retries on its own clock and recovers th
     createControlClient: () => fakeClient(),
     historyRetryMs: [40],
   });
+  t.after(() => bridge.close());
   bridge.emitter.on('error', () => {});
   await bridge.start();
   assert.deepEqual(sessionIds(bridge.getState().model), ['live-1']);
   // No history-changed event is emitted here on purpose: the retry must come
   // from the bridge itself.
-  await sleep(200);
+  await until(() => sessionIds(bridge.getState().model).includes('hist-1'));
   assert.ok(history.calls() >= 2, 'the bridge retried the refresh without an fs event');
   assert.deepEqual(sessionIds(bridge.getState().model), ['hist-1', 'live-1'], 'the history rows arrived on the retry');
-  bridge.close();
 });
 
-test('a runtime refresh failure keeps the rows it already had', async () => {
+test('a runtime refresh failure keeps the rows it already had', async (t) => {
   const history = fakeHistory({ failFirst: 0 });
   const bridge = createSidebarBridge({
     history,
@@ -112,6 +120,7 @@ test('a runtime refresh failure keeps the rows it already had', async () => {
     createControlClient: () => fakeClient(),
     historyRetryMs: [10_000],
   });
+  t.after(() => bridge.close());
   const errors = [];
   bridge.emitter.on('error', (error) => errors.push(error));
   await bridge.start();
@@ -121,5 +130,4 @@ test('a runtime refresh failure keeps the rows it already had', async () => {
   await sleep(400);
   assert.equal(errors.length, 1);
   assert.deepEqual(sessionIds(bridge.getState().model), ['hist-1', 'live-1'], 'a failed refresh never publishes fewer rows');
-  bridge.close();
 });

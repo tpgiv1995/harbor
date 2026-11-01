@@ -8,6 +8,10 @@
   which killed the work it was waiting on. A launch with no completion notice
   now keeps the session up for as long as the work runs, up to 9 hours
   (`HARBOR_SESSIOND_DORMANT_BACKGROUND_MAX_MS`).
+- The phone app lists Codex sessions from every Codex home, not only the default
+  one. A session in a second or third Codex home used to appear on the phone as a
+  nameless "Live session" while it ran and not at all once it stopped, with no
+  conversation to open. The phone server needs a restart to pick this up.
 
 ## 0.1.0 (2026-10-12)
 

@@ -12,11 +12,11 @@ export function formatContextTokens(tokens) {
 
 // A percentage only from Claude's own math; tokens alone otherwise; nothing
 // when neither is known (the 2026-07-21 rule: Harbor never invents a denominator).
-export function contextFact(header) {
+export function contextFact(header, providerLabel = 'Claude') {
   const pct = header?.contextPct;
   if (typeof pct === 'number') return { kind: 'pct', pct, label: `${pct}%`, warn: pct >= 70, title: `${pct}% of the context window used` };
   const tokens = header?.contextTokens;
-  if (typeof tokens === 'number' && tokens > 0) return { kind: 'tokens', label: formatContextTokens(tokens), title: `${tokens.toLocaleString()} tokens in context; Claude has not reported the window size yet` };
+  if (typeof tokens === 'number' && tokens > 0) return { kind: 'tokens', label: formatContextTokens(tokens), title: `${tokens.toLocaleString()} tokens in context; ${providerLabel} has not reported the window size yet` };
   return null;
 }
 

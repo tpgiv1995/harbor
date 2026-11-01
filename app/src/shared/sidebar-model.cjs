@@ -304,7 +304,10 @@ function mergeSidebarModel({ historySessions = [], livePanes = [], workspaces = 
       delegationSummary: row.delegationSummary || null,
       lastActive: row.lastActive,
       lastActiveMs,
-      home: row.home ?? homes[row.id] ?? null,
+      // A codex or cursor row has no home from the claude index. The plan its
+      // transcript was found under (provider-history's profileId) is its home,
+      // so a row with none cannot fall through to the default claude plan's badge.
+      home: row.home ?? (row.provider && row.provider !== 'claude' ? row.profileId : null) ?? homes[row.id] ?? null,
       provider: row.provider || 'claude',
       model: row.model || live?.model || null,
       isLive: Boolean(live),

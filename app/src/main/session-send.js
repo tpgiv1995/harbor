@@ -316,17 +316,59 @@ const CODEX_LIST_ROW_RE = /^›\s*\d+\.\s/u;
 const CODEX_FOOTER_RE = /^\s+\S.*?\s·\s(?:~|[A-Za-z]:|\/)/u;
 const CODEX_PASTE_RE = /^\[PastedContent(\d+)chars\](?:#\d+)?$/;
 const CODEX_LARGE_PASTE_CHARS = 1000;
+// WHILE A TURN RUNS, OR ONCE THE BOX HOLDS TEXT, THE LINE UNDER THE BOX IS KEY
+// HINTS, NOT THE STATUS LINE (2026-10-31, a send into a working Astra pane):
+// "tab to queue message" with "21% context left" at the right edge. Read as part
+// of the box, it made every send into a busy Codex look unshown. The hint words
+// are the binary's own spans (" to queue message", " for shortcuts", " to edit
+// previous message", " for agents"), each after one or two key names.
+const CODEX_HINT_FOOTER_RE = /^\s+(?:\S+\s+){0,2}(?:to queue message|to queue|for shortcuts|to edit previous message|for agents)\b|^\s+\S.*\b\d{1,3}% context left\s*$/u;
+// An empty box draws one of these dim hints (Codex 0.165.0 and 0.166.0 binaries);
+// a plain-text screen read cannot see dimness, so they are matched by text.
+const CODEX_EMPTY_HINTS = new Set(['AskCodextodoanything', 'Askafollow-upquestion']);
 function codexPromptBox(screen) {
   const lines = String(screen || '').split('\n');
   while (lines.length && !lines.at(-1).trim()) lines.pop();
-  const footer = lines.length > 1 && CODEX_FOOTER_RE.test(lines.at(-1));
+  const footer = lines.length > 1 && (CODEX_FOOTER_RE.test(lines.at(-1)) || CODEX_HINT_FOOTER_RE.test(lines.at(-1)));
+  // Transcript selection/search displays earlier user rows with the same prompt
+  // marker. Its navigation footer (or overlay heading) owns input, not a composer.
+  const navigation = lines.at(-1)?.trim() || '';
+  if (/(?:enter\/q(?:\/esc)? close|enter copy(?: & latest)?\s*·\s*(?:esc clear\s*·\s*)?q close)$/u.test(navigation)
+    || (!footer && (
+      lines.some(line => /^\s*\/\s+T R A N S C R I P T\s+\//u.test(line))
+      || (/\besc(?: cancel)?(?: · query limited to 4 KiB)?$/u.test(navigation)
+        && /^\s*Find: /u.test(lines.at(-2) || ''))
+    ))) return null;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     if (!CODEX_PROMPT_RE.test(lines[i])) continue;
     if (CODEX_LIST_ROW_RE.test(lines[i]) && !footer) return null;
     const end = footer && lines.length - 1 > i ? lines.length - 1 : lines.length;
-    return { inside: squashSpace(lines.slice(i, end).join('\n').replace(CODEX_PROMPT_RE, '')) };
+    // `head`: the prompt row and the rows wrapped under it, up to the first
+    // blank row, which is where the box ends whatever footer Codex draws.
+    let headEnd = i + 1;
+    while (headEnd < end && lines[headEnd].trim()) headEnd += 1;
+    return {
+      inside: squashSpace(lines.slice(i, end).join('\n').replace(CODEX_PROMPT_RE, '')),
+      head: squashSpace(lines.slice(i, headEnd).join('\n').replace(CODEX_PROMPT_RE, '')),
+    };
   }
   return null;
+}
+// What the box holds that is not its own empty hint: '' for an empty box, null
+// when no box is drawn. Read from the box's own rows (head), so a footer this
+// code has never seen cannot make an empty box look full.
+function codexBoxDraft(screen) {
+  const box = codexPromptBox(screen);
+  if (!box) return null;
+  return CODEX_EMPTY_HINTS.has(box.head) ? '' : box.head;
+}
+// The draft in words a person recognises: pasted blocks by size, text by its start.
+function describeCodexDraft(draft) {
+  const pastes = [...String(draft).matchAll(/\[PastedContent(\d+)chars\]/g)].map((m) => Number(m[1]));
+  if (pastes.length && !String(draft).replace(/\[PastedContent\d+chars\](?:#\d+)?/g, '').trim()) {
+    return pastes.length === 1 ? `a pasted block of ${pastes[0]} characters` : `${pastes.length} pasted blocks (${pastes.join(', ')} characters)`;
+  }
+  return 'other text';
 }
 // 'noprompt' (no box: a dialog, a list, a TUI still starting), 'exact' (the box
 // holds this message and nothing else), 'holds' (the box ends with it), or
@@ -1223,6 +1265,17 @@ function createSessionSend(deps) {
     error.code = 'CODEX_NO_PROMPT';
     return error;
   };
+  // A BOX THAT ALREADY HOLDS TEXT IS NEVER TYPED INTO (2026-10-31). Another
+  // session's typer left a 1,489-character paste unsent in Astra's box; Harbor
+  // typed Pat's message after it, refused the Enter (correctly: it would have
+  // sent both), and each retry typed the message again, until the box held the
+  // stranger's paste and four copies. A retry whose own earlier attempt is the
+  // whole box still presses Enter for it (see 'exact' below).
+  const codexBoxBusyError = (draft) => {
+    const error = new Error(`Codex's box already holds ${describeCodexDraft(draft)} that is not this message, so Harbor typed and sent nothing. Your text is kept. Send or clear what is in the box from the >_ terminal first`);
+    error.code = 'CODEX_BOX_BUSY';
+    return error;
+  };
   const codexNeverHeldError = () => {
     const error = new Error('Codex\'s box never showed your text, so Harbor did not press Enter and nothing was sent. Your text is kept. The text may still appear in the box, so check the >_ terminal before sending again');
     error.code = 'PROMPT_NEVER_HELD';
@@ -1349,16 +1402,23 @@ function createSessionSend(deps) {
         const settled = await waitForProviderReady(paneId, { timeoutMs: 15_000, blankTimeoutMs: 45_000 });
         if (!settled) debug('deliver: fresh', provider, 'pane never settled; sending anyway');
       }
-      // A Codex message (not a slash command: its popup draws over the box) is
-      // typed only into a drawn box and submitted only once the box shows it;
-      // see waitForCodexBox.
+      // Every Codex send starts at a drawn composer. Slash commands can open
+      // their own popup after typing, but must not type into a pre-existing
+      // chooser: its Enter could select a safety rewrite and start a new chat.
       const codexGated = provider === 'codex' && !isSlashCommand(text);
-      if (codexGated) {
+      if (provider === 'codex') {
         const ready = await waitForCodexBox(paneId, { text: '' }, (state) => state !== 'noprompt', CODEX_PROMPT_POLLS);
         if (ready.state === 'noprompt') {
           logSend({ paneId, phase: 'codex-no-prompt' });
           await captureSendScreen(paneId, 'codex-no-prompt', ready.screen);
           throw codexNoPromptError(ready.screen);
+        }
+        const draft = codexBoxDraft(ready.screen);
+        const ownEarlierTry = Boolean(text) && !images.length && codexBoxState(ready.screen, { text }) === 'exact';
+        if (draft && !ownEarlierTry) {
+          logSend({ paneId, phase: 'codex-box-busy' });
+          await captureSendScreen(paneId, 'codex-box-busy', ready.screen);
+          throw codexBoxBusyError(draft);
         }
       }
       debug('deliver: composer safe after', Date.now() - t0, 'ms');
@@ -2939,5 +2999,6 @@ module.exports = {
   providerTranscriptDirs,
   composerSendState,
   codexBoxState,
+  codexBoxDraft,
   isFleetView,
 };

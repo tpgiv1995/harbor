@@ -181,7 +181,10 @@
   overflow: hidden;
   white-space: nowrap;
 }
-.hdr-kicker .hdr-project { flex: 0 1 auto; min-width: 2.5em; }
+/* The project name is where you are; the status is a fact that can lose a few
+   characters. Squeezed (the pill's longer 'Reconnecting' at 375), the status gives
+   up four times as much as the name (2026-10-31 review: the name read 'HAR...'). */
+.hdr-kicker .hdr-project { flex: 0 0.25 auto; min-width: 2.5em; }
 .hdr-status {
   flex: 0 1 auto;
   min-width: 0;
@@ -237,7 +240,6 @@
    Lives on row one, so a drop costs no height at all. Its details open as a
    card OVER the content (absolutely positioned), never pushing it down. */
 .conn {
-  position: relative;
   flex: 0 0 auto;
 }
 
@@ -269,10 +271,13 @@
 .conn-pill.is-offline { color: var(--err); }
 .conn-pill.is-offline .conn-dot { background: var(--err); }
 
+/* Anchored to the header (position: relative on .header-top), not to the pill:
+   the pill now sits left of the session buttons, so a card hung off its own
+   right edge would run off the left of a 375px screen (2026-10-31). */
 .conn-pop {
   position: absolute;
   top: calc(100% + 4px);
-  right: -40px;
+  right: 4px;
   z-index: 40;
   width: min(300px, calc(var(--app-w, 100vw) - 24px));
   padding: var(--space-4);
@@ -355,10 +360,9 @@
   padding-bottom: 0;
 }
 
-.app-shell[data-typing="true"] .header-top > .hdr-session .hdr-title,
-.app-shell.is-disconnected .header-top > .hdr-session .hdr-title {
-  /* Typing: one line. Disconnected: the pill takes width from the title, and
-     a second title line would make a drop grow the header again. */
+.app-shell[data-typing="true"] .header-top > .hdr-session .hdr-title {
+  /* Typing: one line. (A dropped connection no longer needs this: its pill sits
+     on the project line with the buttons, not beside the title.) */
   -webkit-line-clamp: 1;
 }
 
@@ -412,3 +416,142 @@
   color: #1a1408;
   font-weight: 700;
 }
+
+/* ── Row one, 2026-10-31: the project line carries the controls, the title has
+   its own row ─────────────────────────────────────────────────────────────────
+   Pat asked for two more buttons in the header (a new session in this chat's
+   project, and a one-tap copy of the session id). Measured on the shipped header,
+   the strip below had 22, 37 and 77px free at 375, 390 and 430, against 88 and
+   more for two 44px targets, and beside the title they would take 88px of the
+   title's 227 to 282. So the layout is the desktop window header's, which Pat
+   chose on 2026-08-31 ("controls should be in the top right, same row as project
+   title"; the title "gets its OWN full-width row below, so it shows as much as it
+   can before clipping and never loses width to the buttons"):
+     line one  project icon, project and status, then new / id / settings (44px
+               targets, the settings button's own style, on a 36px line: they
+               overhang it by 4px a side, over padding and the title's top edge);
+     line two  the title, the live dot and the chevron, full width: 321px at 375
+               where it had 227.
+   ONE button is still the session switcher, spread under the controls; the
+   controls sit over it (z-index) and its project line stops short of them by
+   their measured width (--hdr-tools-w, set in AppShell). */
+.header-top {
+  position: relative;
+}
+
+.header-top.has-session {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 36px auto;
+  align-items: start;
+  gap: 0;
+}
+
+.header-top.has-session > .hdr-session {
+  grid-area: 1 / 1 / 3 / 3;
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
+  grid-template-rows: 36px auto;
+  column-gap: 10px;
+  row-gap: 0;
+  align-items: center;
+  min-height: 0;
+  padding: 0 6px 3px;
+}
+
+.header-top.has-session .hdr-id { display: contents; }
+
+.header-top.has-session .hdr-session .project-icon,
+.header-top.has-session .hdr-session .project-dot { grid-area: 1 / 1; }
+
+.header-top.has-session .hdr-kicker {
+  grid-area: 1 / 2 / 2 / 5;
+  margin-right: var(--hdr-tools-w, 132px);
+}
+
+.header-top.has-session .hdr-session.is-empty .hdr-kicker { grid-column: 1 / 5; }
+
+.header-top.has-session .hdr-title {
+  grid-area: 2 / 1 / 3 / 3;
+  align-self: start;
+}
+
+.header-top.has-session .hdr-state {
+  grid-area: 2 / 3;
+  align-self: start;
+  margin-top: 6px;
+}
+
+.header-top.has-session .hdr-chev {
+  grid-area: 2 / 4;
+  align-self: start;
+  margin-top: 1px;
+}
+
+.hdr-tools {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.header-top.has-session > .hdr-tools {
+  grid-area: 1 / 2;
+  align-self: center;
+  z-index: 2;
+}
+
+/* The new-session and copy-id buttons are the settings button's own style (a
+   .btn-ghost: 44px square, no chrome), so the three read as one set. */
+.hdr-act-id-text {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+
+.btn-ghost:disabled { opacity: 0.4; cursor: default; }
+.btn-ghost:disabled:active { background: transparent; }
+/* The screen-reader announcement for the id button: in the page, not on screen. */
+.hdr-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.hdr-act-id.is-copied { color: var(--live); }
+.hdr-act-id.is-failed { color: var(--err); }
+
+/* Typing: one line again, as before. The two session buttons step aside with the
+   strip (settings stays), and the line is icon, title, dot, chevron. */
+.app-shell[data-typing="true"] .hdr-act { display: none; }
+
+.app-shell[data-typing="true"] .header-top.has-session {
+  grid-template-rows: auto;
+}
+
+.app-shell[data-typing="true"] .header-top.has-session > .hdr-session {
+  grid-area: 1 / 1 / 2 / 3;
+  grid-template-rows: auto;
+  min-height: 44px;
+  padding: 0 calc(6px + var(--hdr-tools-w, 46px)) 0 6px;
+}
+
+.app-shell[data-typing="true"] .header-top.has-session .hdr-title { grid-area: 1 / 2; align-self: center; }
+
+.app-shell[data-typing="true"] .header-top.has-session .hdr-state {
+  grid-area: 1 / 3;
+  align-self: center;
+  margin-top: 0;
+}
+
+.app-shell[data-typing="true"] .header-top.has-session .hdr-chev {
+  grid-area: 1 / 4;
+  align-self: center;
+  margin-top: 0;
+}
+
+.app-shell[data-typing="true"] .header-top.has-session > .hdr-tools { grid-area: 1 / 2; }

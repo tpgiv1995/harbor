@@ -239,6 +239,110 @@ test('a codex interrupt ends the turn: no "Running" forever, and the window says
   assert.match(p.blocks.at(-1).text, /Session compacted/);
 });
 
+// ---- Codex header facts (2026-10-31): context, effort, task tokens and time ----
+// Synthetic rollout lines in the shapes Codex 0.166 writes; no real text.
+const codexStamp = (seconds) => new Date(Date.UTC(2026, 9, 31, 12, 0, seconds)).toISOString();
+const codexUsage = (input, output, cached = 0) => ({ input_tokens: input, cached_input_tokens: cached, cache_write_input_tokens: 0, output_tokens: output, reasoning_output_tokens: 0, total_tokens: input + output });
+const codexTokenCount = (seconds, last, totalOutput, windowTokens = 258400) => ({
+  timestamp: codexStamp(seconds), type: 'event_msg',
+  payload: { type: 'token_count', info: { total_token_usage: { ...codexUsage(9_000_000, totalOutput), total_tokens: 9_000_000 + totalOutput }, last_token_usage: last, model_context_window: windowTokens }, rate_limits: { primary: { used_percent: 1 } } },
+});
+const codexPrompt = (seconds, text = 'do the thing') => ({ timestamp: codexStamp(seconds), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', id: `u${seconds}`, content: [{ type: 'text', text }] } } });
+
+test('codex context is the last request\'s total tokens against the window Codex reports', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexTokenCount(1, codexUsage(24686, 181, 12416), 181));
+  // total_tokens (input plus output), never the thread's accumulated 9M and never input alone.
+  assert.equal(p.header.contextTokens, 24867);
+  assert.equal(p.header.contextPct, 10);
+  p.applyLine(codexTokenCount(2, codexUsage(165518, 516, 165120), 697));
+  assert.equal(p.header.contextTokens, 166034);
+  assert.equal(p.header.contextPct, 64);
+});
+
+test('codex context follows a compaction: the post-compaction estimate has no input, only a total', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexTokenCount(1, codexUsage(240889, 364), 364));
+  assert.equal(p.header.contextPct, 93);
+  p.applyLine({ timestamp: codexStamp(2), type: 'compacted', payload: { message: '' } });
+  p.applyLine(codexTokenCount(3, { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0, total_tokens: 35558 }, 364));
+  assert.equal(p.header.contextTokens, 35558);
+  assert.equal(p.header.contextPct, 14);
+});
+
+test('a codex token_count without info (rate limits only) changes nothing, and a missing window is tokens only', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexTokenCount(1, codexUsage(50000, 100), 100));
+  const before = { ...p.header, lastEventTs: null };
+  p.applyLine({ timestamp: codexStamp(2), type: 'event_msg', payload: { type: 'token_count', info: null, rate_limits: { primary: { used_percent: 9 } } } });
+  assert.deepEqual({ ...p.header, lastEventTs: null }, before);
+  const q = new TranscriptParser('codex');
+  q.applyLine({ timestamp: codexStamp(1), type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: codexUsage(80000, 20), total_token_usage: codexUsage(80000, 20) } } });
+  assert.equal(q.header.contextTokens, 80020);
+  assert.equal(q.header.contextPct, null, 'no window reported, so no percent is invented');
+  const full = new TranscriptParser('codex');
+  full.applyLine(codexTokenCount(1, codexUsage(258000, 400), 400));
+  assert.equal(full.header.contextPct, 99, 'clamped like the claude gauge');
+});
+
+test('codex effort follows the turn context, and a mid-session change at once', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine({ timestamp: codexStamp(1), type: 'turn_context', payload: { model: 'gpt-6-astra', effort: 'high', collaboration_mode: { settings: { reasoning_effort: 'high' } } } });
+  assert.equal(p.header.effort, 'high');
+  p.applyLine({ timestamp: codexStamp(2), type: 'event_msg', payload: { type: 'thread_settings_applied', thread_settings: { model: 'gpt-6-astra', reasoning_effort: 'max' } } });
+  assert.equal(p.header.effort, 'max', 'the change shows before the next turn starts');
+  p.applyLine({ timestamp: codexStamp(3), type: 'turn_context', payload: { model: 'gpt-6-astra', collaboration_mode: { settings: { reasoning_effort: 'XHigh' } } } });
+  assert.equal(p.header.effort, 'xhigh', 'falls back to the collaboration mode, lower-cased');
+  p.applyLine({ timestamp: codexStamp(4), type: 'turn_context', payload: { model: 'gpt-6-astra', effort: { nested: true } } });
+  assert.equal(p.header.effort, 'xhigh', 'a value that is not a word is no effort');
+  assert.equal(p.header.model.name, 'Gpt 6 Astra');
+});
+
+test('a codex task\'s output tokens and time ride on its prompt, counting each request once', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexTokenCount(0, codexUsage(1000, 50), 5000));
+  const changed = p.applyLine(codexPrompt(10));
+  assert.deepEqual(changed, []);
+  const prompt = p.blocks.find((block) => block.kind === 'user');
+  const first = p.applyLine(codexTokenCount(15, codexUsage(2000, 300), 5300));
+  assert.deepEqual(prompt.turnMeta, { outputTokens: 300, durationMs: 5000 });
+  assert.deepEqual(first, [prompt.key], 'the prompt row is re-rendered in place');
+  // Codex writes some token_count events twice: the thread total does not move.
+  assert.deepEqual(p.applyLine(codexTokenCount(15, codexUsage(2000, 300), 5300)), []);
+  p.applyLine(codexTokenCount(25, codexUsage(2400, 700), 6000));
+  assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 15000 });
+  p.applyLine({ timestamp: codexStamp(31), type: 'event_msg', payload: { type: 'task_complete', turn_id: 't', duration_ms: 99999 } });
+  assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 21000 }, 'the finish time is the task\'s end, measured from its prompt');
+  // The next prompt measures from the thread total it arrived at.
+  p.applyLine(codexPrompt(40, 'and another'));
+  const second = p.blocks.filter((block) => block.kind === 'user')[1];
+  p.applyLine(codexTokenCount(44, codexUsage(2500, 120), 6120));
+  assert.deepEqual(second.turnMeta, { outputTokens: 120, durationMs: 4000 });
+  assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 21000 }, 'the earlier task is left alone');
+});
+
+test('a codex task whose start fell before the parsed tail measures from its first request', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexPrompt(10));
+  p.applyLine(codexTokenCount(12, codexUsage(3000, 200), 800_200));
+  const prompt = p.blocks.find((block) => block.kind === 'user');
+  assert.equal(prompt.turnMeta.outputTokens, 200, 'the thread total less this request\'s own output is the base');
+  p.applyLine(codexTokenCount(20, codexUsage(3300, 150), 800_350));
+  assert.equal(prompt.turnMeta.outputTokens, 350);
+});
+
+test('an interrupted codex task settles its time; claude parsers are untouched', () => {
+  const p = new TranscriptParser('codex');
+  p.applyLine(codexPrompt(0));
+  const prompt = p.blocks[0];
+  p.applyLine(codexTokenCount(3, codexUsage(500, 80), 80));
+  p.applyLine({ timestamp: codexStamp(9), type: 'event_msg', payload: { type: 'turn_aborted', turn_id: 't', reason: 'interrupted' } });
+  assert.deepEqual(prompt.turnMeta, { outputTokens: 80, durationMs: 9000 });
+  const claude = new TranscriptParser('claude');
+  claude.applyLine({ timestamp: codexStamp(1), type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: codexUsage(10, 10), model_context_window: 100 } } });
+  assert.equal(claude.header.contextTokens, null);
+});
+
 test('Cursor agent transcript maps content blocks and tool calls without duplicates', () => {
   const p = new TranscriptParser('cursor');
   p.applyLine({ role: 'user', message: { content: [{ type: 'text', text: 'Check Cursor.' }] } });

@@ -13,6 +13,7 @@ const {
   providerTranscriptDirs,
   composerSendState,
   codexBoxState,
+  codexBoxDraft,
   isFleetView,
 } = require('../../src/main/session-send.js');
 
@@ -519,8 +520,8 @@ const typed = (h) => h.sent.map(({ text }) => text);
 // loses what is typed; `reads` counts every read. A paste that is only an
 // image path becomes "[Image #N] " in the box, numbered per message, as Codex's
 // handle_paste_image_path draws it.
-function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTyping = false, title = 'proof', frames = false, failUntil = null } = {}) {
-  let draft = '';
+function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTyping = false, title = 'proof', frames = false, failUntil = null, prefill = '', initialDraft = '', working = false } = {}) {
+  let draft = initialDraft;
   let swallowed = 0;
   let hidden = 0;
   let frame = 0;
@@ -542,7 +543,12 @@ function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTy
     if (hidden > 0) hidden -= 1;
     const above = echoed.map((text) => `› ${box(text)}\n\n• OK\n`).join('\n');
     const busy = frames ? `\n• Working (${frame += 1}s • esc to interrupt)\n` : '';
-    return `  >_ OpenAI Codex (v0.165.0)\n\n${above}${busy}\n› ${shown ? box(shown) : 'Ask Codex to do anything'}\n\n  GPT-6.1-Sol low · ~\\dev\\proof · ${title}`;
+    // `prefill`: text someone else left in the box. `working`: a running turn,
+    // whose footer is key hints with the context left at the right edge.
+    const inBox = prefill + (shown ? box(shown) : '');
+    const status = working ? `\n◦ Working (44s • esc to interrupt)\n` : busy;
+    const footer = working ? `  tab to queue message${' '.repeat(80)}21% context left` : `  GPT-6.1-Sol low · ~\\dev\\proof · ${title}`;
+    return `  >_ OpenAI Codex (v0.165.0)\n\n${above}${status}\n› ${inBox || (echoed.length ? 'Ask a follow-up question' : 'Ask Codex to do anything')}\n\n${footer}`;
   };
   const sendInput = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => {
@@ -1293,6 +1299,52 @@ test('a Codex box that never shows the text gets no Enter and an honest refusal'
   assert.equal(typed(h).includes('\r'), false, 'no Enter into a box that does not hold the message');
 });
 
+// A BOX THAT ALREADY HOLDS TEXT IS NEVER TYPED INTO (2026-10-31, a live Astra
+// pane): another session's typer left a 1,489-character paste unsent, Harbor
+// typed a message after it, and every retry added another copy. Synthetic
+// screens in the shape of that capture.
+test('a Codex box holding someone else\'s paste or draft is refused before one key, on every retry', async () => {
+  const text = `Please look again. ${proofWords.repeat(24)}marker`;
+  for (const [prefill, said] of [['[Pasted Content 1489 chars]', /a pasted block of 1489 characters/], ['[Pasted Content 1489 chars][Pasted Content 1058 chars]', /2 pasted blocks \(1489, 1058 characters\)/], ['half a note I was writing', /other text/]]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    codexPane(h, { prefill });
+    const send = createSessionSend(h.deps);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await assert.rejects(
+        send.send({ sessionId: 'pane:codex-busy', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+        (error) => error.code === 'CODEX_BOX_BUSY' && said.test(error.message),
+      );
+    }
+    assert.deepEqual(typed(h), [], `nothing typed into a box holding "${prefill}"`);
+  }
+});
+
+test('a retry whose own earlier try is the whole Codex box presses Enter without typing it again', async () => {
+  const text = `Please look again. ${proofWords.repeat(30)}marker`;
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { initialDraft: text });
+  await createSessionSend(h.deps).send({ sessionId: 'pane:codex-retry', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), ['\r']);
+  assert.deepEqual(pane.echoed, [text]);
+});
+
+test('a send into a working Codex reads the box over its key-hint footer', async () => {
+  const text = "also - please adjust your settings to be on 'max' effort or tell me how to";
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { working: true, burstReads: 2 });
+  await createSessionSend(h.deps).send({ sessionId: 'pane:codex-working', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), [`\x1b[200~${text}\x1b[201~`, '\r']);
+  assert.deepEqual(pane.echoed, [text]);
+});
+
+test('codexBoxDraft reads only the box rows, so an unseen footer cannot make an empty box look full', () => {
+  assert.equal(codexBoxDraft('• OK\n\n› Ask a follow-up question\n\n  some hint line Codex has never drawn before'), '');
+  assert.equal(codexBoxDraft('• OK\n\n›\n\n  ? for shortcuts                      100% context left'), '');
+  assert.equal(codexBoxDraft('• OK\n\n› [Pasted Content 1489 chars]\n\n  GPT-6-Astra high · C:\\dev\\proof · proof'), '[PastedContent1489chars]');
+  assert.equal(codexBoxDraft('• OK\n\n› a draft\n  that wraps\n\n  tab to queue message                21% context left'), 'adraftthatwraps');
+  assert.equal(codexBoxDraft(codexFixture('codex-0.165.0-update-screen-120.txt')), null);
+});
+
 test('with no Codex box on screen (the update screen) nothing is typed at all', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   codexPane(h, { screen: codexFixture('codex-0.165.0-update-screen-120.txt') });
@@ -1317,6 +1369,50 @@ test('an effort change into a codex pane goes in as /model --reasoning=<level>; 
   composerPane(c);
   await createSessionSend(c.deps).send({ sessionId: 's-claude-effort', text: '/effort high', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
   assert.equal(typed(c)[0], '/effort ');
+});
+
+test('Codex safety rewrites and sibling dialogs refuse slash commands before typing', async () => {
+  const screens = [
+    '  Here are a few ways I can help:\n  Choosing a rewrite sends it in a new chat.\n\n› 1. Overview\n  2. Recovery\n  3. Prevention\n\n  enter select · esc back',
+    codexFixture('codex-0.165.0-update-screen-120.txt'),
+    '  This conversation is open in another app\n  r retry   f fork   esc/ctrl+c/q exit',
+  ];
+  for (const screen of screens) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    codexPane(h, { screen });
+    await assert.rejects(
+      createSessionSend(h.deps).send({ sessionId: 'pane:codex-choice', text: '/effort high', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      error => error.code === 'CODEX_NO_PROMPT',
+    );
+    assert.deepEqual(typed(h), [], 'a setting command must not select a dialog action');
+  }
+});
+
+test('Codex transcript selection never treats a historical prompt as its composer', async () => {
+  const footers = [
+    'arrows/hjkl/w/b/e move · 0/$/g/G ends · v/space/V mark · / find · enter/q/esc close',
+    '  arrows/hjkl/w/b/e move · 0/$/g/G ends · v/space/V mark · / find · enter/q/esc close',
+    'v mark · enter/q close',
+    'y/ctrl+c copy · enter copy & latest · esc clear · q close',
+    'enter copy · q close',
+  ];
+  for (const footer of footers) {
+    const screen = `› Previous synthetic message\n\nSynthetic response\n\n${footer}`;
+    assert.equal(codexBoxState(screen, { text: '/effort high' }), 'noprompt');
+    for (const text of ['/effort high', 'A new synthetic message']) {
+      const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+      codexPane(h, { screen });
+      await assert.rejects(
+        createSessionSend(h.deps).send({ sessionId: 'pane:codex-selection', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+        error => error.code === 'CODEX_NO_PROMPT',
+      );
+      assert.deepEqual(typed(h), []);
+    }
+  }
+  const searchOverlay = '/ T R A N S C R I P T / / /\n\n› Previous synthetic message\n\nFind: sample';
+  assert.equal(codexBoxState(searchOverlay, { text: 'sample' }), 'noprompt');
+  assert.equal(codexBoxState('› Previous synthetic message\n\nFind: sample\nenter accept · esc cancel', { text: 'sample' }), 'noprompt');
+  assert.equal(codexBoxState('› enter copy · q close\n  GPT-6-Sol low · ~/project', { text: 'enter copy · q close' }), 'exact');
 });
 
 test('a Codex thread locked by the Codex app gets no keys and a refusal that says to close it there', async () => {
@@ -2388,8 +2484,9 @@ test('Claude /model refuses honestly when its post-send confirmation does not cl
 
 test('non-Claude /model never auto-answers a matching pane dialog', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  const panes = ['conversation\n❯', MODEL_SWITCH_DIALOG];
-  h.deps.readPane = async () => panes.shift() ?? MODEL_SWITCH_DIALOG;
+  h.deps.readPane = async () => h.sent.some(({ text }) => text === '\r')
+    ? MODEL_SWITCH_DIALOG
+    : '› Ask Codex to do anything\n  GPT-6-Sol low · ~/project';
   const send = createSessionSend(h.deps);
 
   await send.send({

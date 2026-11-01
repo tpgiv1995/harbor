@@ -1977,6 +1977,16 @@ function createWindow() {
       // artifacts INSIDE the Artifacts view; without this flag a PDF frame
       // just downloads.
       plugins: true,
+      // A MINIMIZED HARBOR KEEPS ITS PICTURE (2026-10-31, Pat, from a screen
+      // recording: "every time i open harbor theres like a second or two delay
+      // where it opens like all black"). With throttling on, Chromium drops a
+      // minimized window's frame and redraws the whole stage on restore: 1.0 to
+      // 1.3 s of bare background, logged as compositor-stall lines in
+      // perf/renderer-stalls.jsonl while the renderer's JS sat idle. Off, the
+      // frame stays current; toggled on the live window, Pat saw the same
+      // restore drop to about 0.2 s. Chromium draws only when something
+      // changes, so a minimized Harbor draws only as its sessions update.
+      backgroundThrottling: false,
     },
   });
 

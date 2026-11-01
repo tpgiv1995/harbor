@@ -19,7 +19,11 @@ const { chromium, expect } = require('@playwright/test');
 const { realTmpDir } = require('../test/support/real-tmpdir.js');
 
 const APP_ROOT = path.resolve(__dirname, '..');
-const EVIDENCE = path.join(realTmpDir(), 'harbor-drive-mobile-newsession');
+// Optional: node scripts/drive-mobile-newsession-win.js [distDir] [evidenceDir]. A built
+// bundle in a scratch folder can be driven without touching dist-web, which the live
+// phone server serves (2026-10-31).
+const DIST = path.resolve(process.argv[2] || path.join(APP_ROOT, 'dist-web'));
+const EVIDENCE = path.resolve(process.argv[3] || path.join(realTmpDir(), 'harbor-drive-mobile-newsession'));
 const VIEWPORT = { width: 390, height: 844 };
 const OLD_ID = '11111111-1111-4111-8111-111111111111';
 const NEW_ID = '22222222-2222-4222-8222-222222222222';
@@ -61,7 +65,7 @@ async function makeFixture(root, realHome) {
     HARBOR_PROJECT_ICONS_DIR: path.join(root, 'icons'),
     HARBOR_MODEL_CACHE_FILE: path.join(cacheDir, 'claude-models.json'),
     HARBOR_E2E_FAKE_LAUNCH: '1', HARBOR_TAILNET_LOGINS: 'none',
-    HARBOR_WEB_DIST: path.join(APP_ROOT, 'dist-web'),
+    HARBOR_WEB_DIST: DIST,
   });
   assert.equal(os.homedir(), home, 'all default-home reads must be relocated');
   const { composeServer } = require('../src/server/compose.js');
@@ -140,7 +144,8 @@ async function openSheet(page) {
   }
   await page.getByRole('button', { name: 'New session', exact: true }).click();
   await expect(page.locator('.newsession-provider')).toHaveCount(3);
-  await expect(page.getByRole('combobox', { name: 'Account', exact: true }).locator('option')).toHaveCount(3);
+  // The plan picker is chips since 2026-10-03 (it was an Account select).
+  await expect(page.locator('.plan-choices button')).toHaveCount(3);
 }
 
 async function assertLayout(page, label) {
@@ -234,7 +239,7 @@ async function drive(page, fx) {
 }
 
 async function main() {
-  await fs.access(path.join(APP_ROOT, 'dist-web', 'index.html'));
+  await fs.access(path.join(DIST, 'index.html'));
   const originalEnv = { ...process.env };
   const realHome = os.homedir();
   const executablePath = chromium.executablePath();

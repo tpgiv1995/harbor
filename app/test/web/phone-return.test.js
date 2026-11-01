@@ -235,6 +235,8 @@ test('the header shows only reported context, and plain status words', async () 
   assert.equal(contextFact({ contextPct: 81 }).warn, true);
   assert.equal(contextFact({ contextPct: null, contextTokens: 84_200 }).label, '84k', 'tokens alone when the window is unknown');
   assert.equal(contextFact({ contextPct: null, contextTokens: null }), null, 'nothing reported, nothing shown');
+  assert.match(contextFact({ contextPct: null, contextTokens: 84_200 }, 'Codex').title, /Codex has not reported/, 'a codex window never blames Claude');
+  assert.match(contextFact({ contextPct: null, contextTokens: 84_200 }).title, /Claude has not reported/);
   const now = Date.UTC(2026, 9, 11, 20, 0, 0);
   assert.equal(statusFact({ session: { isLive: true, paneId: 'p' }, header: { blocked: true } }).label, 'Waiting on you');
   assert.equal(statusFact({ session: { isLive: true, paneId: 'p' }, header: { working: true }, meter: '1m 12s · ↓ 2.4k' }).label, 'Working 1m 12s · ↓ 2.4k');

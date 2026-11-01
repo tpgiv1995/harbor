@@ -21,7 +21,8 @@ for (const viewport of [844, 400]) for (const extras of [0, 100]) test(`composer
     const entry = path.resolve(__dirname, '../../web/src/composer/Composer.jsx');
     const code = buildSync({ entryPoints: [entry], bundle: true, external: ['*'], write: false, platform: 'node', format: 'cjs' }).outputFiles[0].text;
     const module = { exports: {} };
-    const stubs = { useRpc: () => ({}), useSend: () => ({ queue: { count: 0 } }), useAttachments: () => ({ attachments: [] }), useCapabilities: () => ({ capabilities: {} }), useVoiceDraft: () => ({ voiceState: {} }), useSlashState: () => ({ chrome: {} }), useComposerLiveVoice: () => null, useQuestionReply: () => null };
+    const stubs = { useRpc: () => ({}), useSend: () => ({ queue: { count: 0 } }), useAttachments: () => ({ attachments: [] }), useCapabilities: () => ({ capabilities: {} }), useVoiceDraft: () => ({ voiceState: {} }), useSlashState: () => ({ chrome: {} }), useComposerLiveVoice: () => null, useQuestionReply: () => null,
+      composerActions: () => ({ stop: false, sendReady: false }), hasDraft: () => false };
     new Function('require', 'module', 'exports', code)(id => id === 'react' ? react : stubs, module, module.exports);
     // The textarea ref is the one that starts empty; the others hold the
     // session id. Found by that, not by position, so a new ref cannot break it.

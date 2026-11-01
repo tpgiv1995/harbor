@@ -8,7 +8,8 @@ import { contextFact, statusFact } from './session-facts.js';
 // already arriving with each transcript update and going unshown: the context
 // percentage, the working state, the cache facts. Meanings follow the desktop
 // window header so one word means one thing on both:
-//   context  the ring from header.contextPct (Claude's own statusline math);
+//   context  the ring from header.contextPct (Claude's own statusline math, or
+//            Codex's token_count against its own reported window);
 //            tokens alone when the window size is unknown, never a guessed
 //            percentage (the 2026-07-21 rule in main/providers/transcript.js)
 //   status   "Working 1m 12s, 2.4k tokens" from the same live meter the
@@ -20,10 +21,14 @@ const { cacheFreshness, describeCacheFreshness } = cacheFreshnessHelpers;
 
 // The live meter, phone edition: the same CLI working line the desktop reads
 // off the pane (session:work-meter, remote-safe since 2026-10-11), polled every
-// 2 s only while the turn runs and the page is visible.
+// 2 s only while the turn runs and the page is visible. A Codex session has no
+// pane line to read: its output tokens come from its rollout (the prompt's
+// turnMeta) and the elapsed time ticks locally, so it skips only the poll.
 function useWorkMeter(client, session, pane, working, prompt) {
   const paneId = pane?.paneId || null;
-  const active = Boolean(client && working && paneId && (session?.provider || 'claude') === 'claude');
+  const provider = session?.provider || 'claude';
+  const polls = Boolean(client && paneId && provider === 'claude');
+  const active = Boolean(working && (polls || provider === 'codex'));
   const [cli, setCli] = useState(null);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -33,7 +38,7 @@ function useWorkMeter(client, session, pane, working, prompt) {
     let timer = null;
     const tick = async () => {
       const visible = typeof document === 'undefined' || document.visibilityState !== 'hidden';
-      const next = visible ? await client.call('session:work-meter', { pane, sessionId: session.id }).catch(() => null) : null;
+      const next = visible && polls ? await client.call('session:work-meter', { pane, sessionId: session.id }).catch(() => null) : null;
       if (!alive) return;
       if (next) setCli((prev) => ({ elapsed: next.elapsed || prev?.elapsed || null, tokens: parseTokenCount(next.tokens) ?? prev?.tokens ?? null }));
       setNow(Date.now());
@@ -72,7 +77,8 @@ export function useSessionFacts({ client, session, header, pane, background = nu
   const now = useClock(15000);
   const meter = useWorkMeter(client, session, pane, Boolean(header?.working), header?.lastPrompt || null);
   if (!session) return null;
-  const context = contextFact(header) || (typeof session.contextPct === 'number' ? contextFact({ contextPct: session.contextPct }) : null);
+  const providerLabel = { codex: 'Codex', cursor: 'Cursor' }[session.provider] || 'Claude';
+  const context = contextFact(header, providerLabel) || (typeof session.contextPct === 'number' ? contextFact({ contextPct: session.contextPct }) : null);
   // Background work ("7 tasks running") is what the session is doing while its
   // turn is over, so it IS the status; it used to take a row of its own.
   const status = background && !header?.working && !header?.blocked

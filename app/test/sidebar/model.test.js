@@ -153,6 +153,23 @@ test('merge defaults session providers to claude and preserves explicit provider
   assert.equal(sessions.find((session) => session.id === 'cursor-live').provider, 'cursor');
 });
 
+test('a codex row\'s home is the plan its transcript was found under, never the default claude plan', () => {
+  const model = mergeSidebarModel({
+    historySessions: [
+      { id: 'codex-a', lastActive: '2026-07-17 09:00', project: 'alpha', title: 'Codex A', provider: 'codex', profileId: 'codex-alpha' },
+      { id: 'codex-none', lastActive: '2026-07-17 08:30', project: 'alpha', title: 'Codex none', provider: 'codex', profileId: null },
+      { id: 'claude-a', lastActive: '2026-07-17 08:00', project: 'alpha', title: 'Claude A', home: 'team' },
+      { id: 'codex-launched', lastActive: '2026-07-17 07:00', project: 'alpha', title: 'Codex launched', provider: 'codex' },
+    ],
+    homes: { 'codex-launched': 'codex-work', 'codex-a': 'personal' },
+  });
+  const byId = new Map(model.projects.flatMap((project) => project.sessions).map((session) => [session.id, session]));
+  assert.equal(byId.get('codex-a').home, 'codex-alpha', 'the scanned home outranks any launch overlay');
+  assert.equal(byId.get('codex-none').home, null, 'no home stays no home, so no wrong badge is drawn');
+  assert.equal(byId.get('claude-a').home, 'team', 'claude rows are unchanged');
+  assert.equal(byId.get('codex-launched').home, 'codex-work', 'a Harbor launch still names the home until the scan can');
+});
+
 test('merge keeps project grouping as the default', () => {
   const model = mergeSidebarModel({ historySessions: history });
   assert.equal(model.grouping, 'project');

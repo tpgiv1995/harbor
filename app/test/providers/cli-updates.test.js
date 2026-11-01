@@ -222,6 +222,28 @@ test('codex 0.165.0 notes retain model, input, reviewer and memory usage contact
   }
 });
 
+test('codex 0.166.0 verbatim notes retain input, runtime and usage contacts', () => {
+  const cases = [
+    ['Added keyboard-driven transcript selection with word, line, and page motions, integrated search, and configurable shortcuts. (#57221, #57222, #57223, #57224)', ['visibility', 'composer']],
+    ['Rendered Markdown consistently in async questions, choices, answers, and transcript replies. (#57259, #57292)', ['visibility']],
+    ['Added GPT-6.1 Terra to the bundled, Vertex AI, and Amazon Bedrock model catalogs. (#57293)', ['models']],
+    ['Added clearer safety-block explanations and selectable safer follow-up prompts in the TUI. (#57363, #57365)', ['visibility', 'composer']],
+    ['Preserved acknowledged approval and permission settings when resuming or forking threads. (#57227)', ['sandbox', 'resume']],
+    ['Preserved local image attachments when restoring killed composer text. (#57502)', ['composer']],
+    ['Preserved reasoning-token accounting across resume and fork to avoid premature compaction. (#57839)', ['rollout', 'resume']],
+    ['Shipped the standalone executor in canonical CLI and app-server release packages. (#57837)', ['runtime', 'daemon']],
+    ['Standardized development and release builds on Node.js 24.22.1 and Rust 1.95.0. (#57168, #57373)', ['runtime']],
+  ];
+  const missing = cases.flatMap(([line, wanted]) => {
+    const got = tagLine('codex', line).flags.map(flag => flag.id);
+    return wanted.filter(id => !got.includes(id)).map(id => ({ line, id }));
+  });
+  assert.deepEqual(missing, []);
+  for (const line of ['Updated selection benchmark fixtures.', 'Improved executor documentation examples.']) {
+    assert.ok(!tagLine('codex', line).flags.some(flag => ['runtime', 'composer', 'visibility'].includes(flag.id)), line);
+  }
+});
+
 test('codex notes flag input routing, Daybreak, persistent hints and shell notices', () => {
   const cases = [
     ['Daybreak is enabled by default for eligible accounts.', 'daybreak'],
@@ -500,6 +522,56 @@ test('impact flags tag the Harbor contracts a note line touches, Revert included
 
   const boring = tagLine('claude', 'Improved the colour of a spinner');
   assert.deepEqual(boring.flags, [], 'an unrelated line carries no scare text');
+});
+
+// 2026-10-31 (Claude 2.1.316, Codex 0.166.0): Pat named two costs of past
+// updates the chip had no word for, plan usage burned and a disk that filled.
+// 2.1.316 turned idle compaction on for five of six plans and added a subagent
+// effort switch, and neither line said "usage". Every line is verbatim.
+test('lines that change plan usage or disk and memory footprint carry a provider-wide flag', () => {
+  const ids = (provider, line) => tagLine(provider, line).flags.map((f) => f.id);
+  const usage = [
+    ['claude', 'Changed idle compaction to also run for subscribers with telemetry turned off, and on Bedrock, Vertex, Foundry and LLM gateways once the one-hour prompt cache is on'],
+    ['claude', 'Added `CLAUDE_CODE_SUBAGENT_EFFORT` to set the effort level subagents run at when nothing else names one, instead of inheriting the session\'s'],
+    ['claude', 'Fixed sub-agents that inherited a parent sub-agent\'s model moving to the main model when a background job or message woke them'],
+    ['claude', 'Fixed "Continue automatically at usage limit" continuing more than three times without a prompt from you when a task restarted itself between waits (a /goal check-in, a background or scheduled task)'],
+    ['claude', 'Fixed a resumed claude.ai cloud session making a model call nobody asked for when the previous worker stopped just after receiving a new chat\'s files'],
+    ['claude', 'Added `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` to apply `CLAUDE_CODE_SUBAGENT_MODEL` (or the main model) to every subagent, ignoring per-spawn and agent-definition model overrides'],
+    ['claude', 'Changed `CLAUDE_CODE_SUBAGENT_MODEL` to set the default subagent model rather than override everything: an agent definition\'s `model:` and an explicit per-spawn model now take precedence over it'],
+    ['codex', 'Preserved reasoning-token accounting across resume and fork to avoid premature compaction. (#57839)'],
+    ['codex', 'Fixed fresh TUI sessions to honor the server’s default approval reviewer when no explicit override is provided. (#56090)'],
+  ];
+  const footprint = [
+    ['claude', 'Fixed `~/.claude/skills/.trash` and `~/.claude/plugins/.trash` growing without limit: each now holds about 1024 entries, whatever `cleanupPeriodDays` says'],
+    ['claude', 'Fixed the skill file watcher checking every removed skill kept in `~/.claude/skills/.trash`, which added file system load that grew with each removal'],
+    ['claude', 'Improved memory use in long headless and SDK turns that run many subagents: the parent session no longer keeps each subagent\'s tool results until the turn ends'],
+    ['claude', 'Fixed shell commands being left running on macOS and Linux when Claude Code exits by itself, for example when credentials are refused or a cloud session is archived'],
+    ['claude', 'Fixed Grep and Glob never returning when the search process is killed at the timeout but does not exit, seen on Windows'],
+    ['claude', 'Removed the one-hour time limit on background commands started by subagents; they now run until they exit or are stopped, matching the main session'],
+    ['codex', 'Shipped the standalone executor in canonical CLI and app-server release packages. (#57837)'],
+    ['codex', 'Reduced disk usage by pruning unused installations, cleaning abandoned marketplace checkouts, and bounding daemon logs. (#53827, #55149, #55689, #55690, #55856)'],
+  ];
+  const missing = [
+    ...usage.filter(([p, line]) => !ids(p, line).includes('usage')),
+    ...footprint.filter(([p, line]) => !ids(p, line).includes('footprint')),
+  ];
+  assert.deepEqual(missing, []);
+  for (const line of [
+    'Fixed blank lines at the top of a code block disappearing when the code block opens a quote',
+    'Fixed markdown tables jumping between grid and stacked layouts on half-typed rows while streaming, and long tables falling back to raw pipes',
+    'Improved SSL certificate errors to name the likely causes, among them a server that leaves out an intermediate certificate, and the fix for each',
+    'Fixed extra sign-in renewals when several sessions share an Anthropic profile login and the credentials lock is busy',
+    'Fixed a Claude apps gateway Vertex upstream hanging for minutes when a Google token endpoint accepts the connection and never answers',
+    'Fixed the welcome header in fullscreen mode showing the session\'s model while viewing a subagent or teammate that runs on a different model',
+    'Fixed sandbox protections not applying to a worktree entered by `claude -p --resume` or `--continue`',
+    'Fixed background sessions that fail to start being reported as a deleted daemon binary when the binary is still on disk',
+    '[VSCode] Changed `ultrathink` to run its turn at `xhigh` effort and show in a rainbow in the chat box, as in the terminal',
+    '[Cloud sessions] Fixed cloud sessions reporting uncommitted changes every turn after Claude moved a branch to a commit it had pushed from another worktree',
+  ]) {
+    assert.ok(!ids('claude', line).some((id) => id === 'usage' || id === 'footprint'), line);
+  }
+  const usageFlag = tagLine('claude', usage[0][1]).flags.find((f) => f.id === 'usage');
+  assert.match(usageFlag.why, /plan usage/i);
 });
 
 // The 2026-09-25 review found the lines that mattered most in codex 0.157.0 and
@@ -811,6 +883,43 @@ test('install records a successful history entry and re-reads the installed vers
     { from: '2.1.258', to: '2.1.260', ok: true },
   );
   assert.ok(state.providers.claude.history[0].snapshot, 'the pre-install config snapshot id is recorded');
+});
+
+// 2026-10-31: npm parks a replaced package it cannot delete as @scope/.<name>-<8 chars>, always under the
+// same derived name, so a parked copy still in use made the next install fail EBUSY. Before and after an
+// install, free parked copies are deleted, and one in use is renamed whole (never emptied) out of npm's way.
+test('an npm install frees npm\'s parking name first, deletes parked copies nothing uses, and only renames one in use', async (t) => {
+  const fixture = await makeHome();
+  t.after(() => fsp.rm(fixture.root, { recursive: true, force: true }));
+  const scope = path.join(fixture.prefix, 'node_modules', '@anthropic-ai');
+  const other = path.join(fixture.prefix, 'node_modules', '@openai');
+  for (const dir of [path.join(scope, '.claude-code-AbCd1234'), path.join(scope, '.claude-code-Held5678'), path.join(scope, '.claude-code-notes'), path.join(scope, 'claude-code-ZzZz1234'), path.join(other, '.codex-QwEr5678')]) {
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(path.join(dir, 'file.txt'), 'x');
+  }
+  let atInstall = null;
+  const checker = checkerFor(fixture, {
+    execFile: async () => {
+      atInstall = (await fsp.readdir(scope)).sort();
+      await fsp.writeFile(path.join(scope, 'claude-code', 'package.json'), JSON.stringify({ version: '2.1.260' }));
+      return { stdout: 'added 1 package\n', stderr: '' };
+    },
+    // The held copy keeps "running" wherever it is renamed to.
+    parkedInUse: async (dir) => (await fsp.readFile(path.join(dir, 'file.txt'), 'utf8').catch(() => '')) === 'held',
+  });
+  await fsp.writeFile(path.join(scope, '.claude-code-Held5678', 'file.txt'), 'held');
+  await checker.check();
+  const result = await checker.install('claude', '2.1.260');
+  assert.equal(result.ok, true);
+  assert.ok(!atInstall.includes('.claude-code-Held5678') && !atInstall.includes('.claude-code-AbCd1234'), `npm's names were free before it ran: ${atInstall}`);
+  const left = (await fsp.readdir(scope)).sort();
+  const renamed = left.filter((n) => /^\.claude-code-[A-Za-z0-9]{8}$/.test(n));
+  assert.equal(renamed.length, 1, left.join(','));
+  assert.equal(await fsp.readFile(path.join(scope, renamed[0], 'file.txt'), 'utf8'), 'held', 'the copy in use is renamed whole, never emptied');
+  assert.ok(left.includes('.claude-code-notes') && left.includes('claude-code-ZzZz1234'), 'other names are not parked copies');
+  assert.ok((await fsp.readdir(other)).includes('.codex-QwEr5678'), 'another package\'s parked copy is not this install\'s to remove');
+  const entry = (await checker.state()).providers.claude.history[0];
+  assert.deepEqual(entry.parked, { removed: ['.claude-code-AbCd1234'], kept: renamed });
 });
 
 test('a same-day cursor rebuild installs as success but history names the build on disk', async (t) => {

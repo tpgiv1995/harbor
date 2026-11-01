@@ -1030,7 +1030,7 @@ export function CommandBar({
             <img className="logomk" src={provider.logo} alt="" aria-hidden="true" />
             {displayModel?.name || provider.label}
             {curEffort ? <span className="eff">{EFFORT_LABEL[curEffort] || curEffort}</span> : null}
-            {session.provider === 'claude' && session.home ? (
+            {(session.provider === 'claude' || session.provider === 'codex') && session.home ? (
               <ProfileBadge profileId={session.home} profiles={profiles} className="model-acct" />
             ) : null}
             <span className="mswitch-caret" aria-hidden="true">▾</span>
@@ -1082,7 +1082,7 @@ export function CommandBar({
               title={ctxPct != null
                 ? `${ctxPct}% of context used`
                 : ctxTokens != null
-                  ? 'Tokens in context; window size not yet reported by Claude'
+                  ? `Tokens in context; window size not yet reported by ${provider.label}`
                   : 'Context usage unavailable'}
             >
               <span className="ustat-lbl">ctx</span>

@@ -340,3 +340,48 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The chosen folder, when the sheet is opened from a chat's header button
+   (2026-10-31): the folder is already decided, so it is one card (the same card
+   as a picked folder in the list) with a Change button, and the list stays
+   folded until asked for. */
+.newsession-chosen {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 6px 6px 6px 12px;
+  border: 1px solid rgb(var(--ac-rgb) / 0.65);
+  border-radius: 12px;
+  background: rgb(var(--ac-rgb) / 0.12);
+}
+
+.newsession-chosen + .newsession-search {
+  margin-top: 10px;
+}
+
+.newsession-chosen-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.newsession-chosen-change {
+  flex: 0 0 auto;
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  padding: 0 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ac2);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.newsession-chosen-change:active {
+  background: rgba(255, 255, 255, 0.06);
+}

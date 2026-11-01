@@ -674,6 +674,11 @@ const PROVIDER_ANSWER_MARKERS = {
     /Do you trust the contents of this directory/i,
     /Yes, continue/i,
     /Press enter to continue and create a sandbox/i,
+    // Codex uses "enter select", without "to", for safety rewrite choices.
+    // Selection and Find also own input while the transcript is otherwise idle.
+    /^\s*enter select\s*·\s*esc back\s*$/im,
+    /(?:enter\/q(?:\/esc)? close|enter copy(?: & latest)?\s*·\s*(?:esc clear\s*·\s*)?q close)\s*$/m,
+    /^\s*Find: [^\n]*\n[^\n]*\besc(?: cancel)?(?: · query limited to 4 KiB)?\s*$/m,
   ],
   cursor: [
     /Workspace Trust Required/i,

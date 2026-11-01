@@ -1,7 +1,7 @@
 import { subSessionReadOnly } from '../../../src/shared/sub-sessions.js';
 import { runStateCue } from '../../../src/shared/session-run-state.cjs';
 import React, {
-  useCallback, useEffect, useMemo, useRef, useState,
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
 import { CONNECTION, createRpcClient } from '../rpc/client.js';
 import { RpcProvider } from '../rpc/rpc-context.jsx';
@@ -29,6 +29,8 @@ import { useVisualViewport } from './use-visual-viewport.js';
 import { useTyping } from './use-typing.js';
 import { prettyModelId } from './model-label.js';
 import { SessionMeta, SessionStatus, useSessionFacts } from './SessionMeta.jsx';
+import { CopySessionIdButton, NewSessionHereButton } from './SessionActions.jsx';
+import { newSessionHerePreset } from './session-actions.cjs';
 import { ErrorBoundary } from '../../../src/renderer/ErrorBoundary.jsx';
 import './shell.css';
 
@@ -101,6 +103,8 @@ function OfflineScreen({ error, onRetry }) {
   );
 }
 
+const PROVIDER_NAME = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' };
+
 // The effort as the desktop's model chip badges it (MED, not "medium"), so the
 // facts strip has room for the status.
 const EFFORT_BADGE = { medium: 'med' };
@@ -132,7 +136,7 @@ function SessionHeaderButton({ session, header, facts, iconUrl, onOpenBrowse }) 
       ? 'working'
       : session?.isLive ? 'live' : 'idle';
   return (
-    <button type="button" className="hdr-session" onClick={onOpenBrowse} aria-label={session ? `Switch session (now: ${title})` : 'Switch session'}>
+    <button type="button" className={`hdr-session${session ? '' : ' is-empty'}`} onClick={onOpenBrowse} aria-label={session ? `Switch session (now: ${title})` : 'Switch session'}>
       {session ? <ProjectIcon label={session.project} url={iconUrl} /> : null}
       <span className="hdr-id">
         <span className="hdr-kicker">
@@ -253,6 +257,9 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
   const [connectionError, setConnectionError] = useState(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  // What the sheet opens on: null from the session browser's plus, a chat's folder,
+  // provider and plan from that chat's header button.
+  const [newSessionPreset, setNewSessionPreset] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [capabilityOpen, setCapabilityOpen] = useState(false);
   const [planOpen, setPlanOpen] = useState(false);
@@ -392,6 +399,40 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
     [model, iconUrl],
   );
 
+  const openNewSession = useCallback(() => { setNewSessionPreset(null); setNewSessionOpen(true); }, []);
+  const hereRequest = useMemo(() => newSessionHerePreset(activeSession), [activeSession]);
+  const openNewSessionHere = useCallback(() => {
+    if (!hereRequest) return;
+    setNewSessionPreset(hereRequest);
+    setNewSessionOpen(true);
+  }, [hereRequest]);
+  // Named like desktop's "+" tooltip: which provider and plan it starts on, and where.
+  const newHereLabel = activeSession
+    ? (() => {
+      const provider = activeSession.provider || 'claude';
+      const hasPlan = provider !== 'cursor' && (activeSession.home || activeSession.account);
+      const project = activeSession.project && activeSession.project !== '~' ? activeSession.project : 'home';
+      return `New ${PROVIDER_NAME[provider] || provider} session${hasPlan ? ` (${planLabel(activeSession)})` : ''} in ${project}`;
+    })()
+    : 'New session';
+
+  // The project line reserves room for the buttons beside it by their measured
+  // width (a connection pill joins them when the link drops, and typing takes two
+  // away), so nothing is a guessed number.
+  const headerTopRef = useRef(null);
+  const toolsRef = useRef(null);
+  useLayoutEffect(() => {
+    const top = headerTopRef.current;
+    const tools = toolsRef.current;
+    if (!top || !tools) return undefined;
+    const measure = () => top.style.setProperty('--hdr-tools-w', `${tools.offsetWidth}px`);
+    measure();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(tools);
+    return () => observer.disconnect();
+  }, [view]);
+
   const openBrowse = useCallback(() => setBrowseOpen(true), []);
   const closeBrowse = useCallback(() => setBrowseOpen(false), []);
 
@@ -411,7 +452,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                 context, status, cache. It used to be three rows (identity,
                 chips, facts) plus a banner row and an error card. */}
             <header className="app-header">
-              <div className="header-top">
+              <div className={`header-top${view === 'chat' ? ' has-session' : ''}`} ref={headerTopRef}>
                 {view === 'chat' ? <SessionHeaderButton
                   header={activeHeader}
                   facts={facts}
@@ -419,7 +460,18 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                   iconUrl={activeSession ? iconUrl(activeSession.project) : null}
                   onOpenBrowse={openBrowse}
                 /> : <ViewHeader view={view} />}
+                <div className="hdr-tools" ref={toolsRef}>
                 {disconnected ? <ConnectionPill long={offlineLong} error={connectionError} onRetry={retryNow} /> : null}
+                {view === 'chat' && activeSession ? (
+                  <>
+                    {/* Offline neither button has a job worth its room: a new session
+                        needs the host, and at 375 the connection pill's own words
+                        (Reconnecting) plus two more 44px buttons left the project
+                        reading 'HAR...' (2026-10-31 review). The room is the pill's. */}
+                    {disconnected ? null : <NewSessionHereButton label={newHereLabel} disabled={!hereRequest} onOpen={openNewSessionHere} />}
+                    {disconnected ? null : <CopySessionIdButton sessionId={activeSession.id} />}
+                  </>
+                ) : null}
                 <button
                   type="button"
                   className="btn-ghost hdr-settings"
@@ -439,6 +491,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                     <circle cx="9" cy="14" r="2" fill="currentColor" />
                   </svg>
                 </button>
+                </div>
               </div>
               {view === 'chat' && activeSession ? (
                 <div className="hdr-strip">
@@ -486,7 +539,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                 activeSessionId={activeId}
                 onPick={pickSession}
                 onClose={closeBrowse}
-                onNewSession={() => setNewSessionOpen(true)}
+                onNewSession={openNewSession}
                 fetchSlice={fetchSlice}
               />
             </div>
@@ -496,6 +549,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
         <NewSessionSheet
           client={client}
           open={newSessionOpen}
+          preset={newSessionPreset}
           onClose={() => setNewSessionOpen(false)}
           onCreated={({ sessionId }) => {
             setNewSessionOpen(false);

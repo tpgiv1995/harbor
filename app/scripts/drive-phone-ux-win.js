@@ -327,7 +327,10 @@ const STATES = {
     const g = await geometry(page);
     console.log(`offline geometry: ${JSON.stringify(g)}`);
     assert.equal(g.offlinePanel, null, 'no error card over a conversation the phone already has');
-    assert.ok(g.header.height <= 96, `offline, the header stays two rows (${g.header.height}px)`);
+    // Two blocks, session and facts strip. 96 until 2026-10-31, when the project line grew
+    // to hold the new-session and copy-id buttons (44px targets on a 36px line) and the
+    // title moved to its own row below it: one-line title 105px, two lines 124px.
+    assert.ok(g.header.height <= 112, `offline, the header stays two blocks (${g.header.height}px)`);
     await shot(page, '05-offline');
     await page.locator('.composer-field textarea').click();
     await page.locator('.composer-field textarea').fill(LONG_DRAFT);

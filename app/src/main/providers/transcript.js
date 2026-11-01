@@ -177,6 +177,14 @@ function usageTokens(usage) {
   return total > 0 ? total : null;
 }
 
+// A Codex reasoning effort as the rollout spells it ('high', 'xhigh', 'max',
+// 'minimal'), lower-cased; anything that is not a plain word is no effort.
+function codexEffort(value) {
+  if (typeof value !== 'string') return null;
+  const effort = value.trim().toLowerCase();
+  return /^[a-z]{3,12}$/.test(effort) ? effort : null;
+}
+
 // Conversation prose: unbounded for anything a person actually wrote or read;
 // the guard only trims pathological blocks and announces that it did.
 function clipProse(text) {
@@ -920,6 +928,11 @@ class TranscriptParser {
     // not yet seen its CommandExecution. See applyCodexLine.
     this.codexNamed = new Map();
     this.codexCodeMode = false;
+    // Codex token accounting (see noteCodexTokenCount): the context window the
+    // rollout last reported, and the thread's running output-token total, which
+    // a task's own output is measured against.
+    this.codexWindow = null;
+    this.codexTotalOutput = null;
     // The task in flight: the user prompt that opened it and the output tokens
     // each API message spent on it. See noteTurnUsage.
     this.turn = null;
@@ -1025,7 +1038,8 @@ class TranscriptParser {
   // conversation's own spend.
   startTurn(block, ts) {
     const startMs = Date.parse(ts);
-    this.turn = { block, startMs: Number.isFinite(startMs) ? startMs : null, outputs: new Map() };
+    // outputBase is Codex only: the thread's output total when this prompt arrived.
+    this.turn = { block, startMs: Number.isFinite(startMs) ? startMs : null, outputs: new Map(), outputBase: this.codexTotalOutput };
   }
 
   noteTurnUsage(message, ts, changed) {
@@ -1044,6 +1058,71 @@ class TranscriptParser {
     if (prior && prior.outputTokens === outputTokens && prior.durationMs === durationMs) return;
     turn.block.turnMeta = { outputTokens, durationMs };
     if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+  }
+
+  // CODEX CONTEXT AND TASK TOKENS (2026-10-31, Pat: a Codex window "missing a
+  // ton of information (context, cache, etc)"). Codex writes a token_count
+  // event after every model request:
+  //   info.last_token_usage     that ONE request. total_tokens (input plus
+  //                             output) is what the context holds right now:
+  //                             the output joins the history the next request
+  //                             sends. input_tokens alone is wrong twice over,
+  //                             it leaves the reply out, and it is 0 on the
+  //                             estimate Codex writes straight after a
+  //                             compaction (input 0, total 35,558 in the real
+  //                             rollout, then 32,614 input on the next request).
+  //   info.total_token_usage    the THREAD, accumulated: 4.7M input over a
+  //                             session whose window is 258k. Never the gauge.
+  //   info.model_context_window the denominator Codex itself divides by.
+  // Checked against a real 1,444-line rollout: its three compactions land right
+  // after last total_tokens of 241,171, 226,572 and 241,253 (a window of
+  // 258,400, 87 to 93 percent), and the first real request after each reads
+  // 32,979, 37,030 and 38,707, so the gauge climbs to the compaction and falls
+  // away from it the way the CLI's own does. A token_count with no `info` is a
+  // rate-limit update and is skipped. The output a TASK has spent is the thread's output
+  // total now minus its total when the task's prompt arrived, so a token_count
+  // written twice (it is) never counts twice.
+  noteCodexTokenCount(info, ts, changed) {
+    if (!info || typeof info !== 'object') return;
+    const windowTokens = Number(info.model_context_window);
+    if (Number.isFinite(windowTokens) && windowTokens > 0) this.codexWindow = windowTokens;
+    const last = info.last_token_usage;
+    const used = Number(last?.total_tokens);
+    if (Number.isFinite(used) && used > 0) {
+      this.header.contextTokens = used;
+      this.header.contextPct = this.codexWindow
+        ? Math.max(1, Math.min(99, Math.round((used / this.codexWindow) * 100)))
+        : null;
+    }
+    const totalOut = Number(info.total_token_usage?.output_tokens);
+    if (!Number.isFinite(totalOut)) return;
+    this.codexTotalOutput = totalOut;
+    const turn = this.turn;
+    if (!turn) return;
+    // A task whose prompt fell before the first token_count this parser saw
+    // takes its base from that request: the thread total less its own output.
+    if (!Number.isFinite(turn.outputBase)) {
+      const lastOut = Number(last?.output_tokens);
+      turn.outputBase = Number.isFinite(lastOut) ? Math.max(0, totalOut - lastOut) : totalOut;
+    }
+    this.noteCodexTurnMeta(Math.max(0, totalOut - turn.outputBase), ts, changed);
+  }
+
+  noteCodexTurnMeta(outputTokens, ts, changed) {
+    const turn = this.turn;
+    if (!turn) return;
+    const endMs = Date.parse(ts);
+    const durationMs = turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null;
+    const prior = turn.block.turnMeta;
+    if (prior && prior.outputTokens === outputTokens && prior.durationMs === durationMs) return;
+    turn.block.turnMeta = { outputTokens, durationMs };
+    if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+  }
+
+  // A task ended (completed or interrupted): the time it took is now final.
+  settleCodexTurn(ts, changed) {
+    const prior = this.turn?.block?.turnMeta;
+    if (prior) this.noteCodexTurnMeta(prior.outputTokens, ts, changed);
   }
 
   // Returns the keys of blocks that CHANGED in place (tool results resolving
@@ -1269,9 +1348,22 @@ class TranscriptParser {
     const payload = obj.payload || {};
     const ts = obj.timestamp || null;
     if (ts) this.header.lastEventTs = ts;
-    if (obj.type === 'turn_context' && payload.model) this.header.model = modelDisplay(payload.model);
-    if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message) {
-      this.push({ kind: 'user', text: clipProse(payload.message), ts });
+    if (obj.type === 'turn_context') {
+      if (payload.model) this.header.model = modelDisplay(payload.model);
+      // The effort the turn runs at (2026-10-31): `effort`, or the same value in
+      // the collaboration mode on records that carry no top-level one.
+      const effort = codexEffort(payload.effort) || codexEffort(payload.collaboration_mode?.settings?.reasoning_effort);
+      if (effort) this.header.effort = effort;
+    }
+    if (obj.type === 'event_msg' && payload.type === 'thread_settings_applied') {
+      // A mid-session change (`/model --reasoning=max`) lands here at once; the
+      // next turn_context only repeats it when the next task starts.
+      const effort = codexEffort(payload.thread_settings?.reasoning_effort);
+      if (effort) this.header.effort = effort;
+    } else if (obj.type === 'event_msg' && payload.type === 'token_count') {
+      this.noteCodexTokenCount(payload.info, ts, changed);
+    } else if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message) {
+      this.startTurn(this.push({ kind: 'user', text: clipProse(payload.message), ts }), ts);
       this.header.lastSignal = 'user-turn';
     } else if (obj.type === 'event_msg' && payload.type === 'agent_message' && payload.message) {
       this.push({ kind: 'assistant', text: clipProse(payload.message), ts });
@@ -1296,7 +1388,9 @@ class TranscriptParser {
           .trim();
         if (text) {
           const user = item.type === 'UserMessage';
-          this.push({ kind: user ? 'user' : 'assistant', text: clipProse(text), ts });
+          const block = this.push({ kind: user ? 'user' : 'assistant', text: clipProse(text), ts });
+          // A task runs from a prompt to the next one, as in the Claude path.
+          if (user) this.startTurn(block, ts);
           // Codex narrates mid-turn ("phase": "commentary"); only its final
           // answer ends the turn (2026-10-29: 13 of 15 messages in one real
           // session were commentary, so the window read idle while it worked).
@@ -1359,6 +1453,7 @@ class TranscriptParser {
       }
     } else if (obj.type === 'event_msg' && ['task_complete', 'task_completed'].includes(payload.type)) {
       this.header.lastSignal = 'idle';
+      this.settleCodexTurn(ts, changed);
     } else if (obj.type === 'compacted') {
       this.push({ kind: 'note', text: 'Session compacted: earlier context was summarized.', ts });
     } else if (obj.type === 'event_msg' && payload.type === 'turn_aborted') {
@@ -1371,6 +1466,7 @@ class TranscriptParser {
       this.pendingTools.clear();
       this.push({ kind: 'note', text: 'Interrupted', ts });
       this.header.lastSignal = 'idle';
+      this.settleCodexTurn(ts, changed);
     }
     return changed;
   }

@@ -210,6 +210,28 @@ async function composeServer(options = {}) {
       cacheDir: config.paths.cacheDir,
       profiles: config.profiles,
     }),
+    // THE PROVIDER HALF OF THE BRIDGE'S OPTIONS, THE SAME FOUR main/index.js
+    // PASSES (2026-10-31, Pat: "Codex sessions don't show up in mobile but I
+    // think they show up as a perpetually hung live session"). Each
+    // composition root hand-lists these, and this one had none of them.
+    // `profiles` is the cause: provider history and the provider session
+    // linker take every Codex home from it, and without it both fall back to
+    // the single default ~/.codex. Pat has three Codex homes, so the phone
+    // listed 435 Codex sessions where the desktop listed 4,079, and each live
+    // pane in the other two homes was a row titled "Live session" with no
+    // history behind it (no title, no prompt, no transcript to open).
+    // The other three are not decoration. The first scan below is awaited
+    // before this server listens, and with three homes it took 98 s cold on
+    // Pat's machine; the two scan caches are what make a restart seconds, and
+    // the metadata sidecar is the desktop's own file (the default path only
+    // matched it by coincidence, and wrote into the real home from a relocated
+    // harness). They are shared with the desktop deliberately: every entry is
+    // validated against the file's size and mtime, and each write is a whole
+    // file renamed into place, so the worst a race costs is a rescan.
+    profiles: config.profiles,
+    providerMetadataFile: path.join(config.paths.cacheDir, 'provider-session-metadata.json'),
+    providerFactsCacheFile: path.join(config.paths.cacheDir, 'provider-row-facts.json'),
+    delegationScanCacheFile: path.join(config.paths.cacheDir, 'background-fold.json'),
   });
   const artifacts = options.artifacts || createArtifactsProvider({
     getSessionLabel: (id) => sidebar.getSessionLabel?.(id),

@@ -9,6 +9,7 @@ import { useVoiceDraft } from '../voice/use-voice-draft.js';
 import { LiveVoiceBar } from '../voice/LiveVoiceBar.jsx';
 import { SlashPalette, useSlashState } from '../slash/SlashPalette.jsx';
 import { useComposerLiveVoice } from './use-composer-live-voice.js';
+import { composerActions, hasDraft } from './composer-actions.cjs';
 import './composer.css';
 import { replyStore, useQuestionReply } from '../../../src/renderer/stage/use-question-reply.js';
 import '../slash/slash.css';
@@ -109,28 +110,51 @@ export function Composer({
       const extras = composer.querySelector('.composer-extras').scrollHeight
         + (composer.querySelector('.composer-tools')?.offsetHeight || 0);
       const chrome = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 1;
-      const cap = Math.max(44, Math.min(150, viewport * .4 - extras - chrome));
+      // The card around the text box (border, attachment chips, the toolbar) is
+      // part of the budget too. Measured with the box at its natural height, so
+      // the answer does not depend on what was typed.
       node.style.height = 'auto';
+      const card = composer.querySelector('.composer-card');
+      const cardChrome = Math.max(0, (card?.offsetHeight || 0) - (node.offsetHeight || 0));
+      const cap = Math.max(44, Math.min(150, viewport * .4 - extras - chrome - cardChrome));
       node.style.height = Math.min(node.scrollHeight, cap) + 'px';
       node.style.overflowY = node.scrollHeight > cap ? 'auto' : 'hidden';
     };
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(composer.querySelector('.composer-extras'));
+    // The box's own width can change under a draft (a turn starting or ending, a
+    // rotation, a different card), and what wraps changes with it: remeasure, so
+    // a multi-line draft never clips its last line. Width only, so the height the
+    // measure itself sets does not loop back.
+    let lastWidth = node.offsetWidth;
+    const widthObserver = new ResizeObserver(() => {
+      if (node.offsetWidth === lastWidth) return;
+      lastWidth = node.offsetWidth;
+      resize();
+    });
+    widthObserver.observe(node);
     window.visualViewport?.addEventListener('resize', resize);
     window.addEventListener('resize', resize);
-    return () => { observer.disconnect(); window.visualViewport?.removeEventListener('resize', resize); window.removeEventListener('resize', resize); };
-  }, [text, formatOpen, toolsOpen, attachments, sessionId]);
+    return () => { observer.disconnect(); widthObserver.disconnect(); window.visualViewport?.removeEventListener('resize', resize); window.removeEventListener('resize', resize); };
+  }, [text, formatOpen, toolsOpen, attachments, sessionId, working]);
 
   useEffect(() => {
     setSlashDismissed(false);
     setSlashHighlight(0);
   }, [sessionId]);
 
+  // The toolbar's right end (composer-actions.cjs): [Send] while idle, [Stop]
+  // [Send] while a turn runs. Send never moves; Send is muted without a draft.
+  const actions = composerActions({
+    canStop: Boolean(paneId && working),
+    hasDraft: hasDraft(text, attachments.length),
+  });
+
   if (!sessionId) return null;
 
   const submit = async () => {
-    if (disabled || offline || sending || uploading || (!text.trim() && attachments.length === 0)) return;
+    if (disabled || offline || sending || uploading || !actions.sendReady) return;
     const images = attachments.map((attachment) => attachment.path);
     const sentSessionId = sessionId;
     const sentText = text;
@@ -170,10 +194,11 @@ export function Composer({
     textareaRef.current?.focus();
   };
 
-  const fieldClass = [
-    'composer-field',
+  // Slash validity colours the card's border (it was an inset bar down the text
+  // box's left edge, which a rounded card cannot hold cleanly).
+  const cardClass = [
+    'composer-card',
     slash.chrome.active ? (slash.chrome.valid ? 'slash-valid' : 'slash-invalid') : '',
-    text ? 'has-text' : '',
   ].filter(Boolean).join(' ');
 
   return (
@@ -209,20 +234,6 @@ export function Composer({
         <p className={`voice-status ${voiceState.phase === 'error' ? 'error' : ''}`} role="status">{voiceState.message}</p>
       ) : null}
       <LiveVoiceBar liveVoice={liveVoice} />
-      {/* Attachments and Stop share ONE row: stacked, they took two of the
-          composer's rows, and with the keyboard up that left the text box a
-          line and a half (2026-10-06). */}
-      {attachments.length || (paneId && working) ? (
-        <div className={`composer-strip${attachments.length ? ' has-chips' : ''}`}>
-          <AttachChips attachments={attachments} onRemove={remove} />
-          {paneId && working ? (
-            <button type="button" className="composer-interrupt" onPointerDown={keepFocus} onClick={interrupt}>
-              <span className="composer-interrupt-glyph" aria-hidden="true" />
-              Stop
-            </button>
-          ) : null}
-        </div>
-      ) : null}
       {formatOpen ? (
         <FormatToolbar
           textareaRef={textareaRef}
@@ -284,20 +295,16 @@ export function Composer({
         {liveVoice ? <button type="button" className={`composer-live-voice ${liveVoice.phase}${liveVoice.speaking ? ' speaking' : ''}`} aria-label={liveVoice.phase === 'live' ? 'End live voice mode' : 'Start live voice mode'} aria-pressed={liveVoice.phase === 'live'} onClick={liveVoice.toggle}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="4" y1="10" x2="4" y2="14" stroke="currentColor" strokeWidth="1.9" /><line x1="8" y1="7" x2="8" y2="17" stroke="currentColor" strokeWidth="1.9" /><line x1="12" y1="4" x2="12" y2="20" stroke="currentColor" strokeWidth="1.9" /><line x1="16" y1="7" x2="16" y2="17" stroke="currentColor" strokeWidth="1.9" /><line x1="20" y1="10" x2="20" y2="14" stroke="currentColor" strokeWidth="1.9" /></svg></button> : null}
         </div>
       ) : null}
-      <div className="composer-row">
-        <button
-          type="button"
-          className={`composer-plus${toolsOpen ? ' on' : ''}`}
-          onPointerDown={keepFocus}
-          aria-label={toolsOpen ? 'Hide composer tools' : 'Show composer tools'}
-          aria-expanded={toolsOpen}
-          onClick={() => setToolsOpen((v) => !v)}
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-            <path d="M10 4.4v11.2M4.4 10h11.2" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-          </svg>
-        </button>
-        <div className={fieldClass}>
+      {/* ONE CARD holds the whole composer (2026-10-31): attachment chips on top,
+          the text box at the card's full width, a toolbar along the bottom edge
+          with the tools toggle on the left and Stop / Send on the right. */}
+      <div className={cardClass}>
+        {attachments.length ? (
+          <div className="composer-strip">
+            <AttachChips attachments={attachments} onRemove={remove} />
+          </div>
+        ) : null}
+        <div className="composer-field">
           <textarea
             ref={textareaRef}
             aria-label="Message"
@@ -334,30 +341,58 @@ export function Composer({
             }}
           />
         </div>
-        <button
-          type="button"
-          className="composer-send"
-          onPointerDown={keepFocus}
-          disabled={disabled || offline || sending || uploading || (!text.trim() && attachments.length === 0)}
-          onClick={submit}
-          aria-label={sending ? 'Sending' : questionReply ? "Reply to Claude's questions" : 'Send'}
-          title={questionReply ? "Reply to Claude's questions" : 'Send to this session'}
-        >
-          {sending ? (
-            <span className="composer-send-spinner" aria-hidden="true" />
-          ) : (
+        <div className="composer-bar">
+          <button
+            type="button"
+            className={`composer-plus${toolsOpen ? ' on' : ''}`}
+            onPointerDown={keepFocus}
+            aria-label={toolsOpen ? 'Hide composer tools' : 'Show composer tools'}
+            aria-expanded={toolsOpen}
+            onClick={() => setToolsOpen((v) => !v)}
+          >
             <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-              <path
-                d="M10 16V4.8M10 4.4 5.2 9.2M10 4.4 14.8 9.2"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+              <path d="M10 4.4v11.2M4.4 10h11.2" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
             </svg>
-          )}
-        </button>
+          </button>
+          <div className="composer-actions">
+            {actions.stop ? (
+              <button
+                type="button"
+                className="composer-stop"
+                onPointerDown={keepFocus}
+                onClick={interrupt}
+                aria-label="Stop"
+                title="Stop this turn"
+              >
+                <span className="composer-stop-glyph" aria-hidden="true" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="composer-send"
+              onPointerDown={keepFocus}
+              disabled={disabled || offline || sending || uploading || !actions.sendReady}
+              onClick={submit}
+              aria-label={sending ? 'Sending' : questionReply ? "Reply to Claude's questions" : 'Send'}
+              title={questionReply ? "Reply to Claude's questions" : 'Send to this session'}
+            >
+              {sending ? (
+                <span className="composer-send-spinner" aria-hidden="true" />
+              ) : (
+                <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                  <path
+                    d="M10 16V4.8M10 4.4 5.2 9.2M10 4.4 14.8 9.2"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </button>
+          </div>
+        </div>
       </div>
       <SlashPalette
         open={slashOpen}

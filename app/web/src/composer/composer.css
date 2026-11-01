@@ -23,11 +23,55 @@
 
 .composer-extras { min-height: 0; overflow-y: auto; }
 
-.composer-row {
+/* THE CARD (2026-10-31, Pat: "go look at best practices and good examples
+   online ... you shouldnt be trying to invent this stuff yourself every time",
+   then a screenshot of Claude's phone app).
+   One rounded surface holds the whole composer, the way Claude and ChatGPT on the
+   phone and Vercel AI Elements' PromptInput (header / body / footer) do it:
+     chips      attachments, only while there are any
+     field      the text box at the card's FULL width, generous left padding
+     bar        tools toggle left, Stop / Send right, 12px in from the edges
+   Every button in the bar is the same circle (--cmp-btn) on one centre line. The
+   card is a step lighter than the page with a thin border; the border takes the
+   accent while the box has focus, and the slash colour while a command is typed. */
+.composer-card {
+  --cmp-btn: 40px;
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-end;
-  gap: var(--space-1);
+  flex-direction: column;
+  border: 1px solid var(--ln2);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.055);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.composer-card:focus-within {
+  border-color: rgb(var(--ac-rgb) / 0.55);
+}
+
+.composer-bar {
+  /* Above the text box (z-index 2 in slash.css) so the 2px a button's tap area
+     reaches past its circle land on the button, not on the box beside it. */
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+/* Send is the rightmost button and Stop, when there is one, the one just left of
+   it, so nothing changes place when a draft appears or goes. */
+.composer-actions {
+  display: flex;
+  align-items: center;
+  /* Stop is the one action with no undo: 16px between the circles keeps 12px
+     between the two 44px tap areas, so a second tap on a busy Send cannot land
+     on it. */
+  gap: var(--space-4);
+  margin-left: auto;
 }
 
 .composer-attach {
@@ -64,16 +108,13 @@
   height: 21px;
 }
 
+/* The attachment chips' strip, the card's header: drawn only while there are
+   attachments, inside the card, 12px from its top and side edges. */
 .composer-strip {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
-}
-
-.composer-strip.has-chips {
-  justify-content: space-between;
+  padding: var(--space-3) var(--space-3) 0;
 }
 
 .attach-chips {
@@ -131,16 +172,18 @@
    nothing implemented it, so a long message showed one line and scrolled inside
    itself. max-height here and the cap there must stay in agreement. */
 .composer-field textarea {
-  flex: 1 1 auto;
+  display: block;
   min-width: 0;
   min-height: var(--touch-min);
   max-height: min(150px, calc(var(--app-h, 100dvh) * .4));
   resize: none;
-  padding: 10px var(--space-3);
+  /* 24px in from the card's edge, like Claude's: the card is the surface, so the
+     box itself paints nothing and the focus ring is the card's border. */
+  padding: 14px var(--space-6) 10px;
   border: 0 !important;
-  border-radius: var(--radius-md);
+  border-radius: 0;
   outline: 0 !important;
-  background: rgba(255, 255, 255, 0.055);
+  background: transparent;
   color: var(--tx);
   font: inherit;
   /* 16px exactly: iOS Safari zooms the whole page on focus below this. */
@@ -189,13 +232,7 @@
   color: var(--fnt);
 }
 
-.composer-field textarea:focus {
-  background: rgba(255, 255, 255, 0.065);
-}
-/* Seamless well while touch-typing; a visible ring for keyboard/switch focus (WCAG 2.4.7). */
-.composer-field textarea:focus-visible {
-  box-shadow: 0 0 0 1px rgb(var(--ac-rgb) / 0.55);
-}
+/* Focus (touch or keyboard) shows as the card's border, .composer-card:focus-within. */
 
 .composer-queue-item button {
   min-height: var(--touch-min);
@@ -206,22 +243,80 @@
   font-weight: 650;
 }
 
-/* A round accent button with a stroked arrow, the same signal the desktop
-   command bar uses. It was a 68px slab reading "Send", which is a word the
-   arrow already says and 68px the text field wanted. */
+/* THE TOOLBAR'S BUTTONS (2026-10-31). All of them are one circle, --cmp-btn, on one
+   centre line, and each is a 44px target: the extra 2px a side is an inset pseudo
+   element, and the gap between neighbours keeps two tap areas from
+   overlapping (Stop and Send keep 12px between theirs). Same family as Claude's phone composer:
+     plus   a subtle filled circle, a step lighter than the card, light icon
+     stop   the same subtle circle with a solid square in the text colour
+     send   the one accent circle, a white arrow; muted until there is a draft */
+.composer-plus,
+.composer-stop,
 .composer-send {
+  position: relative;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: var(--touch-min);
-  min-width: var(--touch-min);
-  height: var(--touch-min);
+  width: var(--cmp-btn);
+  min-width: var(--cmp-btn);
+  height: var(--cmp-btn);
   padding: 0;
   border: 0;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--ac), #2f5fd6);
-  color: #fff;
   cursor: pointer;
+}
+
+.composer-plus::before,
+.composer-stop::before,
+.composer-send::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+}
+
+.composer-plus:focus-visible,
+.composer-stop:focus-visible,
+.composer-send:focus-visible {
+  outline: 2px solid rgb(var(--ac-rgb) / 0.6);
+  outline-offset: 2px;
+}
+
+.composer-plus,
+.composer-stop {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--tx);
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.composer-plus:active,
+.composer-stop:active {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.composer-plus svg { width: 18px; height: 18px; }
+
+/* Open stays a plus, never an x: next to an attachment chip an x reads as
+   "remove the image" (Pat, 2026-10-06). The highlight says the tray is open. */
+.composer-plus.on {
+  background: rgb(var(--ac-rgb) / 24%);
+  color: var(--ac2);
+}
+
+.composer-stop-glyph {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: currentColor;
+}
+
+.composer-send {
+  background: var(--ac);
+  color: #fff;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.composer-send:active {
+  background: var(--ac2);
 }
 
 .composer-send svg {
@@ -240,37 +335,13 @@
   opacity: 0.4;
 }
 
+/* Nothing to send: the same circle, dimmed, so Send never changes place or size. */
 .composer-send:disabled {
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--fnt);
+  background: rgb(var(--ac-rgb) / 30%);
+  color: rgb(255 255 255 / 55%);
   opacity: 1;
 }
 
-/* Only drawn while a turn is running (see Composer.jsx), so it can afford to
-   be a small centred chip rather than a permanent full-width bar. */
-.composer-interrupt {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--touch-min);
-  margin: 0;
-  padding: 9px 18px;
-  border: 1px solid var(--ln2);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--sub);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.composer-interrupt-glyph {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: #ff8f8f;
-}
 
 .composer-queue {
   display: grid;
@@ -316,32 +387,8 @@
 }
 
 /* ── Composer tools behind one plus ────────────────────────────────────────
-   Attach and formatting stay here; dictation and live voice stay directly
-   reachable in the primary row. */
-.composer-plus {
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  width: var(--touch-min);
-  min-width: var(--touch-min);
-  height: var(--touch-min);
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--sub);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-
-.composer-plus svg { width: 20px; height: 20px; }
-
-/* Open stays a plus, never an x: next to an attachment chip an x reads as
-   "remove the image" (Pat, 2026-10-06). The highlight says the tray is open. */
-.composer-plus.on {
-  background: rgb(var(--ac-rgb) / 18%);
-  color: var(--ac2);
-}
+   Attach and formatting stay in this tray; dictation and live voice too. The
+   plus that opens it is the left button of the card's toolbar (above). */
 
 .composer-tools {
   flex: 0 0 auto;

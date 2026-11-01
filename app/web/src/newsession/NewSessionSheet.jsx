@@ -8,6 +8,7 @@ import { providerPlans, selectedPlan } from '../../../src/shared/plan-options.cj
 import { folderLabel, groupFolderCandidates } from '../../../src/shared/project-root.cjs';
 import { isOrchestrationCwd } from '../../../src/shared/sidebar-model.js';
 import { PlanChoices } from '../capability/PlanChoices.jsx';
+import { presetChoices, withPresetFolder } from './preset.cjs';
 
 const PROVIDER_LABEL = {
   claude: 'Claude',
@@ -87,6 +88,10 @@ export function NewSessionSheet({
   onClose,
   onCreated,
   client,
+  // Opened from a chat's header button (2026-10-31): that chat's folder,
+  // provider and plan (shell/session-actions.cjs). Null from the session browser's
+  // plus, where the sheet starts from its own defaults exactly as it always did.
+  preset = null,
 }) {
   const [options, setOptions] = useState(null);
   const [folders, setFolders] = useState([]);
@@ -100,6 +105,15 @@ export function NewSessionSheet({
   const [effort, setEffort] = useState('xhigh');
   const [starting, setStarting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  // With a preset the folder is already chosen, so its picker starts folded to one
+  // card (the chosen folder and a Change button) instead of a long list.
+  const [pickerOpen, setPickerOpen] = useState(true);
+  // True once THIS open's folder list has come back. The folder, the list and the
+  // picker belong to one open of the sheet: a second open (from another chat)
+  // used to show the first one's folder with Start enabled until the load
+  // returned, and a first open flashed "No candidate folders" before the list
+  // arrived (2026-10-31 review).
+  const [loaded, setLoaded] = useState(false);
 
   const connected = client?.getState() === CONNECTION.connected;
   const providerKeys = useMemo(
@@ -115,6 +129,11 @@ export function NewSessionSheet({
     () => groupFolderCandidates(folders, { query: folderQuery, isOrchestration: isOrchestrationCwd }),
     [folders, folderQuery],
   );
+  const presetFolder = Boolean(preset?.folder);
+  const chooseFolder = (value) => {
+    setFolder(value);
+    if (presetFolder) setPickerOpen(false);
+  };
   const toggleGroup = (key) => setExpanded((previous) => {
     const next = new Set(previous);
     if (next.has(key)) next.delete(key);
@@ -122,39 +141,69 @@ export function NewSessionSheet({
     return next;
   });
 
+  // Closing, or opening on another chat's preset, throws the previous open's
+  // folder state away: the sheet never shows one open's folder in the next.
+  const clearFolderState = useCallback(() => {
+    setLoaded(false);
+    setFolders([]);
+    setFolder('');
+    setFolderQuery('');
+    setExpanded(new Set());
+    setPickerOpen(true);
+  }, []);
+
   useEffect(() => {
-    if (!open || !client || !connected) return undefined;
+    if (!open) clearFolderState();
+  }, [open, clearFolderState]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    clearFolderState();
+    setPickerOpen(!preset?.folder);
+    // The provider and plan are this chat's too, from the options a previous open
+    // left: the last chat's plan must not sit highlighted while the list loads.
+    if (options) {
+      const early = presetChoices(options, preset);
+      setProvider(early.provider);
+      setAccount(early.account);
+    }
+    if (!client || !connected) return undefined;
     let cancelled = false;
     setLoadError(null);
     setSubmitError(null);
     Promise.all([
       client.call('new-session:options'),
-      client.call('new-session:folder'),
+      client.call('new-session:folder', preset?.sessionId ? { sessionId: preset.sessionId } : undefined),
     ])
       .then(([nextOptions, nextFolders]) => {
         if (cancelled) return;
         setOptions(nextOptions);
-        const candidates = Array.isArray(nextFolders) ? nextFolders : [];
+        // The chat's own folder is offered even when the server's list left it
+        // out (a worktree, a new folder), and it is the one chosen.
+        const candidates = withPresetFolder(Array.isArray(nextFolders) ? nextFolders : [], preset?.folder);
         setFolders(candidates);
         const defaults = nextOptions?.defaults || {};
-        const defaultProvider = defaults.provider || 'claude';
         const defaultModel = defaults.model || 'opus';
         const defaultEffort = defaults.effort || 'xhigh';
-        const defaultProfile = selectedPlan(nextOptions, defaultProvider)?.id || '';
-        setProvider(defaultProvider);
+        // Provider and plan follow the chat; the model and effort keep the sheet's
+        // defaults, and the effect below corrects them for another provider.
+        const chosen = presetChoices(nextOptions, preset);
+        setProvider(chosen.provider);
         setModel(defaultModel);
         setEffort(defaultEffort);
-        setAccount(defaultProfile);
+        setAccount(chosen.account);
         setFolder(candidates[0] || '');
         setFolderQuery('');
+        setPickerOpen(!preset?.folder);
         const holding = candidates[0] ? groupKeyHolding(candidates, candidates[0]) : null;
         setExpanded(new Set(holding ? [holding] : []));
+        setLoaded(true);
       })
       .catch((error) => {
         if (!cancelled) setLoadError(String(error.message || error));
       });
     return () => { cancelled = true; };
-  }, [open, client, connected]);
+  }, [open, client, connected, preset]);
 
   useEffect(() => {
     if (!open || !client || !connected) return undefined;
@@ -179,7 +228,7 @@ export function NewSessionSheet({
 
   const submit = async (event) => {
     event.preventDefault();
-    if (!client || !connected || !folder || !providerOptions || starting) return;
+    if (!client || !connected || !loaded || !folder || !providerOptions || starting) return;
     setStarting(true);
     setSubmitError(null);
     const sinceMs = Date.now();
@@ -190,6 +239,8 @@ export function NewSessionSheet({
         provider,
         model,
         effort: selectedEffort,
+        // The server also accepts this chat's own folder, whatever its list holds.
+        ...(preset?.sessionId ? { sessionId: preset.sessionId } : {}),
       });
       // HARBOR MINTS A CLAUDE SESSION'S ID, so the launch already answered the
       // question this used to spend twelve seconds guessing at. Guessing was
@@ -206,6 +257,128 @@ export function NewSessionSheet({
       setStarting(false);
     }
   };
+
+  // The folder field is drawn once, at the bottom as always, or (from a chat) at the
+  // top, folded to the chosen folder, since the folder is the one thing already decided.
+  const folderField = (
+    <fieldset className="newsession-field">
+      <legend>Project folder</legend>
+      {presetFolder ? (
+        <div className="newsession-chosen">
+          <span className="newsession-chosen-text">
+            <span className="newsession-folder-label">{folderLabel(folder || preset.folder)}</span>
+            <span className="newsession-folder-path">{folder || preset.folder}</span>
+          </span>
+          <button
+            type="button"
+            className="newsession-chosen-change"
+            aria-expanded={pickerOpen}
+            onClick={() => setPickerOpen((value) => !value)}
+          >
+            {pickerOpen ? 'Done' : 'Change'}
+          </button>
+        </div>
+      ) : null}
+      {!pickerOpen ? null : folders.length ? (
+        <>
+          <div className="newsession-search">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <path d="m10.2 10.2 3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <input
+              type="search"
+              placeholder="Search projects"
+              value={folderQuery}
+              onChange={(event) => setFolderQuery(event.target.value)}
+              aria-label="Search project folders"
+              enterKeyHint="search"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+            {folderQuery ? (
+              <button type="button" className="newsession-search-clear" onClick={() => setFolderQuery('')} aria-label="Clear search">
+                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                  <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                </svg>
+              </button>
+            ) : null}
+          </div>
+          <div className="newsession-folder-list" role="group" aria-label="Project folders">
+            {folderGroups.length ? folderGroups.map((group) => {
+              const open = group.open || expanded.has(group.key);
+              const count = group.open ? group.children.length : group.total;
+              const holdsSelection = !open && group.children.some((child) => child.folder === folder);
+              return (
+                <div key={group.key} className="newsession-group">
+                  <div className="newsession-group-row">
+                    {group.folder ? (
+                      <button
+                        type="button"
+                        aria-pressed={group.folder === folder}
+                        className={`newsession-folder${group.folder === folder ? ' on' : ''}`}
+                        onClick={() => chooseFolder(group.folder)}
+                      >
+                        <span className="newsession-folder-label">{group.label}</span>
+                        <span className="newsession-folder-path">{group.folder}</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        aria-expanded={open}
+                        className={`newsession-folder newsession-folder-heading${holdsSelection ? ' holds' : ''}`}
+                        onClick={() => toggleGroup(group.key)}
+                      >
+                        <span className="newsession-folder-label">{group.label}</span>
+                        <span className="newsession-folder-path">{count} {count === 1 ? 'folder' : 'folders'}</span>
+                        <Chevron open={open} />
+                      </button>
+                    )}
+                    {group.folder && group.children.length ? (
+                      <button
+                        type="button"
+                        aria-expanded={open}
+                        aria-label={`${open ? 'Hide' : 'Show'} ${count} ${count === 1 ? 'subfolder' : 'subfolders'} of ${group.label}`}
+                        className={`newsession-group-toggle${holdsSelection ? ' holds' : ''}`}
+                        onClick={() => toggleGroup(group.key)}
+                      >
+                        <span>{count}</span>
+                        <Chevron open={open} />
+                      </button>
+                    ) : null}
+                  </div>
+                  {open && group.children.length ? (
+                    <div className="newsession-subfolders">
+                      {group.children.map((child) => (
+                        <button
+                          key={child.folder}
+                          type="button"
+                          aria-pressed={child.folder === folder}
+                          className={`newsession-folder sub${child.folder === folder ? ' on' : ''}`}
+                          onClick={() => chooseFolder(child.folder)}
+                        >
+                          <span className="newsession-folder-label">{child.label}</span>
+                          <span className="newsession-folder-path">{child.folder}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            }) : (
+              <p className="newsession-empty">No project folders match.</p>
+            )}
+          </div>
+        </>
+      ) : loaded ? (
+        <p className="newsession-empty">No candidate folders from the server.</p>
+      ) : loadError ? null : (
+        <p className="newsession-empty" role="status">Loading folders…</p>
+      )}
+    </fieldset>
+  );
 
   if (!open) return null;
 
@@ -235,6 +408,7 @@ export function NewSessionSheet({
         {submitError ? <div className="newsession-error" role="alert">{submitError}</div> : null}
 
         <div className="newsession-body">
+          {presetFolder ? folderField : null}
           <fieldset className="newsession-field">
             <legend>Provider</legend>
             <div className="newsession-providers">
@@ -284,105 +458,7 @@ export function NewSessionSheet({
               </div>
             </fieldset>
           ) : null}
-          <fieldset className="newsession-field">
-            <legend>Project folder</legend>
-            {folders.length ? (
-              <>
-                <div className="newsession-search">
-                  <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                    <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-                    <path d="m10.2 10.2 3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                  </svg>
-                  <input
-                    type="search"
-                    placeholder="Search projects"
-                    value={folderQuery}
-                    onChange={(event) => setFolderQuery(event.target.value)}
-                    aria-label="Search project folders"
-                    enterKeyHint="search"
-                    autoComplete="off"
-                    autoCorrect="off"
-                    autoCapitalize="none"
-                    spellCheck={false}
-                  />
-                  {folderQuery ? (
-                    <button type="button" className="newsession-search-clear" onClick={() => setFolderQuery('')} aria-label="Clear search">
-                      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                        <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-                      </svg>
-                    </button>
-                  ) : null}
-                </div>
-                <div className="newsession-folder-list" role="group" aria-label="Project folders">
-                  {folderGroups.length ? folderGroups.map((group) => {
-                    const open = group.open || expanded.has(group.key);
-                    const count = group.open ? group.children.length : group.total;
-                    const holdsSelection = !open && group.children.some((child) => child.folder === folder);
-                    return (
-                      <div key={group.key} className="newsession-group">
-                        <div className="newsession-group-row">
-                          {group.folder ? (
-                            <button
-                              type="button"
-                              aria-pressed={group.folder === folder}
-                              className={`newsession-folder${group.folder === folder ? ' on' : ''}`}
-                              onClick={() => setFolder(group.folder)}
-                            >
-                              <span className="newsession-folder-label">{group.label}</span>
-                              <span className="newsession-folder-path">{group.folder}</span>
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              aria-expanded={open}
-                              className={`newsession-folder newsession-folder-heading${holdsSelection ? ' holds' : ''}`}
-                              onClick={() => toggleGroup(group.key)}
-                            >
-                              <span className="newsession-folder-label">{group.label}</span>
-                              <span className="newsession-folder-path">{count} {count === 1 ? 'folder' : 'folders'}</span>
-                              <Chevron open={open} />
-                            </button>
-                          )}
-                          {group.folder && group.children.length ? (
-                            <button
-                              type="button"
-                              aria-expanded={open}
-                              aria-label={`${open ? 'Hide' : 'Show'} ${count} ${count === 1 ? 'subfolder' : 'subfolders'} of ${group.label}`}
-                              className={`newsession-group-toggle${holdsSelection ? ' holds' : ''}`}
-                              onClick={() => toggleGroup(group.key)}
-                            >
-                              <span>{count}</span>
-                              <Chevron open={open} />
-                            </button>
-                          ) : null}
-                        </div>
-                        {open && group.children.length ? (
-                          <div className="newsession-subfolders">
-                            {group.children.map((child) => (
-                              <button
-                                key={child.folder}
-                                type="button"
-                                aria-pressed={child.folder === folder}
-                                className={`newsession-folder sub${child.folder === folder ? ' on' : ''}`}
-                                onClick={() => setFolder(child.folder)}
-                              >
-                                <span className="newsession-folder-label">{child.label}</span>
-                                <span className="newsession-folder-path">{child.folder}</span>
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  }) : (
-                    <p className="newsession-empty">No project folders match.</p>
-                  )}
-                </div>
-              </>
-            ) : (
-              <p className="newsession-empty">No candidate folders from the server.</p>
-            )}
-          </fieldset>
+          {presetFolder ? null : folderField}
 
         </div>
 
@@ -391,7 +467,7 @@ export function NewSessionSheet({
           <button
             type="submit"
             className="btn-primary newsession-start"
-            disabled={!folder || !providerOptions || starting || !connected}
+            disabled={!loaded || !folder || !providerOptions || starting || !connected}
           >
             {starting ? 'Starting…' : 'Start session'}
           </button>

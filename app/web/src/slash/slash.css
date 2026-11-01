@@ -1,6 +1,6 @@
 .composer-field {
   position: relative;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
 }
 
@@ -12,19 +12,24 @@
  * drew did not grow with a wrapped draft, so long text spilled out of the box.
  * A metric-matched mirror can never stay aligned with the field it shadows,
  * which is the same reason the desktop composer deleted its own. Slash validity
- * is the coloured bar below; the palette still does the useful work. */
+ * is the coloured card border below; the palette still does the useful work. */
 .composer-field textarea {
   position: relative;
   z-index: 2;
   width: 100%;
 }
 
-.composer-field.slash-valid textarea {
-  box-shadow: inset 3px 0 0 #6ecf9a;
+/* Slash validity colours the card's border (2026-10-31). It was an inset bar down
+ * the text box's left edge: a coloured bar on one side, which a rounded card
+ * cannot hold cleanly and which this project does not draw. */
+.composer-card.slash-valid,
+.composer-card.slash-valid:focus-within {
+  border-color: rgb(110 207 154 / 0.75);
 }
 
-.composer-field.slash-invalid textarea {
-  box-shadow: inset 3px 0 0 #ff8f8f;
+.composer-card.slash-invalid,
+.composer-card.slash-invalid:focus-within {
+  border-color: rgb(255 143 143 / 0.75);
 }
 
 .slash-token-ok {
