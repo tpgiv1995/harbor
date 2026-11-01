@@ -111,3 +111,11 @@ test('registration insists on a pool root named pool', t => {
   const odd = path.join(f.root, 'slots'); fs.mkdirSync(odd);
   throwsCode(() => f.pool.init({ repo: 'sample', path: f.repo, poolRoot: odd, size: 1 }), 'INVALID_ARGUMENT');
 });
+
+test('the pool-root name is checked on the real path, not on an alias', t => {
+  const f = fixture(t, { register: false });
+  const real = path.join(f.root, 'slots'); fs.mkdirSync(real);
+  const alias = path.join(f.root, 'alias', 'pool'); fs.mkdirSync(path.dirname(alias));
+  fs.symlinkSync(real, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  throwsCode(() => f.pool.init({ repo: 'sample', path: f.repo, poolRoot: alias, size: 1 }), 'INVALID_ARGUMENT');
+});

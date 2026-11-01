@@ -110,7 +110,7 @@ class Pool {
       const canonical = fs.realpathSync.native(path.resolve(options.path));
       insist(fs.existsSync(options.poolRoot), 'VOLUME_MISSING', 'Configured pool root does not exist; registration never creates it');
       // A root named `pool` lets launch guards recognise a slot by its shape when the registry snapshot is unreadable.
-      insist(path.basename(path.resolve(options.poolRoot)).toLowerCase() === 'pool', 'INVALID_ARGUMENT', 'The pool root must be a folder named pool');
+      insist(path.basename(fs.realpathSync.native(path.resolve(options.poolRoot))).toLowerCase() === 'pool', 'INVALID_ARGUMENT', 'The pool root must be a folder named pool (checked on its real path, not an alias)');
       const poolRoot = fs.realpathSync.native(path.resolve(options.poolRoot));
       ws.noLinks(poolRoot);
       insist(ws.samePath(ws.git(canonical, ['rev-parse', '--show-toplevel']), canonical), 'INVALID_ARGUMENT', 'path must be the repository root');

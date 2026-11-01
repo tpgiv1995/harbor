@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { deriveDefaults } = require('../config/defaults.js');
 const { currentLaneAt } = require('../../shared/lane/resume-guard.cjs');
+const { registryStamp } = require('../../shared/lane/lookup.cjs');
 
 const DONE_STATUSES = new Set(['done', 'completed', 'success']);
 const RECENT_DONE_MS = 10 * 60 * 1000;
@@ -53,15 +54,16 @@ function sameWorkspace(left, right, platform = process.platform) {
 // A batch that ran in a workspace-pool lane (`batch.lane`, 2026-11-01) matches its slot only while
 // the pool says that slot holds that lane. Slots are reused, so a bare path match would tie every
 // later session there to the first queue that ever used the slot. Lane ids are never reused, so
-// the id alone names the batch's lane (docs/claude/lanes.md).
-const LANE_TTL_MS = 5_000;
+// the id alone names the batch's lane (docs/claude/lanes.md). The answer is cached per folder
+// until the registry snapshot changes (its stamp), so a reassigned slot is seen at once.
 const lanesAt = new Map();
 function cachedLaneAt(workspace) {
   const key = String(workspace);
+  const stamp = registryStamp();
   const hit = lanesAt.get(key);
-  if (hit && Date.now() - hit.at < LANE_TTL_MS) return hit.value;
+  if (hit && hit.stamp === stamp) return hit.value;
   const value = currentLaneAt(workspace);
-  lanesAt.set(key, { value, at: Date.now() });
+  lanesAt.set(key, { value, stamp });
   return value;
 }
 

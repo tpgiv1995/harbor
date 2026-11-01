@@ -78,3 +78,32 @@ test('the launch guard loads no mutable pool implementation', () => {
   const r = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(guard)}); console.log(Object.keys(require.cache).map((f) => require('path').basename(f)).join(','))`], { encoding: 'utf8', windowsHide: true });
   assert.deepEqual(r.stdout.trim().split(',').sort(), ['lookup.cjs', 'resume-guard.cjs']);
 });
+
+test('malformed snapshot records fail closed for slots and never break unrelated launches', t => {
+  const f = fixture(t);
+  const lane = f.lease();
+  const env = { HARBOR_LANES_DIR: f.dir };
+  const registry = path.join(f.dir, 'registry.json');
+  const good = JSON.parse(fs.readFileSync(registry, 'utf8'));
+  for (const broken of [
+    { ...good, repos: null },
+    { ...good, repos: { sample: null } },
+    { ...good, repos: { sample: { ...good.repos.sample, slots: [null] } } },
+    { ...good, lanes: [] },
+  ]) {
+    fs.writeFileSync(registry, JSON.stringify(broken));
+    assert.match(poolSlotRefusal({ provider: 'claude', cwd: lane.path }, { env }), /registry snapshot cannot be read \(registry.json is not usable \(unexpected shape\)\)/);
+    assert.equal(poolSlotRefusal({ provider: 'claude', cwd: f.repo }, { env }), null);
+  }
+});
+
+test('an alias into a slot is refused even when the snapshot cannot be read', t => {
+  const f = fixture(t);
+  const lane = f.lease();
+  const env = { HARBOR_LANES_DIR: f.dir };
+  const door = path.join(f.root, 'door');
+  fs.symlinkSync(lane.path, door, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.match(poolSlotRefusal({ provider: 'claude', cwd: door }, { env }), /does not start sessions in workspace-pool slot 1/);
+  fs.writeFileSync(path.join(f.dir, 'registry.json'), '{');
+  assert.match(poolSlotRefusal({ provider: 'claude', cwd: path.join(door, 'src') }, { env }), /looks like a workspace-pool slot/);
+});

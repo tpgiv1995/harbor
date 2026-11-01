@@ -545,3 +545,21 @@ test('getEvents reads the optional sidecar and watchQueue observes it when queue
     path.join('/state', 'events', 'queue-1.jsonl'),
   ]);
 });
+
+test('lane ownership is re-read as soon as the pool registry changes', async (t) => {
+  const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'harbor-delegate-lanes-'));
+  const prior = process.env.HARBOR_LANES_DIR;
+  process.env.HARBOR_LANES_DIR = dir;
+  t.after(() => { if (prior === undefined) delete process.env.HARBOR_LANES_DIR; else process.env.HARBOR_LANES_DIR = prior; fs.rmSync(dir, { recursive: true, force: true }); });
+  const slot = path.join(dir, 'pool', 'harbor', 'slot-01');
+  fs.mkdirSync(slot, { recursive: true });
+  const write = (lane) => fs.writeFileSync(path.join(dir, 'registry.json'), JSON.stringify({ repos: { harbor: { id: 'harbor', slots: [{ id: 1, path: slot, lane, generation: 1 }] } }, lanes: {}, sessions: {} }));
+  const queueA = { workspace: 'C:\\dev\\HarborA', batches: [{ worktree: slot, lane: 'lane-a' }] };
+  const queueB = { workspace: 'C:\\dev\\HarborB', batches: [{ worktree: slot, lane: 'lane-b' }] };
+  write('lane-a');
+  assert.equal(findQueueForWorkspace([queueA, queueB], slot), queueA);
+  await new Promise((r) => setTimeout(r, 20));
+  write('lane-b');
+  assert.equal(findQueueForWorkspace([queueA, queueB], slot), queueB, 'no stale owner after the slot is reassigned');
+});

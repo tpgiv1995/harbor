@@ -24,10 +24,35 @@ function defaultStateDir(env = process.env) {
   return env.HARBOR_LANES_DIR || path.join(realHome(), '.harbor', 'lanes');
 }
 
+// The OS spelling of `p`: its nearest existing ancestor resolved through junctions and links,
+// with the not-yet-existing tail appended.
+function canonical(p) {
+  let current = path.resolve(p);
+  const tail = [];
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(current), ...tail.reverse()); } catch { /* walk up to an existing ancestor */ }
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(p);
+    tail.push(path.basename(current));
+    current = parent;
+  }
+}
+
 function pathKey(p) {
-  let resolved = path.resolve(p);
-  try { resolved = fs.realpathSync.native(resolved); } catch { /* a missing folder keeps its resolved spelling */ }
+  const resolved = canonical(p);
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+const isMap = (v) => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+
+// Every record a launch guard reads must have the shape it reads; anything else is unreadable.
+function validState(state) {
+  if (!isMap(state) || !isMap(state.repos) || !isMap(state.lanes) || !isMap(state.sessions)) return false;
+  for (const repo of Object.values(state.repos)) {
+    if (!isMap(repo) || typeof repo.id !== 'string' || !Array.isArray(repo.slots)) return false;
+    for (const slot of repo.slots) if (!isMap(slot) || typeof slot.path !== 'string' || !path.isAbsolute(slot.path)) return false;
+  }
+  return Object.values(state.lanes).every(isMap) && Object.values(state.sessions).every(isMap);
 }
 
 // The pool's durable session key: provider, the config home's real path (case-folded on Windows)
@@ -56,7 +81,7 @@ function readRegistry(env = process.env) {
   }
   try {
     const state = JSON.parse(text);
-    if (!state || typeof state.repos !== 'object' || typeof state.lanes !== 'object' || typeof state.sessions !== 'object') throw new Error('unexpected shape');
+    if (!validState(state)) throw new Error('unexpected shape');
     return { status: 'ok', dir, state };
   } catch (error) {
     return { status: 'unreadable', dir, reason: `registry.json is not usable (${error.message})` };
@@ -75,8 +100,14 @@ function slotFor(state, cwd) {
   return null;
 }
 
+// Lexically, or once junctions and links are resolved: an alias into a slot is a slot.
 function looksLikeSlot(cwd) {
-  return SLOT_SHAPE.test(path.resolve(cwd));
+  return SLOT_SHAPE.test(path.resolve(cwd)) || SLOT_SHAPE.test(canonical(cwd));
 }
 
-module.exports = { PROVIDERS, SLOT_SHAPE, realHome, defaultStateDir, pathKey, sessionKey, readRegistry, slotFor, looksLikeSlot, poolStateExists };
+// The snapshot's modification stamp (null when absent), so caches can follow registry changes.
+function registryStamp(env = process.env) {
+  try { return fs.statSync(path.join(defaultStateDir(env), 'registry.json')).mtimeMs; } catch { return null; }
+}
+
+module.exports = { PROVIDERS, SLOT_SHAPE, realHome, defaultStateDir, canonical, pathKey, sessionKey, validState, readRegistry, registryStamp, slotFor, looksLikeSlot, poolStateExists };

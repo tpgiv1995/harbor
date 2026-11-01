@@ -28,3 +28,13 @@ Doctrine: `docs/claude/lanes.md` (Launcher adapters; Harbor and pool slots). The
 10. The queue fix dropped the current worker's summary: current-lane matching.
 11. The documented quarantine recovery could not succeed: recipe now says checkpoint, then `recover`.
 12. The guard rule matched quoted prose and missed `git -C <slot> worktree remove`: quote-aware command position and a `-C` rule, with fixtures for both.
+
+## Astra's verification round (7 resolved, 5 partly) and the fixes
+
+Astra accepted the decision not to trap signals. The five partly resolved findings, each fixed and tested:
+
+- A. Registry checks: one validated read (every map and record must have the shape the guard reads), slot shape tested lexically and through junctions, the pool-root name checked on its real path.
+- B. Cursor: `--continue` and `--resume=<id>` are refused on a lane like `--resume`.
+- C. claude-worker: an outer handler seals the lane on any exception after the lease; a test injects a temp-file failure between lease and spawn and proves it (the previous launcher left the lane running).
+- D. Queue pill: ownership is re-read whenever the registry stamp changes. Associating summaries with a session instead of a folder is open (renderer and `main/index.js`).
+- E. Command guard: git's `-c name=value` globals before `-C`, and escaped quotes in prose; fixtures for both.
