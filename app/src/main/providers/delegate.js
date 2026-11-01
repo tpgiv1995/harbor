@@ -49,10 +49,14 @@ function sameWorkspace(left, right, platform = process.platform) {
   return platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
+// A batch that ran in a workspace-pool lane (`batch.lane`, 2026-11-01) never matches by its
+// worktree path: pool slots are reused, so that folder later holds other lanes and other runs'
+// batches, and the first queue that ever used the slot would claim every later session there.
+// Such a queue is still found through its own workspace (docs/claude/lanes.md).
 function findQueueForWorkspace(queues, workspace, platform = process.platform) {
   return (queues || []).find((queue) => queue?.workspace && (
     sameWorkspace(queue.workspace, workspace, platform)
-    || (queue.batches || []).some((batch) => batch.worktree && sameWorkspace(batch.worktree, workspace, platform))
+    || (queue.batches || []).some((batch) => batch.worktree && !batch.lane && sameWorkspace(batch.worktree, workspace, platform))
   )) || null;
 }
 

@@ -366,6 +366,14 @@ test('queue lookup tolerates Windows casing and matches a worker worktree', () =
   assert.equal(findQueueForWorkspace([queue], 'C:\\dev\\other', 'win32'), null);
 });
 
+test('a reused workspace-pool slot never ties a session to an old queue', () => {
+  const slot = 'C:\\dev\\.orch\\pool\\harbor\\slot-01';
+  const earlier = { workspace: 'C:\\dev\\Harbor', batches: [{ id: 'a', worktree: slot, lane: 'run1-a', lane_generation: '1' }] };
+  const later = { workspace: 'C:\\dev\\Harbor', batches: [{ id: 'b', worktree: slot, lane: 'run2-b', lane_generation: '2' }] };
+  assert.equal(findQueueForWorkspace([earlier, later], slot, 'win32'), null);
+  assert.equal(findQueueForWorkspace([earlier, later], 'c:\\dev\\harbor', 'win32'), earlier, 'the queue is still found through its own workspace');
+});
+
 test('real abandoned and live queues are classified without changing delegate batch statuses', async () => {
   const abandoned = JSON.parse(await fs.promises.readFile(ABANDONED_QUEUE_FIXTURE, 'utf8'));
   const live = JSON.parse(await fs.promises.readFile(LIVE_QUEUE_FIXTURE, 'utf8'));

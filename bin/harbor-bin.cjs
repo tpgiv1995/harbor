@@ -8,6 +8,7 @@ const { createHistoryIndex } = require('../app/src/main/providers/history-index.
 const { SessionClient } = require('../app/src/daemon/client.js');
 const { defaultConfigFile } = require('../app/src/shared/tasks-file.cjs');
 const { cursorAuthEnv } = require('../app/src/shared/cursor-auth.cjs');
+const { poolSlotRefusal } = require('../app/src/shared/lane/resume-guard.cjs');
 
 const BIN_DIR = __dirname;
 const ROOT = path.dirname(BIN_DIR);
@@ -754,6 +755,15 @@ async function ai(args) {
       codexHome: childEnv.CODEX_HOME || path.join(os.homedir(), '.codex'),
     }));
   }
+  // Never in a workspace-pool slot, new or resumed: the slot belongs to a lane (docs/claude/lanes.md).
+  const slotRefusal = poolSlotRefusal({
+    provider: parsed.provider,
+    session: parsed.resumeId || null,
+    configHome: parsed.provider === 'claude' ? (childEnv.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'))
+      : parsed.provider === 'codex' ? (childEnv.CODEX_HOME || path.join(os.homedir(), '.codex')) : null,
+    cwd: process.cwd(),
+  });
+  if (slotRefusal) throw new Error(slotRefusal);
   if (process.env.HARBOR_AI_DRY_RUN === '1') {
     process.stdout.write(`${commandString(parsed.argv)}\n`);
     return 0;
@@ -903,6 +913,9 @@ async function claudeSessions(args) {
     if (!meta.cwd || !fs.existsSync(meta.cwd) || !fs.statSync(meta.cwd).isDirectory()) {
       throw new Error(`project directory is gone or unknown for ${resumeId}`);
     }
+    // A workspace-pool slot is a reused checkout its lane's launcher owns (docs/claude/lanes.md).
+    const slotRefusal = poolSlotRefusal({ provider: 'claude', configHome: selected.configHome || path.join(os.homedir(), '.claude'), session: resumeId, cwd: meta.cwd });
+    if (slotRefusal) throw new Error(slotRefusal);
     preacceptFolderTrust(resumeEnv.CLAUDE_CONFIG_DIR || null, meta.cwd);
     if (!meta.path || !fs.existsSync(meta.path)) throw new Error(`transcript no longer exists (pruned?): ${meta.path || ''}`);
     const age = Math.floor(Date.now() / 1000 - fs.statSync(meta.path).mtimeMs / 1000);
