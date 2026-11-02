@@ -233,7 +233,10 @@ test('a codex interrupt ends the turn: no "Running" forever, and the window says
   p.applyLine({ timestamp: TS, type: 'event_msg', payload: { type: 'turn_aborted', root_turn_id: 't', turn_id: 't', reason: 'interrupted', started_at: 1 } });
   assert.equal(p.workingState(Date.now(), Date.now(), true).working, false);
   assert.deepEqual(ranRows(p).map((row) => row.split(':').pop()), ['err']);
-  assert.equal(p.blocks.at(-1).kind, 'note');
+  // Our Codex parser draws an interrupt the way Claude's interrupted turn is
+  // drawn: the "Interrupted" command marker (endCodexTurn), not a note.
+  assert.equal(p.blocks.at(-1).kind, 'user');
+  assert.equal(p.blocks.at(-1).command, true);
   assert.equal(p.blocks.at(-1).text, 'Interrupted');
   p.applyLine({ timestamp: TS, type: 'compacted', payload: { message: '' } });
   assert.match(p.blocks.at(-1).text, /Session compacted/);
@@ -312,13 +315,15 @@ test('a codex task\'s output tokens and time ride on its prompt, counting each r
   p.applyLine(codexTokenCount(25, codexUsage(2400, 700), 6000));
   assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 15000 });
   p.applyLine({ timestamp: codexStamp(31), type: 'event_msg', payload: { type: 'task_complete', turn_id: 't', duration_ms: 99999 } });
-  assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 21000 }, 'the finish time is the task\'s end, measured from its prompt');
+  // Our Codex parser: Codex's own task clock (duration_ms) is the task's time
+  // when the end record carries one; without it the time runs prompt to end.
+  assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 99999 }, 'codex\'s own task clock wins');
   // The next prompt measures from the thread total it arrived at.
   p.applyLine(codexPrompt(40, 'and another'));
   const second = p.blocks.filter((block) => block.kind === 'user')[1];
   p.applyLine(codexTokenCount(44, codexUsage(2500, 120), 6120));
   assert.deepEqual(second.turnMeta, { outputTokens: 120, durationMs: 4000 });
-  assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 21000 }, 'the earlier task is left alone');
+  assert.deepEqual(prompt.turnMeta, { outputTokens: 1000, durationMs: 99999 }, 'the earlier task is left alone');
 });
 
 test('a codex task whose start fell before the parsed tail measures from its first request', () => {
