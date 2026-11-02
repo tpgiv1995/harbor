@@ -1,6 +1,6 @@
 'use strict';
 
-const { isDividerLine } = require('../shared/divider.cjs');
+const { isDividerLine, isComposerEdge } = require('../shared/divider.cjs');
 
 function paragraphs(lines) {
   return lines.join('\n').trim().split(/\n\s*\n/)
@@ -15,7 +15,7 @@ function parseModelSwitch(screen) {
   if (start < 0) return null;
   const tail = lines.slice(start + 1);
   const stale = tail.some((line, index) => /^\s*\u276f\s*$/.test(line)
-    || (/^\s*\u276f\s/.test(line) && isDividerLine(tail[index - 1]))
+    || (/^\s*\u276f\s/.test(line) && isComposerEdge(tail[index - 1]))
     || /esc to interrupt/i.test(line));
   if (stale) return null;
 

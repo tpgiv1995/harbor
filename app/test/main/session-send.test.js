@@ -12,6 +12,7 @@ const {
   claudeProjectDir,
   providerTranscriptDirs,
   composerSendState,
+  composerBox,
   codexBoxState,
   codexBoxMatch,
   codexBoxDraft,
@@ -700,6 +701,17 @@ test('composerSendState reads the 2.1.295 prompt shapes it used to miss', () => 
   // A message starting with "!" puts the prompt in shell mode, drawn with "!".
   assert.equal(composerSendState(enterFixture('shell-mode-prompt-2.1.295.txt'), { text: '!echo hello there' }), 'holds');
   assert.equal(composerSendState(enterFixture('shell-mode-prompt-2.1.295.txt'), { text: '!echo something else' }), 'pending');
+});
+
+// 2026-11-02, Ryan: "i cant enter any more prompts". Approving a plan named
+// the session, and CLI 2.1.316 then drew the name in the prompt's top edge.
+// That edge failed the divider test, so the box was never found and every send
+// into the pane stopped as `nobox` (seven in an hour) while the text sat in it.
+test('a named session prompt (name drawn in the top edge) is still the composer', () => {
+  const screen = enterFixture('named-session-edge-2.1.316.txt');
+  assert.ok(composerBox(screen));
+  assert.equal(composerSendState(screen, { text: 'can you not open the console?', imageMarker: '[Image #1]' }), 'holds');
+  assert.equal(composerSendState(screen, { text: 'something else entirely' }), 'pending');
 });
 
 // 2026-10-14, Pat from the phone: "FYI" with a screenshot sat on "sending" for
