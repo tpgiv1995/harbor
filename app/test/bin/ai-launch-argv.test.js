@@ -75,7 +75,9 @@ test('codex 0.163 panes disable the new default Daybreak picker on launch and re
 test('codex 0.164+ panes never open on the update screen, whose Enter is "Update now"', () => {
   for (const args of [
     ['--provider', 'codex', 'hello'],
-    ['--provider', 'codex', '--resume-id', 'synthetic-session', 'hello'],
+    // --recorded, as in the Daybreak test above: our resume reads the rollout's
+    // own settings and refuses a session id with no rollout on disk.
+    ['--provider', 'codex', '--resume-id', 'synthetic-session', '--recorded', 'hello'],
   ]) {
     for (const version of ['0.164.0', '0.165.0']) {
       const command = argv(args, { HARBOR_CODEX_VERSION: version });
