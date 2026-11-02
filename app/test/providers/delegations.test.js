@@ -268,7 +268,7 @@ test('final working and idle events yield exactly one finish after background cl
   const n = createNotifier({ getPaneState: () => state, notify: (...args) => toasts.push(args) });
   const event = (status) => n.onAgentStatusChanged({ data: { pane_id: 'p', agent_status: status, title: 'Parent' } });
   event('working'); event('idle'); event('working'); state = {}; n.onBackgroundChanged(); event('idle'); n._flushNow(); n.onBackgroundChanged(); n._flushNow();
-  assert.deepEqual(toasts, [['Harbor', 'Parent finished']]); n.destroy();
+  assert.deepEqual(toasts, [['Harbor', 'Parent finished', { paneId: 'p' }]]); n.destroy();
 });
 
 test('sidebar twins hide delegated history, retain live panes and expose search results', () => {
