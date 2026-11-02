@@ -648,7 +648,11 @@ function codexPaneControls({ version, codexHome }) {
   // run an unreviewed `npm install -g @openai/codex@latest`. Updates go through
   // Harbor's chip after review (cli-updates.js). The key gates both the startup
   // check and the screen (tui/src/updates.rs, 0.164.0 and 0.165.0 binaries).
-  if (semverAtLeast(version, [0, 164, 0])) controls.push('-c', 'check_for_update_on_startup=false');
+  // The pane controls above already set it for every Codex since
+  // CODEX_PANE_CONTROLS_SINCE, so it is only added here when they did not.
+  if (semverAtLeast(version, [0, 164, 0]) && !controls.includes('check_for_update_on_startup=false')) {
+    controls.push('-c', 'check_for_update_on_startup=false');
+  }
   const acks = codexHome ? codexMigrationAcks(codexHome, version) : null;
   if (acks) controls.push('-c', acks);
   return controls;
