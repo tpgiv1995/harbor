@@ -238,3 +238,51 @@ test('test runs count per owner and name the agent whose process runs them', () 
   assert.equal(warning.count, 4);
   assert.equal(team.warnings.filter((w) => w.kind === 'many-test-runs').length, 1, 'one loose run is not a crowd');
 });
+
+// A lead-and-reviewer team where authority is not who launched whom (the shape
+// Pat expected on 2026-11-02: reviewer -> lead -> everyone else). The lead
+// launches the reviewer's thread to ask for rulings, and another pane
+// delegated it once; the team file says who answers to whom.
+test('a declared top and everyone_else_reports_to give the team its own shape over launch evidence', () => {
+  const annex = '66666666-6666-4666-8666-666666666666';
+  const inputs = baseInputs();
+  inputs.panes.push(
+    { paneId: 'p2', sessionId: REVIEWER, provider: 'codex', pid: 170, cwd: 'C:\\dev\\lighthouse' },
+    { paneId: 'p3', sessionId: OTHER, provider: 'claude', pid: 180, cwd: 'C:\\dev\\lighthouse' },
+    { paneId: 'p4', sessionId: annex, provider: 'claude', pid: 190, cwd: 'C:\\dev\\lighthouse-annex' },
+  );
+  inputs.sessions[REVIEWER] = { title: 'Chief review thread', cwd: 'C:\\dev\\lighthouse', provider: 'codex' };
+  inputs.sessions[OTHER] = { title: 'Side audit', cwd: 'C:\\dev\\lighthouse', provider: 'claude' };
+  inputs.sessions[annex] = { title: 'Annex work', cwd: 'C:\\dev\\lighthouse-annex', provider: 'claude' };
+  // The lead resumed the reviewer's thread (a launch record), and the side pane delegated it once.
+  inputs.launches.push({ launch: 'L2', launcher: 'astra-run', pid: 210, childPid: 211, alive: true, startedMs: NOW - min(6), parent: { provider: 'claude', session: LEAD }, child: { provider: 'codex', session: REVIEWER, resume: true } });
+  inputs.delegations = [{ parentId: OTHER, agents: [{ sessionId: REVIEWER, provider: 'codex', state: 'running' }] }];
+  // A lane started before launches were recorded: only the process table knows it.
+  inputs.processes = [{ pid: 401, launcherPid: 400, launcher: 'claude-worker', provider: 'claude', sessionId: WORKER_B, cwd: 'C:\\dev\\.orch\\lighthouse\\rebuild-B1' }];
+  inputs.declarations = [{ file: 'C:\\dev\\lighthouse\\docs\\orchestration\\x\\TEAM.json', root: 'C:\\dev\\lighthouse', title: 'Release team', everyoneElse: 'lead', members: [
+    { name: 'chief', role: 'Technical owner', session: REVIEWER, top: true },
+    { name: 'lead', role: 'Runs the lanes', session: LEAD, reports_to: 'chief' },
+  ] }];
+  const team = deriveTeam(inputs, NOW);
+  const parentOf = (id) => team.members[id]?.parent || null;
+  assert.equal(parentOf(REVIEWER), null, 'the declared top has no line above it, whoever launched its thread');
+  assert.equal(parentOf(LEAD), REVIEWER, 'the lead reports to the chief');
+  assert.equal(team.members[LEAD].parentSource, 'declared');
+  assert.equal(parentOf(WORKER_A), LEAD, 'a lane the lead launched keeps its launch line');
+  assert.equal(team.members[WORKER_A].parentSource, 'launch');
+  assert.equal(parentOf(WORKER_B), LEAD, 'a lane with no record goes under the lead');
+  assert.equal(parentOf(OTHER), LEAD, 'so does any other agent of the project');
+  assert.equal(parentOf(annex), null, 'a sibling folder that only shares the prefix is another project');
+  assert.equal(team.warnings.some((w) => w.kind === 'undeclared'), false, 'everyone_else covers everyone: nothing to nag about');
+  assert.equal(team.members[REVIEWER].name, 'chief');
+  // Without the file, the same evidence draws the launch shape, as before.
+  const plain = { ...inputs, declarations: [] };
+  assert.equal(deriveTeam(plain, NOW).members[REVIEWER].parent, LEAD);
+});
+
+test('a worker with no title yet is named by its worktree folder, not "Untitled session"', () => {
+  const inputs = baseInputs({ launches: [], processes: [{ pid: 501, launcherPid: 500, launcher: 'claude-worker', provider: 'claude', cwd: 'C:\\dev\\.orch\\lighthouse\\rebuild-C3\\' }] });
+  const team = deriveTeam(inputs, NOW);
+  const worker = Object.values(team.members).find((m) => m.runMode === 'worker' && /rebuild-C3/.test(m.cwd || ''));
+  assert.equal(worker.name, 'rebuild-C3');
+});

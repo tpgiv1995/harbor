@@ -161,6 +161,33 @@ function createLaunchReader(file, { now = () => Date.now() } = {}) {
   };
 }
 
+// One TEAM.json, resolved. A member may name its session through a file the
+// team already keeps current instead of a fixed id: `session_file` is read
+// (relative to the project root) and its first session id is used, so a lead
+// that hands over to a new session moves on the chart when that file changes.
+// `everyone_else_reports_to` and `top` pass through to the model.
+async function readDeclaration(parsed, { file, root, readFile, onSessionFile = () => {} }) {
+  const members = [];
+  for (const entry of parsed.members) {
+    if (!entry || typeof entry !== 'object') continue;
+    const copy = { ...entry };
+    if (typeof entry.session_file === 'string' && entry.session_file && !entry.session) {
+      const target = path.resolve(root, entry.session_file);
+      onSessionFile(target);
+      try {
+        const match = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(await readFile(target));
+        if (match) copy.session = match[0].toLowerCase();
+      } catch { /* the file is missing: the member reads as declared but absent */ }
+    }
+    members.push(copy);
+  }
+  return {
+    file, root, title: parsed.title || null, members,
+    everyoneElse: typeof parsed.everyone_else_reports_to === 'string' ? parsed.everyone_else_reports_to : null,
+    notes: Array.isArray(parsed.notes) ? parsed.notes : [],
+  };
+}
+
 function createTeamProvider(options = {}) {
   const emitter = new EventEmitter();
   const bridge = options.bridge;
@@ -187,6 +214,9 @@ function createTeamProvider(options = {}) {
   let runsAt = 0;
   let codexUsageAt = 0;
   let declarations = [];
+  // Files a TEAM.json names with session_file (cdt-app's FABLE-SESSION.txt):
+  // a change to one re-reads the declarations, so a handover moves the line.
+  let sessionFiles = new Set();
   const declarationWatchers = new Map();
   let ended = [];
   let previousLive = new Map();
@@ -349,13 +379,17 @@ function createTeamProvider(options = {}) {
   // of live members only. Optional: no file is a normal state, never a nag.
   async function refreshDeclarations(roots) {
     const next = [];
+    const referenced = new Set();
     for (const root of roots) {
       const base = path.join(root, 'docs', 'orchestration');
       let names = [];
       try { names = await fsp.readdir(base); } catch { continue; }
       if (!declarationWatchers.has(base)) {
         try {
-          const watcher = watchImpl(base, { recursive: true }, (_event, name) => { if (!name || /TEAM\.json$/i.test(String(name))) { declarationsKey = ''; scheduleRecompute(); } });
+          const watcher = watchImpl(base, { recursive: true }, (_event, name) => {
+            const changed = String(name || '').replace(/\\/g, '/').toLowerCase();
+            if (!name || /team\.json$/.test(changed) || [...sessionFiles].some((file) => file.endsWith(changed))) { declarationsKey = ''; scheduleRecompute(); }
+          });
           watcher.on?.('error', () => {});
           declarationWatchers.set(base, watcher);
         } catch { declarationWatchers.set(base, null); }
@@ -364,10 +398,11 @@ function createTeamProvider(options = {}) {
         const file = path.join(base, name, 'TEAM.json');
         try {
           const parsed = JSON.parse(await fsp.readFile(file, 'utf8'));
-          if (parsed && Array.isArray(parsed.members)) next.push({ file, root, title: parsed.title || null, members: parsed.members, notes: Array.isArray(parsed.notes) ? parsed.notes : [] });
+          if (parsed && Array.isArray(parsed.members)) next.push(await readDeclaration(parsed, { file, root, readFile: (target) => fsp.readFile(target, 'utf8'), onSessionFile: (target) => referenced.add(target.replace(/\\/g, '/').toLowerCase()) }));
         } catch { /* absent or unreadable */ }
       }
     }
+    sessionFiles = referenced;
     if (JSON.stringify(next) !== JSON.stringify(declarations)) { declarations = next; scheduleRecompute(); }
   }
   let declarationsKey = '';
@@ -646,4 +681,4 @@ function createTeamProvider(options = {}) {
   };
 }
 
-module.exports = { createTeamProvider, createLaunchReader, defaultLaunchesFile, commandWords, wordValue, mungeCwd, canonicalProjectCwd, MAX_PINS, PIN_TTL_MS };
+module.exports = { createTeamProvider, readDeclaration, createLaunchReader, defaultLaunchesFile, commandWords, wordValue, mungeCwd, canonicalProjectCwd, MAX_PINS, PIN_TTL_MS };

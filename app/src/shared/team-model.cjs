@@ -25,15 +25,27 @@ const PLAN_NEAR_LIMIT_PCT = 90;
 const MANY_TEST_RUNS = 4;
 const USAGE_STALE_MS = 6 * 60 * 60 * 1000;
 
-// Which evidence wins when two sources name a different parent. A launch record
-// is the launcher's own statement and outranks everything; a declaration is a
-// person's statement; delegation links are proven by exact ids; the process
-// tree is only where the worker happens to run.
-const DIRECT_SOURCES = ['launch', 'declared', 'delegation', 'process'];
+// Which evidence wins when two sources name a different parent. A team's own
+// declaration (TEAM.json reports_to) wins: whoever STARTS a run is not always
+// its boss, and in a lead-and-reviewer team the lead routinely launches the
+// reviewer's thread to ask for a ruling (cdt-app, 2026-11-02: Fable resumes
+// Astra's thread, yet Astra directs Fable; Pat: "it should be the astra agent
+// -> fable agent -> all others"). Then the launcher's own record; delegation
+// links proven by exact ids; and the process tree, which is only where a
+// worker happens to run.
+const DIRECT_SOURCES = ['declared', 'launch', 'delegation', 'process'];
 
 function isUuidLike(value) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '')); }
 
 function slashes(value) { return String(value || '').replace(/\\/g, '/'); }
+
+// Inside a project root: the root itself or a folder below it, never a sibling
+// that merely shares its prefix (C:/dev/cdt-app-other is not C:/dev/cdt-app).
+function underRoot(folder, root) {
+  const a = slashes(folder).toLowerCase().replace(/\/+$/, '');
+  const b = slashes(root).toLowerCase().replace(/\/+$/, '');
+  return Boolean(b) && (a === b || a.startsWith(`${b}/`));
+}
 
 // A worktree, pool slot or orchestration scratch folder belongs to the project
 // it was cut from: `C:\dev\.orch\cdt-app\rebuild-DX1` and
@@ -282,9 +294,15 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     if (row.delegatedBy && members.has(id) && row.delegatedBy !== id && !row.parentThreadId) addEdge(row.delegatedBy, id, 'directs', 'delegation');
   }
 
-  // 5. TEAM.json: optional labels. Names, roles, reports_to, reviewed_by.
+  // 5. TEAM.json: optional. Names, roles, reports_to, reviewed_by; `top` for
+  // the member nobody above it on this chart directs; and
+  // everyone_else_reports_to, which puts every other agent of the project
+  // that has no line of its own under one member (a lead's lanes, without
+  // listing them one by one or rewriting the file at every relaunch).
   const declaredBy = new Map();
   const declaredAbsent = [];
+  const declaredTop = new Set();
+  const everyoneElse = [];
   for (const declaration of inputs.declarations || []) {
     const nameToId = new Map();
     for (const entry of declaration.members || []) {
@@ -302,7 +320,10 @@ function deriveTeam(inputs = {}, now = Date.now()) {
       if (entry.name) nameToId.set(entry.name, id);
       if (!id) { declaredAbsent.push({ name: entry.name || entry.session || 'member', role: entry.role || null, file: declaration.file }); continue; }
       declaredBy.set(id, { name: entry.name || null, role: entry.role || null, file: declaration.file, team: declaration.title || null });
+      if (entry.top === true) declaredTop.add(id);
     }
+    const leadId = declaration.everyoneElse ? nameToId.get(declaration.everyoneElse) : null;
+    if (leadId) everyoneElse.push({ leadId, root: slashes(declaration.root).toLowerCase() });
     for (const entry of declaration.members || []) {
       const id = nameToId.get(entry.name);
       if (!id) continue;
@@ -335,6 +356,9 @@ function deriveTeam(inputs = {}, now = Date.now()) {
       || (row.title ? cleanTitle(row.title) : null)
       || row.nickname
       || (row.firstPrompt ? cleanTitle(row.firstPrompt) : null)
+      // A worker only the process table knows has no title yet; its worktree
+      // folder (foundation-rebuild-L5) says more than "Untitled session".
+      || (member.runMode === 'worker' && member.cwd ? slashes(member.cwd).replace(/\/+$/, '').split('/').at(-1) || null : null)
       || (member.provider === 'cursor' ? 'Cursor worker' : 'Untitled session');
     member.role = declared?.role || null;
     member.declaredTeam = declared?.team || null;
@@ -375,7 +399,7 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     // ended: it started before the launchers recorded launches, so who
     // launched it is not on any record. Said plainly, never "by hand".
     member.parentUnknown = member.runMode === 'worker' && !candidates.length;
-    const onChart = candidates.find((edge) => members.has(edge.from) && members.get(edge.from).alive);
+    const onChart = declaredTop.has(member.id) ? null : candidates.find((edge) => members.has(edge.from) && members.get(edge.from).alive);
     member.parent = onChart?.from || null;
     member.parentSource = onChart?.source || null;
   }
@@ -388,6 +412,20 @@ function deriveTeam(inputs = {}, now = Date.now()) {
       seen.add(cursor.parent);
       cursor = members.get(cursor.parent);
       if (!cursor) break;
+    }
+  }
+
+  // everyone_else_reports_to: every live agent of that project with no line
+  // of its own, except the lead and anyone above the lead, reports to the lead.
+  for (const { leadId, root } of everyoneElse) {
+    if (!members.get(leadId)?.alive) continue;
+    const above = new Set([leadId]);
+    for (let cursor = members.get(leadId); cursor?.parent && !above.has(cursor.parent); cursor = members.get(cursor.parent)) above.add(cursor.parent);
+    for (const member of members.values()) {
+      if (!member.alive || member.parent || above.has(member.id) || declaredTop.has(member.id)) continue;
+      if (!underRoot(member.projectCwd, root)) continue;
+      member.parent = leadId;
+      member.parentSource = 'declared';
     }
   }
 
@@ -460,9 +498,10 @@ function deriveTeam(inputs = {}, now = Date.now()) {
   for (const absent of declaredAbsent) warn({ kind: 'declared-absent', memberIds: [], name: absent.name, file: absent.file });
   if ((inputs.declarations || []).length) {
     for (const declaration of inputs.declarations) {
+      if (declaration.everyoneElse) continue;
       const root = slashes(declaration.root).toLowerCase();
       for (const member of live) {
-        if (declaredBy.has(member.id) || !root || !slashes(member.projectCwd).toLowerCase().startsWith(root)) continue;
+        if (declaredBy.has(member.id) || !underRoot(member.projectCwd, root)) continue;
         if (member.parent && declaredBy.has(member.parent)) continue;
         warn({ kind: 'undeclared', memberIds: [member.id], file: declaration.file });
       }
