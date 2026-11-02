@@ -495,7 +495,18 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     warn({ kind: 'many-test-runs', memberIds: owner ? [owner] : [], count: runs.length, commands: runs.map((run) => run.label || run.cmdline || 'test') });
   }
   // Declared but absent, and live but undeclared when a team file exists.
-  for (const absent of declaredAbsent) warn({ kind: 'declared-absent', memberIds: [], name: absent.name, file: absent.file });
+  // Not before the pane list has arrived (Harbor just started): every pane
+  // member would read as absent for a moment, which is not news. One warning
+  // per file and name, however many root spellings read the file.
+  if (inputs.panesKnown !== false) {
+    const said = new Set();
+    for (const absent of declaredAbsent) {
+      const key = `${absent.file}|${absent.name}`;
+      if (said.has(key)) continue;
+      said.add(key);
+      warn({ kind: 'declared-absent', memberIds: [], name: absent.name, file: absent.file });
+    }
+  }
   if ((inputs.declarations || []).length) {
     for (const declaration of inputs.declarations) {
       if (declaration.everyoneElse) continue;

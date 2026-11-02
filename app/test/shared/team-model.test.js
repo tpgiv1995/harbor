@@ -286,3 +286,12 @@ test('a worker with no title yet is named by its worktree folder, not "Untitled 
   const worker = Object.values(team.members).find((m) => m.runMode === 'worker' && /rebuild-C3/.test(m.cwd || ''));
   assert.equal(worker.name, 'rebuild-C3');
 });
+
+test('a declared member is not called absent before the pane list arrives, and is called absent once per file', () => {
+  const declaration = { file: 'C:\\dev\\lighthouse\\docs\\orchestration\\x\\TEAM.json', root: 'C:\\dev\\lighthouse', members: [{ name: 'ghost', session: '99999999-9999-4999-8999-999999999999' }] };
+  const booting = deriveTeam({ ...baseInputs(), panes: [], panesKnown: false, declarations: [declaration] }, NOW);
+  assert.equal(booting.warnings.some((w) => w.kind === 'declared-absent'), false, 'nothing is absent while Harbor is still starting');
+  // The same file read under two spellings of one root.
+  const twice = deriveTeam({ ...baseInputs(), panesKnown: true, declarations: [declaration, { ...declaration, root: 'C:/dev/lighthouse' }] }, NOW);
+  assert.equal(twice.warnings.filter((w) => w.kind === 'declared-absent').length, 1);
+});

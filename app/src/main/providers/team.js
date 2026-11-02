@@ -473,6 +473,9 @@ function createTeamProvider(options = {}) {
     const helpers = {};
     for (const [id, fact] of Object.entries(facts)) if (fact.helpers?.length) helpers[id] = fact.helpers;
     const next = deriveTeam({
+      // Until the daemon has delivered its panes (the first moments after
+      // Harbor starts), a TEAM.json member that is a pane cannot match yet.
+      panesKnown: panes.length > 0,
       panes,
       launches: launches.list(),
       processes,
@@ -536,7 +539,12 @@ function createTeamProvider(options = {}) {
 
     const homes = [...new Set([...live.values()].map((member) => member.home).filter(Boolean))].filter((id) => !Object.hasOwn(usage, id));
     if (homes.length) refreshUsage(homes);
-    const roots = [...new Set([...live.values()].map((member) => member.projectCwd).filter(Boolean))].sort();
+    // One root per FOLDER: a lane's worktree maps to C:/dev/x while a pane says
+    // C:\dev\x, and two spellings read the same TEAM.json twice (two
+    // "declared but absent" warnings for one member, 2026-11-02).
+    const rootByKey = new Map();
+    for (const member of live.values()) if (member.projectCwd) rootByKey.set(member.projectCwd.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase(), member.projectCwd);
+    const roots = [...rootByKey.values()].sort();
     const rootsKey = JSON.stringify(roots);
     if (rootsKey !== declarationsKey) { declarationsKey = rootsKey; refreshDeclarations(roots).catch(() => {}); }
 
