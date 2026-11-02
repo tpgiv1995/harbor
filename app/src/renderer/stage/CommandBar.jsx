@@ -12,6 +12,7 @@ import { ComposeEditor } from './ComposeEditor.jsx';
 import { ImagePreview } from './ImagePreview.jsx';
 import { ConnectionsPanel } from './ConnectionsPanel.jsx';
 import connectionsModel from './connections-model.cjs';
+import turnMetaHelpers from './turn-meta.cjs';
 
 const {
   appendTranscription, attachmentsAfterSend, attachmentKind, fileAttachmentsFromPaths, imageAttachment,
@@ -188,6 +189,8 @@ export function CommandBar({
   ));
   const queuedItem = sendState?.queue?.items?.find((item) => item.status === 'queued') || null;
   const showStop = Boolean(pane?.paneId && (pending || header?.working));
+  // Typed messages waiting in Claude's queue: Stop is how they go now.
+  const sendNowHint = showStop ? turnMetaHelpers.queueSendNowHint(header?.queue) : null;
 
   // Retargeting the bar clears menu remnants; each session keeps its own draft.
   useEffect(() => {
@@ -1045,8 +1048,8 @@ export function CommandBar({
           <button
             type="button"
             className="send stop"
-            aria-label="Stop current turn"
-            title="Stop current turn (Esc)"
+            aria-label={sendNowHint ? sendNowHint.stopTitle : 'Stop current turn'}
+            title={sendNowHint ? sendNowHint.stopTitle : 'Stop current turn (Esc)'}
             onClick={onInterrupt}
           >
             <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
@@ -1099,8 +1102,8 @@ export function CommandBar({
             <span className="ustat-sep" aria-hidden="true">·</span>
             <span className="ustat-title" title={displayTitle}>{displayTitle}</span>
             <span className="ustat-sep" aria-hidden="true">·</span>
-            <span className={`ustat-phase${phaseText || chainText ? '' : ' empty'}`} title={phaseText || chainText || undefined}>
-              {phaseText || chainText ||' '}
+            <span className={`ustat-phase${phaseText || chainText || sendNowHint ? '' : ' empty'}`} title={phaseText || chainText || sendNowHint?.stopTitle || undefined}>
+              {phaseText || chainText || sendNowHint?.status || ' '}
             </span>
             {queuedItem ? (
               <span className="queued-mini" title={queuedItem.textPreview}>

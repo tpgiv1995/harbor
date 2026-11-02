@@ -1032,7 +1032,23 @@ function createSessionSend(deps) {
   // Busy Claude sessions persist accepted input as a queue event rather than
   // a normal user turn. Match it the same way the transcript renderer pairs
   // enqueue/queued_command records: whitespace-normalized human text.
-  const confirmsQueuedDelivery = (chunk, text) => {
+  //
+  // A send that carried IMAGES is queued as "[Image #8] <text>": Claude writes
+  // each pasted image's chip into the message. Exact equality therefore missed
+  // every mid-turn image send, which read "could not confirm the message
+  // reached the session" until Claude absorbed it minutes later (2026-11-02,
+  // Pat's screenshot to this session). Leading chips are set aside only when
+  // the send attached exactly that many images; the rest must still be equal.
+  const LEADING_IMAGE_CHIPS_RE = /^((?:\[Image #\d+\]\s*)+)/;
+  const queuedTextMatches = (content, expected, images = 0) => {
+    const got = String(content ?? '').replace(/\s+/g, ' ').trim();
+    if (got === expected) return true;
+    if (!(images > 0)) return false;
+    const chips = got.match(LEADING_IMAGE_CHIPS_RE);
+    return Boolean(chips) && (chips[1].match(/\[Image #\d+\]/g) || []).length === images
+      && got.slice(chips[1].length).trim() === expected;
+  };
+  const confirmsQueuedDelivery = (chunk, text, images = 0) => {
     const expected = String(text ?? '').replace(/\s+/g, ' ').trim();
     if (!expected) return false;
     for (const line of String(chunk || '').split('\n')) {
@@ -1041,7 +1057,7 @@ function createSessionSend(deps) {
         const obj = JSON.parse(line);
         if (obj.type === 'queue-operation'
           && obj.operation === 'enqueue'
-          && String(obj.content ?? '').replace(/\s+/g, ' ').trim() === expected) return true;
+          && queuedTextMatches(obj.content, expected, images)) return true;
       } catch { /* an incomplete/non-JSON line cannot confirm delivery */ }
     }
     return false;
@@ -1065,7 +1081,7 @@ function createSessionSend(deps) {
   const confirmDelivery = async (
     sessionId,
     text,
-    { timeoutMs, optional = false, prepared = null } = {},
+    { timeoutMs, optional = false, prepared = null, images = 0 } = {},
   ) => {
     if (prepared?.skip) return true;
     if (process.env.HARBOR_SKIP_DELIVERY_CONFIRM === '1') return true;
@@ -1088,7 +1104,7 @@ function createSessionSend(deps) {
     if (preSize == null) {
       try { preSize = (await fs.stat(transcriptPath)).size; } catch { preSize = 0; }
     }
-    const scan = transcriptScanner(transcriptPath, preSize, text);
+    const scan = transcriptScanner(transcriptPath, preSize, text, images);
     const deadline = Date.now() + budget;
     while (Date.now() < deadline) {
       await sleep(500);
@@ -1122,10 +1138,10 @@ function createSessionSend(deps) {
   // been kept whole (an image) falls back to the old needle test.
   const recordText = (content) => (typeof content === 'string' ? content
     : Array.isArray(content) ? content.map((b) => (b && (b.type === 'text' || b.type === 'input_text') ? b.text || '' : '')).join('\n') : '');
-  const recordConfirms = (rec, line, needle, text) => {
+  const recordConfirms = (rec, line, needle, text, images = 0) => {
     const whole = squashSpace(text);
     if (!rec || typeof rec !== 'object') return line.includes(needle);
-    if (rec.type === 'queue-operation') return confirmsQueuedDelivery(line, text);
+    if (rec.type === 'queue-operation') return confirmsQueuedDelivery(line, text, images);
     if (rec.type === 'assistant' || rec.message?.role === 'assistant' || rec.role === 'assistant') return false;
     if (rec.type === 'event_msg') {
       return rec.payload?.type === 'user_message' && Boolean(whole) && squashSpace(rec.payload.message).includes(whole);
@@ -1138,11 +1154,13 @@ function createSessionSend(deps) {
       if (Array.isArray(content) && content.some((b) => b?.type === 'tool_result')) return false;
       return line.includes(needle) || (Boolean(whole) && squashSpace(recordText(content)).includes(whole));
     }
-    if (rec.type === 'attachment') return rec.attachment?.type === 'queued_command' && Boolean(whole) && squashSpace(rec.attachment.prompt).includes(whole);
+    // The prompt is a LIST of parts (text, then each image) on 2.1.316; reading
+    // it as one string never matched an image send.
+    if (rec.type === 'attachment') return rec.attachment?.type === 'queued_command' && Boolean(whole) && squashSpace(recordText(rec.attachment.prompt)).includes(whole);
     // A shape this does not know (another provider's store): the old rule.
     return line.includes(needle);
   };
-  const transcriptScanner = (transcriptPath, from, text) => {
+  const transcriptScanner = (transcriptPath, from, text, images = 0) => {
     const needle = confirmNeedle(text);
     const decoder = new StringDecoder('utf8');
     let offset = from;
@@ -1167,7 +1185,7 @@ function createSessionSend(deps) {
           if (!line.trim() || (!line.includes(needle) && !line.includes('queue-operation') && !line.includes('user_message') && !line.includes('"user"'))) continue;
           let rec = null;
           try { rec = JSON.parse(line); } catch { rec = null; } // the cut tail of a giant line
-          if (recordConfirms(rec, line, needle, text)) return true;
+          if (recordConfirms(rec, line, needle, text, images)) return true;
         }
         if (carry.length > SCAN_CARRY_MAX) {
           // A line too large to keep whole (an image): judge what is held of it
@@ -2906,11 +2924,11 @@ function createSessionSend(deps) {
             const checkingSeq = statusSeq.get(sessionId);
             reconcileDelivery(sessionId, trimmed, slash, confirmation, () => {
               if (statusSeq.get(sessionId) === checkingSeq) status(sessionId, 'sent', normalizedNote || undefined);
-            }, checkingSeq);
+            }, checkingSeq, imagePaths.length);
             return { ok: true, paneId: target.paneId, delivery: 'confirming' };
           }
           status(sessionId, 'sent', normalizedNote || undefined);
-          if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation);
+          if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, null, imagePaths.length);
           return { ok: true, paneId: target.paneId, delivery: trimmed ? 'confirming' : 'delivered' };
         } catch (error) {
           // A pane at a dead shell prompt is a dead SESSION holding a leftover
@@ -2994,16 +3012,16 @@ function createSessionSend(deps) {
     const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
     await deliver(fresh.paneId, fresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
     status(sessionId, 'sent');
-    if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation);
+    if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, null, imagePaths.length);
     return { ok: true, paneId: fresh.paneId, resumed: true, delivery: trimmed ? 'confirming' : 'delivered' };
   };
 
   // Confirmation is deliberately detached from the user-visible send. A pty
   // write makes the message appear sent immediately; transcript reconciliation
   // can still replace that optimism with an honest error if delivery failed.
-  const reconcileDelivery = (sessionId, text, optional, confirmation, onConfirmed = null, guardSeq = null) => {
+  const reconcileDelivery = (sessionId, text, optional, confirmation, onConfirmed = null, guardSeq = null, images = 0) => {
     Promise.resolve(confirmation).then((prepared) => (
-      confirmDelivery(sessionId, text, { optional, prepared })
+      confirmDelivery(sessionId, text, { optional, prepared, images })
     )).then((confirmed) => {
       if (confirmed && onConfirmed) onConfirmed();
     }).catch((error) => {
@@ -3355,6 +3373,7 @@ function createSessionSend(deps) {
     readPermissionMode,
     cyclePermissionMode,
     confirmNeedle,
+    confirmDelivery, // exposed for the transcript-record specs
     getQueueState,
     cancelQueued,
   };

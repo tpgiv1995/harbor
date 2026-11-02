@@ -26,6 +26,8 @@ const { pastTense, progressive } = require('./plain-english.js');
 const MAX_BLOCKS = 240;
 const MAX_IMAGE_BLOCKS = 32;
 const MAX_INITIAL_BYTES = 1024 * 1024;
+// An open slower than this is reported to the perf log (see onOpenTiming).
+const SLOW_OPEN_MS = 2000;
 // Windowed delivery (MOBILE-3): a phone on cellular cannot take the full
 // desktop payload. A windowed open trims what gets EMITTED to the client to
 // the most recent N blocks; the live parser and its tailing offset are
@@ -1332,6 +1334,12 @@ class TranscriptParser {
       const existing = this.queuedByText.get(normalizeQueuedKey(userTextFor(text)?.text || ''));
       if (existing) {
         attachImages(existing, images);
+        // The bubble was drawn from its enqueue, often minutes earlier: a
+        // message queued mid-turn gets its queued_command (the one record that
+        // carries the IMAGES) only when Claude absorbs it. Without reporting the
+        // block changed, the window kept the text-only bubble and Pat's
+        // screenshot never appeared (2026-11-02, "now cant even see images?").
+        if (this.blocks.includes(existing) && !changed.includes(existing.key)) changed.push(existing.key);
       } else {
         this.push({ kind: 'user', text: userTextFor(text)?.text || '', images, ts, queued: true });
       }
@@ -1913,6 +1921,8 @@ function createTranscriptProvider(options = {}) {
   const contextCacheDir = options.contextCacheDir
     ?? path.join(os.homedir(), '.cache', 'harbor', 'context');
   const watchFactory = options.watchFactory || ((target, listener) => watchPath(target, listener));
+  // Where the Claude and Codex stores live; tests point it at a scratch home.
+  const providerHome = options.home || os.homedir();
   // The /proc default cannot answer on Windows: every read throws, the catch
   // said processAlive=false, and a LIVE outside session rendered as killed
   // (which is the exact "Resume offered on an alive session" two-writer trap
@@ -2258,7 +2268,49 @@ function createTranscriptProvider(options = {}) {
   // poller ran on with nothing able to close them. An open that finds another
   // still initializing waits for it, then takes a reference on that entry.
   const initializing = new Map(); // sessionId -> promise of the first opener's result
+  // A WINDOW STUCK ON "No transcript yet" (2026-11-01 and 11-02, sessions
+  // 87bf23de and 0cbe1ef6, not reproduced): the renderer shows that text only
+  // while its last open came back "path unknown" and no later open has
+  // finished, so a stuck window means one open ran for minutes. Which step
+  // (waiting on another open, the history worker's lookup, the project scan,
+  // the first read) is not recorded anywhere, so every open slower than
+  // SLOW_OPEN_MS, the first failure per session, and the success that ends a
+  // run of failures (with how long the window was without its conversation)
+  // are reported through options.onOpenTiming into the perf log.
+  const onOpenTiming = typeof options.onOpenTiming === 'function' ? options.onOpenTiming : null;
+  const failingSince = new Map(); // sessionId -> { at, failures }
   const openTranscript = async (sessionId, hints = {}) => {
+    const started = Date.now();
+    const steps = {};
+    let result;
+    try {
+      result = await openTranscriptOnce(sessionId, hints, steps);
+      return result;
+    } finally {
+      const ms = Date.now() - started;
+      const ok = Boolean(result && result.ok !== false);
+      const failing = failingSince.get(sessionId);
+      let report = ms >= SLOW_OPEN_MS;
+      if (!ok) {
+        if (failing) failing.failures += 1;
+        else {
+          // A window closed while still failing never succeeds; keep the map small.
+          if (failingSince.size >= 200) failingSince.delete(failingSince.keys().next().value);
+          failingSince.set(sessionId, { at: started, failures: 1 });
+          report = true;
+        }
+      } else if (failing) {
+        failingSince.delete(sessionId);
+        steps.afterFailures = failing.failures;
+        steps.withoutConversationMs = Date.now() - failing.at;
+        report = true;
+      }
+      if (onOpenTiming && report) {
+        try { onOpenTiming({ sessionId, ok, ms, reason: result?.reason || (result ? null : 'threw'), steps }); } catch { /* logging never breaks an open */ }
+      }
+    }
+  };
+  const openTranscriptOnce = async (sessionId, hints, steps) => {
     const existing = open.get(sessionId);
     if (existing) {
       existing.refs += 1;
@@ -2268,10 +2320,12 @@ function createTranscriptProvider(options = {}) {
     }
     const inFlight = initializing.get(sessionId);
     if (inFlight) {
+      const waitStarted = Date.now();
       await inFlight.catch(() => null);
-      return openTranscript(sessionId, hints);
+      steps.waitedMs = (steps.waitedMs || 0) + (Date.now() - waitStarted);
+      return openTranscriptOnce(sessionId, hints, steps);
     }
-    const first = initializeTranscript(sessionId, hints);
+    const first = initializeTranscript(sessionId, hints, steps);
     initializing.set(sessionId, first);
     try {
       return await first;
@@ -2280,11 +2334,32 @@ function createTranscriptProvider(options = {}) {
     }
   };
 
-  const initializeTranscript = async (sessionId, hints) => {
+  const initializeTranscript = async (sessionId, hints, steps = {}) => {
     let meta = null;
-    try { meta = await getSessionMeta(sessionId); } catch { meta = null; }
+    let transcriptPath = null;
+    // A Claude window that knows its cwd can name its file without the history
+    // worker: the path is the cwd munged into a project dir plus the id. The
+    // worker's lookup for a session it has not indexed yet runs a full index
+    // refresh, queued behind every other request on that one thread, so a NEW
+    // session (the only kind it has not indexed) waited on the slowest path.
+    if ((!hints.provider || hints.provider === 'claude') && hints.cwd) {
+      const direct = transcriptPathFor({ provider: 'claude', sessionId, cwd: hints.cwd, home: providerHome });
+      const t = Date.now();
+      try { await fsp.access(direct); transcriptPath = direct; } catch { /* not under that cwd (yet) */ }
+      steps.directMs = Date.now() - t;
+    }
+    if (!transcriptPath) {
+      let t = Date.now();
+      try { meta = await getSessionMeta(sessionId); } catch { meta = null; }
+      steps.metaMs = Date.now() - t;
+      t = Date.now();
+      transcriptPath = meta?.path || await findProviderTranscript({
+        provider: hints.provider || meta?.provider || 'claude', sessionId, cwd: hints.cwd || meta?.cwd, home: providerHome,
+      });
+      steps.findMs = Date.now() - t;
+    }
     const provider = hints.provider || meta?.provider || 'claude';
-    const transcriptPath = meta?.path || await findProviderTranscript({ provider, sessionId, cwd: hints.cwd || meta?.cwd });
+    const readStarted = Date.now();
     if (!transcriptPath) return { ok: false, sessionId, reason: 'transcript path unknown', provider };
     const entry = {
       sessionId,
@@ -2344,6 +2419,7 @@ function createTranscriptProvider(options = {}) {
     entry.pollTimer = setInterval(() => scheduleRead(entry), 5000);
     entry.pollTimer.unref?.();
     await readNew(entry);
+    steps.readMs = Date.now() - readStarted;
     if (entry.needsReplace) {
       // Empty/absent file: still tell the renderer the tile is open.
       entry.needsReplace = false;

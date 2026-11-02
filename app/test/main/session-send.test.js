@@ -4283,3 +4283,43 @@ test('round 4: an image-only Codex send is not stopped by the text check', async
   assert.ok(typed(h).includes('\r'), `Enter pressed: ${JSON.stringify(typed(h))}`);
   assert.equal(pane.echoed.length, 1);
 });
+
+// 2026-11-02, Pat's screenshot into this very session: "failed: could not
+// confirm the message reached the session" on a message that had arrived. A
+// mid-turn send with a picture is queued as "[Image #8] <text>", and the
+// queued_command that carries the picture stores its prompt as a list of parts.
+test('2026-11-02: a queued image send confirms by its enqueue, and only with the images it sent', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const text = 'i dont have a way to send messages now that are queued';
+  await fsp.writeFile(file, `${JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content: `[Image #8] ${text}` })}\n`);
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const prepared = { path: file, preSize: 0 };
+  assert.equal(await send.confirmDelivery('s', text, { prepared, images: 1, timeoutMs: 1200 }), true);
+  // A text-only send is not confirmed by someone's message that adds a picture.
+  await assert.rejects(send.confirmDelivery('s', text, { prepared, images: 0, timeoutMs: 1200 }), (e) => e.code === 'UNCONFIRMED');
+  // Nor by a chip count that is not what it sent.
+  await assert.rejects(send.confirmDelivery('s', text, { prepared, images: 2, timeoutMs: 1200 }), (e) => e.code === 'UNCONFIRMED');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('2026-11-02: the queued_command that carries a picture confirms its send (its prompt is a list of parts)', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const text = 'now cant even see images? dude clean your shit up';
+  await fsp.writeFile(file, `${JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: [
+    { type: 'text', text: `[Image #9] ${text}` },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } },
+  ], origin: { kind: 'human' } } })}\n`);
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  // The 60-character needle would find it too; a different message must not.
+  assert.equal(await send.confirmDelivery('s', text, { prepared: { path: file, preSize: 0 }, images: 1, timeoutMs: 1200 }), true);
+  await assert.rejects(send.confirmDelivery('s', 'a different message entirely', { prepared: { path: file, preSize: 0 }, images: 1, timeoutMs: 1200 }), (e) => e.code === 'UNCONFIRMED');
+  await fsp.rm(dir, { recursive: true, force: true });
+});

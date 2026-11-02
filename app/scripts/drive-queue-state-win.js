@@ -137,6 +137,10 @@ const facts = `(() => {
     states: [...w.querySelectorAll('.conv-queue-state')].map((e) => ({ text: e.textContent.trim(), waiting: e.classList.contains('waiting') })),
     bubbles: w.querySelectorAll('.conv-user').length,
     metaOverflow: meta.scrollWidth > meta.clientWidth + 1,
+    // The command bar (2026-11-02): typed messages waiting means Stop is how
+    // they go now, and the bar says so.
+    barPhase: document.querySelector('.ubar-status .ustat-phase')?.textContent.trim() || null,
+    stopTitle: document.querySelector('button.send.stop')?.title || null,
   };
 })()`;
 
@@ -167,6 +171,8 @@ async function drive() {
     const wide = await cdp.eval(facts);
     await cdp.shot('01-window-1920');
     await cdp.shotOf('02-header-1920', `.win2[data-session-id="${SESSION}"] .wh`);
+    await cdp.shotOf('06-command-bar-1920', '.ubar-status', 4).catch(() => {});
+    await cdp.shotOf('07-stop-button-1920', 'button.send.stop', 8).catch(() => {});
     await cdp.eval(`(() => { const b = document.querySelectorAll('.win2[data-session-id="${SESSION}"] .conv-user'); b[b.length - 1].scrollIntoView({ block: 'end' }); })()`);
     await sleep(300);
     await cdp.shotOf('03-conversation-1920', `.win2[data-session-id="${SESSION}"] .conv-scroll, .win2[data-session-id="${SESSION}"] .conv`, 0).catch(() => cdp.shot('03-conversation-1920'));
@@ -195,6 +201,8 @@ async function drive() {
       assert.deepEqual(wide.subLines, ['7 tools so far · Measuring free space on C:'], 'the running sub-agent says what it is doing, even in a collapsed group');
       assert.equal(wide.metaOverflow, false, 'the header does not overflow at 1920');
       assert.equal(narrow.metaOverflow, false, 'the header does not overflow at a grid cell width');
+      assert.equal(wide.barPhase, "2 messages wait in Claude's queue. Stop sends them now", `the bar names Stop as the way to send them now: ${JSON.stringify(wide.barPhase)}`);
+      assert.match(wide.stopTitle || '', /reads your 2 queued messages now \(Esc\)/, 'the Stop button says what it does to the queue');
       assert.deepEqual(cdp.errors, [], 'no page errors');
     }
     console.log(JSON.stringify({ status: EXPECT ? 'PASS' : 'RECORDED', screenshots: OUT }));

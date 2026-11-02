@@ -2129,3 +2129,103 @@ test('sub-agent progress: a meta file first read without its Agent call is read 
   await readSubagentProgress(entry);
   assert.equal(p.delegations.get('toolu_m').sub.tools, 1);
 });
+
+// A WINDOW STUCK ON "No transcript yet" (2026-11-02, session 0cbe1ef6, not
+// reproduced): a new session's open waited on the history worker, whose lookup
+// for an unindexed id is a full refresh. A Claude window that knows its cwd now
+// finds its file directly, and every slow or failed open leaves its step timings.
+test('a claude open with a cwd hint finds its file without the history lookup', async () => {
+  const home = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-home-'));
+  const cwd = 'C:\\dev\\probe-direct';
+  const id = '3c1f0d2e-1111-4222-8333-444455556666';
+  const dir = path.join(home, '.claude', 'projects', 'C--dev-probe-direct');
+  await fsp.mkdir(dir, { recursive: true });
+  writeLines(path.join(dir, `${id}.jsonl`), [userLine('hello')], 'w');
+  let lookups = 0;
+  const provider = createTranscriptProvider({ home, getSessionMeta: async () => { lookups += 1; return null; } });
+  try {
+    const res = await provider.open(id, { provider: 'claude', cwd });
+    assert.equal(res.ok, true);
+    assert.equal(lookups, 0, 'the history worker is not asked when the derived path exists');
+  } finally {
+    provider.closeAll();
+    await fsp.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a failed open is reported once, and the open that ends the failures says how long the window waited', async () => {
+  const home = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-home-'));
+  const cwd = 'C:\\dev\\probe-late';
+  const id = '3c1f0d2e-2222-4222-8333-444455556666';
+  const reports = [];
+  const provider = createTranscriptProvider({ home, getSessionMeta: async () => null, onOpenTiming: (r) => reports.push(r) });
+  try {
+  assert.equal((await provider.open(id, { provider: 'claude', cwd })).ok, false);
+  assert.equal((await provider.open(id, { provider: 'claude', cwd })).ok, false);
+  assert.equal(reports.length, 1, 'only the first failure is reported');
+  assert.equal(reports[0].ok, false);
+  assert.equal(reports[0].reason, 'transcript path unknown');
+  assert.ok(Number.isFinite(reports[0].steps.metaMs) && Number.isFinite(reports[0].steps.findMs));
+  const dir = path.join(home, '.claude', 'projects', 'C--dev-probe-late');
+  await fsp.mkdir(dir, { recursive: true });
+  writeLines(path.join(dir, `${id}.jsonl`), [userLine('hello')], 'w');
+  assert.equal((await provider.open(id, { provider: 'claude', cwd })).ok, true);
+  assert.equal(reports.length, 2);
+  assert.equal(reports[1].ok, true);
+  assert.equal(reports[1].steps.afterFailures, 2);
+  assert.ok(reports[1].steps.withoutConversationMs >= 0);
+  assert.ok(Number.isFinite(reports[1].steps.readMs));
+  // A healthy reopen of the same session is not reported again.
+  assert.equal((await provider.open(id, { provider: 'claude', cwd })).ok, true);
+  assert.equal(reports.length, 2);
+  } finally {
+    provider.closeAll();
+    await fsp.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('an open that waits on another slow open reports the wait', async () => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-'));
+  const file = path.join(dir, 's.jsonl');
+  writeLines(file, [userLine('x')], 'w');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const reports = [];
+  const provider = createTranscriptProvider({
+    getSessionMeta: async () => { await gate; return { path: file }; },
+    onOpenTiming: (r) => reports.push(r),
+  });
+  try {
+  const first = provider.open('s');
+  const second = provider.open('s');
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  release();
+  await Promise.all([first, second]);
+  const waited = reports.find((r) => Number.isFinite(r.steps.waitedMs));
+  assert.ok(waited && waited.steps.waitedMs >= 2000, 'the second opener names the wait');
+  assert.ok(reports.some((r) => r.steps.metaMs >= 2000), 'the first opener names the slow lookup');
+  } finally {
+    release();
+    provider.closeAll();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// 2026-11-02, Pat: "now cant even see images?". A message queued mid-turn is
+// drawn from its enqueue; its picture arrives minutes later on the queued_command
+// Claude writes when it absorbs the message. That bubble must be reported
+// changed, or the window keeps the text-only version it drew first.
+test('a queued bubble that gets its picture later is reported changed', () => {
+  const p = new TranscriptParser('claude');
+  const text = '[Image #8] i dont have a way to send messages now that are queued';
+  p.applyLine({ type: 'queue-operation', operation: 'enqueue', timestamp: TS, content: text });
+  const bubble = p.blocks.find((b) => b.kind === 'user');
+  assert.ok(bubble && !bubble.images);
+  p.applyLine({ type: 'queue-operation', operation: 'remove', timestamp: TS, content: text });
+  const changed = p.applyLine({ type: 'attachment', timestamp: TS, attachment: { type: 'queued_command', origin: { kind: 'human' }, prompt: [
+    { type: 'text', text },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: TINY_PNG_B64 } },
+  ] } });
+  assert.equal(bubble.images?.length, 1);
+  assert.ok(changed.includes(bubble.key), 'the window is told to redraw the bubble with its picture');
+});

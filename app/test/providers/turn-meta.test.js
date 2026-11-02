@@ -96,3 +96,13 @@ test('subagentLabel: what a sub-agent is doing, then what it used', () => {
   assert.equal(subagentLabel({ running: true, tools: 0, now: null, partial: true }), 'Working (its earlier steps were too many to count)');
   assert.equal(subagentLabel({ running: false, finished: true, tools: 0, now: null, partial: true }), 'Done (its steps were too many to count)');
 });
+
+test('queueSendNowHint: only typed messages, and it names Stop as the way to send them now', () => {
+  const { queueSendNowHint } = require('../../src/renderer/stage/turn-meta.cjs');
+  assert.equal(queueSendNowHint(null), null);
+  assert.equal(queueSendNowHint({ waiting: 2, from: { task: 2 } }), null, 'background results alone get no hint');
+  assert.equal(queueSendNowHint({ waiting: 1, from: { you: 1 } }).status, "1 message waits in Claude's queue. Stop sends it now");
+  const two = queueSendNowHint({ waiting: 3, from: { you: 1, peer: 1, task: 1 } });
+  assert.equal(two.status, "2 messages wait in Claude's queue. Stop sends them now");
+  assert.match(two.stopTitle, /reads your 2 queued messages now \(Esc\)/);
+});

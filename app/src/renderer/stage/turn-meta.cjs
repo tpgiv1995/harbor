@@ -62,6 +62,24 @@ function queueChip(queue, { formatTime = (ms) => new Date(ms).toLocaleTimeString
   };
 }
 
+// What the command bar says while typed messages wait in Claude's queue
+// (2026-11-02, Pat: "i dont have a way to send messages now that are queued").
+// Claude reads its queue only between steps, so a long step (three sub-agents,
+// eight minutes) holds them. Measured on 2.1.316 in a throwaway session: Esc,
+// which is the bar's Stop button, ends the current step and Claude takes the
+// queued message at once (answered in 3 s); Enter on an empty box does nothing.
+// Background results count in the header chip but not here: Stop is for Pat's
+// own messages and other sessions' messages.
+function queueSendNowHint(queue) {
+  const from = queue?.from || {};
+  const n = (Number(from.you) || 0) + (Number(from.peer) || 0);
+  if (n <= 0) return null;
+  return {
+    status: `${plural(n, 'message waits', 'messages wait')} in Claude's queue. Stop sends ${n === 1 ? 'it' : 'them'} now`,
+    stopTitle: `Stop Claude's current step so it reads your ${plural(n, 'queued message', 'queued messages')} now (Esc)`,
+  };
+}
+
 // "↓ 2.4k" (the CLI's own spelling) back to 2400, or null.
 function parseTokenCount(text) {
   const match = /([\d.,]+)\s*([kKmM]?)/.exec(String(text || ''));
@@ -104,4 +122,4 @@ function subagentLabel(sub) {
   return n ? `Used ${count(n)}` : null;
 }
 
-module.exports = { formatTokens, formatDuration, turnMetaLabel, parseTokenCount, liveMeterLabel, queueStateLabel, queueChip, subagentLabel };
+module.exports = { formatTokens, formatDuration, turnMetaLabel, parseTokenCount, liveMeterLabel, queueStateLabel, queueChip, queueSendNowHint, subagentLabel };

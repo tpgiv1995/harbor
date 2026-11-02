@@ -2711,6 +2711,11 @@ app.whenReady().then(async () => {
   transcriptProvider = createTranscriptProvider({
     getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
     contextCacheDir: contextDir,
+    // Slow and failed transcript opens, with the step that took the time: the
+    // evidence for the next window stuck on "No transcript yet".
+    onOpenTiming: ({ sessionId, ok, ms, reason, steps }) => appendPerfLine({
+      kind: 'transcript-open', ms, at: new Date().toISOString(), context: { sessionId, ok, reason, ...steps },
+    }),
   });
   transcriptProvider.emitter.on('update', (payload) => {
     sendToRenderer('transcript:update', payload);
