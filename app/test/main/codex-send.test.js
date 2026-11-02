@@ -113,7 +113,10 @@ test('a Codex send with no composer on screen and no parsed dialog is refused, f
 
   const h = harness();
   const send = createSessionSend(h.deps);
-  h.state.onInput = (bytes) => { if (bytes === '\r') h.state.screen = withEcho('first'); };
+  h.state.onInput = (bytes) => {
+    if (bytes.includes('first')) h.state.screen = withComposer('first');
+    if (bytes === '\r') h.state.screen = withEcho('first');
+  };
   await send.send({ sessionId: 'codex-thread-1', text: 'first', provider: 'codex', pane });
   assert.ok(h.sent.length, 'the first send was delivered');
   h.sent.length = 0;
@@ -188,7 +191,8 @@ test('a Codex image is pasted as its PATH and waits for the composer\'s own [Ima
   assert.equal(composerImageCount(sentBefore), 0);
   const send = createSessionSend(h.deps);
   await send.send({ sessionId: 'pane:codex-img', text: 'what is this', images: ['/tmp/shot.png'], provider: 'codex', pane });
-  assert.equal(h.sent[0], '\x1b[200~/tmp/shot.png\x1b[201~');
+  // Quoted, as Codex 0.165 attaches a bare or quoted path (Pat's pasteCodexImage).
+  assert.equal(h.sent[0], '\x1b[200~"/tmp/shot.png"\x1b[201~');
   assert.ok(!h.sent.includes('\x16') && !h.sent.includes('\x1bv'), 'no Claude paste chord');
 });
 
@@ -350,7 +354,10 @@ test('an idle Codex screen whose answer reads like a Claude prompt is not blocke
   const send = createSessionSend(h.deps);
   assert.equal(await send.getMenu({ pane }), null, 'no fallback panel over an idle session');
   assert.equal(await send.getMenu({ pane, blockedHint: true }), null, 'a stale blocked hint does not raise one either');
-  h.state.onInput = (bytes) => { if (bytes === '\r') h.state.screen = withEcho('hello'); };
+  h.state.onInput = (bytes) => {
+    if (bytes.includes('hello')) h.state.screen = idleQuoting().replace('› Ask Codex to do anything', '› hello');
+    if (bytes === '\r') h.state.screen = withEcho('hello');
+  };
   await send.send({ sessionId: 'codex-thread-1', text: 'hello', provider: 'codex', pane });
   assert.ok(h.sent.length, 'the send was typed');
   assert.equal(h.sent.at(-1), '\r');
