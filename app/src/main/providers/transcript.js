@@ -815,9 +815,27 @@ function isPeerMessage(raw) {
   return /^<cross-session-message[\s>]/.test(String(raw ?? '').trim());
 }
 
+// The sender's name and the message, out of the wrapper (2026-11-01, Pat: "clear
+// issues communicating between sessions"). Every peer bubble used to read
+// `<cross-session-message from="uds:\\.\pipe\LOCAL\cc-msg-…" from-name="…"
+// from-mode="prompting">` before a word of the message, so a window full of
+// session traffic was mostly pipe names. The name is the session's own label
+// (from-name); the message is drawn as any other.
+function peerMessageParts(raw) {
+  const match = String(raw ?? '').trim().match(/^<cross-session-message\b([^>]*)>([\s\S]*?)<\/cross-session-message>$/);
+  if (!match) return null;
+  const from = match[1].match(/\bfrom-name="([^"]*)"/)?.[1]?.trim() || null;
+  return { from, body: match[2].trim() };
+}
+
 function userTextFor(raw) {
   const text = String(raw ?? '').trim();
   if (!text) return null;
+  const peer = peerMessageParts(text);
+  if (peer) {
+    const inner = userTextFor(peer.body);
+    return inner ? { ...inner, peerFrom: peer.from } : null;
+  }
   if (text.startsWith('<local-command-caveat>')) return null;
   if (text.startsWith('<local-command-stdout>')) return null;
   // Background-task events and their system-notification framing are
@@ -924,6 +942,7 @@ class TranscriptParser {
     this.provider = provider;
     this.blocks = [];
     this.pendingTools = new Map(); // tool_use id -> action block
+    this.delegations = new Map(); // Agent/Task tool_use id -> its action block (subagent progress)
     // Codex code mode: command text -> the action rows that name it and have
     // not yet seen its CommandExecution. See applyCodexLine.
     this.codexNamed = new Map();
@@ -944,6 +963,9 @@ class TranscriptParser {
     // transcript FILE on demand instead; see providers/pending-ask.js. There is
     // deliberately no second copy of that state here to drift from it.
     this.queuedByText = new Map(); // normalized text -> queued user block (to attach its images)
+    // Messages waiting in Claude's own queue (see the queue-operation branch of
+    // applyLine): { key, ts, from: 'you' | 'peer' | 'task', block }, oldest first.
+    this.queuePending = [];
     this.header = {
       model: seedModel && seedModel !== 'default' ? modelDisplay(seedModel) : null,
       effort: null,
@@ -965,6 +987,19 @@ class TranscriptParser {
     // tokens/window). Until it is known, usage lines carry tokens only and
     // contextPct stays null; a percentage is never computed from a guess.
     this.learnedWindow = null;
+  }
+
+  // What still waits in Claude's queue, for the window header: how many, who
+  // sent them, and since when (the oldest). Facts only; ages are drawn at render.
+  noteQueue() {
+    const waiting = this.queuePending;
+    if (!waiting.length) {
+      this.header.queue = null;
+      return;
+    }
+    const from = { you: 0, peer: 0, task: 0 };
+    for (const item of waiting) from[item.from] += 1;
+    this.header.queue = { waiting: waiting.length, from, oldestTs: waiting[0].ts || null };
   }
 
   // Set the learned window (from the tee's math or its persisted file) and
@@ -999,7 +1034,7 @@ class TranscriptParser {
       if (dropIndex < 0) dropIndex = this.blocks.findIndex((item) => item.kind === 'user' && !item.images?.length);
       if (dropIndex < 0) dropIndex = 0; // only image-bearing blocks remain
       const [dropped] = this.blocks.splice(dropIndex, 1);
-      if (dropped?.toolId) this.pendingTools.delete(dropped.toolId);
+      if (dropped?.toolId) { this.pendingTools.delete(dropped.toolId); this.delegations.delete(dropped.toolId); }
     }
     // Image-payload cap on the LIVE path (2026-09-06). A block's base64 image
     // data URI is the only large thing a block carries; every screenshot a long
@@ -1022,7 +1057,7 @@ class TranscriptParser {
       const dropIndex = this.blocks.findIndex((item) => item.images?.length);
       if (dropIndex < 0) break;
       const [dropped] = this.blocks.splice(dropIndex, 1);
-      if (dropped?.toolId) this.pendingTools.delete(dropped.toolId);
+      if (dropped?.toolId) { this.pendingTools.delete(dropped.toolId); this.delegations.delete(dropped.toolId); }
       imageBlocks -= 1;
     }
     return block;
@@ -1174,7 +1209,7 @@ class TranscriptParser {
         }
         const user = userTextFor(content);
         if (user) {
-          this.startTurn(this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(content) ? { peer: true } : {}) }), ts);
+          this.startTurn(this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(content) ? { peer: true, peerFrom: user.peerFrom || null } : {}) }), ts);
           this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
         }
         return changed;
@@ -1192,7 +1227,7 @@ class TranscriptParser {
             }
             const user = userTextFor(part.text);
             if (user) {
-              lastUserInLine = this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(part.text) ? { peer: true } : {}) });
+              lastUserInLine = this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(part.text) ? { peer: true, peerFrom: user.peerFrom || null } : {}) });
               this.startTurn(lastUserInLine, ts);
               this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
             }
@@ -1235,12 +1270,54 @@ class TranscriptParser {
     // messages); any pasted IMAGES are on the paired queued_command attachment
     // (whose prompt is empty for text-only messages). Render the enqueue as a
     // user bubble and attach the queued_command's images to it by matching text.
-    if (obj.type === 'queue-operation' && obj.operation === 'enqueue') {
-      const user = userTextFor(obj.content);
-      if (user) {
-        const block = this.push({ kind: 'user', text: user.text, command: user.command, ts, queued: true, ...(isPeerMessage(obj.content) ? { peer: true } : {}) });
-        this.queuedByText.set(normalizeQueuedKey(user.text), block);
-        this.header.lastSignal = 'user-turn';
+    //
+    // WAITING IS SHOWN UNTIL CLAUDE TAKES IT (2026-11-01, Pat: "a lot more
+    // messages that are sticking in the queue when i enter the terminal view.
+    // it'd be nice to have some visibility into this in the 'harbor view'").
+    // A queued message is read only at Claude's next tool-batch boundary: across
+    // six live cdt-app transcripts, enqueue to pick-up was 22 s at the median, 86 s
+    // at p90 and up to 531 s, and the window showed the bubble as if it had been
+    // read the moment it was sent. The CLI records the pick-up itself: `dequeue`
+    // (no content; the oldest goes, the idle path) or `remove` (with the same
+    // content; mid-turn, followed by its queued_command attachment). Every
+    // enqueue is tracked, typed ones as bubbles marked waiting, harness ones
+    // (task notifications) as a count only, and the header carries what still
+    // waits so the window says so.
+    if (obj.type === 'queue-operation') {
+      if (obj.operation === 'enqueue') {
+        const user = userTextFor(obj.content);
+        const peer = isPeerMessage(obj.content);
+        const entry = { key: normalizeQueuedKey(obj.content), ts, from: user ? (peer ? 'peer' : 'you') : 'task', block: null };
+        if (user) {
+          entry.block = this.push({ kind: 'user', text: user.text, command: user.command, ts, queued: true, queueState: 'waiting', ...(peer ? { peer: true, peerFrom: user.peerFrom || null } : {}) });
+          this.queuedByText.set(normalizeQueuedKey(user.text), entry.block);
+          this.header.lastSignal = 'user-turn';
+        }
+        this.queuePending.push(entry);
+        this.noteQueue();
+        return changed;
+      }
+      if (obj.operation === 'dequeue' || obj.operation === 'remove') {
+        // `remove` names its message; `dequeue` takes the oldest. A `remove`
+        // whose text matches nothing waiting (its enqueue was before this read
+        // began) changes nothing.
+        let index = -1;
+        if (typeof obj.content === 'string' && obj.content.trim()) {
+          const key = normalizeQueuedKey(obj.content);
+          index = this.queuePending.findIndex((item) => item.key === key);
+        } else if (this.queuePending.length) {
+          index = 0;
+        }
+        if (index >= 0) {
+          const [entry] = this.queuePending.splice(index, 1);
+          if (entry.block) {
+            entry.block.queueState = 'delivered';
+            entry.block.deliveredTs = ts;
+            if (this.blocks.includes(entry.block)) changed.push(entry.block.key);
+          }
+          this.noteQueue();
+        }
+        return changed;
       }
       return changed;
     }
@@ -1321,6 +1398,7 @@ class TranscriptParser {
             ...actionForToolUse(part),
           });
           if (part.id) this.pendingTools.set(part.id, action);
+          if (part.id && (part.name === 'Agent' || part.name === 'Task')) this.delegations.set(part.id, action);
         } else if (part.type === 'thinking') {
           // Claude's own reasoning arrives here with EMPTY text and never
           // renders; the working shimmer covers "busy". But since Opus 5.5 /
@@ -1707,6 +1785,123 @@ async function readArchiveBlocksBeforeOffset(filePath, provider, endOffset, minC
   return { blocks: trimmed, hasMore };
 }
 
+// A SUB-AGENT'S WORK, SHOWN ON ITS "DELEGATED" ROW (2026-11-01, Pat: "in
+// harbor view it looks like shit is just stuck and literally like every 5 min
+// im clicking into terminal view"). The terminal draws a running sub-agent's
+// tool calls under its Agent row; the main transcript holds only the Agent
+// call and, at the end, its result, so the window showed one static row for
+// the whole run (and a background agent's row turns "done" at once while it
+// keeps working). Claude Code 2.1.316 writes each sub-agent to
+// <session>/subagents/agent-<id>.jsonl beside agent-<id>.meta.json, whose
+// toolUseId names the Agent call and whose finished flag turns true at the
+// end. The row gets { running, quiet, finished, tools, now, partial }.
+// Rules (Astra's round 3):
+// - An agent first seen already finished is not read at all (an old session
+//   opened late costs nothing). Every unfinished one stays followed, however
+//   long it is quiet: silence is not death (a long tool, a model wait, its own
+//   sub-agent), so 15 minutes without a write reads "quiet", not "done", and a
+//   write after that makes it running again. A meta file with no transcript
+//   yet is "starting" until the same 15 minutes pass.
+// - A meta file is read once to learn its Agent call; one that names no row
+//   of this window (a sub-agent's own sub-agents) is remembered and not read
+//   again unless that row appears.
+// - A child file that shrank is read again from the start; a gap too large to
+//   read is skipped and the count marked "at least" (partial).
+// - The follow state belongs to one parser: a rebuilt parser (truncation)
+//   starts it fresh, and rows the parser evicts stop being followed.
+const SUBAGENT_QUIET_MS = 15 * 60_000;
+const SUBAGENT_READ_CAP = 32 * 1024 * 1024;
+const yieldNow = () => new Promise((resolve) => setImmediate(resolve));
+function subagentActionLabel(part) {
+  const a = actionForToolUse(part);
+  const lead = a.saying || a.said || a.verb || '';
+  return clip([lead, a.said ? null : a.chip].filter(Boolean).join(' '), 120) || null;
+}
+async function readSubagentProgress(entry, now = Date.now()) {
+  const parser = entry.parser;
+  if (!parser?.delegations?.size) return [];
+  if (entry.subagentsFor !== parser) { entry.subagents = new Map(); entry.subagentsFor = parser; }
+  // Nothing left to follow: every delegation is finished or settled.
+  const live = [...parser.delegations.values()].some((action) => !action.sub || !action.sub.finished);
+  if (!live) return [];
+  const dir = path.join(path.dirname(entry.path), entry.sessionId, 'subagents');
+  let names;
+  try { names = await fsp.readdir(dir); } catch { return []; }
+  const changed = [];
+  for (const name of names) {
+    if (!name.endsWith('.meta.json')) continue;
+    let state = entry.subagents.get(name);
+    if (state?.settled) continue;
+    // A meta file read before it named its Agent call is read again (Astra r4).
+    if (state && !state.toolUseId) { entry.subagents.delete(name); state = null; }
+    if (!state) {
+      let meta;
+      try { meta = JSON.parse(await fsp.readFile(path.join(dir, name), 'utf8')); } catch { continue; }
+      state = { toolUseId: meta?.toolUseId || null, finished: meta?.finished === true, read: false, offset: 0, tools: 0, now: null, partial: false, lines: new LineBuffer(), metaMtimeMs: now };
+      try { state.metaMtimeMs = (await fsp.stat(path.join(dir, name))).mtimeMs; } catch { /* keep now */ }
+      entry.subagents.set(name, state);
+    }
+    const action = state.toolUseId ? parser.delegations.get(state.toolUseId) : null;
+    if (!action) continue; // not a row of this window (yet)
+    if (!state.read) {
+      state.read = true;
+      // First sight of an agent that already finished: settle it unread.
+      if (state.finished && !action.sub) {
+        state.settled = true;
+        action.sub = { running: false, quiet: false, finished: true, tools: null, now: null, partial: false };
+        continue;
+      }
+    } else if (!state.finished) {
+      try { state.finished = JSON.parse(await fsp.readFile(path.join(dir, name), 'utf8'))?.finished === true; } catch { /* keep */ }
+    }
+    const file = path.join(dir, name.replace(/\.meta\.json$/, '.jsonl'));
+    let mtimeMs = 0;
+    try {
+      const handle = await fsp.open(file, 'r');
+      try {
+        const stat = await handle.stat();
+        mtimeMs = stat.mtimeMs;
+        if (stat.size < state.offset) {
+          // Replaced or truncated: count again from the start.
+          Object.assign(state, { offset: 0, tools: 0, now: null, partial: false, lines: new LineBuffer() });
+        }
+        if (stat.size - state.offset > SUBAGENT_READ_CAP) {
+          state.offset = stat.size;
+          state.partial = true;
+          state.lines = new LineBuffer();
+        } else if (stat.size > state.offset) {
+          const buffer = Buffer.alloc(stat.size - state.offset);
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, state.offset);
+          state.offset += bytesRead;
+          let sinceYield = 0;
+          for (const line of state.lines.feed(buffer.toString('utf8', 0, bytesRead))) {
+            if ((sinceYield += 1) >= 256) { sinceYield = 0; await yieldNow(); }
+            if (!line.includes('"tool_use"')) continue;
+            let obj;
+            try { obj = JSON.parse(line); } catch { continue; }
+            if (obj?.type !== 'assistant' || !Array.isArray(obj.message?.content)) continue;
+            for (const part of obj.message.content) {
+              if (part?.type !== 'tool_use') continue;
+              state.tools += 1;
+              state.now = subagentActionLabel(part) || state.now;
+            }
+          }
+        }
+      } finally { await handle.close(); }
+    } catch { /* not written yet */ }
+    const lastWrite = mtimeMs || state.metaMtimeMs;
+    const quiet = !state.finished && now - lastWrite >= SUBAGENT_QUIET_MS;
+    const running = !state.finished && !quiet;
+    const sub = { running, quiet, finished: state.finished, tools: state.tools, now: running ? state.now : null, partial: state.partial };
+    if (state.finished) state.settled = true;
+    if (JSON.stringify(sub) !== JSON.stringify(action.sub || null)) {
+      action.sub = sub;
+      changed.push(action.key);
+    }
+  }
+  return changed;
+}
+
 function createTranscriptProvider(options = {}) {
   const getSessionMeta = options.getSessionMeta;
   if (typeof getSessionMeta !== 'function') {
@@ -1915,8 +2110,10 @@ function createTranscriptProvider(options = {}) {
       entry.beaconMs = await readSessionBeacon(entry.sessionId);
       if (stat.size === entry.offset) {
         await handle.close();
-        // mtime moved with no new bytes still refreshes the working clock.
-        emitUpdate(entry, { append: [], changed: [] });
+        // mtime moved with no new bytes still refreshes the working clock,
+        // and a running sub-agent writes its own file, not this one.
+        const subKeys = new Set(entry.provider === 'claude' ? await readSubagentProgress(entry).catch(() => []) : []);
+        emitUpdate(entry, { append: [], changed: entry.parser.blocks.filter((block) => subKeys.has(block.key)) });
         return;
       }
       const length = stat.size - entry.offset;
@@ -1946,6 +2143,9 @@ function createTranscriptProvider(options = {}) {
       }
       entry.offset = position;
       await handle.close();
+      if (entry.provider === 'claude') {
+        for (const key of await readSubagentProgress(entry).catch(() => [])) changedKeys.add(key);
+      }
       // Window learning: a pairable tee's pct and the tokens it describes
       // yield the window numerically (pct = tokens/window is Claude's own
       // arithmetic). Persist it so cold starts and stale-tee fallbacks keep
@@ -2266,6 +2466,7 @@ module.exports = {
   modelDisplay,
   usageTokens,
   actionForToolUse,
+  readSubagentProgress,
   userTextFor,
   imageFromPart,
   imagesFromContent,

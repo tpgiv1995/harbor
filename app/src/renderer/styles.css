@@ -2401,6 +2401,41 @@ button { font-family: inherit; }
   white-space: nowrap;
 }
 
+/* A queued message Claude has not read yet (2026-11-01): the bubble's own edge
+   turns dashed amber, and one line under it says it is waiting. Once Claude
+   takes it, the edge is solid again and a long wait is noted in the quiet tone. */
+.conv-user.queued-waiting {
+  border-style: dashed;
+  border-color: rgba(212, 165, 55, 0.5);
+}
+.conv-queue-state {
+  align-self: flex-end;
+  margin-top: -4px;
+  padding-right: 4px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--fnt);
+}
+.conv-queue-state.waiting { color: var(--warn); }
+
+/* A message another session sent: its sender's name, then the message. */
+.conv-peer-from {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--sub);
+}
+
+/* The header's count of messages waiting in Claude's queue. */
+.queue-chip {
+  font: 500 10px var(--font-mono);
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
+}
+
 /* What a task spent (output tokens + elapsed), tucked under its prompt. */
 .conv-turn-meta {
   align-self: flex-end;
@@ -2693,6 +2728,19 @@ button { font-family: inherit; }
   color: var(--fnt);
   font-size: 11px;
 }
+
+/* A sub-agent's progress under its Delegated row (subagentLabel). */
+.conv-act-sub {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 7px 12px 8px 31px;
+  font-size: 11.5px;
+  color: var(--fnt);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-act-sub.run { color: var(--sub); }
 
 .conv-act-code {
   border-top: 1px solid rgba(255, 255, 255, 0.07);

@@ -6,7 +6,7 @@ import { providerIdentity, ProfileBadge } from '../providers.js';
 import { clipboardImageDataURL } from '../image-clipboard.js';
 import './conversation-image-copy.css';
 
-const { turnMetaLabel } = turnMeta;
+const { turnMetaLabel, queueStateLabel, subagentLabel } = turnMeta;
 
 // The designed conversation surface (Slate): user bubbles, assistant prose,
 // tool-action rows, and the working shimmer. Pure presentation; blocks arrive
@@ -98,6 +98,7 @@ function ConvImages({ images, onImageLoad }) {
 }
 
 const ActionBlock = memo(function ActionBlock({ block }) {
+  const sub = subagentLabel(block.sub);
   return (
     <div className={`conv-act status-${block.status}`}>
       <div className="conv-act-row">
@@ -129,6 +130,12 @@ const ActionBlock = memo(function ActionBlock({ block }) {
           <span className="conv-act-cv">{block.cv}</span>
         ) : null}
       </div>
+      {/* A sub-agent's own progress, read from its transcript (the terminal
+          draws its tool calls under the Agent row; the window had one static
+          row for the whole run). */}
+      {sub ? (
+        <div className={`conv-act-sub${block.sub.running ? ' run' : ''}`} title={sub}>{sub}</div>
+      ) : null}
       {block.diff ? (
         <div className="conv-act-code">
           {block.diff.map((line, i) => (
@@ -241,6 +248,14 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
             <ActionBlock key={block.key} block={block} />
           ))}
         </div>
+      ) : blocks.some((block) => block.sub?.running) ? (
+        // A collapsed run still shows the sub-agents that are working, so a
+        // long delegation is never hidden behind "N actions".
+        <div className="conv-act-group-items">
+          {blocks.filter((block) => block.sub?.running).map((block) => (
+            <ActionBlock key={block.key} block={block} />
+          ))}
+        </div>
       ) : null}
     </div>
   );
@@ -257,9 +272,13 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
   }
   if (block.kind === 'user') {
     const meta = turnMetaLabel(block.turnMeta);
+    const queueLabel = queueStateLabel(block);
+    const waiting = block.queued && block.queueState === 'waiting';
     return (
       <>
-      <div className={`conv-user${block.command ? ' command' : ''}`}>
+      <div className={`conv-user${block.command ? ' command' : ''}${block.peer ? ' peer' : ''}${waiting ? ' queued-waiting' : ''}`}>
+        {/* Another session wrote this, not Pat: say which (transcript.js peerMessageParts). */}
+        {block.peer ? <span className="conv-peer-from">{block.peerFrom ? `From ${block.peerFrom}` : 'From another session'}</span> : null}
         {/* Composed formatting reads back formatted (2026-07-26). A command
             block stays verbatim: `/compact` is a literal string the CLI parses,
             and markdown-rendering it would only misrepresent what was sent. */}
@@ -273,6 +292,8 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
       {/* What this task spent: output tokens across every reply it produced and
           the time from the prompt to the latest reply, growing while it runs. */}
       {meta ? <div className="conv-turn-meta" title="Output tokens and time this task has used so far">{meta}</div> : null}
+      {/* Whether Claude has read a queued message yet (turn-meta queueStateLabel). */}
+      {queueLabel ? <div className={`conv-queue-state${waiting ? ' waiting' : ''}`}>{queueLabel}</div> : null}
       </>
     );
   }

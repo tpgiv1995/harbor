@@ -35,6 +35,7 @@ import { useVoiceAgent } from './voice/useVoiceAgent.js';
 import voiceToolsModule from './voice/voice-tools.cjs';
 import { createStallContext, installPerfWatch } from './perf-watch.js';
 import { planProvisionalUpgrades } from './stage/provisional-upgrade.cjs';
+import { createUnboundWatch } from './stage/unbound-watch.cjs';
 import { terminalView } from './stage/terminal-view.cjs';
 import { mergeLaunchMeta, withLaunchFacts } from './stage/launch-meta.cjs';
 import { resolveStage, pickEviction, placeNewTile, placeDraggedTile } from './stage/stage-resolve.cjs';
@@ -738,6 +739,17 @@ function App() {
     const timer = setInterval(() => setTranscriptRetry((n) => n + 1), 3000);
     return () => clearInterval(timer);
   }, []);
+  // A window stuck without its conversation for 45 s leaves a line in the perf
+  // log saying which half held it (stage/unbound-watch.cjs).
+  const unboundWatchRef = useRef(null);
+  if (!unboundWatchRef.current) unboundWatchRef.current = createUnboundWatch();
+  useEffect(() => {
+    for (const event of unboundWatchRef.current({ tiles, transcripts, sessions: sessionsById, now: Date.now() })) {
+      window.harbor.perf?.stall?.({ ...event, at: new Date().toISOString() });
+    }
+    // Checked on the retry tick only; the tick re-reads the current values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transcriptRetry]);
 
   // Renderer stall capture: cheap always-on, so the next freeze Pat hits leaves
   // a measurement behind (see perf-watch.js).

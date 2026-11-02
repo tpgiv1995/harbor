@@ -13,7 +13,11 @@ const {
   providerTranscriptDirs,
   composerSendState,
   codexBoxState,
+  codexBoxMatch,
   codexBoxDraft,
+  codexStartupEcho,
+  codexSafeText,
+  codexChangeNote,
   isFleetView,
 } = require('../../src/main/session-send.js');
 
@@ -520,7 +524,7 @@ const typed = (h) => h.sent.map(({ text }) => text);
 // loses what is typed; `reads` counts every read. A paste that is only an
 // image path becomes "[Image #N] " in the box, numbered per message, as Codex's
 // handle_paste_image_path draws it.
-function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTyping = false, title = 'proof', frames = false, failUntil = null, prefill = '', initialDraft = '', working = false } = {}) {
+function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTyping = false, title = 'proof', frames = false, failUntil = null, prefill = '', initialDraft = '', working = false, dropsSymbols = false } = {}) {
   let draft = initialDraft;
   let swallowed = 0;
   let hidden = 0;
@@ -557,7 +561,9 @@ function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTy
     if (text === '\r') {
       if (swallowed < swallowEnters) { swallowed += 1; draft += '\n'; } else if (draft.trim()) { echoed.push(draft.trim()); draft = ''; images = 0; }
     } else {
-      const pasted = text.replace(/\x1b\[20[01]~/g, '');
+      // `dropsSymbols`: the real Codex 0.166.0 on Windows loses non-ASCII punctuation
+      // and symbols (measured 2026-11-01; letters, accents and emoji survive).
+      const pasted = text.replace(/\x1b\[20[01]~/g, '').replace(dropsSymbols ? /[\u00a0-\uffff]/gu : /(?!)/u, (ch) => (/[\p{L}\p{M}\p{N}]/u.test(ch) ? ch : ''));
       if (/^"?[^"\n]+\.(png|jpe?g|gif|webp)"?$/i.test(pasted)) { images += 1; draft += `[Image #${images}] `; } else draft += pasted;
       hidden = burstReads;
     }
@@ -1257,6 +1263,64 @@ test('codexBoxState reads the real Codex box: stuck, taken, placeholder, footer 
   assert.equal(codexBoxState(codexFixture('codex-0.165.0-update-screen-120.txt'), { text: 'x' }), 'noprompt');
 });
 
+// A REAL SPLIT PASTE (Codex 0.166.0, 154 columns, 2026-11-01): the first
+// character reached Codex 40 ms before the rest, so it was typed and the other
+// 1,182 became the paste. Fable's 1,183-character message most likely sat in
+// Astra's box in this shape while every check said "never shown" (an inference
+// from the counts: no screen from that moment was kept; this capture is a
+// reproduction).
+const splitMessage = ('FABLE 03:06Z, URGENT. ' + 'the quick brown fox jumps over the lazy dog, ').repeat(26).slice(0, 1183);
+test('codexBoxState: a message drawn as a typed first character plus a pasted block is in the box', () => {
+  const split = codexFixture('codex-0.166.0-split-paste-154.txt');
+  assert.match(split, /^› F\[Pasted Content 1182 chars\]$/m, 'the real capture holds the split shape');
+  assert.equal(codexBoxState(split, { text: splitMessage }), 'exact');
+  // A different message of the same length is not this one: its first character differs.
+  assert.equal(codexBoxState(split, { text: `X${splitMessage.slice(1)}` }), 'other');
+  // Nor is a much shorter or longer one.
+  assert.equal(codexBoxState(split, { text: splitMessage.slice(0, 900) }), 'other');
+  assert.equal(codexBoxState(split, { text: `${splitMessage}${proofWords.repeat(3)}` }), 'other');
+  // The same split at the other end, and twice: typed runs at their own places.
+  const withBox = (box) => split.replace('› F[Pasted Content 1182 chars]', `› ${box}`);
+  // The last character typed instead of the first.
+  assert.equal(codexBoxState(withBox('[Pasted Content 1182 chars],'), { text: splitMessage.replace(/.$/u, ',') }), 'exact');
+  // Two typed characters, then two pastes (each over Codex's 1,000-character threshold).
+  const long = `FA${'x'.repeat(1200)}${'y'.repeat(1198)}`;
+  assert.equal(codexBoxState(withBox('FA[Pasted Content 1200 chars][Pasted Content 1198 chars]'), { text: long }), 'exact');
+  assert.equal(codexBoxState(withBox('FB[Pasted Content 1181 chars]'), { text: splitMessage }), 'other');
+  // A placeholder can never be a short message, split or not.
+  assert.equal(codexBoxState(withBox('F[Pasted Content 1182 chars]'), { text: 'Fix it' }), 'other');
+  // A match through a pasted block is reported as opaque: its text cannot be read.
+  assert.deepEqual(codexBoxMatch(split, { text: splitMessage }), { state: 'exact', opaque: true , clipped: false });
+});
+
+// ASTRA'S COUNTEREXAMPLES (adversarial review, 2026-11-01), each once accepted.
+test('codexBoxState: no slack lets extra, missing or foreign content pass as this message', () => {
+  const split = codexFixture('codex-0.166.0-split-paste-154.txt');
+  const withBox = (box) => split.replace('› F[Pasted Content 1182 chars]', `› ${box}`);
+  const xs = `F${'x'.repeat(1182)}`;
+  // Two extra typed characters after the paste.
+  assert.equal(codexBoxState(withBox('F[Pasted Content 1182 chars]xx'), { text: xs }), 'other');
+  // Two characters of the message missing.
+  assert.equal(codexBoxState(withBox('F[Pasted Content 1182 chars]'), { text: `${xs}NO` }), 'other');
+  // Slack does not compound across pastes.
+  const box3 = 'A[Pasted Content 1000 chars]B[Pasted Content 1001 chars]C[Pasted Content 1001 chars]D'.replace('1000 chars', '1001 chars');
+  const text3 = `A${'x'.repeat(1001)}1234B${'y'.repeat(1001)}1234C${'z'.repeat(1001)}1234DWXYZ`;
+  assert.equal(codexBoxState(withBox(box3), { text: text3 }), 'other');
+  // An image chip in the box of a text-only send is someone else's.
+  assert.equal(codexBoxState(withBox('[Image #9]F[Pasted Content 1182 chars]'), { text: xs }), 'other');
+  // ...but this send's own image chip is set aside.
+  assert.equal(codexBoxState(withBox('[Image #1]F[Pasted Content 1182 chars]'), { text: xs, imageMarker: '[Image #1]' }), 'exact');
+  // A placeholder at or under 1,000 characters is literal text, never a paste.
+  assert.equal(codexBoxState(withBox('F[Pasted Content 12 chars]'), { text: `F${'x'.repeat(12)}` }), 'other');
+  const literal = `Explain [Pasted Content 12 chars] ${'x'.repeat(1182)}`;
+  assert.equal(codexBoxState(withBox('Explain [Pasted Content 12 chars] [Pasted Content 1182 chars]'), { text: literal }), 'exact');
+  // Whitespace typed before the paste is not drawn; both readings are tried.
+  assert.equal(codexBoxState(withBox('F[Pasted Content 1182 chars]'), { text: `F   ${'x'.repeat(1182)}` }), 'exact');
+  assert.equal(codexBoxState(withBox('[Pasted Content 1182 chars]'), { text: `   ${'x'.repeat(1182)}` }), 'exact');
+  // An Enter swallowed into the LAST paste counts one more than the message.
+  assert.equal(codexBoxState(withBox('F[Pasted Content 1183 chars]'), { text: xs }), 'exact');
+});
+
 test('a Codex message that starts "1. " is still the box: it sits over the model footer', () => {
   const screen = '› Reply with just OK.\n\n• OK\n\n› 1. fix the header\n\n  GPT-6.1-Sol low · ~\\dev\\proof · proof';
   assert.equal(codexBoxState(screen, { text: '1. fix the header' }), 'exact');
@@ -1320,12 +1384,47 @@ test('a Codex box holding someone else\'s paste or draft is refused before one k
 });
 
 test('a retry whose own earlier try is the whole Codex box presses Enter without typing it again', async () => {
+  // Visible text proves itself: a short message drawn in full is this message.
+  const shortText = 'Please look again at the retry test.';
+  const hShort = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const shortPane = codexPane(hShort, { initialDraft: shortText });
+  await createSessionSend(hShort.deps).send({ sessionId: 'pane:codex-retry', text: shortText, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(hShort), ['\r']);
+  assert.deepEqual(shortPane.echoed, [shortText]);
+
+  // A pasted block proves only its shape, so the Enter-only retry needs this
+  // Harbor's own record of typing it: the first send types it and Codex
+  // swallows both Enters (CODEX_NOT_SUBMITTED), the resend presses Enter only.
   const text = `Please look again. ${proofWords.repeat(30)}marker`;
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  const pane = codexPane(h, { initialDraft: text });
-  await createSessionSend(h.deps).send({ sessionId: 'pane:codex-retry', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
-  assert.deepEqual(typed(h), ['\r']);
+  const pane = codexPane(h, { swallowEnters: 2 });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 'pane:codex-retry', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_NOT_SUBMITTED',
+  );
+  const before = typed(h).length;
+  await send.send({ sessionId: 'pane:codex-retry', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h).slice(before), ['\r'], 'the resend types nothing new');
   assert.deepEqual(pane.echoed, [text]);
+});
+
+// A PASTED BLOCK OF THE RIGHT SHAPE IS NOT PROOF OF OWNERSHIP (Astra's
+// adversarial review, 2026-11-01): a stranger's paste of this message's length
+// used to be "the earlier try" and got Enter. Without this Harbor's own record
+// of typing it, the box is busy.
+test('a Codex box holding a pasted block shaped like this message, which this Harbor never typed, is refused', async () => {
+  const text = `Please look again. ${proofWords.repeat(30)}marker`;
+  for (const initialDraft of [text, `P${'x'.repeat([...text].length - 1)}`]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const pane = codexPane(h, { initialDraft });
+    await assert.rejects(
+      createSessionSend(h.deps).send({ sessionId: 'pane:codex-stranger', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      (error) => error.code === 'CODEX_BOX_BUSY' && /a pasted block of \d+ characters/.test(error.message),
+    );
+    assert.deepEqual(typed(h), [], 'no key, no Enter');
+    assert.deepEqual(pane.echoed, []);
+  }
 });
 
 test('a send into a working Codex reads the box over its key-hint footer', async () => {
@@ -3865,4 +3964,322 @@ test('a row with no checkbox refuses to be ticked instead of reporting success',
   assert.equal(res.ok, false);
   assert.match(res.reason, /not a checkbox/);
   assert.equal(h.sent.filter((s) => s.text === ' ').length, 0, 'no Space was sent at it');
+});
+
+// PAT'S PHONE TEXT INTO CODEX (2026-11-01, three refusals while he watched):
+// "didn’t…" arrived in Astra's box as "didnt", so the box never matched and no
+// Enter was pressed. Codex sends now carry the ASCII twins.
+test('a Codex send with smart punctuation types its ASCII twins and is submitted', async () => {
+  const text = 'It should have done a lot more research\u2026 If it didn\u2019t then it didn\u2019t do what I asked \u2013 \u201cfully\u201d';
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.platform = 'win32';
+  const pane = codexPane(h, { dropsSymbols: true });
+  await createSessionSend(h.deps).send({ sessionId: 'pane:codex-phone', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  const ascii = 'It should have done a lot more research... If it didn\'t then it didn\'t do what I asked - "fully"';
+  assert.deepEqual(typed(h), [`\x1b[200~${ascii}\x1b[201~`, '\r']);
+  assert.deepEqual(pane.echoed, [ascii]);
+});
+
+test('codexSafeText: twins for smart punctuation, letters and emoji kept, other symbols named as dropped', () => {
+  assert.deepEqual((({ text, dropped }) => ({ text, dropped }))(codexSafeText('didn\u2019t\u2026 \u201cok\u201d a\u2013b \u2192 caf\u00e9 \ud83d\ude80')), { text: 'didn\'t... "ok" a-b -> café \ud83d\ude80', dropped: [] });
+  assert.deepEqual((({ text, dropped }) => ({ text, dropped }))(codexSafeText('3\u00b0C \u2713 a\u00a0b\u200bc')), { text: '3C  a bc', dropped: ['\u00b0', '\u2713', '\u200b'] });
+  // Measured round 2 (2026-11-01): Codex drops the emoji joiner and combining
+  // marks but keeps CJK punctuation and full-width forms; a decomposed é is
+  // composed first so it survives.
+  assert.deepEqual((({ text, dropped }) => ({ text, dropped }))(codexSafeText('cafe\u0301 a\u00f7b \ud83d\udc69\u200d\ud83d\udcbb \u3002\uff01')), { text: 'café a/b \ud83d\udc69\ud83d\udcbb \u3002\uff01', dropped: ['\u200d'] });
+  assert.deepEqual((({ text, dropped }) => ({ text, dropped }))(codexSafeText('plain ascii')), { text: 'plain ascii', dropped: [] });
+});
+
+// 2026-11-01: while a message waits in Claude's queue the box shows a dim
+// "Press up to edit queued messages", which the command bar offered on Tab.
+test('getSuggestion never offers one of Claude\'s own box hints', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let next = 'Press up to edit queued messages';
+  h.deps.readSuggestion = async () => next;
+  const api = createSessionSend(h.deps);
+  const pane = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  assert.equal(await api.getSuggestion({ pane }), null);
+  next = 'Try "refactor <filepath>"';
+  assert.equal(await api.getSuggestion({ pane }), null);
+  next = 'run the tests again';
+  assert.equal(await api.getSuggestion({ pane }), 'run the tests again');
+});
+
+// ASTRA'S ROUND-2 REVIEW (2026-11-01), each counterexample as a spec.
+test('round 2: removing what Codex cannot show never turns a message into a command or into nothing', async () => {
+  for (const [text, why] of [['\u2713/exit', /start with "\/" and run as a Codex command/], ['\u2713 \u2714', /be empty/]]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    h.deps.platform = 'win32';
+    codexPane(h);
+    await assert.rejects(
+      createSessionSend(h.deps).send({ sessionId: 'pane:codex-guard', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      (error) => error.code === 'CODEX_TEXT_UNSENDABLE' && why.test(error.message),
+    );
+    assert.deepEqual(typed(h), [], `nothing typed for ${JSON.stringify(text)}`);
+  }
+});
+
+test('round 2: the Codex text rule applies on Windows only, where it was measured', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.platform = 'darwin';
+  codexPane(h);
+  await createSessionSend(h.deps).send({ sessionId: 'pane:codex-mac', text: 'didn\u2019t', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), ['\x1b[200~didn\u2019t\x1b[201~', '\r']);
+});
+
+test('round 2: a normalized Codex send is confirmed against the text that was sent, not the original', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 'rollout.jsonl');
+  await fsp.writeFile(file, '');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.platform = 'win32';
+  h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file, provider: 'codex' });
+  const pane = codexPane(h, { dropsSymbols: true });
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '600';
+  try {
+    const send = createSessionSend(h.deps);
+    const statuses = [];
+    send.emitter.on('status', (value) => statuses.push(value));
+    const res = await send.send({ sessionId: 'codex-smart-confirm', text: 'It didn\u2019t work \u2014 again', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    assert.equal(res.delivery, 'confirming');
+    assert.deepEqual(pane.echoed, ["It didn't work - again"]);
+    await fsp.appendFile(file, `${JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: "It didn't work - again" } })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    assert.equal(statuses.some((s) => s.phase === 'error'), false, `no false error: ${JSON.stringify(statuses)}`);
+  } finally {
+    delete process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('round 2: no slack on a whole placeholder, and a box that only spells a placeholder is not proof', () => {
+  const footer = '  GPT-6-Astra high · C:\\dev\\proof · proof';
+  const screenWith = (box) => `• OK\n\n› ${box}\n\n${footer}`;
+  assert.notEqual(codexBoxMatch(screenWith('[Pasted Content 1182 chars]'), { text: `${'x'.repeat(1182)}NO` }).state, 'exact');
+  assert.notEqual(codexBoxMatch(screenWith('[Pasted Content 1184 chars]'), { text: 'x'.repeat(1182) }).state, 'exact');
+  assert.notEqual(codexBoxMatch(screenWith('[Pasted Content 1000 chars]'), { text: 'x'.repeat(1000) }).state, 'exact');
+  assert.deepEqual(codexBoxMatch(screenWith('F[Pasted Content 1182 chars]'), { text: 'F[Pasted Content 1182 chars]' }), { state: 'exact', opaque: true , clipped: false });
+  // A message that mentions a large placeholder matches either reading, opaquely.
+  assert.deepEqual(codexBoxMatch(screenWith('Explain [Pasted Content 1200 chars] [Pasted Content 1182 chars]'), { text: `Explain [Pasted Content 1200 chars] ${'x'.repeat(1182)}` }), { state: 'exact', opaque: true , clipped: false });
+  // Harbor's own record of two Enters pressed into its paste covers exactly two more.
+  assert.equal(codexBoxMatch(screenWith('F[Pasted Content 1184 chars]'), { text: `F${'x'.repeat(1182)}`, extra: 2 }).state, 'exact');
+  assert.notEqual(codexBoxMatch(screenWith('F[Pasted Content 1185 chars]'), { text: `F${'x'.repeat(1182)}`, extra: 2 }).state, 'exact');
+});
+
+test('round 2: a box holding other text after Enter is not "sent", and gets no second Enter', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h);
+  const original = h.deps.terminalBridge.sendInput;
+  let entered = false;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r' && !entered) { entered = true; return original(paneId, ' and something else'); }
+    return original(paneId, text);
+  };
+  // Round 3: with no transcript to read (a pane: window), that is an error the
+  // user sees, never "sent".
+  const send = createSessionSend(h.deps);
+  const statuses = [];
+  send.emitter.on('status', (value) => statuses.push(value.phase));
+  await assert.rejects(
+    send.send({ sessionId: 'pane:codex-changed', text: 'hello there', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_UNCONFIRMED',
+  );
+  assert.equal(statuses.includes('sent'), false, `never reported sent: ${statuses.join(' ')}`);
+  assert.deepEqual(typed(h), ['\x1b[200~hello there\x1b[201~', ' and something else'], 'one Enter only, swallowed into the box here');
+  assert.deepEqual(pane.echoed, []);
+  const log = await readSendLog(h.deps.sendLogFile, (rows) => rows.some((r) => r.phase === 'enter-state'));
+  assert.equal(log.find((r) => r.phase === 'enter-state')?.state, 'unconfirmed', 'not reported as taken');
+  assert.ok(log.some((r) => r.phase === 'codex-box-changed-after-enter'));
+});
+
+test('round 2: other text appearing in front of the message while Harbor types it stops the Enter', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h);
+  const read = h.deps.readPane;
+  h.deps.readPane = async (...args) => {
+    const screen = await read(...args);
+    return typed(h).length ? screen.replace('› hello there', '› FOREIGN hello there') : screen;
+  };
+  await assert.rejects(
+    createSessionSend(h.deps).send({ sessionId: 'pane:codex-race', text: 'hello there', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_BOX_CHANGED',
+  );
+  assert.deepEqual(typed(h), ['\x1b[200~hello there\x1b[201~'], 'no Enter');
+});
+
+test('round 2: a retry record is for the exact text; whitespace inside it matters', async () => {
+  const text = `print('a b') ${'x'.repeat(1200)}`;
+  const other = `print('ab ') ${'x'.repeat(1200)}`;
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { swallowEnters: 2 });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(send.send({ sessionId: 'pane:codex-ws', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }), (error) => error.code === 'CODEX_NOT_SUBMITTED');
+  await assert.rejects(
+    send.send({ sessionId: 'pane:codex-ws', text: other, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_BOX_BUSY',
+  );
+});
+
+// ASTRA'S ROUND 3 (2026-11-01). A box that shows only the END of a message is
+// that message only when Codex marked it clipped (the "↑" at the right edge of
+// its first row, real capture at 50 columns); and a row under the status line
+// must not be read as part of the box.
+test('round 3: a clipped Codex box is recognised by its marker, and an unclipped end is not enough', () => {
+  const clippedScreen = codexFixture('codex-0.166.0-clipped-draft-50.txt');
+  const text = Array.from({ length: 99 }, (_, i) => `w${String(i).padStart(2, '0')}-abcde`).join(' ').slice(0, 990);
+  assert.deepEqual(codexBoxMatch(clippedScreen, { text }), { state: 'holds', opaque: false, clipped: true });
+  assert.match(codexBoxDraft(clippedScreen), /^w45-abcdew46/, 'the marker is not part of the draft');
+  const footer = '  GPT-6-Astra high · C:\\dev\\proof · proof';
+  const shortBox = `• OK\n\n› ${'x'.repeat(40)}\n\n${footer}`;
+  assert.deepEqual(codexBoxMatch(shortBox, { text: `Do not deploy. ${'x'.repeat(40)}` }), { state: 'holds', opaque: false, clipped: false });
+});
+
+test('round 3: an unclipped box that shows only the end of the message gets no Enter', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h);
+  const read = h.deps.readPane;
+  h.deps.readPane = async (...args) => {
+    const screen = await read(...args);
+    return typed(h).length ? screen.replace(/› Do not deploy\. /, '› ') : screen;
+  };
+  await assert.rejects(
+    createSessionSend(h.deps).send({ sessionId: 'pane:codex-partial', text: `Do not deploy. ${'x'.repeat(40)}`, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_BOX_CHANGED',
+  );
+  assert.equal(typed(h).includes('\r'), false, 'no Enter');
+});
+
+test('round 3: a Codex send that changed characters says exactly what changed', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.platform = 'win32';
+  codexPane(h, { dropsSymbols: true });
+  const send = createSessionSend(h.deps);
+  const statuses = [];
+  send.emitter.on('status', (value) => statuses.push(value));
+  await send.send({ sessionId: 'pane:codex-note', text: 'Open a\u2013b.txt \u2713', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  const sent = statuses.find((value) => value.phase === 'sent');
+  assert.match(sent.detail, /with \u2013 as -/);
+  assert.match(sent.detail, /without \u2713/);
+  assert.deepEqual(codexSafeText('a\u2019b\u2019c').mapped, [['\u2019', "'"]]);
+});
+
+// Live-caught while proving round 3 (2026-11-01): a fresh Codex's first message
+// is echoed with "Waiting for startup · esc cancel" under it and no box drawn.
+// That is delivery, not "other text left in the box".
+test('round 3: a fresh Codex echoing the message while it starts up has taken it', async () => {
+  const text = 'Reply with just OK. it didn\'t... "quoted" - dash';
+  const header = '⚠ Heads up, you have less than 25% of your weekly limit left. Run /status for a breakdown.\n\n  >_ OpenAI Codex (v0.166.0)\n     ~\\work\n  permissions: YOLO mode\n\n';
+  for (const gap of ['\n', '\n\n']) {
+    const screen = `${header}› ${text}${gap}  Waiting for startup  · esc cancel\n`;
+    assert.equal(codexBoxDraft(screen), null, 'no box is drawn');
+    assert.equal(codexStartupEcho(screen, { text }), true);
+    assert.equal(codexStartupEcho(screen, { text: 'something else' }), false);
+  }
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h);
+  const read = h.deps.readPane;
+  h.deps.readPane = async (...args) => (typed(h).includes('\r') ? `${header}› hello there\n  Waiting for startup  · esc cancel\n` : read(...args));
+  const statuses = [];
+  const send = createSessionSend(h.deps);
+  send.emitter.on('status', (value) => statuses.push(value.phase));
+  await send.send({ sessionId: 'pane:codex-fresh', text: 'hello there', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), ['\x1b[200~hello there\x1b[201~', '\r'], 'one Enter');
+  assert.ok(statuses.includes('sent'));
+  assert.ok(pane);
+});
+
+// ASTRA'S ROUND 4 (2026-11-01), each counterexample as a spec.
+test('round 4: only the whole measured startup layout is a delivered echo', () => {
+  const footer = '  GPT-6-Astra high · C:\\dev\\proof · proof';
+  // A still-filled two-line box over its status line: a draft, not an echo.
+  const draft = `• OK\n\n› hello\n  Waiting for startup · esc cancel\n\n${footer}`;
+  assert.equal(codexStartupEcho(draft, { text: 'hello' }), false);
+  assert.notEqual(codexBoxDraft(draft), null, 'it is a box');
+  // Extra rows between the echo and the status: not this message.
+  assert.equal(codexStartupEcho('› hello\n\n  EXTRA UNSENT TEXT\n  Waiting for startup · esc cancel', { text: 'hello' }), false);
+  // A real echo with a paragraph break, status row last: delivered.
+  assert.equal(codexStartupEcho('  >_ OpenAI Codex\n\n› first part\n\n  second part\n  Waiting for startup  · esc cancel\n', { text: 'first part\n\nsecond part' }), true);
+});
+
+test('round 4: an assistant reply quoting the message does not confirm a Codex send', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 'rollout.jsonl');
+  await fsp.writeFile(file, '');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file, provider: 'codex' });
+  codexPane(h);
+  const original = h.deps.terminalBridge.sendInput;
+  let entered = false;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r' && !entered) { entered = true; return original(paneId, ' still here'); }
+    return original(paneId, text);
+  };
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '700';
+  try {
+    const send = createSessionSend(h.deps);
+    const statuses = [];
+    send.emitter.on('status', (value) => statuses.push(value.phase));
+    const res = await send.send({ sessionId: 'codex-quote', text: 'hello', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    assert.equal(res.delivery, 'confirming');
+    await fsp.appendFile(file, `${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'hello' }] } })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    assert.equal(statuses.includes('sent'), false, `not confirmed by the assistant: ${statuses.join(' ')}`);
+    assert.equal(statuses.at(-1), 'error');
+  } finally {
+    delete process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('round 4: a later send owns the status; an older confirmation cannot overwrite it', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 'rollout.jsonl');
+  await fsp.writeFile(file, '');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.platform = 'win32';
+  h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file, provider: 'codex' });
+  codexPane(h);
+  const original = h.deps.terminalBridge.sendInput;
+  let entered = false;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r' && !entered) { entered = true; return original(paneId, ' still here'); }
+    return original(paneId, text);
+  };
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '1500';
+  try {
+    const send = createSessionSend(h.deps);
+    const statuses = [];
+    send.emitter.on('status', (value) => statuses.push(value.phase));
+    await send.send({ sessionId: 'codex-own', text: 'hello', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    await assert.rejects(send.send({ sessionId: 'codex-own', text: '\u2713/exit', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }), (error) => error.code === 'CODEX_TEXT_UNSENDABLE');
+    await fsp.appendFile(file, `${JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'hello' } })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    assert.equal(statuses.at(-1), 'error', `the newer refusal stays: ${statuses.join(' ')}`);
+  } finally {
+    delete process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('round 4: the change note names special spaces and joined accents', () => {
+  assert.match(codexChangeNote(codexSafeText('a\u00a0b')), /U\+00A0 \(a special space\) as a plain space/);
+  assert.match(codexChangeNote(codexSafeText('cafe\u0301')), /accents joined to their letters/);
+  assert.equal(codexChangeNote(codexSafeText('plain')), null);
+});
+
+test('round 4: an image-only Codex send is not stopped by the text check', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h);
+  await createSessionSend(h.deps).send({ sessionId: 'pane:codex-image', text: '', images: ['C:/virtual/example.png'], provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.ok(typed(h).includes('\r'), `Enter pressed: ${JSON.stringify(typed(h))}`);
+  assert.equal(pane.echoed.length, 1);
 });

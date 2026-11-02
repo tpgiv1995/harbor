@@ -218,6 +218,9 @@ const PASTE_PLACEHOLDER_RE = /\[Pastedtext#\d+(?:\+\d+lines)?\]/;
 const PASTE_COLLAPSE_CHARS = 700;
 const mayCollapseToPlaceholder = (text) => /\n/.test(String(text || '')) || String(text || '').length >= PASTE_COLLAPSE_CHARS;
 const PROMPT_GLYPH_RE = /^\s*[❯!]/;
+// Dim text Claude draws in an EMPTY box that is an instruction, not a draft or
+// a prediction (the welcome hint is also dropped by the keeper's reader).
+const CLAUDE_BOX_HINT_RE = /^(?:Try ".*"|Press up to edit queued messages)$/;
 const squashSpace = (value) => String(value || '').replace(/\s+/g, '');
 
 // CLAUDE DRAWS A PASTED IMAGE PATH AS AN IMAGE CHIP (2026-10-14, Pat from the
@@ -326,6 +329,35 @@ const CODEX_HINT_FOOTER_RE = /^\s+(?:\S+\s+){0,2}(?:to queue message|to queue|fo
 // An empty box draws one of these dim hints (Codex 0.165.0 and 0.166.0 binaries);
 // a plain-text screen read cannot see dimness, so they are matched by text.
 const CODEX_EMPTY_HINTS = new Set(['AskCodextodoanything', 'Askafollow-upquestion']);
+// A FRESH CODEX TAKES ITS FIRST MESSAGE BEFORE IT HAS A BOX AGAIN (measured on
+// 0.166.0, 2026-11-01): Enter moves the message into the conversation as
+// "› <message>" with "Waiting for startup · esc cancel" under it, and no box
+// is drawn until startup ends. That row is not a box, and the echo of exactly
+// this message above it is the evidence that Codex took it (codexStartupEcho).
+// Only the whole measured layout counts (Astra's round 4: the phrase anywhere
+// under a prompt let a two-line draft pass as delivered): the status row is the
+// LAST row on screen, no status line or key hints of a box sit between it and
+// the last "›" row, and the echo is every row in between, paragraph breaks
+// included. Checked only after this sender's own Enter.
+const CODEX_STARTUP_STATUS_RE = /^\s*Waiting for startup\b.*\besc cancel\s*$/u;
+function codexStartupLayout(lines) {
+  let last = lines.length - 1;
+  while (last >= 0 && !lines[last].trim()) last -= 1;
+  if (last < 1 || !CODEX_STARTUP_STATUS_RE.test(lines[last])) return null;
+  for (let i = last - 1; i >= 0; i -= 1) {
+    if (!CODEX_PROMPT_RE.test(lines[i])) continue;
+    if (lines.slice(i + 1, last).some((line) => CODEX_FOOTER_RE.test(line) || CODEX_HINT_FOOTER_RE.test(line) || CODEX_STARTUP_STATUS_RE.test(line))) return null;
+    return { prompt: i, status: last };
+  }
+  return null;
+}
+function codexStartupEcho(screen, sent = {}) {
+  const lines = String(screen || '').split('\n');
+  const layout = codexStartupLayout(lines);
+  if (!layout) return false;
+  const echo = squashSpace(lines.slice(layout.prompt, layout.status).join('\n').replace(CODEX_PROMPT_RE, ''));
+  return Boolean(echo) && (echo === squashSpace(sent.text) || codexBoxCarries(echo, sent.text || '', sent.extra || 0));
+}
 function codexPromptBox(screen) {
   const lines = String(screen || '').split('\n');
   while (lines.length && !lines.at(-1).trim()) lines.pop();
@@ -342,7 +374,29 @@ function codexPromptBox(screen) {
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     if (!CODEX_PROMPT_RE.test(lines[i])) continue;
     if (CODEX_LIST_ROW_RE.test(lines[i]) && !footer) return null;
-    const end = footer && lines.length - 1 > i ? lines.length - 1 : lines.length;
+    // A submitted message waiting on startup is not a box (codexStartupEcho).
+    if (codexStartupLayout(lines)?.prompt === i) return null;
+    let end = footer && lines.length - 1 > i ? lines.length - 1 : lines.length;
+    // A ROW UNDER THE STATUS LINE (measured 2026-11-01: "⚠ 1 · f2" right-aligned
+    // below "GPT-6-Luna low · <folder>") made the last line unrecognisable, so
+    // the status line itself was read as part of the message and no long send
+    // into that pane could ever match. The box ends at the first blank row that
+    // is followed by the status line, wherever that sits.
+    if (!footer) {
+      for (let j = i + 2; j < lines.length; j += 1) {
+        if (!lines[j - 1].trim() && (CODEX_FOOTER_RE.test(lines[j]) || CODEX_HINT_FOOTER_RE.test(lines[j]))) { end = j; break; }
+      }
+    }
+    // A DRAFT TALLER THAN THE BOX IS CLIPPED, AND CODEX MARKS IT (measured on
+    // 0.166.0, 2026-11-01: 989 characters at 50 columns showed only the last
+    // 12 rows, with "↑" at the right edge of the first). The marker is not
+    // text: it is taken off the row and kept as `clipped`, the only evidence
+    // that a box showing the END of a message is showing all it can.
+    let clipped = false;
+    for (let k = i; k < end; k += 1) {
+      const unmarked = lines[k].replace(/\s{2,}[↑↓]\s*$/u, '');
+      if (unmarked !== lines[k]) { clipped = true; lines[k] = unmarked; }
+    }
     // `head`: the prompt row and the rows wrapped under it, up to the first
     // blank row, which is where the box ends whatever footer Codex draws.
     let headEnd = i + 1;
@@ -350,6 +404,7 @@ function codexPromptBox(screen) {
     return {
       inside: squashSpace(lines.slice(i, end).join('\n').replace(CODEX_PROMPT_RE, '')),
       head: squashSpace(lines.slice(i, headEnd).join('\n').replace(CODEX_PROMPT_RE, '')),
+      clipped,
     };
   }
   return null;
@@ -370,22 +425,172 @@ function describeCodexDraft(draft) {
   }
   return 'other text';
 }
-// 'noprompt' (no box: a dialog, a list, a TUI still starting), 'exact' (the box
-// holds this message and nothing else), 'holds' (the box ends with it), or
-// 'other' (empty, its dim hint, or something else).
-function codexBoxState(screen, { text = '', imageMarker = null } = {}) {
+// ONE MESSAGE CAN BE DRAWN AS TYPED CHARACTERS AROUND A PASTED BLOCK
+// (2026-11-01, Pat: cross-session messages into Astra "killing my workflow").
+// On Windows Codex reads a paste as keystrokes, and when the first one reaches
+// it a moment before the rest (a loaded machine, a keeper write split in two),
+// that character is inserted as typed and only the remainder becomes the paste,
+// drawn "F[Pasted Content 1182 chars]". The old test (the whole box must be ONE
+// placeholder) called that unshown, so no Enter was ever pressed for it; Fable's
+// 1,183-character message to Astra was most likely stranded this way (inferred
+// from its counts; no screen from that moment was kept). Reproduced on the real Codex 0.166.0 by writing the first
+// character 40 ms ahead (test/fixtures/codex-box/codex-0.166.0-split-paste-154.txt).
+// The walk is exact (tightened after Astra's adversarial review, same night):
+// - Codex collapses only a paste of more than 1,000 characters, so a
+//   "[Pasted Content N chars]" with N at or under that is literal text the
+//   message itself contains, matched like any typed run.
+// - A typed run must be the message's own characters at exactly that point,
+//   whitespace skipped (whitespace is never drawn in the squashed box).
+// - A placeholder consumes exactly N characters. Only the LAST segment may be
+//   one short: an Enter swallowed into the paste lands at its end and is
+//   counted (see CODEX_PASTE_RE). No other slack, so a typed run can never
+//   re-read characters a paste already consumed.
+// - Whitespace right before a placeholder may have been typed (and so not
+//   drawn) or pasted; both readings are tried, nothing else is skipped.
+// - The walk must end at the message's end; trailing message whitespace is
+//   allowed only after a typed run (where it would not be drawn).
+// - A large placeholder can also be the message's own literal text (a message
+//   ABOUT "[Pasted Content 1200 chars]"), so both readings are tried.
+// A match through a placeholder proves only that the box is SHAPED like this
+// message (its hidden text cannot be read), so codexBoxMatch reports it as
+// `opaque` and an Enter-only retry also needs a record of having typed it.
+// Whether the 0.166.0 split itself is what stranded Fable's 1,183 characters is
+// an INFERENCE (no screen from that moment was kept); the shape is measured.
+const CODEX_PASTE_SEG_RE = /\[PastedContent(\d+)chars\](?:#\d+)?/g;
+// `extra`: Enters this sender itself pressed into its own paste, each of which
+// Codex may have swallowed as a newline (one more in the last count). Only an
+// owned box is matched with it (ownsCodexBox).
+function codexBoxCarries(box, text, extra = 0) {
+  const chars = [...String(text)];
+  const isSpace = (ch) => /\s/u.test(ch);
+  const segments = [];
+  let last = 0;
+  for (const match of String(box).matchAll(CODEX_PASTE_SEG_RE)) {
+    if (Number(match[1]) <= CODEX_LARGE_PASTE_CHARS) continue; // literal text, not a paste
+    if (match.index > last) segments.push({ typed: String(box).slice(last, match.index) });
+    segments.push({ pasted: Number(match[1]), literal: match[0] });
+    last = match.index + match[0].length;
+  }
+  if (last < String(box).length) segments.push({ typed: String(box).slice(last) });
+  if (!segments.some((segment) => segment.pasted !== undefined)) return false;
+  const matchTyped = (typed, from) => {
+    let at = from;
+    for (const ch of typed) {
+      while (at < chars.length && isSpace(chars[at])) at += 1;
+      if (chars[at] !== ch) return -1;
+      at += 1;
+    }
+    return at;
+  };
+  let positions = new Set([0]);
+  segments.forEach((segment, index) => {
+    const lastSegment = index === segments.length - 1;
+    const next = new Set();
+    for (const at of positions) {
+      if (segment.pasted !== undefined) {
+        // Typed whitespace before the paste is not drawn: try each split.
+        for (let start = at; start <= chars.length; start += 1) {
+          next.add(start + segment.pasted);
+          if (lastSegment) for (let j = 1; j <= Math.max(1, extra); j += 1) next.add(start + segment.pasted - j);
+          if (!isSpace(chars[start] ?? '')) break;
+        }
+        const literalEnd = matchTyped(segment.literal, at);
+        if (literalEnd >= 0) next.add(literalEnd);
+      } else {
+        const end = matchTyped(segment.typed, at);
+        if (end >= 0) next.add(end);
+      }
+    }
+    positions = next;
+  });
+  const lastTyped = segments[segments.length - 1].typed !== undefined;
+  return [...positions].some((at) => at === chars.length
+    || (lastTyped && at < chars.length && chars.slice(at).every(isSpace)));
+}
+
+// CODEX DROPS MOST NON-ASCII PUNCTUATION AND SYMBOLS (2026-11-01, Pat from the
+// phone: three sends to Astra refused while he watched). On Windows Codex reads
+// keystrokes, and a pasted ’ “ ” … – — never reaches its box: Pat's
+// "didn’t…" arrived as "didnt", so the box never matched his text, Harbor
+// (rightly) pressed no Enter, and his retries then met his own first try as
+// "other text". Measured on Codex 0.166.0 on Windows one character at a time
+// (2026-11-01, two rounds): LOST are U+00A0, ° « × · ÷ ± § ¼ © ® ¿, every
+// U+2010-U+2044 punctuation mark tried, U+2060, the zero-width joiner (an emoji
+// sequence "👩‍💻" arrives as "👩💻"), combining marks (a decomposed é arrives as
+// e), € ™ ≈, arrows, the minus sign, ✓ ✔ ★ and box drawing; KEPT are letters
+// with accents (é ü ï), U+02BC, everything from U+3000 up that was tried (CJK
+// punctuation 。、「, full-width ！, the ideographic space) and emoji. The rule
+// below follows that: the text is composed first (NFC, so a decomposed é
+// survives as é), a phone's smart punctuation becomes its ASCII twin so the
+// meaning arrives, and any other character Codex would drop is left out before
+// typing and named, so the box then shows exactly what was typed. The measured
+// build is Windows only: runSend applies this on win32 alone.
+// Meaning can still change (a path holding an en dash now holds a hyphen), but
+// Codex itself would have deleted that character outright.
+const CODEX_ASCII_TWINS = new Map(Object.entries({
+  '‘': "'", '’': "'", '‚': "'", '‛': "'", '′': "'", 'ʹ': "'",
+  '“': '"', '”': '"', '„': '"', '‟': '"', '″': '"', '«': '"', '»': '"',
+  '…': '...', '‐': '-', '‑': '-', '‒': '-', '–': '-', '—': '-', '―': '-', '−': '-',
+  '•': '-', '·': '-', '→': '->', '←': '<-', '↔': '<->', '⇒': '=>', '×': 'x',
+  '≤': '<=', '≥': '>=', '≠': '!=', '™': '(TM)', '©': '(c)', '®': '(R)', '€': 'EUR',
+  '÷': '/', '±': '+/-', '≈': '~', '¼': '1/4', '½': '1/2', '¾': '3/4', '¹': '^1', '²': '^2', '³': '^3',
+}));
+// Every change codexSafeText made, in words (an invisible space by name).
+function codexChangeNote(safe) {
+  const name = (ch) => (/\s/u.test(ch) ? `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')} (a special space)` : ch);
+  const parts = [];
+  const swaps = (safe.mapped || []).map(([from, to]) => `${name(from)} as ${to === ' ' ? 'a plain space' : to}`).join(', ');
+  if (swaps) parts.push(`with ${swaps}`);
+  if (safe.composed) parts.push('with accents joined to their letters (one character each)');
+  const dropped = [...new Set(safe.dropped || [])].map(name).join(' ');
+  if (dropped) parts.push(`without ${dropped}`);
+  return parts.length ? `Codex cannot show some characters, so this went ${parts.join('; ')}` : null;
+}
+function codexSafeText(text) {
+  const dropped = [];
+  const mapped = []; // [original, twin], each once, in order of first use
+  let out = '';
+  for (const ch of String(text ?? '').normalize('NFC')) {
+    const code = ch.codePointAt(0);
+    if (code < 0x80 || code >= 0x3000) { out += ch; continue; }
+    const twin = CODEX_ASCII_TWINS.get(ch);
+    if (twin !== undefined) { out += twin; if (!mapped.some(([from]) => from === ch)) mapped.push([ch, twin]); continue; }
+    if (/[\p{L}\p{Nd}]/u.test(ch)) { out += ch; continue; }
+    if (/\p{Zs}/u.test(ch)) { out += ' '; if (!mapped.some(([from]) => from === ch)) mapped.push([ch, ' ']); continue; }
+    dropped.push(ch); // punctuation, symbols, joiners and marks: Codex drops them
+  }
+  return { text: out, dropped, mapped, composed: String(text ?? '').normalize('NFC') !== String(text ?? '') };
+}
+
+// What the box says about this message: `state` is 'noprompt' (no box: a
+// dialog, a list, a TUI still starting), 'exact' (the box holds this message
+// and nothing else), 'holds' (the box ends with it) or 'other' (empty, its dim
+// hint, or something else); `opaque` is true when 'exact' rests on a pasted
+// block whose text the screen cannot show.
+// Image chips are set aside only when this send attached images
+// (`imageMarker`): a chip in the box of a text-only send is someone else's.
+function codexBoxMatch(screen, { text = '', imageMarker = null, extra = 0 } = {}) {
   const box = codexPromptBox(screen);
-  if (!box) return 'noprompt';
+  if (!box) return { state: 'noprompt', opaque: false, clipped: false };
+  const clipped = box.clipped;
   const shown = squashSpace(text);
   if (!shown) {
     const marker = squashSpace(imageMarker);
-    return marker && box.inside.endsWith(marker) ? 'holds' : 'other';
+    return { state: marker && box.inside.endsWith(marker) ? 'holds' : 'other', opaque: false, clipped };
   }
-  const chars = [...String(text)].length;
-  const placeholder = box.inside.replace(IMAGE_CHIPS_RE, '').match(CODEX_PASTE_RE);
-  if (chars >= CODEX_LARGE_PASTE_CHARS && placeholder && Math.abs(Number(placeholder[1]) - chars) <= 2) return 'exact';
-  if (box.inside === shown) return 'exact';
-  return box.inside.endsWith(shown.slice(-SEND_TAIL_CHARS)) ? 'holds' : 'other';
+  const plain = imageMarker ? box.inside.replace(IMAGE_CHIPS_RE, '') : box.inside;
+  // A box that reads like this message character for character is still
+  // unverifiable when it shows a real-sized placeholder: the message may only
+  // SPELL one ("F[Pasted Content 1182 chars]") while the box hides a paste.
+  // (The old whole-placeholder shortcut with two characters of slack in
+  // either direction is gone; codexBoxCarries decides every placeholder.)
+  const hidesPaste = [...plain.matchAll(CODEX_PASTE_SEG_RE)].some((m) => Number(m[1]) > CODEX_LARGE_PASTE_CHARS);
+  if (box.inside === shown || plain === shown) return { state: 'exact', opaque: hidesPaste, clipped };
+  if (codexBoxCarries(plain, text, extra)) return { state: 'exact', opaque: true, clipped };
+  return { state: box.inside.endsWith(shown.slice(-SEND_TAIL_CHARS)) ? 'holds' : 'other', opaque: false, clipped };
+}
+function codexBoxState(screen, sent = {}) {
+  return codexBoxMatch(screen, sent).state;
 }
 
 // CLAUDE'S SESSIONS VIEW IS NOT THIS CONVERSATION (measured on CLI 2.1.295,
@@ -479,6 +684,8 @@ function createSessionSend(deps) {
     // keeper's modeled cells (src/daemon/screen.js); a stripped scrape cannot
     // tell it from a typed draft.
     readSuggestion = async () => null,
+    // The Codex text rule is measured on Windows only (codexSafeText).
+    platform = process.platform,
     terminalBridge,
     launchActions,
     getSessionMeta,
@@ -904,6 +1111,37 @@ function createSessionSend(deps) {
   // and the decoder keeps a multi-byte character split across reads intact.
   const SCAN_SLICE_BYTES = 1024 * 1024;
   const SCAN_CARRY_MAX = 64 * 1024; // only a giant line (an image) ever exceeds this
+  // WHICH RECORD MAY CONFIRM A SEND (Astra's round 4, 2026-11-01): a match
+  // inside the assistant's reply or a tool's output is not the user's message
+  // arriving (Codex answering "hello" confirmed a "hello" that never left the
+  // box). A whole line is parsed and judged by its kind: assistant and tool
+  // records never confirm; a Codex user record (user_message, or a user
+  // message item) must hold the WHOLE sent text, not its first 60 characters;
+  // a Claude user record confirms as before (the needle, or the whole text);
+  // a queued enqueue as confirmsQueuedDelivery says. A line too large to have
+  // been kept whole (an image) falls back to the old needle test.
+  const recordText = (content) => (typeof content === 'string' ? content
+    : Array.isArray(content) ? content.map((b) => (b && (b.type === 'text' || b.type === 'input_text') ? b.text || '' : '')).join('\n') : '');
+  const recordConfirms = (rec, line, needle, text) => {
+    const whole = squashSpace(text);
+    if (!rec || typeof rec !== 'object') return line.includes(needle);
+    if (rec.type === 'queue-operation') return confirmsQueuedDelivery(line, text);
+    if (rec.type === 'assistant' || rec.message?.role === 'assistant' || rec.role === 'assistant') return false;
+    if (rec.type === 'event_msg') {
+      return rec.payload?.type === 'user_message' && Boolean(whole) && squashSpace(rec.payload.message).includes(whole);
+    }
+    if (rec.type === 'response_item') {
+      return rec.payload?.type === 'message' && rec.payload.role === 'user' && Boolean(whole) && squashSpace(recordText(rec.payload.content)).includes(whole);
+    }
+    if (rec.type === 'user') {
+      const content = rec.message?.content;
+      if (Array.isArray(content) && content.some((b) => b?.type === 'tool_result')) return false;
+      return line.includes(needle) || (Boolean(whole) && squashSpace(recordText(content)).includes(whole));
+    }
+    if (rec.type === 'attachment') return rec.attachment?.type === 'queued_command' && Boolean(whole) && squashSpace(rec.attachment.prompt).includes(whole);
+    // A shape this does not know (another provider's store): the old rule.
+    return line.includes(needle);
+  };
   const transcriptScanner = (transcriptPath, from, text) => {
     const needle = confirmNeedle(text);
     const decoder = new StringDecoder('utf8');
@@ -922,10 +1160,21 @@ function createSessionSend(deps) {
         }
         offset += length;
         const chunk = carry + decoder.write(buffer);
-        if (chunk.includes(needle) || confirmsQueuedDelivery(chunk, text)) return true;
         const cut = chunk.lastIndexOf('\n');
+        const complete = cut >= 0 ? chunk.slice(0, cut) : '';
         carry = cut >= 0 ? chunk.slice(cut + 1) : chunk;
-        if (carry.length > SCAN_CARRY_MAX) carry = carry.slice(-SCAN_CARRY_MAX);
+        for (const line of complete.split('\n')) {
+          if (!line.trim() || (!line.includes(needle) && !line.includes('queue-operation') && !line.includes('user_message') && !line.includes('"user"'))) continue;
+          let rec = null;
+          try { rec = JSON.parse(line); } catch { rec = null; } // the cut tail of a giant line
+          if (recordConfirms(rec, line, needle, text)) return true;
+        }
+        if (carry.length > SCAN_CARRY_MAX) {
+          // A line too large to keep whole (an image): judge what is held of it
+          // by the old needle test before its head is let go.
+          if (carry.includes(needle)) return true;
+          carry = carry.slice(-SCAN_CARRY_MAX);
+        }
       }
       return false;
     };
@@ -1276,6 +1525,20 @@ function createSessionSend(deps) {
     error.code = 'CODEX_BOX_BUSY';
     return error;
   };
+  // AN ENTER CODEX DID NOT VISIBLY TAKE IS NOT "SENT" (Astra's round 3): the
+  // box held other text after Enter, or a dialog replaced it. With a
+  // transcript to read, the send waits for it; without one (a pane: window, no
+  // transcript yet) it says so instead of reporting sent.
+  const codexUnconfirmedError = () => {
+    const error = new Error('Harbor pressed Enter, but Codex\'s box did not come back empty, so Harbor cannot tell whether your message went. Your text is kept. Check the >_ terminal before sending again');
+    error.code = 'CODEX_UNCONFIRMED';
+    return error;
+  };
+  const codexBoxChangedError = () => {
+    const error = new Error('Codex\'s box does not show exactly your message (other text in front of it, or part of it missing), so Harbor did not press Enter and nothing was sent. Your text is kept. Check the >_ terminal before sending again');
+    error.code = 'CODEX_BOX_CHANGED';
+    return error;
+  };
   const codexNeverHeldError = () => {
     const error = new Error('Codex\'s box never showed your text, so Harbor did not press Enter and nothing was sent. Your text is kept. The text may still appear in the box, so check the >_ terminal before sending again');
     error.code = 'PROMPT_NEVER_HELD';
@@ -1297,6 +1560,12 @@ function createSessionSend(deps) {
     }
     return { state, screen };
   };
+  // ONLY AN EMPTY BOX MEANS CODEX TOOK THE MESSAGE (Astra's round-2 review,
+  // 2026-11-01). "Not this message" is not "sent": each Enter Codex swallows
+  // into a paste adds one to its count, so after two the box read
+  // "F[Pasted Content 1184 chars]" for 1,182 characters, matched nothing, and
+  // was reported sent while it sat there. A box holding anything else after
+  // Enter gets no further Enter (it may not be ours) and is not confirmed.
   const watchCodexEnter = async (paneId, workspaceId, sent) => {
     for (let attempt = 0; ; attempt += 1) {
       let state = 'holds';
@@ -1305,10 +1574,16 @@ function createSessionSend(deps) {
         await sleep(CODEX_POLL_MS);
         screen = await readScreen(paneId, CODEX_READ_LINES);
         state = codexBoxState(screen, sent);
-        if (state === 'other') return attempt ? 'taken-after-retry' : 'taken';
+        if (state === 'other' && codexBoxDraft(screen) === '') return attempt ? 'taken-after-retry' : 'taken';
+        if (state === 'noprompt' && codexStartupEcho(screen, sent)) return attempt ? 'taken-after-retry' : 'taken';
       }
       // Something other than the box took the screen: never Enter into it.
       if (state === 'noprompt') return 'unconfirmed';
+      if (state === 'other' && attempt === 0) {
+        logSend({ paneId, phase: 'codex-box-changed-after-enter' });
+        await captureSendScreen(paneId, 'codex-box-changed', screen);
+        return 'unconfirmed';
+      }
       if (attempt > 0) {
         logSend({ paneId, phase: 'codex-not-submitted' });
         await captureSendScreen(paneId, 'codex-not-submitted', screen);
@@ -1316,6 +1591,7 @@ function createSessionSend(deps) {
       }
       logSend({ paneId, phase: 'enter-retry', attempt: 1 });
       await typeInto(paneId, workspaceId, '\r');
+      noteCodexEnter(paneId, sent);
     }
   };
 
@@ -1327,6 +1603,33 @@ function createSessionSend(deps) {
   // user); still missing, the record is dropped and the send after that types
   // fresh, so a prompt that truly lost the keys is never a dead end.
   const unshownTyped = new Map(); // paneId -> { sent, at }
+  // Codex messages this Harbor typed and has not seen submitted: paneId ->
+  // { key, at }. A box whose match rests on a pasted block (codexBoxMatch
+  // `opaque`) proves only the message's SHAPE, so pressing Enter on it without
+  // typing (an earlier try still sitting there) needs this record too; without
+  // it, a stranger's paste of the same length would be sent as ours (Astra's
+  // adversarial review, 2026-11-01).
+  // The record holds the EXACT text (whitespace matters inside code) and how
+  // many Enters Harbor has pressed into it, so a box whose count grew by one
+  // per swallowed Enter is still recognised as this send's, and nothing else.
+  // A box that only spells a placeholder is opaque too (codexBoxMatch).
+  const codexTyped = new Map(); // paneId -> { key, at, enters }
+  const ownsCodexBox = (paneId, screen, sent) => {
+    const record = codexTyped.get(paneId);
+    const mine = Boolean(record && record.key === sent.text && clock() - record.at <= UNSHOWN_TYPED_MS);
+    const match = codexBoxMatch(screen, { ...sent, extra: mine ? record.enters : 0 });
+    if (match.state !== 'exact') return false;
+    if (!match.opaque) return true;
+    if (mine) sent.extra = record.enters;
+    return mine;
+  };
+  // Each Enter pressed into a recorded Codex paste may come back as one more
+  // character in its count.
+  const noteCodexEnter = (paneId, sent) => {
+    sent.extra = (sent.extra || 0) + 1;
+    const record = codexTyped.get(paneId);
+    if (record && record.key === sent.text) record.enters = sent.extra;
+  };
   const UNSHOWN_TYPED_MS = 10 * 60_000;
   const STARTUP_WAIT_NOTICE = 'Claude is still starting up. Your message is typed and goes in as soon as its prompt shows it';
   const EARLIER_WAIT_NOTICE = 'waiting for Claude to show the message Harbor typed earlier, so it is not typed twice';
@@ -1414,7 +1717,9 @@ function createSessionSend(deps) {
           throw codexNoPromptError(ready.screen);
         }
         const draft = codexBoxDraft(ready.screen);
-        const ownEarlierTry = Boolean(text) && !images.length && codexBoxState(ready.screen, { text }) === 'exact';
+        // Enter-only for an earlier try needs proof it is ours: exact visible text,
+        // or a pasted block of its shape that this Harbor itself typed (ownsCodexBox).
+        const ownEarlierTry = Boolean(text) && !images.length && ownsCodexBox(paneId, ready.screen, { text });
         if (draft && !ownEarlierTry) {
           logSend({ paneId, phase: 'codex-box-busy' });
           await captureSendScreen(paneId, 'codex-box-busy', ready.screen);
@@ -1505,7 +1810,7 @@ function createSessionSend(deps) {
       // A send whose earlier try is still sitting in Codex's box (the error
       // below says so) presses Enter for it instead of typing it twice.
       if (codexGated && text && !lastImageMarker
-        && codexBoxState(await readScreen(paneId, CODEX_READ_LINES), sent) === 'exact') {
+        && ownsCodexBox(paneId, await readScreen(paneId, CODEX_READ_LINES), sent)) {
         alreadyInPrompt = true;
         logSend({ paneId, phase: 'already-in-prompt' });
       }
@@ -1534,6 +1839,7 @@ function createSessionSend(deps) {
             ? `\x1b[200~${text}\x1b[201~`
             : text;
           await typeInto(paneId, workspaceId, payload);
+          if (codexGated) codexTyped.set(paneId, { key: text, at: clock(), enters: 0 });
         }
         debug('deliver: text written');
       }
@@ -1567,11 +1873,23 @@ function createSessionSend(deps) {
           await captureSendScreen(paneId, `codex-${held.state}`, held.screen);
           throw codexNeverHeldError();
         }
+        // 'holds' (the box ENDS with this message) is this message only when
+        // Codex marked the box clipped AND all it shows is part of the
+        // message. Unclipped, it means text in front arrived from someone else
+        // or the start of the message never arrived, and Enter would send the
+        // wrong thing either way (Astra's rounds 2 and 3).
+        const heldMatch = codexBoxMatch(held.screen, sent);
+        if (held.state === 'holds' && squashSpace(text) && !(heldMatch.clipped && squashSpace(text).endsWith(codexBoxDraft(held.screen) || '\u0000'))) {
+          logSend({ paneId, phase: 'codex-box-changed-while-typing' });
+          await captureSendScreen(paneId, 'codex-box-changed', held.screen);
+          throw codexBoxChangedError();
+        }
         await sleep(CODEX_ENTER_SETTLE_MS);
       } else {
         await sleep(160);
       }
       await typeInto(paneId, workspaceId, '\r');
+      if (codexGated) noteCodexEnter(paneId, sent);
       deliveredPanes.add(paneId);
       debug('deliver: enter written');
       // Not for a slash command: its picker or confirmation dialog would take a
@@ -1583,6 +1901,7 @@ function createSessionSend(deps) {
       } else if (codexGated) {
         enterState = await watchCodexEnter(paneId, workspaceId, sent);
         logSend({ paneId, phase: 'enter-state', state: enterState });
+        if (enterState === 'taken' || enterState === 'taken-after-retry') codexTyped.delete(paneId);
       }
       await resolveClaudeSwitchConfirm(paneId, workspaceId, text, provider);
       return enterState;
@@ -2508,10 +2827,35 @@ function createSessionSend(deps) {
     // 0.165.0 chatwidget/model_command.rs). Typed as-is, Codex only answered
     // "Unrecognized command '/effort'".
     const codexEffort = provider === 'codex' ? /^\/effort\s+([\w-]+)\s*$/i.exec(String(text ?? '').trim()) : null;
-    const trimmed = codexEffort ? `/model --reasoning=${codexEffort[1].toLowerCase()}` : String(text ?? '').replace(/\r\n/g, '\n').trim();
+    let trimmed = codexEffort ? `/model --reasoning=${codexEffort[1].toLowerCase()}` : String(text ?? '').replace(/\r\n/g, '\n').trim();
     const imagePaths = Array.isArray(images) ? images.filter(Boolean) : [];
     if (!trimmed && imagePaths.length === 0 && !resumeOnly) throw new Error('nothing to send');
     const slash = isSlashCommand(trimmed);
+    // CODEX ON WINDOWS DROPS SMART PUNCTUATION AND SYMBOLS (codexSafeText), so
+    // a phone's "didn’t…" never matched the box and was never sent (Pat,
+    // 2026-11-01). The ASCII version is THE message from here on: typed,
+    // matched in the box, and confirmed in the transcript, all as one text
+    // (confirming the original instead reported a delivered send as failed;
+    // Astra's round-2 review). A removal that would turn the message into a
+    // Codex command ("✓/exit" -> "/exit") or into nothing sends nothing.
+    let normalizedNote = null;
+    if (provider === 'codex' && platform === 'win32' && trimmed && !slash) {
+      const safe = codexSafeText(trimmed);
+      if (safe.text !== trimmed) {
+        const wire = safe.text.trim();
+        const shown = safe.dropped.length ? [...new Set(safe.dropped)].join(' ') : '';
+        if (!wire || isSlashCommand(wire)) {
+          const error = new Error(`Codex cannot show ${shown || 'some of these characters'}, and without ${safe.dropped.length === 1 ? 'it' : 'them'} your message would ${wire ? `start with "/" and run as a Codex command` : 'be empty'}, so Harbor sent nothing. Your text is kept`);
+          error.code = 'CODEX_TEXT_UNSENDABLE';
+          throw error;
+        }
+        logSend({ sessionId, phase: 'codex-text-normalized', dropped: shown || null, mapped: safe.mapped.map(([from, to]) => `${from}>${to}`).join(' ') || null });
+        // Every change is said, not only what was dropped: a twin can matter
+        // in a path or a quoted value (Astra's round 3).
+        normalizedNote = codexChangeNote(safe);
+        trimmed = wire;
+      }
+    }
     const waitNotice = (detail) => status(sessionId, 'sending', detail);
     const target = await resolvePane(sessionId, pane);
     debug('resolved target', JSON.stringify(target), 'link was', JSON.stringify(links.get(sessionId)));
@@ -2553,8 +2897,19 @@ function createSessionSend(deps) {
         // message inside preSize and guaranteeing a false timeout.
         const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
         try {
-          await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
-          status(sessionId, 'sent');
+          const enterState = await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
+          if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && enterState === 'unconfirmed') {
+            if (!trimmed || !confirmation || confirmation.skip) throw codexUnconfirmedError();
+            status(sessionId, 'sending', 'checking that Codex took it');
+            // Only while this send still owns the status: a newer send's
+            // outcome is never overwritten by this one's late answer.
+            const checkingSeq = statusSeq.get(sessionId);
+            reconcileDelivery(sessionId, trimmed, slash, confirmation, () => {
+              if (statusSeq.get(sessionId) === checkingSeq) status(sessionId, 'sent', normalizedNote || undefined);
+            }, checkingSeq);
+            return { ok: true, paneId: target.paneId, delivery: 'confirming' };
+          }
+          status(sessionId, 'sent', normalizedNote || undefined);
           if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation);
           return { ok: true, paneId: target.paneId, delivery: trimmed ? 'confirming' : 'delivered' };
         } catch (error) {
@@ -2602,8 +2957,9 @@ function createSessionSend(deps) {
         return { ok: true, paneId: providerFresh.paneId, resumed: true };
       }
       status(sessionId, 'sending');
-      await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
-      status(sessionId, 'sent');
+      const freshEnter = await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
+      if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && freshEnter === 'unconfirmed') throw codexUnconfirmedError();
+      status(sessionId, 'sent', normalizedNote || undefined);
       return { ok: true, paneId: providerFresh.paneId, resumed: true, delivery: 'delivered' };
     }
     const resumePlan = await resumeNudgePlan(sessionId);
@@ -2645,10 +3001,13 @@ function createSessionSend(deps) {
   // Confirmation is deliberately detached from the user-visible send. A pty
   // write makes the message appear sent immediately; transcript reconciliation
   // can still replace that optimism with an honest error if delivery failed.
-  const reconcileDelivery = (sessionId, text, optional, confirmation) => {
+  const reconcileDelivery = (sessionId, text, optional, confirmation, onConfirmed = null, guardSeq = null) => {
     Promise.resolve(confirmation).then((prepared) => (
       confirmDelivery(sessionId, text, { optional, prepared })
-    )).catch((error) => {
+    )).then((confirmed) => {
+      if (confirmed && onConfirmed) onConfirmed();
+    }).catch((error) => {
+      if (guardSeq != null && statusSeq.get(sessionId) !== guardSeq) return; // superseded
       status(sessionId, 'error', error.message);
       if (error?.code === 'UNCONFIRMED' && error.lateWatch?.scan) {
         watchLateDelivery(sessionId, error.lateWatch.scan, statusSeq.get(sessionId)).catch(() => {});
@@ -2958,9 +3317,18 @@ function createSessionSend(deps) {
     try { return parseWorkMeter(await readPane(pane.paneId)); } catch { return null; }
   };
 
+  // Claude also draws its own HINTS dim in an empty box, and those are not
+  // predictions: while a message waits in its queue the box reads "Press up
+  // to edit queued messages" (CLI 2.1.316, measured 2026-11-01), which the bar
+  // offered as "⇥ Tab", and Tab would have typed that sentence in to be sent.
+  // The send path still reads the hint as an empty box (dimSuggestion), which
+  // is right there; only the Tab offer drops it.
   const getSuggestion = async ({ pane } = {}) => {
     if (!pane?.paneId) return null;
-    try { return (await readSuggestion(pane.paneId)) || null; } catch { return null; }
+    try {
+      const suggestion = (await readSuggestion(pane.paneId)) || null;
+      return suggestion && CLAUDE_BOX_HINT_RE.test(suggestion.trim()) ? null : suggestion;
+    } catch { return null; }
   };
 
   return {
@@ -2999,6 +3367,11 @@ module.exports = {
   providerTranscriptDirs,
   composerSendState,
   codexBoxState,
+  codexBoxMatch,
   codexBoxDraft,
+  codexStartupEcho,
+  codexSafeText,
+  codexChangeNote,
+  composerBox,
   isFleetView,
 };

@@ -6,7 +6,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { TranscriptParser } = require('../../src/main/providers/transcript.js');
-const { turnMetaLabel, formatTokens, formatDuration } = require('../../src/renderer/stage/turn-meta.cjs');
+const { turnMetaLabel, formatTokens, formatDuration, queueStateLabel, queueChip, subagentLabel } = require('../../src/renderer/stage/turn-meta.cjs');
 
 const user = (text, ts) => ({ type: 'user', timestamp: ts, message: { role: 'user', content: text } });
 const assistant = (id, out, ts, content) => ({
@@ -62,4 +62,37 @@ test('the live chip reads steadily through the stretches the CLI hides its line'
   // Before the prompt lands in the transcript, the CLI's own elapsed is used.
   assert.equal(liveMeterLabel({ startMs: null, cliElapsed: '3s', cliTokens: 25 }), '3s · ↓ 25');
   assert.equal(liveMeterLabel({}), null);
+});
+
+// A queued message's state, in words under its bubble and as a header count
+// (2026-11-01, Pat: messages "sticking in the queue" seen only in the terminal).
+test('queueStateLabel: waiting says so, a long wait is noted, a quick one and old blocks say nothing', () => {
+  const at = '2026-11-02T03:00:00.000Z';
+  assert.match(queueStateLabel({ queued: true, queueState: 'waiting', ts: at }), /^Waiting in Claude's queue/);
+  assert.equal(queueStateLabel({ queued: true, queueState: 'delivered', ts: at, deliveredTs: '2026-11-02T03:01:12.000Z' }), "Waited 1m 12s in Claude's queue");
+  assert.equal(queueStateLabel({ queued: true, queueState: 'delivered', ts: at, deliveredTs: '2026-11-02T03:00:04.000Z' }), null);
+  assert.equal(queueStateLabel({ queued: true, ts: at }), null, 'a block parsed before queue states existed');
+  assert.equal(queueStateLabel({ kind: 'user', text: 'hi' }), null);
+});
+
+test('queueChip: counts what waits and says who sent it', () => {
+  assert.equal(queueChip(null), null);
+  assert.equal(queueChip({ waiting: 0 }), null);
+  const chip = queueChip({ waiting: 3, from: { you: 1, peer: 1, task: 1 }, oldestTs: '2026-11-02T03:00:00.000Z' }, { formatTime: () => '9:00 PM' });
+  assert.equal(chip.label, '3 queued');
+  assert.equal(chip.title, "3 messages wait for Claude's next step (1 from you, 1 from other sessions, 1 background result). Claude reads its queue between tool calls, so a long step holds them. The oldest was sent at 9:00 PM.");
+  assert.equal(queueChip({ waiting: 1, from: { you: 1 } }).title, "1 message waits for Claude's next step (1 from you). Claude reads its queue between tool calls, so a long step holds them.");
+});
+
+test('subagentLabel: what a sub-agent is doing, then what it used', () => {
+  assert.equal(subagentLabel({ running: true, tools: 12, now: 'Searching queue-operation' }), '12 tools so far · Searching queue-operation');
+  assert.equal(subagentLabel({ running: true, tools: 1, now: null }), '1 tool so far');
+  assert.equal(subagentLabel({ running: true, tools: 0, now: null }), 'Starting');
+  assert.equal(subagentLabel({ running: false, tools: 20, now: null }), 'Used 20 tools');
+  assert.equal(subagentLabel({ running: false, tools: null, now: null }), null);
+  assert.equal(subagentLabel(null), null);
+  assert.equal(subagentLabel({ running: false, quiet: true, finished: false, tools: 4, now: null }), 'No activity for 15+ min · 4 tools so far');
+  assert.equal(subagentLabel({ running: true, tools: 9, now: null, partial: true }), '9+ tools so far');
+  assert.equal(subagentLabel({ running: true, tools: 0, now: null, partial: true }), 'Working (its earlier steps were too many to count)');
+  assert.equal(subagentLabel({ running: false, finished: true, tools: 0, now: null, partial: true }), 'Done (its steps were too many to count)');
 });

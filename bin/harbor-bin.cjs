@@ -342,7 +342,7 @@ function sessiondChildEnv(sourceEnv = process.env, { agent = null } = {}) {
 }
 
 async function spawnSessiond({ argv, cwd, env, agent, agentSession }) {
-  const client = new SessionClient({ socketPath: process.env.HARBOR_SESSIOND_SOCKET });
+  const client = new SessionClient(process.env.HARBOR_SESSIOND_SOCKET ? { socketPath: process.env.HARBOR_SESSIOND_SOCKET } : {});
   try {
     return await client.request('spawn', {
       argv,

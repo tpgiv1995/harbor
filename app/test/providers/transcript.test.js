@@ -541,6 +541,44 @@ function queuedCommandLine(prompt, origin = { kind: 'human' }) {
   };
 }
 
+// WAITING IS SHOWN UNTIL CLAUDE TAKES IT (2026-11-01). Shapes are the real
+// 2.1.316 records: enqueue (with content) -> remove (same content, mid-turn) or
+// dequeue (no content, the oldest, idle path). Task notifications are queued too
+// and never become bubbles; they still count as waiting.
+function queueOp(operation, content, timestamp = TS) {
+  return { type: 'queue-operation', operation, ...(content === undefined ? {} : { content }), timestamp, sessionId: 's1' };
+}
+test('a queued message is marked waiting until Claude takes it, and the header counts what waits', () => {
+  const p = new TranscriptParser();
+  p.applyLine(queueOp('enqueue', 'please also check the footer', '2026-11-02T03:00:00.000Z'));
+  p.applyLine(queueOp('enqueue', '<cross-session-message from="uds:x" from-name="fable">ship it</cross-session-message>', '2026-11-02T03:00:05.000Z'));
+  p.applyLine(queueOp('enqueue', '[SYSTEM NOTIFICATION - NOT USER INPUT] task done', '2026-11-02T03:00:06.000Z'));
+  assert.equal(p.blocks.length, 2, 'the task notification is counted, not drawn');
+  assert.equal(p.blocks[0].queueState, 'waiting');
+  assert.equal(p.blocks[1].queueState, 'waiting');
+  assert.deepEqual(p.header.queue, { waiting: 3, from: { you: 1, peer: 1, task: 1 }, oldestTs: '2026-11-02T03:00:00.000Z' });
+
+  // Mid-turn pick-up names its message, whatever its position.
+  const changed = p.applyLine(queueOp('remove', '<cross-session-message from="uds:x" from-name="fable">ship it</cross-session-message>', '2026-11-02T03:01:10.000Z'));
+  assert.deepEqual(changed, [p.blocks[1].key], 'the delivered bubble re-renders');
+  assert.equal(p.blocks[1].queueState, 'delivered');
+  assert.equal(p.blocks[1].deliveredTs, '2026-11-02T03:01:10.000Z');
+  assert.equal(p.blocks[0].queueState, 'waiting');
+  assert.deepEqual(p.header.queue.from, { you: 1, peer: 0, task: 1 });
+
+  // A remove whose message was queued before this read began changes nothing.
+  assert.deepEqual(p.applyLine(queueOp('remove', 'something older', '2026-11-02T03:01:20.000Z')), []);
+  assert.equal(p.header.queue.waiting, 2);
+
+  // The idle path's dequeue carries no content and takes the oldest.
+  p.applyLine(queueOp('dequeue', undefined, '2026-11-02T03:02:00.000Z'));
+  assert.equal(p.blocks[0].queueState, 'delivered');
+  p.applyLine(queueOp('dequeue', undefined, '2026-11-02T03:02:01.000Z'));
+  assert.equal(p.header.queue, null, 'nothing waits');
+  // A dequeue with nothing waiting is harmless.
+  assert.deepEqual(p.applyLine(queueOp('dequeue', undefined, '2026-11-02T03:02:02.000Z')), []);
+});
+
 test('a text-only message sent while Claude is busy (enqueue, empty queued_command) renders', () => {
   const p = new TranscriptParser();
   p.applyLine(enqueueLine('i dont mind you using my real chrome'));
@@ -588,6 +626,20 @@ test('a queued cross-session message renders flagged as a peer message; Pat\'s o
   assert.equal(p.blocks[0].queued, true);
   assert.equal(p.blocks[0].peer, true);
   assert.equal(p.blocks[1].peer, undefined, 'a typed message carries no peer flag');
+  // 2026-11-01: the bubble is the message and the sender's name, not the wrapper.
+  assert.equal(p.blocks[0].text, 'grade landed');
+  assert.equal(p.blocks[0].peerFrom, 'cdt-app-80');
+  assert.equal(p.blocks[1].peerFrom, undefined);
+});
+
+test('a peer message delivered as a plain user line is unwrapped too, and a wrapper with no name says so', () => {
+  const p = new TranscriptParser();
+  p.applyLine({ type: 'user', timestamp: TS, message: { role: 'user', content: peerMessage('dispatcher', 'REHEARSAL 2 ENDED AND IS VOID.') } });
+  p.applyLine({ type: 'user', timestamp: TS, message: { role: 'user', content: [{ type: 'text', text: '<cross-session-message from="uds:x">no name here</cross-session-message>' }] } });
+  assert.deepEqual(p.blocks.map((b) => [b.text, b.peer, b.peerFrom]), [
+    ['REHEARSAL 2 ENDED AND IS VOID.', true, 'dispatcher'],
+    ['no name here', true, null],
+  ]);
 });
 
 test('peer messages past the cap never evict every agent row (2026-10-22 lead window)', () => {
@@ -1951,4 +2003,129 @@ test('between-tool progress notes in thinking blocks render; empty reasoning nev
   assert.deepEqual(p.blocks.map((b) => b.kind), ['progress', 'action']);
   assert.equal(p.blocks[0].text, 'Setting up two worktrees off HEAD, then running the suite.');
   assert.equal(p.blocks.filter((b) => b.kind === 'assistant').length, 0, 'a progress note is not a reply');
+});
+
+// 2026-11-01, Pat: "in harbor view it looks like shit is just stuck". A
+// sub-agent writes its own transcript under <session>/subagents/, so the
+// window's Delegated row stayed static for the whole run while the terminal
+// drew its tool calls. The row now carries { running, tools, now }.
+test('a Delegated row follows its sub-agent transcript: tools so far, what it is doing, done', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-subagent-'));
+  const sessionId = 'subagent-progress';
+  const file = path.join(dir, `${sessionId}.jsonl`);
+  const subs = path.join(dir, sessionId, 'subagents');
+  await fsp.mkdir(subs, { recursive: true });
+  writeLines(file, [
+    userLine('map the gaps'),
+    assistantLine([
+      { type: 'tool_use', id: 'toolu_live', name: 'Agent', input: { description: 'Map terminal-vs-Harbor gaps', subagent_type: 'general-purpose' } },
+      { type: 'tool_use', id: 'toolu_old', name: 'Agent', input: { description: 'Already finished', subagent_type: 'general-purpose' } },
+    ], { stop_reason: 'tool_use' }),
+  ], 'w');
+  const subLine = (parts) => ({ type: 'assistant', isSidechain: true, timestamp: new Date().toISOString(), message: { role: 'assistant', content: parts } });
+  await fsp.writeFile(path.join(subs, 'agent-live.meta.json'), JSON.stringify({ agentType: 'general-purpose', toolUseId: 'toolu_live', finished: false }));
+  writeLines(path.join(subs, 'agent-live.jsonl'), [
+    { type: 'user', isSidechain: true, message: { role: 'user', content: 'map the gaps' } },
+    subLine([{ type: 'tool_use', id: 's1', name: 'Grep', input: { pattern: 'queue-operation' } }]),
+    subLine([{ type: 'text', text: 'Checking the parser.' }, { type: 'tool_use', id: 's2', name: 'Bash', input: { command: 'npm test', description: 'Run the tests' } }]),
+  ], 'w');
+  await fsp.writeFile(path.join(subs, 'agent-old.meta.json'), JSON.stringify({ agentType: 'general-purpose', toolUseId: 'toolu_old', finished: true }));
+  writeLines(path.join(subs, 'agent-old.jsonl'), [subLine([{ type: 'tool_use', id: 'o1', name: 'Read', input: { file_path: 'C:\\x\\a.js' } }])], 'w');
+
+  const provider = createTranscriptProvider({ getSessionMeta: async () => ({ path: file }), watchFactory: () => ({ on: () => {}, close: () => {} }) });
+  t.after(async () => { provider.closeAll(); await fsp.rm(dir, { recursive: true, force: true }); });
+  const updates = [];
+  provider.emitter.on('update', (update) => updates.push(update));
+  await provider.open(sessionId);
+  const opened = updates.find((u) => u.replace)?.replace || [];
+  const live = opened.find((b) => b.toolId === 'toolu_live');
+  const old = opened.find((b) => b.toolId === 'toolu_old');
+  assert.equal(live.verb, 'Delegated');
+  assert.equal(live.sub.running, true);
+  assert.equal(live.sub.tools, 2);
+  assert.match(live.sub.now, /^Running the tests/);
+  // First seen already finished: not read, nothing to draw.
+  assert.deepEqual(old.sub, { running: false, quiet: false, finished: true, tools: null, now: null, partial: false });
+
+  // It keeps working and then finishes; the main transcript does not move.
+  writeLines(path.join(subs, 'agent-live.jsonl'), [subLine([{ type: 'tool_use', id: 's3', name: 'Read', input: { file_path: 'C:\\dev\\x\\transcript.js' } }])]);
+  await provider.refresh(sessionId);
+  let changed = updates.at(-1).changed.find((b) => b.toolId === 'toolu_live');
+  assert.equal(changed.sub.tools, 3);
+  assert.equal(changed.sub.running, true);
+  assert.match(changed.sub.now, /transcript\.js/);
+  await fsp.writeFile(path.join(subs, 'agent-live.meta.json'), JSON.stringify({ agentType: 'general-purpose', toolUseId: 'toolu_live', finished: true }));
+  await provider.refresh(sessionId);
+  changed = updates.at(-1).changed.find((b) => b.toolId === 'toolu_live');
+  assert.deepEqual(changed.sub, { running: false, quiet: false, finished: true, tools: 3, now: null, partial: false });
+  // Settled: a later refresh sends nothing for it.
+  await provider.refresh(sessionId);
+  assert.equal(updates.at(-1).changed.some((b) => b.toolId === 'toolu_live'), false);
+});
+
+// Astra's round 3 (2026-11-01): silence is not death, a shrunk child file is
+// recounted, a rebuilt parser is followed afresh, evicted rows are dropped.
+test('sub-agent progress: quiet then resumed, child truncated, parser rebuilt, evicted rows dropped', async (t) => {
+  const { readSubagentProgress } = require('../../src/main/providers/transcript.js');
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-subagent-r3-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const sessionId = 'sub-r3';
+  const subs = path.join(dir, sessionId, 'subagents');
+  await fsp.mkdir(subs, { recursive: true });
+  const agentCall = assistantLine([{ type: 'tool_use', id: 'toolu_q', name: 'Agent', input: { description: 'Long job' } }], { stop_reason: 'tool_use' });
+  const parserWithAgent = () => { const p = new TranscriptParser(); p.applyLine(userLine('go')); p.applyLine(agentCall); return p; };
+  const subTool = (id) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Grep', input: { pattern: id } }] } }) + '\n';
+  const child = path.join(subs, 'agent-q.jsonl');
+  await fsp.writeFile(path.join(subs, 'agent-q.meta.json'), JSON.stringify({ toolUseId: 'toolu_q', finished: false }));
+  await fsp.writeFile(child, subTool('s1'));
+  const entry = { parser: parserWithAgent(), path: path.join(dir, `${sessionId}.jsonl`), sessionId };
+  const row = () => entry.parser.delegations.get('toolu_q');
+  const t0 = Date.now();
+  await readSubagentProgress(entry, t0);
+  assert.equal(row().sub.running, true);
+  assert.equal(row().sub.tools, 1);
+  // Sixteen quiet minutes: quiet, not done, and still followed.
+  await readSubagentProgress(entry, t0 + 16 * 60_000);
+  assert.deepEqual([row().sub.running, row().sub.quiet, row().sub.finished], [false, true, false]);
+  await fsp.appendFile(child, subTool('s2'));
+  const later = new Date(t0 + 16 * 60_000);
+  await fsp.utimes(child, later, later);
+  await readSubagentProgress(entry, t0 + 16.5 * 60_000);
+  assert.deepEqual([row().sub.running, row().sub.tools], [true, 2], 'it resumed');
+  // The child file is replaced by a shorter one: counted again from the start.
+  await fsp.writeFile(child, subTool('n1'));
+  await fsp.utimes(child, later, later);
+  await readSubagentProgress(entry, t0 + 16.5 * 60_000);
+  assert.equal(row().sub.tools, 1);
+  // A rebuilt parser (the truncation path) is followed afresh.
+  await fsp.writeFile(path.join(subs, 'agent-q.meta.json'), JSON.stringify({ toolUseId: 'toolu_q', finished: true }));
+  await readSubagentProgress(entry, t0 + 16.5 * 60_000);
+  assert.equal(row().sub.finished, true);
+  entry.parser = parserWithAgent();
+  assert.equal(row().sub, undefined);
+  await readSubagentProgress(entry, t0 + 16.5 * 60_000);
+  assert.equal(row().sub.finished, true, 'the new row is settled, not skipped forever');
+  // Rows the parser evicts stop being followed.
+  const p = parserWithAgent();
+  for (let i = 0; i < 300; i += 1) p.applyLine(assistantLine([{ type: 'text', text: `note ${i}` }]));
+  assert.equal(p.delegations.size, 0);
+});
+
+test('sub-agent progress: a meta file first read without its Agent call is read again (Astra round 4)', async (t) => {
+  const { readSubagentProgress } = require('../../src/main/providers/transcript.js');
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-subagent-r4-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const subs = path.join(dir, 's', 'subagents');
+  await fsp.mkdir(subs, { recursive: true });
+  const p = new TranscriptParser();
+  p.applyLine(userLine('go'));
+  p.applyLine(assistantLine([{ type: 'tool_use', id: 'toolu_m', name: 'Agent', input: { description: 'x' } }], { stop_reason: 'tool_use' }));
+  const entry = { parser: p, path: path.join(dir, 's.jsonl'), sessionId: 's' };
+  await fsp.writeFile(path.join(subs, 'agent-m.meta.json'), JSON.stringify({ finished: false }));
+  await fsp.writeFile(path.join(subs, 'agent-m.jsonl'), `${JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'a', name: 'Grep', input: { pattern: 'a' } }] } })}\n`);
+  await readSubagentProgress(entry);
+  assert.equal(p.delegations.get('toolu_m').sub, undefined);
+  await fsp.writeFile(path.join(subs, 'agent-m.meta.json'), JSON.stringify({ toolUseId: 'toolu_m', finished: false }));
+  await readSubagentProgress(entry);
+  assert.equal(p.delegations.get('toolu_m').sub.tools, 1);
 });

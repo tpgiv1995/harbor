@@ -136,7 +136,7 @@ function OrchestrationPill({ summary, onClick }) {
 // terminal behind the TTY toggle (permission prompts and menus live in the
 // pty, not the transcript; a session waiting on one must never be a dead end).
 // The question card itself is stage/AskCard.jsx (the answer sheet, 2026-09-03).
-const { parseTokenCount, liveMeterLabel } = turnMetaHelpers;
+const { parseTokenCount, liveMeterLabel, queueChip } = turnMetaHelpers;
 
 // LIVE WORK METER (2026-10-05). While a Claude window is mid-turn the header
 // shows "38s · ↓ 2.4k" beside the run state, like the CLI's own working line.
@@ -228,6 +228,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   const runState = runStateCue(session, pane, awaitingAnswer ? { ...header, blocked: true } : header);
   const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued) return blocks[i]; return null; }, [blocks]);
   const workMeter = useWorkMeter(session, pane, Boolean(header?.working) && !awaitingAnswer, lastPrompt);
+  const queueInfo = useMemo(() => queueChip(header?.queue), [header?.queue]);
   const title = session.isChildTask && session.childTitle ? session.childTitle : session.title;
   const projectLabel = !session.project || session.project === '~' ? 'home' : session.project;
   const showKeycap = index < 9;
@@ -392,6 +393,9 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           ) : null}
           {workMeter ? (
             <span className="work-meter" title={workMeter.title}>{workMeter.label}</span>
+          ) : null}
+          {queueInfo ? (
+            <span className="queue-chip" role="status" title={queueInfo.title} aria-label={queueInfo.title}>{queueInfo.label}</span>
           ) : null}
           {taskTip && runState?.tooltip ? createPortal(<div role="tooltip" className="background-task-tip" style={{ left: Math.min(taskTip.left, window.innerWidth - 370), top: taskTip.bottom + 6 }}>{runState.tooltip}</div>, document.body) : null}
           {session.delegationSummary?.total ? <button className="orch-pill delegation-pill" type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onOpenDelegations(); }}>agents {session.delegationSummary.running} running / {session.delegationSummary.total}</button> : null}

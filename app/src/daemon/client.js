@@ -9,6 +9,14 @@ const { resolvePaths, listenAddress } = require('./paths.js');
 class SessionClient extends EventEmitter {
   constructor(options = {}) {
     super();
+    // AN EMPTY ADDRESS IS NOT "THE DEFAULT" (2026-11-01). A harness that read its
+    // relocated store's socket from a field that did not exist passed
+    // `socketPath: undefined`, and this fell through to the USER'S daemon: four
+    // scratch Codex sessions launched into Pat's real store. Omit the option to
+    // mean the default daemon; naming it means you have one.
+    if (Object.hasOwn(options, 'socketPath') && !options.socketPath) {
+      throw new TypeError('SessionClient was given an empty socketPath; omit the option to use the default daemon');
+    }
     this.socketPath = options.socketPath || resolvePaths().socket;
     this.socket = null;
     this.pending = new Map();

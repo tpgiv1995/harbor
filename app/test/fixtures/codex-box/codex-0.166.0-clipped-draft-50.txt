@@ -1,0 +1,24 @@
+do
+  /model - choose what model and reasoning effort
+to use
+  /review - review any changes and find issues
+ 
+⚠ Heads up, you have less than 25% of your weekly
+  limit left. Run /status for a breakdown.        
+                         ⚠ weekly limit: 24% left
+
+› w45-abcde w46-abcde w47-abcde w48-abcde w49-   ↑
+  abcde w50-abcde w51-abcde w52-abcde w53-abcde
+  w54-abcde w55-abcde w56-abcde w57-abcde w58-
+  abcde w59-abcde w60-abcde w61-abcde w62-abcde
+  w63-abcde w64-abcde w65-abcde w66-abcde w67-
+  abcde w68-abcde w69-abcde w70-abcde w71-abcde
+  w72-abcde w73-abcde w74-abcde w75-abcde w76-
+  abcde w77-abcde w78-abcde w79-abcde w80-abcde
+  w81-abcde w82-abcde w83-abcde w84-abcde w85-
+  abcde w86-abcde w87-abcde w88-abcde w89-abcde
+  w90-abcde w91-abcde w92-abcde w93-abcde w94-
+  abcde w95-abcde w96-abcde w97-abcde w98-abcde
+
+  GPT-6-Luna low · ~\AppData\Local\Temp\claude\ct…
+                                         ⚠ 1 · f2

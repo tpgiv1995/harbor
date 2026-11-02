@@ -1,0 +1,17 @@
+# Astra adversarial review, round 4: your round-3 findings, answered (2026-11-01)
+
+Same job (your reviews r1 to r3 in `docs\orchestration\2026-11-01-session-comms\reviews\`). Do NOT edit any file, and do NOT start, contact, type into or signal any live session or daemon. Return the FULL review as your final message.
+
+The round-3 answer is commit `9c2a1f8` (`git -C C:\dev\harbor show 9c2a1f8`); the typer is staged at `...\private\inputs\type.cjs` (round-3 version beside it as `type.cjs.r3`). The working tree also holds other sessions' unrelated changes; ignore them.
+
+How each finding was answered, for you to verify or reopen with a concrete input:
+1. Unconfirmed Codex Enter: `runSend` now fails with `CODEX_UNCONFIRMED` when there is no transcript to read, and otherwise shows "checking that Codex took it" until `reconcileDelivery` confirms (new `onConfirmed`). Slash commands stay best-effort. Live-caught while proving it: a fresh Codex echoes the first message as "› <message>" with "Waiting for startup · esc cancel" under it and draws no box; `codexStartupEcho` treats an echo of exactly this message there as taken (Harbor's watcher and the typer).
+2. End-only boxes: Codex marks a clipped draft with "↑" at the right edge of the first box row (real capture `app/test/fixtures/codex-box/codex-0.166.0-clipped-draft-50.txt`); `codexPromptBox` strips it into `clipped`, and an end-only match needs it. The typer's Claude gate accepts an end-only box only at 20 or more drawn rows. Also found: a row under the status line used to be read into the box; the box now ends at the first blank row followed by the status line.
+3. Typer transcript check: whole-text equality with only CRLF and the ends normalised.
+4. Same-process replacement: the typer now refuses an opaque or end-only retry unless the caller passes `--enter-only`. Harbor's own retry is unchanged on purpose: it happens only when Pat resends after Harbor said it would press Enter for the earlier try. The doctrine states this and that you do not accept it; a keeper input counter would close it and is not built. Say whether anything short of that is worth doing.
+5. Value changes: kept as a deliberate product call (Codex cannot receive those characters at all); the send status now names every change, twins included. Say if you see a concrete harm the status does not cover.
+6 and 7: documented residuals (no session id or a changed id after /clear ends "unconfirmed"; a real `Try "..."` draft in a fresh conversation gets appended to, and the typer's own check then refuses Enter).
+8 to 10: sub-agent rows keep following unfinished agents ("No activity for 15+ min"), recount a shrunk child, rebuild with the parser, drop evicted rows, read an unmatched meta once, yield every 256 lines, and mark skipped stretches "N+".
+11 and 12: the logger reports a transcript open that never answered, and "window-left" for a window that went away unseen.
+
+Focus: confirm or reopen each with a concrete input, and look for anything the round-3 changes broke (especially the startup-echo rule: could it confirm a send that did not happen, or swallow a real failure?). Order findings Blocker, Should-fix, Nit. You may run `npm test -- session-send`, `npm test -- providers/transcript`, `npm test -- turn-meta`, `npm test -- unbound-watch` from `C:\dev\harbor\app` and the staged typer's `--self-test`. Do NOT run the full suite. No browser.
