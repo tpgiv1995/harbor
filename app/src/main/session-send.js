@@ -321,7 +321,10 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
 // Enter Codex swallowed into the paste adds one).
 const CODEX_PROMPT_RE = /^›(?:\s|$)/u;
 const CODEX_LIST_ROW_RE = /^›\s*\d+\.\s/u;
-const CODEX_FOOTER_RE = /^\s+\S.*?\s·\s(?:~|[A-Za-z]:|\/)/u;
+// Mid-turn, with text typed in the box, the footer is a key hint instead
+// ("tab to queue message ... 94% context left", working-typed-0.160.0.txt):
+// read as part of the box it made every steer look unheld, so none was sent.
+const CODEX_FOOTER_RE = /^\s+(?:\S.*?\s·\s(?:~|[A-Za-z]:|\/)|tab to queue message\b)/u;
 const CODEX_PASTE_RE = /^\[PastedContent(\d+)chars\](?:#\d+)?$/;
 const CODEX_LARGE_PASTE_CHARS = 1000;
 // WHILE A TURN RUNS, OR ONCE THE BOX HOLDS TEXT, THE LINE UNDER THE BOX IS KEY
@@ -993,7 +996,7 @@ function createSessionSend(deps) {
   // classifyBlocked refuses the dialogs codex-screen.js can PARSE; one it cannot
   // leaves no card and no refusal, and a send's paste would land in it and its
   // Enter answer it. So for Codex the absence of a composer is itself a refusal.
-  const assertComposerSafe = async (paneId, { requireCodexComposer = false } = {}) => {
+  const assertComposerSafe = async (paneId, { requireCodexComposer = false, codex = requireCodexComposer } = {}) => {
     // The refusal is the SAME decision as the card (classifyBlocked), not a
     // second one that happens to agree most of the time. It used to be its own
     // code on its own read: 16 lines instead of 90, sliced without trimming the
@@ -1019,13 +1022,21 @@ function createSessionSend(deps) {
       // window: a blocked pane is never a dead end (Pat mandate 2026-07-21).
       let menu = null;
       try { menu = await readMenu(paneId); } catch { /* refuse with the generic guidance */ }
-      if (menu) {
-        throw new Error('the session is asking a question in its window; answer it there first. Your text is kept');
-      }
-      throw new Error('the session is showing a prompt Harbor cannot fully read; use the answer panel in its window. Your text is kept');
+      const error = new Error(menu
+        ? 'the session is asking a question in its window; answer it there first. Your text is kept'
+        : 'the session is showing a prompt Harbor cannot fully read; use the answer panel in its window. Your text is kept');
+      // A Codex send refused for any screen but its message box carries Pat's
+      // code, so callers tell "not typed" apart from a failed send.
+      if (codex) error.code = 'CODEX_NO_PROMPT';
+      throw error;
     }
     if (requireCodexComposer && !codexComposer(screen)) {
-      throw new Error('Codex is not showing its message box (a prompt or another screen is up), so the send was refused rather than typed into whatever is there; check its window. Your text is kept');
+      // The Codex app's thread lock gets Pat's refusal, which says where to
+      // close it (codexNoPromptError, CODEX_LOCKED_RE).
+      if (CODEX_LOCKED_RE.test(screen)) throw codexNoPromptError(screen);
+      const error = new Error('Codex is not showing its message box (a prompt or another screen is up), so the send was refused rather than typed into whatever is there; check its window. Your text is kept');
+      error.code = 'CODEX_NO_PROMPT';
+      throw error;
     }
     const bottom = screen.split('\n').slice(-10).join('\n');
     if (COMPOSER_RE.test(bottom)) return;
@@ -1717,7 +1728,7 @@ function createSessionSend(deps) {
       // delivered to must show its composer now; a fresh one is still drawing,
       // so its composer is required after the readiness wait below instead.
       if (provider === 'claude') await assertComposerSafe(paneId);
-      else if (provider === 'codex') await assertComposerSafe(paneId, { requireCodexComposer: deliveredPanes.has(paneId) });
+      else if (provider === 'codex') await assertComposerSafe(paneId, { requireCodexComposer: deliveredPanes.has(paneId), codex: true });
       else await assertNotDeadShell(paneId);
 
       // A FRESH non-claude pane is still starting its TUI, and codex swallows
