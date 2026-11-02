@@ -2229,3 +2229,32 @@ test('a queued bubble that gets its picture later is reported changed', () => {
   assert.equal(bubble.images?.length, 1);
   assert.ok(changed.includes(bubble.key), 'the window is told to redraw the bubble with its picture');
 });
+
+// 2026-11-02, Pat: "i'd like all agent-to-agent messages between sessions to look
+// consistent". A message another session TYPED (C:\tools\harbor-peek\type.cjs,
+// the only path across plans and between Claude and Codex) opens with
+// "[from: <sender>]"; it is drawn as a message from that session, not Pat's.
+test('a typed message that names its sender is a peer message in Claude, Claude\'s queue, and Codex', () => {
+  const claude = new TranscriptParser('claude');
+  claude.applyLine({ type: 'user', timestamp: TS, message: { role: 'user', content: '[from: Fable] Land DX1 after the glass push.' } });
+  claude.applyLine({ type: 'queue-operation', operation: 'enqueue', timestamp: TS, content: '[from: Fixing session time and date errors (cdt-app)] Three heads are queued.' });
+  claude.applyLine({ type: 'user', timestamp: TS, message: { role: 'user', content: 'my own message' } });
+  const users = claude.blocks.filter((b) => b.kind === 'user');
+  assert.deepEqual(users.map((b) => [b.text, b.peer || false, b.peerFrom || null]), [
+    ['Land DX1 after the glass push.', true, 'Fable'],
+    ['Three heads are queued.', true, 'Fixing session time and date errors (cdt-app)'],
+    ['my own message', false, null],
+  ]);
+  const codex = new TranscriptParser('codex');
+  codex.applyLine({ type: 'event_msg', timestamp: TS, payload: { type: 'user_message', message: '[from: Fable] DX1 ADDENDUM: tree 2fde9340a.' } });
+  codex.applyLine({ type: 'event_msg', timestamp: TS, payload: { type: 'user_message', message: 'FABLE, 07:5xZ: an untagged message stays as typed' } });
+  const cx = codex.blocks.filter((b) => b.kind === 'user');
+  assert.deepEqual(cx.map((b) => [b.text, b.peer || false, b.peerFrom || null]), [
+    ['DX1 ADDENDUM: tree 2fde9340a.', true, 'Fable'],
+    ['FABLE, 07:5xZ: an untagged message stays as typed', false, null],
+  ]);
+  // A tag with nothing after it is not a message from anyone.
+  const empty = new TranscriptParser('claude');
+  empty.applyLine({ type: 'user', timestamp: TS, message: { role: 'user', content: '[from: Fable]' } });
+  assert.equal(empty.blocks.filter((b) => b.kind === 'user' && b.peer).length, 0);
+});

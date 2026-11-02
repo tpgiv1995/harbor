@@ -814,7 +814,23 @@ function normalizeQueuedKey(text) {
 // as a bubble like any other, but Pat did not type it, so it carries `peer` and
 // gets none of the trim protection his own turns get (see push()).
 function isPeerMessage(raw) {
-  return /^<cross-session-message[\s>]/.test(String(raw ?? '').trim());
+  return /^<cross-session-message[\s>]/.test(String(raw ?? '').trim()) || Boolean(typedSenderParts(raw));
+}
+
+// A message another session TYPED into this one (2026-11-02, Pat: "how come
+// the one in image 1 looks different?"). Sessions on different plans, and every
+// message between Claude and Codex, go through C:\tools\harbor-peek\type.cjs,
+// which types into the pane the way Pat would, so the transcript held a plain
+// user message and the window drew it as his. The typer now opens each message
+// with one plain line, "[from: <sender>]", which the receiving agent reads too;
+// that line is the sender and the rest is the message.
+const TYPED_SENDER_RE = /^\[from: ([^\]\r\n]{1,120})\][ \t]*(?:\r?\n[ \t]*)?/;
+function typedSenderParts(raw) {
+  const text = String(raw ?? '').trim();
+  const match = text.match(TYPED_SENDER_RE);
+  if (!match) return null;
+  const body = text.slice(match[0].length).trim();
+  return body ? { from: match[1].trim(), body } : null;
 }
 
 // The sender's name and the message, out of the wrapper (2026-11-01, Pat: "clear
@@ -825,7 +841,7 @@ function isPeerMessage(raw) {
 // (from-name); the message is drawn as any other.
 function peerMessageParts(raw) {
   const match = String(raw ?? '').trim().match(/^<cross-session-message\b([^>]*)>([\s\S]*?)<\/cross-session-message>$/);
-  if (!match) return null;
+  if (!match) return typedSenderParts(raw);
   const from = match[1].match(/\bfrom-name="([^"]*)"/)?.[1]?.trim() || null;
   return { from, body: match[2].trim() };
 }
@@ -1449,7 +1465,9 @@ class TranscriptParser {
     } else if (obj.type === 'event_msg' && payload.type === 'token_count') {
       this.noteCodexTokenCount(payload.info, ts, changed);
     } else if (obj.type === 'event_msg' && payload.type === 'user_message' && payload.message) {
-      this.startTurn(this.push({ kind: 'user', text: clipProse(payload.message), ts }), ts);
+      // Another session's typed message names its sender (typedSenderParts).
+      const peer = typedSenderParts(payload.message);
+      this.startTurn(this.push({ kind: 'user', text: clipProse(peer ? peer.body : payload.message), ts, ...(peer ? { peer: true, peerFrom: peer.from } : {}) }), ts);
       this.header.lastSignal = 'user-turn';
     } else if (obj.type === 'event_msg' && payload.type === 'agent_message' && payload.message) {
       this.push({ kind: 'assistant', text: clipProse(payload.message), ts });
