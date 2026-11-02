@@ -1037,10 +1037,6 @@ class TranscriptParser {
     // not yet seen its CommandExecution. See applyCodexLine.
     this.codexNamed = new Map();
     this.codexCodeMode = false;
-    // Codex token accounting (see noteCodexTokenCount): the context window the
-    // rollout last reported, and the thread's running output-token total, which
-    // a task's own output is measured against.
-    this.codexWindow = null;
     this.codexTotalOutput = null;
     // The task in flight: the user prompt that opened it and the output tokens
     // each API message spent on it. See noteTurnUsage.
@@ -1194,70 +1190,6 @@ class TranscriptParser {
     if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
   }
 
-  // CODEX CONTEXT AND TASK TOKENS (2026-10-31, Pat: a Codex window "missing a
-  // ton of information (context, cache, etc)"). Codex writes a token_count
-  // event after every model request:
-  //   info.last_token_usage     that ONE request. total_tokens (input plus
-  //                             output) is what the context holds right now:
-  //                             the output joins the history the next request
-  //                             sends. input_tokens alone is wrong twice over,
-  //                             it leaves the reply out, and it is 0 on the
-  //                             estimate Codex writes straight after a
-  //                             compaction (input 0, total 35,558 in the real
-  //                             rollout, then 32,614 input on the next request).
-  //   info.total_token_usage    the THREAD, accumulated: 4.7M input over a
-  //                             session whose window is 258k. Never the gauge.
-  //   info.model_context_window the denominator Codex itself divides by.
-  // Checked against a real 1,444-line rollout: its three compactions land right
-  // after last total_tokens of 241,171, 226,572 and 241,253 (a window of
-  // 258,400, 87 to 93 percent), and the first real request after each reads
-  // 32,979, 37,030 and 38,707, so the gauge climbs to the compaction and falls
-  // away from it the way the CLI's own does. A token_count with no `info` is a
-  // rate-limit update and is skipped. The output a TASK has spent is the thread's output
-  // total now minus its total when the task's prompt arrived, so a token_count
-  // written twice (it is) never counts twice.
-  noteCodexTokenCount(info, ts, changed) {
-    if (!info || typeof info !== 'object') return;
-    const windowTokens = Number(info.model_context_window);
-    if (Number.isFinite(windowTokens) && windowTokens > 0) this.codexWindow = windowTokens;
-    const last = info.last_token_usage;
-    const used = Number(last?.total_tokens);
-    if (Number.isFinite(used) && used > 0) {
-      this.header.contextTokens = used;
-      this.header.contextPct = this.codexWindow
-        ? Math.max(1, Math.min(99, Math.round((used / this.codexWindow) * 100)))
-        : null;
-    }
-    const totalOut = Number(info.total_token_usage?.output_tokens);
-    if (!Number.isFinite(totalOut)) return;
-    this.codexTotalOutput = totalOut;
-    const turn = this.turn;
-    if (!turn) return;
-    // A task whose prompt fell before the first token_count this parser saw
-    // takes its base from that request: the thread total less its own output.
-    if (!Number.isFinite(turn.outputBase)) {
-      const lastOut = Number(last?.output_tokens);
-      turn.outputBase = Number.isFinite(lastOut) ? Math.max(0, totalOut - lastOut) : totalOut;
-    }
-    this.noteCodexTurnMeta(Math.max(0, totalOut - turn.outputBase), ts, changed);
-  }
-
-  noteCodexTurnMeta(outputTokens, ts, changed) {
-    const turn = this.turn;
-    if (!turn) return;
-    const endMs = Date.parse(ts);
-    const durationMs = turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null;
-    const prior = turn.block.turnMeta;
-    if (prior && prior.outputTokens === outputTokens && prior.durationMs === durationMs) return;
-    turn.block.turnMeta = { outputTokens, durationMs };
-    if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
-  }
-
-  // A task ended (completed or interrupted): the time it took is now final.
-  settleCodexTurn(ts, changed) {
-    const prior = this.turn?.block?.turnMeta;
-    if (prior) this.noteCodexTurnMeta(prior.outputTokens, ts, changed);
-  }
 
   // Returns the keys of blocks that CHANGED in place (tool results resolving
   // an earlier action row) so the renderer can re-render them.
@@ -1571,7 +1503,11 @@ class TranscriptParser {
         break;
       // The pre-0.147 conversation events, kept for the historical corpus.
       case 'user_message':
-        if (payload.message) this.codexUser(clipProse(payload.message), ts);
+        if (payload.message) {
+          // Another session's typed message names its sender (typedSenderParts).
+          const peer = typedSenderParts(payload.message);
+          this.codexUser(clipProse(peer ? peer.body : payload.message), ts, peer);
+        }
         break;
       case 'agent_message':
         if (payload.message) this.codexAgent(String(payload.message), payload.phase, ts);
@@ -1582,6 +1518,13 @@ class TranscriptParser {
       case 'token_count':
         this.noteCodexTokens(payload.info, ts, changed);
         break;
+      case 'thread_settings_applied': {
+        // A mid-session change (`/model --reasoning=max`) lands here at once; the
+        // next turn_context only repeats it when the next task starts.
+        const effort = codexEffort(payload.thread_settings?.reasoning_effort);
+        if (effort) this.header.effort = effort;
+        break;
+      }
       case 'task_complete':
       case 'task_completed':
         this.endCodexTurn(payload.error ? 'error' : 'complete', payload, ts, changed);
@@ -1619,6 +1562,7 @@ class TranscriptParser {
         break;
       case 'CommandExecution':
         this.noteCodexCommand(item);
+        this.codexCommandRow(item, ts, changed);
         break;
       case 'McpToolCall':
         this.noteCodexItemFailed(item.id, item.status === 'failed' || item.result?.isError === true, changed);
@@ -1631,8 +1575,8 @@ class TranscriptParser {
     }
   }
 
-  codexUser(text, ts) {
-    const block = { kind: 'user', text, ts };
+  codexUser(text, ts, peer = null) {
+    const block = { kind: 'user', text, ts, ...(peer ? { peer: true, peerFrom: peer.from } : {}) };
     // A steer (a message typed while the task runs; real TUI rollouts write
     // it as a UserMessage with no task_started before it) joins the open
     // task. Starting a turn on it froze the real prompt's time and tokens
@@ -1694,12 +1638,14 @@ class TranscriptParser {
       // backwards: this report's own request is the task's first spend.
       if (turn.codexOutputBase == null || totalOut < turn.codexOutputBase) turn.codexOutputBase = Math.max(0, totalOut - lastOut);
       const endMs = Date.parse(ts);
-      turn.block.turnMeta = {
-        ...turn.block.turnMeta,
-        outputTokens: totalOut - turn.codexOutputBase,
-        durationMs: turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : (turn.block.turnMeta?.durationMs ?? null),
-      };
-      if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+      const prior = turn.block.turnMeta;
+      const outputTokens = totalOut - turn.codexOutputBase;
+      const durationMs = turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : (prior?.durationMs ?? null);
+      // Codex writes some token_count events twice: nothing moved, nothing to redraw.
+      if (!prior || prior.outputTokens !== outputTokens || prior.durationMs !== durationMs) {
+        turn.block.turnMeta = { ...prior, outputTokens, durationMs };
+        if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+      }
     }
     this.codexTotalOutput = totalOut;
   }
@@ -1734,10 +1680,17 @@ class TranscriptParser {
     this.header.lastSignal = 'idle';
     this.codexPromptExpected = false;
     const turn = this.turn;
-    if (turn && this.codexTurnOpen && Number.isFinite(payload.duration_ms)) {
-      // Codex's own task clock outranks the last token report's timestamp.
-      turn.block.turnMeta = { outputTokens: 0, ...turn.block.turnMeta, durationMs: payload.duration_ms };
-      if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+    if (turn && this.codexTurnOpen) {
+      // Codex's own task clock outranks the last token report's timestamp; a
+      // task end without one (an older interrupt) is timed from its prompt to
+      // this record, so the time stops when the task did.
+      const endMs = Date.parse(ts);
+      const durationMs = Number.isFinite(payload.duration_ms) ? payload.duration_ms
+        : turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null;
+      if (durationMs !== null && (turn.block.turnMeta || Number.isFinite(payload.duration_ms))) {
+        turn.block.turnMeta = { outputTokens: 0, ...turn.block.turnMeta, durationMs };
+        if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+      }
     }
     this.codexTurnOpen = false;
   }
@@ -1761,6 +1714,61 @@ class TranscriptParser {
     this.codexExits.set(callId, failed ? (Number.isInteger(item.exit_code) && item.exit_code > 0 ? item.exit_code : -1) : 0);
   }
 
+  // ONE ROW PER COMMAND (Pat, 2026-10-29: "cant see any agent work"). Codex
+  // code mode runs its shell work inside `exec` cells of JavaScript, often
+  // several commands to a cell, and the cell's row names only the first
+  // working call: across 3,239 real cells, 2,059 of 5,292 calls never got a
+  // row, while Codex's own screen prints a line for each. Each command reports
+  // itself here when it finishes. A command a row already names (in this cell
+  // or an earlier one) is not drawn twice: a row still running keeps the
+  // cell's exit rule (noteCodexCommand, the LAST command decides), and one
+  // already resolved takes this command's own status. Any other command gets
+  // its own row. Matched by the exact command text.
+  codexCommandRow(item, ts, changed) {
+    if (!this.codexCodeMode) return;
+    const command = codexCommandText(item.command);
+    if (!command) return;
+    const exit = Number.isInteger(item.exit_code) ? item.exit_code : null;
+    const status = exit === null ? (item.status === 'failed' ? 'err' : 'ok') : (exit === 0 ? 'ok' : 'err');
+    const named = this.codexNamed.get(command);
+    if (named?.length) {
+      const row = named.shift();
+      if (!named.length) this.codexNamed.delete(command);
+      if (!row.toolId || !this.pendingTools.has(row.toolId)) {
+        row.status = status;
+        if (status === 'err' && !row.pill) row.pill = { text: exit > 0 ? `exit ${exit}` : 'error', tone: 'err' };
+        if (this.blocks.includes(row)) changed.push(row.key);
+      }
+      return;
+    }
+    const row = { kind: 'action', toolId: null, status, ts, ...actionForToolUse({ name: 'exec_command', input: { command } }) };
+    if (status === 'err' && !row.pill) row.pill = { text: exit > 0 ? `exit ${exit}` : 'error', tone: 'err' };
+    this.push(row);
+  }
+
+  // Code mode and the rows that name each command, for codexCommandRow.
+  noteCodexNamedCommand(payload, action) {
+    const raw = payload.arguments ?? payload.input ?? {};
+    let name = payload.name || '';
+    let input = raw;
+    if (typeof raw === 'string') {
+      const snippet = codexToolSnippet(raw);
+      if (snippet) {
+        ({ name, input } = snippet);
+        if (payload.type === 'custom_tool_call') this.codexCodeMode = true;
+      } else {
+        try { input = JSON.parse(raw); } catch { input = null; }
+      }
+    }
+    if (!input || typeof input !== 'object') return;
+    const command = input.command ?? input.cmd;
+    if (name !== 'exec_command' || typeof command !== 'string') return;
+    const rows = this.codexNamed.get(command) || [];
+    rows.push(action);
+    this.codexNamed.set(command, rows);
+  }
+
+
   // An McpToolCall item's id IS its function_call's call_id.
   noteCodexItemFailed(callId, failed, changed) {
     if (!callId) return;
@@ -1779,6 +1787,7 @@ class TranscriptParser {
   applyCodexResponseItem(payload, ts, changed) {
     if (['function_call', 'custom_tool_call'].includes(payload.type)) {
       const action = this.push({ kind: 'action', toolId: payload.call_id || payload.id || null, status: 'run', ts, ...codexActionFor(payload) });
+      this.noteCodexNamedCommand(payload, action);
       if (action.toolId) {
         this.pendingTools.set(action.toolId, action);
         if (payload.type === 'custom_tool_call') this.codexExecCalls.add(action.toolId);

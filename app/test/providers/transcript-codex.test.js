@@ -32,7 +32,9 @@ const cx = {
   user: (sec, text, extra = []) => ({ timestamp: CTS(sec), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', id: `u${sec}`, content: [...(text ? [{ type: 'text', text }] : []), ...extra] } } }),
   agent: (sec, text, phase, more = {}) => ({ timestamp: CTS(sec), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'AgentMessage', id: `a${sec}`, content: [{ type: 'Text', text }], ...(phase ? { phase } : {}), ...more } } }),
   exec: (sec, callId, cmd) => ({ timestamp: CTS(sec), type: 'response_item', payload: { type: 'custom_tool_call', id: `ci-${callId}`, call_id: callId, name: 'exec', status: 'completed', input: `const r = await tools.exec_command(${JSON.stringify({ cmd })});\nreturn r;` } }),
-  command: (sec, exitCode, status = exitCode === 0 ? 'completed' : 'failed') => ({ timestamp: CTS(sec), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', id: `x${sec}`, command: ['/bin/zsh', '-lc', 'x'], exit_code: exitCode, status, source: 'unified_exec_startup' } } }),
+  // `cmd` is the command text Codex records; real rollouts carry the cell's own
+  // command, which is how a CommandExecution finds the row that names it.
+  command: (sec, exitCode, status = exitCode === 0 ? 'completed' : 'failed', cmd = 'x') => ({ timestamp: CTS(sec), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', id: `x${sec}`, command: ['/bin/zsh', '-lc', cmd], exit_code: exitCode, status, source: 'unified_exec_startup' } } }),
   output: (sec, callId, output, kind = 'custom_tool_call_output') => ({ timestamp: CTS(sec), type: 'response_item', payload: { type: kind, call_id: callId, output } }),
   tokens: (sec, { last, totalOut, window = 258_400, lastOut = 0 }) => ({ timestamp: CTS(sec), type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: last - lastOut, cached_input_tokens: 0, output_tokens: lastOut, reasoning_output_tokens: 0, total_tokens: last }, total_token_usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: totalOut, reasoning_output_tokens: 0, total_tokens: 0 }, model_context_window: window }, rate_limits: {} } }),
   complete: (sec, extra = {}) => ({ timestamp: CTS(sec), type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1', duration_ms: 4200, ...extra } }),
@@ -115,9 +117,9 @@ test('codex: tool status comes from the real exit code, not the word "error" in 
   const { p } = codexParser([
     cx.user(0, 'check'),
     // exit 0, but the output talks about errors: still a success.
-    cx.exec(1, 'ok1', 'grep -c error app.log'), cx.command(2, 0), cx.output(3, 'ok1', outArray('Process exited with code 0\n42 error lines')),
+    cx.exec(1, 'ok1', 'grep -c error app.log'), cx.command(2, 0, undefined, 'grep -c error app.log'), cx.output(3, 'ok1', outArray('Process exited with code 0\n42 error lines')),
     // a real failure, with an ARRAY output (codex 0.160).
-    cx.exec(4, 'bad1', 'npm test'), cx.command(5, 1), cx.output(6, 'bad1', outArray('1 failing')),
+    cx.exec(4, 'bad1', 'npm test'), cx.command(5, 1, undefined, 'npm test'), cx.output(6, 'bad1', outArray('1 failing')),
     // one exec ran two commands and the last one failed.
     cx.exec(7, 'two', 'make a; make b'), cx.command(8, 0), cx.command(9, 2), cx.output(10, 'two', outArray('done')),
   ]);
@@ -147,9 +149,11 @@ test('codex: an execution that lands after its call resolved is not pinned on an
   const { p } = codexParser([
     cx.exec(1, 'c1', 'npm run long'), cx.output(2, 'c1', outArray('Process running with session ID 9')),
     cx.exec(3, 'c2', 'ls'), cx.output(4, 'c2', outArray('a b')),
-    cx.command(5, 1),
+    cx.command(5, 1, undefined, 'npm run long'),
   ]);
-  assert.deepEqual(p.blocks.map((b) => b.status), ['ok', 'ok']);
+  // The late execution names its own command, so it lands on the row that ran
+  // it (now resolved: it takes the real exit), never on the newer `ls` row.
+  assert.deepEqual(p.blocks.map((b) => b.status), ['err', 'ok']);
 });
 
 test('codex: MCP calls show their tool and server, and the item decides failure either side of the output', () => {
@@ -175,7 +179,7 @@ test('codex: MCP calls show their tool and server, and the item decides failure 
   assert.ok(changed.includes(m1.key));
   // A non-MCP namespace names itself on the right.
   const clock = codexActionFor({ type: 'function_call', name: 'sleep', namespace: 'clock', arguments: '{"ms":1000}' });
-  assert.equal(clock.verb, 'Sleep');
+  assert.equal(clock.verb, 'Waited');
   assert.equal(clock.cv, 'clock');
   // An MCP tool called from inside an exec snippet keeps working as before.
   const inSnippet = codexActionFor({ type: 'custom_tool_call', name: 'exec', input: 'await tools.mcp__azure__list_users({"top":5})' });
@@ -309,7 +313,9 @@ test('codex: the last command in an exec call decides its row, so a handled grep
     cx.exec(1, 'handled', 'grep -q TODO a.js || echo none'), cx.command(2, 1), cx.command(3, 0), cx.output(4, 'handled', outArray('none')),
     cx.exec(5, 'failed', 'make a; make b'), cx.command(6, 0), cx.command(7, 2), cx.output(8, 'failed', outArray('done')),
   ]);
-  const [handled, failed] = p.blocks.filter((b) => b.kind === 'action');
+  // The cells' own rows (they carry a call id); the commands inside them that
+  // no row names get rows of their own (toolId null), Pat's one-row-per-command.
+  const [handled, failed] = p.blocks.filter((b) => b.kind === 'action' && b.toolId);
   assert.equal(handled.status, 'ok');
   assert.equal(handled.pill, undefined);
   assert.equal(failed.status, 'err');
