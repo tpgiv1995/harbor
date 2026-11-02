@@ -555,6 +555,9 @@ function createPlanUsageProvider({
         windows,
         resets: null,
         source: 'claude-usage',
+        // Numbers read with a Keychain login on another plan than the home's
+        // say so on the row (usage.js planMismatch), not only in a tooltip.
+        signInNotice: sample?.planMismatchNote || null,
         updatedAt: sample?.updatedAt || null,
         stale: !!windows.length && (!stamp(sample?.updatedAt) || time - stamp(sample.updatedAt) > STALE_MS),
         unavailable: !windows.length,

@@ -83,6 +83,33 @@ test('detection only OFFERS config homes that exist', async () => {
   await fsp.rm(dir, { recursive: true, force: true });
 });
 
+// Codex DOES record a readable account (2026-10-15): the ChatGPT login's
+// id_token in auth.json names it. Only the email claim is read back.
+test('a Codex home reports its account email from the auth.json id_token', async () => {
+  const dir = await scratch();
+  const home = path.join(dir, '.codex');
+  await fsp.mkdir(home, { recursive: true });
+  const part = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  await fsp.writeFile(path.join(home, 'auth.json'), JSON.stringify({
+    tokens: { id_token: `${part({ alg: 'none' })}.${part({ email: 'codex@example.com' })}.sig`, access_token: 'synthetic-access' },
+  }));
+  const read = await detect.readCodexHome(home, fsp.readFile);
+  assert.deepEqual(read, { path: home, exists: true, authed: true, email: 'codex@example.com', reason: null });
+  const detected = await detect.detectEnvironment({ env: { PATH: '' }, homedir: dir, platform: 'linux', probeVersion: false });
+  assert.equal(detected.providers.codex.home, home);
+  assert.equal(detected.providers.codex.email, 'codex@example.com');
+  assert.equal(detected.providers.codex.emailReason, null);
+  assert.doesNotMatch(JSON.stringify(detected), /synthetic-access/);
+
+  // An API-key login and a home Codex never signed into say what they are.
+  await fsp.writeFile(path.join(home, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'synthetic-key' }));
+  assert.match((await detect.readCodexHome(home, fsp.readFile)).reason, /API key/);
+  await fsp.rm(path.join(home, 'auth.json'));
+  assert.match((await detect.readCodexHome(home, fsp.readFile)).reason, /no auth\.json/);
+  assert.equal((await detect.readCodexHome(path.join(dir, 'missing'), fsp.readFile)).exists, false);
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
 test('a config home suggests the id the rest of the app already uses', () => {
   // `.claude` is the PERSONAL home by convention across bin/ and the rail, so
   // the literal folder name "claude" would be the wrong id to seed.
@@ -147,5 +174,36 @@ test('the command catalogue comes from the user’s real config home', async () 
   const deploy = catalog.commands.find((command) => command.name === '/deploy');
   assert.equal(deploy.description, 'Ship it');
   assert.equal(deploy.source, 'user');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// `cli_auth_credentials_store = "keyring"` keeps the
+// login in the OS keyring, so the home has no auth.json and the wizard said
+// "not signed in". Display only: the keyring is never read.
+test('a Codex home whose config.toml stores credentials in the keyring says so instead of "not signed in"', async () => {
+  const dir = await scratch();
+  const home = path.join(dir, '.codex');
+  await fsp.mkdir(home, { recursive: true });
+  const reads = [];
+  const readFile = (file, enc) => { reads.push(file); return fsp.readFile(file, enc); };
+  await fsp.writeFile(path.join(home, 'config.toml'), 'model = "gpt-6"\ncli_auth_credentials_store = "keyring" # OS store\n\n[profiles.x]\nmodel = "y"\n');
+  const read = await detect.readCodexHome(home, readFile);
+  assert.equal(read.reason, 'signed in via the OS keyring (not verified)');
+  assert.equal(read.credentialStore, 'keyring');
+  assert.equal(read.email, null);
+  assert.deepEqual(reads.map((file) => path.basename(file)), ['config.toml'], 'only config.toml is read');
+  const detected = await detect.detectEnvironment({ env: { PATH: '' }, homedir: dir, platform: 'linux', probeVersion: false });
+  assert.equal(detected.providers.codex.emailReason, 'signed in via the OS keyring (not verified)');
+
+  // Single quotes are TOML too; "file", "auto", a key under a table, or no key keep the old answer.
+  await fsp.writeFile(path.join(home, 'config.toml'), "cli_auth_credentials_store = 'keyring'\n");
+  assert.match((await detect.readCodexHome(home, fsp.readFile)).reason, /OS keyring/);
+  for (const toml of ['cli_auth_credentials_store = "file"\n', 'cli_auth_credentials_store = "auto"\n',
+    '[profiles.x]\ncli_auth_credentials_store = "keyring"\n', 'model = "gpt-6"\n']) {
+    await fsp.writeFile(path.join(home, 'config.toml'), toml);
+    assert.match((await detect.readCodexHome(home, fsp.readFile)).reason, /no auth\.json/, toml);
+  }
+  await fsp.rm(path.join(home, 'config.toml'));
+  assert.match((await detect.readCodexHome(home, fsp.readFile)).reason, /no auth\.json/);
   await fsp.rm(dir, { recursive: true, force: true });
 });

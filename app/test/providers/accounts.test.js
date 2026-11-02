@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createAccountsProvider } = require('../../src/main/providers/accounts.js');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
+const { realTmpDir } = require('../support/real-tmpdir.js');
+const { createAccountsProvider, readAccountEmails, readCodexAccountEmail } = require('../../src/main/providers/accounts.js');
 
 test('resolveSession maps indexer home labels to config homes', async () => {
   const accounts = createAccountsProvider({
@@ -65,4 +68,37 @@ test('an unknown or throwing launch lookup is ignored', async () => {
     launchedHome: () => { throw new Error('bridge gone'); },
   });
   assert.equal((await accounts.resolveSession('s5')).account, 'max');
+});
+
+// A synthetic, unsigned token shaped like the ChatGPT login's id_token.
+function fakeIdToken(claims) {
+  const part = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${part({ alg: 'none' })}.${part(claims)}.sig`;
+}
+
+test('a Codex account email is read from auth.json id_token claims, and only the email', async (t) => {
+  const root = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-codex-email-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const chatgpt = path.join(root, '.codex');
+  const apiKey = path.join(root, '.codex-api');
+  const claude = path.join(root, '.claude');
+  await fsp.mkdir(chatgpt, { recursive: true });
+  await fsp.mkdir(apiKey, { recursive: true });
+  await fsp.mkdir(claude, { recursive: true });
+  await fsp.writeFile(path.join(chatgpt, 'auth.json'), JSON.stringify({
+    tokens: { id_token: fakeIdToken({ email: 'plus@example.com', sub: 'synthetic' }), access_token: 'synthetic-access' },
+  }));
+  await fsp.writeFile(path.join(apiKey, 'auth.json'), JSON.stringify({ OPENAI_API_KEY: 'synthetic-key' }));
+  await fsp.writeFile(path.join(claude, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'claude@example.com' } }));
+  assert.equal(await readCodexAccountEmail(chatgpt), 'plus@example.com');
+  assert.equal(await readCodexAccountEmail(apiKey), null);
+  assert.equal(await readCodexAccountEmail(path.join(root, 'missing')), null);
+  const emails = await readAccountEmails({ profiles: [
+    { id: 'p', provider: 'claude', configHome: claude },
+    { id: 'c', provider: 'codex', configHome: chatgpt },
+    { id: 'k', provider: 'codex', configHome: apiKey },
+    { id: 'u', provider: 'cursor', configHome: null },
+  ] });
+  assert.deepEqual(emails, { p: 'claude@example.com', c: 'plus@example.com', k: null, u: null });
+  assert.doesNotMatch(JSON.stringify(emails), /synthetic/);
 });
