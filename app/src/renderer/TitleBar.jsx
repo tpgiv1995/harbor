@@ -840,7 +840,7 @@ function StageLayoutToggle({ layout, onToggle }) {
   );
 }
 
-export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenWorker, profiles, stageLayout, onToggleStageLayout }) {
+export function TitleBar({ onOpenHelp, onNewSession, liveCount, needsYouCount = 0, needsYouActive = false, onToggleNeedsYou, workers, onOpenWorker, profiles, stageLayout, onToggleStageLayout }) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -881,6 +881,20 @@ export function TitleBar({ onOpenHelp, onNewSession, liveCount, workers, onOpenW
         <MemoryChip />
         <UpdatesChip />
         <WorkersChip workers={workers} onOpenWorker={onOpenWorker} />
+        {/* Sessions waiting on your answer right now; a click narrows the rail
+            to just them (and again shows everything). */}
+        {needsYouCount > 0 || needsYouActive ? (
+          <button
+            type="button"
+            className={`needs-pill${needsYouActive ? ' on' : ''}`}
+            aria-pressed={needsYouActive}
+            title={needsYouActive ? 'Show every session again' : 'Show only the sessions waiting on your answer'}
+            onClick={onToggleNeedsYou}
+          >
+            <span className="needs-dot" aria-hidden="true" />
+            {`${needsYouCount} need${needsYouCount === 1 ? 's' : ''} you`}
+          </button>
+        ) : null}
         <span className="live-pill" title={`${liveCount} live session${liveCount === 1 ? '' : 's'}`}>
           <span className={`pulse${liveCount ? '' : ' off'}`} aria-hidden="true" />
           {`${liveCount} live`}
