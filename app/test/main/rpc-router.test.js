@@ -88,13 +88,19 @@ test('router emits named pushes without a transport dependency', () => {
 
 // Claude's composer suggestion, read for the desktop command bar (2026-10-05).
 LIVE_METHODS.push('session:suggestion', 'session:work-meter');
+// The Orch view's team chart (2026-11-02): desktop-only reads and pins, plus
+// the one push that carries every change.
+const TEAM_METHODS = ['orchestration:team', 'orchestration:team-watch', 'orchestration:team-unwatch', 'orchestration:team-pins', 'orchestration:team-get-pin', 'orchestration:team-pin', 'orchestration:team-unpin'];
+LIVE_METHODS.push(...TEAM_METHODS);
 LIVE_METHODS.sort();
-test('channel metadata covers exactly the captured 137 methods and 27 pushes', () => {
+LIVE_PUSH_CHANNELS.push('orchestration:team-update');
+LIVE_PUSH_CHANNELS.sort();
+test('channel metadata covers exactly the captured 144 methods and 28 pushes', () => {
   const { METHOD_CHANNELS, PUSH_CHANNELS } = require('../../src/main/rpc/channels.js');
   assert.deepEqual([...METHOD_CHANNELS.map(({ method }) => method)].sort(), LIVE_METHODS);
   assert.deepEqual([...PUSH_CHANNELS].sort(), LIVE_PUSH_CHANNELS);
-  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 137);
-  assert.equal(new Set(PUSH_CHANNELS).size, 27);
+  assert.equal(new Set(METHOD_CHANNELS.map(({ method }) => method)).size, 144);
+  assert.equal(new Set(PUSH_CHANNELS).size, 28);
   assert.ok(METHOD_CHANNELS.every(({ capability }) => (
     ['local-only', 'remote-safe', 'mutating'].includes(capability)
   )));
@@ -104,12 +110,12 @@ test('channel metadata covers exactly the captured 137 methods and 27 pushes', (
       METHOD_CHANNELS.filter((entry) => entry.capability === capability).length,
     ])),
     // session:work-meter moved local-only -> remote-safe 2026-10-11 (phone header).
-    { 'local-only': 49, 'remote-safe': 45, mutating: 43 },
+    { 'local-only': 56, 'remote-safe': 45, mutating: 43 },
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'local-only')
       .map(({ method }) => method).sort(),
-    [...LOCAL_ONLY_METHODS, ...CONNECTIONS_METHODS, 'usage:get-plans', 'usage:get-lean', 'usage:set-lean', 'session:suggestion'].sort(),
+    [...LOCAL_ONLY_METHODS, ...CONNECTIONS_METHODS, ...TEAM_METHODS, 'usage:get-plans', 'usage:get-lean', 'usage:set-lean', 'session:suggestion'].sort(),
   );
   assert.deepEqual(
     METHOD_CHANNELS.filter(({ capability }) => capability === 'mutating')

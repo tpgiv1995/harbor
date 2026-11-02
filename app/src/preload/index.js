@@ -343,6 +343,19 @@ const api = {
     kickoffResearch: (payload) => ipcRenderer.invoke('orchestration:kickoff-research', payload),
     kickoffExecute: (payload) => ipcRenderer.invoke('orchestration:kickoff-execute', payload),
     sessionPreview: (payload) => ipcRenderer.invoke('orchestration:session-preview', payload),
+    // The team chart: one read, a watch that pushes every change, and pins.
+    team: () => ipcRenderer.invoke('orchestration:team'),
+    watchTeam: () => ipcRenderer.invoke('orchestration:team-watch'),
+    unwatchTeam: () => ipcRenderer.invoke('orchestration:team-unwatch'),
+    onTeamUpdate: (callback) => {
+      const handler = (_event, team) => callback(team);
+      ipcRenderer.on('orchestration:team-update', handler);
+      return () => ipcRenderer.removeListener('orchestration:team-update', handler);
+    },
+    teamPins: () => ipcRenderer.invoke('orchestration:team-pins'),
+    teamPin: (id) => ipcRenderer.invoke('orchestration:team-get-pin', { id }),
+    pinTeam: (label) => ipcRenderer.invoke('orchestration:team-pin', { label }),
+    unpinTeam: (id) => ipcRenderer.invoke('orchestration:team-unpin', { id }),
     onUpdate: (listener) => {
       const handler = (_event, payload) => listener(payload);
       ipcRenderer.on('orchestration:update', handler);

@@ -278,7 +278,7 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
       <>
       <div className={`conv-user${block.command ? ' command' : ''}${block.peer ? ' peer' : ''}${waiting ? ' queued-waiting' : ''}`}>
         {/* Another session wrote this, not Pat: say which (transcript.js peerMessageParts). */}
-        {block.peer ? <span className="conv-peer-from">{block.peerFrom ? `From ${block.peerFrom}` : 'From another session'}</span> : null}
+        {block.peer ? <span className="conv-peer-from">{block.peerFrom ? `Message from ${block.peerFrom}` : 'Message from another session'}</span> : null}
         {/* Composed formatting reads back formatted (2026-07-26). A command
             block stays verbatim: `/compact` is a literal string the CLI parses,
             and markdown-rendering it would only misrepresent what was sent. */}
@@ -291,9 +291,9 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
       </div>
       {/* What this task spent: output tokens across every reply it produced and
           the time from the prompt to the latest reply, growing while it runs. */}
-      {meta ? <div className="conv-turn-meta" title="Output tokens and time this task has used so far">{meta}</div> : null}
+      {meta ? <div className={`conv-turn-meta${block.peer ? ' peer' : ''}`} title="Output tokens and time this task has used so far">{meta}</div> : null}
       {/* Whether Claude has read a queued message yet (turn-meta queueStateLabel). */}
-      {queueLabel ? <div className={`conv-queue-state${waiting ? ' waiting' : ''}`}>{queueLabel}</div> : null}
+      {queueLabel ? <div className={`conv-queue-state${waiting ? ' waiting' : ''}${block.peer ? ' peer' : ''}`}>{queueLabel}</div> : null}
       </>
     );
   }

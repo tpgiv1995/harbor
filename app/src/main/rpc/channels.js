@@ -1,6 +1,10 @@
 'use strict';
 
 const LOCAL_ONLY = new Set([
+  // The team chart (2026-11-02): read on the desktop only (the phone has no
+  // Orch browser), and its pins are files in this machine's cache dir.
+  'orchestration:team', 'orchestration:team-watch', 'orchestration:team-unwatch',
+  'orchestration:team-pins', 'orchestration:team-get-pin', 'orchestration:team-pin', 'orchestration:team-unpin',
   // Claude's composer suggestion for the desktop command bar's Tab-to-accept.
   // The phone has no use for it, so it never leaves this machine.
   'session:suggestion',
@@ -328,6 +332,13 @@ const METHOD_NAMES = [
   'terminal:rename-tab',
   'orchestration:watch-summaries',
   'orchestration:unwatch-summaries',
+  'orchestration:team',
+  'orchestration:team-watch',
+  'orchestration:team-unwatch',
+  'orchestration:team-pins',
+  'orchestration:team-get-pin',
+  'orchestration:team-pin',
+  'orchestration:team-unpin',
   'orchestration:list-runs',
   'orchestration:list-delegations', 'orchestration:list-sub-sessions', 'orchestration:get-session',
   'orchestration:get-data',
@@ -395,6 +406,7 @@ const PUSH_CHANNELS = Object.freeze([
   'links:update',
   'orchestration:summaries',
   'orchestration:update',
+  'orchestration:team-update',
   'project-icons:update',
   'send:status',
   'session:launched',

@@ -718,6 +718,14 @@ function createSidebarBridge(options = {}) {
     resolveProviderSessions: () => providerLinker?.resolveNow() ?? false,
     providerSessionForPane: (paneId) => providerLinker?.get(paneId) ?? null,
     getLivePaneIds: () => liveState.panes.map((pane) => pane.pane_id),
+    // The team chart (providers/team.js): live agent panes with the linker's
+    // session ids applied, and the daemon's resident process verbs
+    // (proc-find / proc-tree / proc-info), asked through THIS client's socket.
+    getLivePanes: () => resolvedPanes(),
+    daemonRequest: (verb, params) => {
+      if (!daemonClient?.request) return Promise.reject(new Error('daemon not connected'));
+      return daemonClient.request(verb, params);
+    },
     getHistoryRow: (id) => historyById.get(id),
     getState: () => publisher.getState(),
   };

@@ -12,7 +12,7 @@ import { useTerminalDialogs } from './use-dialog-state.js';
 import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
 import { terminalView, windowClickArms, headerKeepsKeys } from './terminal-view.cjs';
-import { copyText } from './md.jsx';
+import { CopySessionId } from './CopySessionId.jsx';
 import { runStateCue } from '../../shared/session-run-state.cjs';
 import { createPortal } from 'react-dom';
 
@@ -218,7 +218,6 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   xterm,
 }, ref) {
   const { profiles } = useProfiles();
-  const [copiedId, setCopiedId] = useState(false);
   const [taskTip, setTaskTip] = useState(null);
   const header = headerForOwnedPane(session, pane, data?.header || null);
   const blocks = useMemo(() => data?.blocks || [], [data?.blocks]);
@@ -319,26 +318,9 @@ export const SessionTile = memo(forwardRef(function SessionTile({
               +
             </button>
             {/* Copy the session's unique id to the clipboard, to hand to another
-                session for referencing. `copyText` reports whether it landed
-                (navigator.clipboard fails silently over file://), so the ✓ only
-                shows on a real copy. */}
-            {canCopyId ? (
-              <button
-                type="button"
-                className={`ico tile-id${copiedId ? ' ok' : ''}`}
-                title={copiedId ? 'Session id copied' : 'Copy this session’s id'}
-                aria-label="Copy session id"
-                onClick={async (e) => {
-                  e.stopPropagation();
-                  if (await copyText(session.id)) {
-                    setCopiedId(true);
-                    setTimeout(() => setCopiedId(false), 1200);
-                  }
-                }}
-              >
-                {copiedId ? '✓' : 'id'}
-              </button>
-            ) : null}
+                session for referencing. The same control sits on every team
+                chart card (stage/CopySessionId.jsx). */}
+            {canCopyId ? <CopySessionId sessionId={session.id} /> : null}
             {pane && !readOnly ? (
               <button
                 type="button"

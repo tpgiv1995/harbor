@@ -80,6 +80,8 @@ function paneFor(session) {
     workspace_id: session.id,
     cwd: session.cwd,
     pid: session.pid,
+    // The launch argv (model and effort as launched), for the team chart.
+    argv: Array.isArray(session.argv) ? session.argv : [],
     agent: session.agent ?? null,
     agent_session: session.agent_session
       ? { kind: 'id', value: session.agent_session }

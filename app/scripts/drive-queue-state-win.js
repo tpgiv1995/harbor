@@ -132,6 +132,7 @@ const facts = `(() => {
     chipTitle: chip ? chip.title : null,
     waitingBubbles: [...w.querySelectorAll('.conv-user.queued-waiting .conv-user-text')].map((e) => e.textContent.trim()),
     peerLabels: [...w.querySelectorAll('.conv-user.peer .conv-peer-from')].map((e) => e.textContent.trim()),
+    peerSide: (() => { const p = w.querySelector('.conv-user.peer'); const c = w.querySelector('.conv'); if (!p || !c) return null; const pr = p.getBoundingClientRect(); const cr = c.getBoundingClientRect(); return pr.left - cr.left < cr.right - pr.right ? 'left' : 'right'; })(),
     subLines: [...w.querySelectorAll('.conv-act-sub')].map((e) => e.textContent.trim()),
     rawWrapperShown: /cross-session-message/.test(w.textContent),
     states: [...w.querySelectorAll('.conv-queue-state')].map((e) => ({ text: e.textContent.trim(), waiting: e.classList.contains('waiting') })),
@@ -196,7 +197,8 @@ async function drive() {
         "Waiting in Claude's queue: it reads this at its next step",
       ], 'the 70 s wait is noted, the 2 s one is not, both waiting ones say so');
       assert.deepEqual(wide.waitingBubbles, ['Stage three is the one that filled the disk last time; watch free space.', 'When this finishes, push the branch.'], 'the peer message shows its text, not its wrapper');
-      assert.deepEqual(wide.peerLabels, ['From dispatcher'], 'the peer message names the session that sent it');
+      assert.deepEqual(wide.peerLabels, ['Message from dispatcher'], 'the peer message names the session that sent it');
+      assert.equal(wide.peerSide, 'left', 'a peer message sits on the other side from Pat\'s own messages');
       assert.equal(wide.rawWrapperShown, false, 'no raw cross-session wrapper on screen');
       assert.deepEqual(wide.subLines, ['7 tools so far · Measuring free space on C:'], 'the running sub-agent says what it is doing, even in a collapsed group');
       assert.equal(wide.metaOverflow, false, 'the header does not overflow at 1920');

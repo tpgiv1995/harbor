@@ -77,22 +77,18 @@ test('delegation pill navigation obeys the same optional Orch gate', () => {
   assert.match(indexSource, /focusParentId=\{delegationFocus\}/);
 });
 
-test('Orch polls independently of sidebar pushes and coalesces repeated refreshes', async () => {
-  const vm = require('node:vm'); const esbuild = require('esbuild');
-  const effects = []; let poll; let subscriptions = 0; let queueCalls = 0; let delegationCalls = 0; let release;
-  const mod = { exports: {} };
-  const source = read('src/renderer/orchestration/OrchLiveRuns.jsx');
-  const react = { createElement: () => null, useEffect: (fn) => effects.push(fn), useState: (initial) => [initial, () => {}] };
-  const harbor = { orchestration: { listRuns: async () => { queueCalls++; return []; }, listDelegations: () => { delegationCalls++; return new Promise((resolve) => { release = resolve; }); } }, sidebar: { onUpdate: () => { subscriptions++; return () => {}; } } };
-  vm.runInNewContext(esbuild.transformSync(source, { format: 'cjs', loader: 'jsx' }).code, {
-    module: mod, exports: mod.exports, window: { harbor }, setInterval: (fn) => { poll = fn; return 1; }, clearInterval() {},
-    require: (id) => id === 'react' ? react : id.includes('single-flight') ? require('../../src/shared/single-flight.cjs') : {},
-  });
-  mod.exports.OrchLiveRuns({ projects: [] }); const cleanup = effects[0]();
-  assert.equal(subscriptions, 0);
-  for (let i = 0; i < 40; i++) poll();
-  assert.equal(queueCalls, 1); assert.equal(delegationCalls, 1);
-  release([]); await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(queueCalls, 2); assert.equal(delegationCalls, 2);
-  release([]); cleanup();
+test('the Orch team chart is pushed by main, never polled and never refreshed by rail pushes (2026-11-02)', () => {
+  // The Live runs list polled every 30 s and the Delegated agents list rode
+  // the same poll. The team chart replaced both: main pushes a new chart only
+  // when something on it changed, and the one renderer timer redraws the
+  // "3m ago" text. Rail chatter must never refresh the Orch view.
+  const overview = read('src/renderer/orchestration/OrchLiveRuns.jsx');
+  const chart = read('src/renderer/orchestration/TeamChart.jsx');
+  assert.doesNotMatch(overview, /setInterval|listRuns|listDelegations/);
+  assert.match(chart, /onTeamUpdate/);
+  assert.match(chart, /watchTeam/);
+  assert.match(chart, /unwatchTeam/);
+  assert.equal((chart.match(/setInterval\(/g) || []).length, 1, 'one clock, for age text only');
+  assert.match(chart, /setInterval\(\(\) => setNow\(Date\.now\(\)\), CLOCK_MS\)/);
+  assert.doesNotMatch(chart, /sidebar\.onUpdate|listRuns|listDelegations/);
 });

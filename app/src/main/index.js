@@ -20,7 +20,7 @@ const {
 const { createHistoryProvider } = require('./providers/history.js');
 const { createSystemMemoryProvider } = require('./providers/system-memory.js');
 const { createAskInbox } = require('./providers/ask-inbox.js');
-const { createTitlesProvider, scheduleTitler: scheduleTitlesProvider } = require('./providers/titles.js');
+const { createTitlesProvider, createDescriber, scheduleTitler: scheduleTitlesProvider } = require('./providers/titles.js');
 const { createConfigStore } = require('./config/store.js');
 const { createLaunchActions } = require('./actions/launch.js');
 const {
@@ -46,6 +46,7 @@ const { startLagMonitor } = require('./lag-monitor.js');
 const { createGpuTelemetry } = require('./gpu-telemetry.js');
 const { createCrashCapture } = require('./crash-capture.js');
 const { createUsageProvider } = require('./providers/usage.js');
+const { createTeamProvider } = require('./providers/team.js');
 const { createPlanUsageProvider } = require('./providers/plan-usage.js');
 const { resolveLeanFile, readLean, writeLean } = require('./providers/provider-lean.js');
 const { createWorkflowRuns } = require('./providers/workflow-runs.js');
@@ -293,6 +294,12 @@ let sessionOwnerProbe = null;
 const sessionOperationGate = createSessionOperationGate();
 let orchActions = null;
 let delegateProvider = null;
+// The Orch view's team chart (providers/team.js), and the one desktop
+// subscription that pushes its changes.
+let teamProvider = null;
+let teamUnsubscribe = null;
+// registerIpc's run lister, reachable by the team provider created earlier.
+let orchListRuns = null;
 let orchWatcher = null;
 let orchSummaryWatchers = [];
 let orchSummaryExpiryTimer = null;
@@ -1672,14 +1679,29 @@ function registerIpc() {
   ipcMain.handle('orchestration:list-delegations', () => sidebarBridge.listDelegations());
   ipcMain.handle('orchestration:list-sub-sessions', (_event, request) => sidebarBridge.listSubSessions(request));
   ipcMain.handle('orchestration:get-session', (_event, { id }) => sidebarBridge.getSession(id));
-  ipcMain.handle('orchestration:list-runs', async () => {
+  async function listOrchestrationRuns() {
     const queues = await delegateProvider.listQueues();
     const historyRows = await orchHistoryRows(queues);
     const rows = await Promise.all(queues.map((queue) => orchDeriveQueue(queue, Date.now(), historyRows)));
     return rows.filter((run) => run.summary?.visible)
       .sort((a, b) => (a.summary.state === 'live' ? -1 : 1) - (b.summary.state === 'live' ? -1 : 1)
         || b.summary.updatedAt - a.summary.updatedAt);
+  }
+  orchListRuns = listOrchestrationRuns;
+  ipcMain.handle('orchestration:list-runs', () => listOrchestrationRuns());
+
+  ipcMain.handle('orchestration:team', () => teamProvider?.get() || null);
+  ipcMain.handle('orchestration:team-watch', () => {
+    if (!teamProvider) return { ok: false, reason: 'The team chart is not running.' };
+    teamUnsubscribe?.();
+    teamUnsubscribe = teamProvider.subscribe((team) => sendToRenderer('orchestration:team-update', team));
+    return { ok: true };
   });
+  ipcMain.handle('orchestration:team-unwatch', () => { teamUnsubscribe?.(); teamUnsubscribe = null; return { ok: true }; });
+  ipcMain.handle('orchestration:team-pins', () => teamProvider?.listPins() || []);
+  ipcMain.handle('orchestration:team-get-pin', (_event, { id } = {}) => teamProvider?.getPin(id) || null);
+  ipcMain.handle('orchestration:team-pin', (_event, { label } = {}) => teamProvider?.pin(label) || { ok: false, reason: 'The team chart is not running.' });
+  ipcMain.handle('orchestration:team-unpin', (_event, { id } = {}) => teamProvider?.unpin(id) || { ok: false, reason: 'The team chart is not running.' });
 
   ipcMain.handle('orchestration:get-data', async (_event, { projectLabel, sessionId, projectRoot: suppliedRoot }) => {
     const projectRoot = suppliedRoot || await orchGetProjectRoot(sessionId);
@@ -2678,6 +2700,28 @@ app.whenReady().then(async () => {
     processKill: guardedKill,
   });
 
+  // The Orch view's team chart (2026-11-02): composed from the bridge's panes
+  // and history, the launch records, the daemon's process verbs and the
+  // usage providers, on events. Its descriptions are the titler's second call.
+  const teamDescriber = createDescriber({
+    cacheDir: harborConfig.paths.cacheDir,
+    e2eMode,
+    onUpdate: () => teamProvider?.scheduleRecompute(),
+  });
+  teamProvider = createTeamProvider({
+    bridge: sidebarBridge,
+    cacheDir: harborConfig.paths.cacheDir,
+    projectsRoot: harborConfig.paths.projectsDir,
+    profiles: harborConfig.profiles,
+    usageProvider,
+    // plan-usage.js gates its own network reads (HARBOR_E2E, HARBOR_NO_USAGE_FETCH)
+    // and still reads local rollouts, so a harness gets real local numbers.
+    planUsageProvider,
+    listRuns: () => (orchListRuns ? orchListRuns() : Promise.resolve([])),
+    projectLabelForCwd,
+    describer: teamDescriber,
+  });
+
   sidebarBridge.emitter.on('update', broadcastSidebarUpdate);
   sidebarBridge.emitter.on('history-refreshed', scheduleTitler);
   sidebarBridge.emitter.on('error', (error) => {
@@ -3284,6 +3328,7 @@ app.whenReady().then(async () => {
   });
   watchDistForUpdates();
   scheduleTitler();
+  teamProvider?.start().catch((error) => lifecycle.note('team-error', { error: errorText(error) }));
 
   // Cold-start chord (R10): when Ctrl/Alt+Copilot LAUNCHES the app (no prior
   // instance to forward to), our own argv carries the intent; act on it now.
@@ -3322,6 +3367,7 @@ function shutdownApp() {
   taskStore?.close();
   noteStore?.close();
   whiteboardStore?.close();
+  teamProvider?.close();
   sidebarBridge?.close();
   terminalBridge?.close();
 }
