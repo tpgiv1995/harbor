@@ -293,6 +293,75 @@
 
 .conv-lightbox-close svg { width: 18px; height: 18px; }
 
+/* Task checklist card (src/renderer/stage/TaskCard.jsx, shared with the
+   desktop). Static: "in progress" is a blue arc while the turn runs and a
+   plain ring once it ended; nothing here animates. */
+.conv-tasks {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.conv-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0;
+  min-width: 0;
+  font-size: 13.5px;
+  line-height: 20px;
+  color: var(--tx);
+}
+
+.conv-task-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.conv-task.completed .conv-task-text { color: var(--fnt); }
+.conv-task.in_progress .conv-task-text { font-weight: 600; }
+
+.conv-task-icon {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  margin-top: 1.5px;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.conv-task-icon.todo circle {
+  stroke: var(--fnt);
+  stroke-width: 1.5;
+  stroke-dasharray: 2.4 2.3;
+}
+
+.conv-task-icon.doing .track {
+  stroke: var(--sub);
+  stroke-width: 2;
+}
+
+.conv-task-icon.doing.live .track { stroke: rgb(var(--ac-rgb) / 28%); }
+
+.conv-task-icon.doing .arc {
+  stroke: var(--ac2);
+  stroke-width: 2;
+}
+
+.conv-task-icon.done circle { fill: rgba(255, 255, 255, 0.2); }
+
+.conv-task-icon.done path {
+  stroke: var(--tx);
+  stroke-width: 1.6;
+}
+
 /* Tool-action rows: a single Edit/Read/Bash etc. Grouped runs collapse
    behind a caret (below) so a long tool run does not push the actual
    question or reply off the bottom of a small screen. */
