@@ -48,9 +48,12 @@ function makeCodexHome(t) {
   fs.mkdirSync(outDir, { recursive: true });
   const start = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   for (const name of ['report.html', 'chart.png', 'deck.pdf', 'mentioned.html']) fs.writeFileSync(path.join(outDir, name), 'x');
-  const day = path.join(home, 'sessions', '2026', '10', '15');
+  // Today's date folder: a fixed date ages out of the provider's window, and
+  // between full sweeps a folder older than it is skipped by name.
+  const [yyyy, mm, dd] = start.slice(0, 10).split('-');
+  const day = path.join(home, 'sessions', yyyy, mm, dd);
   fs.mkdirSync(day, { recursive: true });
-  fs.writeFileSync(path.join(day, `rollout-2026-10-15T10-52-41-${THREAD}.jsonl`),
+  fs.writeFileSync(path.join(day, `rollout-${yyyy}-${mm}-${dd}T10-52-41-${THREAD}.jsonl`),
     rolloutLines({ id: THREAD, cwd: path.join(tmp, 'work'), start, outDir }));
   // The image-generation store: owned by its thread, found without a mention.
   const images = path.join(home, 'generated_images', THREAD);
