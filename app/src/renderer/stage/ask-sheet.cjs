@@ -160,6 +160,7 @@ function buildSheet(menu) {
     }));
     return {
       kind: 'review',
+      provider: menu.provider || 'claude',
       mode: 'immediate',
       questions: [],
       currentIndex: -1,
@@ -180,6 +181,9 @@ function buildSheet(menu) {
   const staged = questions.length > 1 || questions.some((question) => question.multiSelect);
   return {
     kind,
+    // Who is asking: a Codex question (codex-screen.js) reads "Codex is
+    // asking", and its Esc interrupts the turn rather than declining a tool.
+    provider: menu.provider || 'claude',
     mode: staged ? 'staged' : 'immediate',
     questions,
     currentIndex: Math.max(0, questions.findIndex((question) => question.current)),

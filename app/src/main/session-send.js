@@ -21,6 +21,11 @@ const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFrom
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
 const { planResumeNudge } = require('./resume-nudge.js');
+const {
+  isCodexBlocked, codexSendState, composerImageCount, codexPendingInputs, isCodexWorking, codexComposer,
+} = require('./codex-screen.js');
+const { readCodexState, codexPermissionMode } = require('./codex-state.js');
+const { codexApprovalMsg } = require('./codex-status.js');
 
 // Claude Code's project-dir munge: every non-alphanumeric cwd character
 // becomes '-' ('/home/you/dev/harbor' -> '-home-you-dev-harbor').
@@ -316,7 +321,10 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
 // Enter Codex swallowed into the paste adds one).
 const CODEX_PROMPT_RE = /^›(?:\s|$)/u;
 const CODEX_LIST_ROW_RE = /^›\s*\d+\.\s/u;
-const CODEX_FOOTER_RE = /^\s+\S.*?\s·\s(?:~|[A-Za-z]:|\/)/u;
+// Mid-turn, with text typed in the box, the footer is a key hint instead
+// ("tab to queue message ... 94% context left", working-typed-0.160.0.txt):
+// read as part of the box it made every steer look unheld, so none was sent.
+const CODEX_FOOTER_RE = /^\s+(?:\S.*?\s·\s(?:~|[A-Za-z]:|\/)|tab to queue message\b)/u;
 const CODEX_PASTE_RE = /^\[PastedContent(\d+)chars\](?:#\d+)?$/;
 const CODEX_LARGE_PASTE_CHARS = 1000;
 // WHILE A TURN RUNS, OR ONCE THE BOX HOLDS TEXT, THE LINE UNDER THE BOX IS KEY
@@ -676,6 +684,15 @@ const isWorkingTurn = (text) => {
   return WORKING_TURN_RE.test(bottom) && /[❯╭╰]/.test(text);
 };
 
+// The keeper's live OSC 7501 status off a `screen` read (daemon/screen.js), in
+// the shape a one-click answer is checked against; null when the CLI reports
+// none (an older keeper, or no status yet).
+function quickStatusFromScreen(screen) {
+  const own = screen?.status;
+  if (!own?.state) return null;
+  return { state: own.state, kind: own.kind ?? null, msg: own.msg ?? null, seq: Number.isInteger(own.seq) ? own.seq : null };
+}
+
 function createSessionSend(deps) {
   const {
     snapshot, // async () => normalized { panes: [], workspaces: [] }
@@ -686,6 +703,15 @@ function createSessionSend(deps) {
     readSuggestion = async () => null,
     // The Codex text rule is measured on Windows only (codexSafeText).
     platform = process.platform,
+    // async (paneId) => the CLI's own OSC 7501 status as the keeper holds it
+    // right now ({ state, kind, msg, seq }), or null. Read with the screen, so
+    // it is as live as the dialog; a one-click answer is checked against it.
+    readQuickStatus = async () => null,
+    // (paneId) => the seq of the prompt Codex's program status (codex-status.js)
+    // last published for this pane, or null; a Codex one-click answer is
+    // checked against it. And (paneId) => void once such an answer landed.
+    readCodexPromptSeq = () => null,
+    codexPromptAnswered = () => {},
     terminalBridge,
     launchActions,
     getSessionMeta,
@@ -966,7 +992,11 @@ function createSessionSend(deps) {
     }
   };
 
-  const assertComposerSafe = async (paneId) => {
+  // `requireCodexComposer`: a Codex send types only into Codex's own composer.
+  // classifyBlocked refuses the dialogs codex-screen.js can PARSE; one it cannot
+  // leaves no card and no refusal, and a send's paste would land in it and its
+  // Enter answer it. So for Codex the absence of a composer is itself a refusal.
+  const assertComposerSafe = async (paneId, { requireCodexComposer = false, codex = requireCodexComposer } = {}) => {
     // The refusal is the SAME decision as the card (classifyBlocked), not a
     // second one that happens to agree most of the time. It used to be its own
     // code on its own read: 16 lines instead of 90, sliced without trimming the
@@ -992,10 +1022,21 @@ function createSessionSend(deps) {
       // window: a blocked pane is never a dead end (Pat mandate 2026-07-21).
       let menu = null;
       try { menu = await readMenu(paneId); } catch { /* refuse with the generic guidance */ }
-      if (menu) {
-        throw new Error('the session is asking a question in its window; answer it there first. Your text is kept');
-      }
-      throw new Error('the session is showing a prompt Harbor cannot fully read; use the answer panel in its window. Your text is kept');
+      const error = new Error(menu
+        ? 'the session is asking a question in its window; answer it there first. Your text is kept'
+        : 'the session is showing a prompt Harbor cannot fully read; use the answer panel in its window. Your text is kept');
+      // A Codex send refused for any screen but its message box carries Pat's
+      // code, so callers tell "not typed" apart from a failed send.
+      if (codex) error.code = 'CODEX_NO_PROMPT';
+      throw error;
+    }
+    if (requireCodexComposer && !codexComposer(screen)) {
+      // The Codex app's thread lock gets Pat's refusal, which says where to
+      // close it (codexNoPromptError, CODEX_LOCKED_RE).
+      if (CODEX_LOCKED_RE.test(screen)) throw codexNoPromptError(screen);
+      const error = new Error('Codex is not showing its message box (a prompt or another screen is up), so the send was refused rather than typed into whatever is there; check its window. Your text is kept');
+      error.code = 'CODEX_NO_PROMPT';
+      throw error;
     }
     const bottom = screen.split('\n').slice(-10).join('\n');
     if (COMPOSER_RE.test(bottom)) return;
@@ -1374,14 +1415,16 @@ function createSessionSend(deps) {
   const ENTER_POLL_MS = 350;
   const ENTER_WATCH_POLLS = 24;
   const ENTER_SPARES = 2;
-  const watchEnterTaken = async (paneId, workspaceId, sent) => {
+  // Codex has its own composer (codex-screen.js codexSendState), so the reader
+  // of the verdict is a parameter; the rule is the same one.
+  const watchEnterTaken = async (paneId, workspaceId, sent, sendState = composerSendState) => {
     let spares = 0;
     let held = 0;
     for (let poll = 0; poll < ENTER_WATCH_POLLS; poll += 1) {
       await sleep(ENTER_POLL_MS);
       const screen = await readScreen(paneId, MENU_READ_LINES);
       if (screen && classifyBlocked(screen)) return 'unconfirmed';
-      const state = screen ? composerSendState(screen, sent) : 'nobox';
+      const state = screen ? sendState(screen, sent) : 'nobox';
       if (state === 'taken') return state;
       held = state === 'holds' ? held + 1 : 0;
       if (held < 2) continue;
@@ -1679,7 +1722,13 @@ function createSessionSend(deps) {
       const t0 = Date.now();
       await acquireControl(paneId, workspaceId);
       debug('deliver: control after', Date.now() - t0, 'ms; controlled =', terminalBridge.getState().controlledPaneId);
+      // Codex too: with only the dead-shell check, a send landed on an
+      // approval or a request_user_input question and its Enter answered it.
+      // classifyBlocked knows Codex's dialogs. A Codex pane this instance has
+      // delivered to must show its composer now; a fresh one is still drawing,
+      // so its composer is required after the readiness wait below instead.
       if (provider === 'claude') await assertComposerSafe(paneId);
+      else if (provider === 'codex') await assertComposerSafe(paneId, { requireCodexComposer: deliveredPanes.has(paneId), codex: true });
       else await assertNotDeadShell(paneId);
 
       // A FRESH non-claude pane is still starting its TUI, and codex swallows
@@ -1722,6 +1771,9 @@ function createSessionSend(deps) {
       if (provider !== 'claude' && !deliveredPanes.has(paneId)) {
         const settled = await waitForProviderReady(paneId, { timeoutMs: 15_000, blankTimeoutMs: 45_000 });
         if (!settled) debug('deliver: fresh', provider, 'pane never settled; sending anyway');
+        // A fresh Codex can come up on a picker (the update prompt's first row
+        // runs the updater, which Enter would pick): re-check once it has drawn.
+        if (provider === 'codex') await assertComposerSafe(paneId, { requireCodexComposer: true });
       }
       // Every Codex send starts at a drawn composer. Slash commands can open
       // their own popup after typing, but must not type into a pre-existing
@@ -1920,6 +1972,13 @@ function createSessionSend(deps) {
         enterState = await watchCodexEnter(paneId, workspaceId, sent);
         logSend({ paneId, phase: 'enter-state', state: enterState });
         if (enterState === 'taken' || enterState === 'taken-after-retry') codexTyped.delete(paneId);
+        // Mid-turn, Codex's Enter STEERS: the message waits for the turn's
+        // next tool call (or Send now, which is Esc). Say so, not "sent".
+        if (enterState === 'taken' || enterState === 'taken-after-retry') {
+          const pending = codexPendingInputs(await readScreen(paneId, MENU_READ_LINES));
+          const tail = squashSpace(text).slice(-SEND_TAIL_CHARS);
+          if (tail && [...pending.steer, ...pending.queued].some((item) => squashSpace(item).endsWith(tail))) enterState = 'steered';
+        }
       }
       await resolveClaudeSwitchConfirm(paneId, workspaceId, text, provider);
       return enterState;
@@ -2014,7 +2073,21 @@ function createSessionSend(deps) {
   // ghost, whatever blocker text sits in the scrollback.
   const classifyBlocked = (screen, blockedHint = false) => {
     if (!screen.trim()) return null;
+    // A Codex dialog (approval, request_user_input question, any `›` picker)
+    // is decided by its own grammar BEFORE the resolution tail: the Codex
+    // question footer ends "esc to interrupt", which the tail reads as a
+    // working turn, so a send typed into a Codex question and its Enter
+    // picked an option.
+    if (isCodexBlocked(screen)) return { lines: screen.split('\n') };
     if (parseMenu(screen)?.kind === 'model-switch') return { lines: screen.split('\n') };
+    // A CODEX PANE AT REST IS RESOLVED. Its `›` composer is not Claude's `❯`,
+    // so the composer test below never saw it, and an idle Codex screen whose
+    // last answer starts a line with "Do you want…" or quotes "Press Enter to
+    // continue" read as a Claude blocker: the send was refused and the window
+    // drew the fallback panel over an idle session. Codex's composer (null
+    // whenever a Codex dialog is drawn) or its working line ends the question
+    // the way Claude's composer does; neither is anything Claude draws.
+    if (codexComposer(screen) || isCodexWorking(screen)) return null;
     let lines = screen.split('\n');
     while (lines.length && !lines.at(-1).trim()) lines = lines.slice(0, -1);
     const bottomLines = lines.slice(-10);
@@ -2266,6 +2339,64 @@ function createSessionSend(deps) {
       return { ok: true, action: 'cancel' };
     }
 
+    // ONE-CLICK ALLOW / DENY (the window chip, the rail row, the phone, the
+    // keyboard shortcut), offered while the CLI itself reports a permission
+    // prompt (OSC 7501 blocked/permission). Every click names the prompt it was
+    // shown for: `expect` is the CLI's own words ("approve Write: <path>") and
+    // `expectSeq` the keeper's per-change sequence. The button can be seconds
+    // stale (the rail, the phone, a shortcut on an old chip), and the CLI's msg
+    // is ELIDED, so two edits of one file read the same; an answer whose text
+    // or seq is not the live status's is refused, never aimed at whatever is on
+    // screen now. A keeper from before the seq reports none and the row has
+    // none to send: both null, the text alone decides. Only a dialog the parser
+    // recognises AS a permission prompt is answered. Allow is the plain
+    // one-time "Yes" (or an explicit "Yes, but ask again next time"), reached
+    // by the same verified number walk as any select, and Enter is pressed only
+    // if the dialog still shows the request that was checked. Anything that
+    // widens a permission ("don't ask again", "always allow", "keep allowing",
+    // "accept edits") is never a one-click answer. Deny is Esc, which the CLI
+    // takes as No (measured on CLI 2.1.301: Esc on "approve Write" -> idle).
+    let quickFrom = null;
+    if (action.type === 'permission-quick') {
+      if (!menu.permission) return { ok: false, reason: 'the prompt on screen is not a permission prompt' };
+      if (typeof action.expect !== 'string' || !action.expect) {
+        return { ok: false, reason: 'this answer does not say which prompt it is for; answer it in the window' };
+      }
+      // Codex has no OSC 7501. Its published status is up to a poll old and
+      // comes from the very screen the click's `expect` was taken from, so it
+      // cannot prove the click is still current: a Codex click is checked
+      // against the approval just parsed (in the words codex-status.js
+      // publishes) and against the seq of the prompt codex-status saw, which
+      // is spent once a one-click answer lands, so a second click for the
+      // same prompt never answers the next one in the same words.
+      const live = menu.provider === 'codex'
+        ? { state: 'blocked', kind: 'permission', msg: codexApprovalMsg(menu), seq: readCodexPromptSeq(paneId) }
+        : await Promise.resolve(readQuickStatus(paneId)).catch(() => null);
+      const liveSeq = Number.isInteger(live?.seq) ? live.seq : null;
+      const expectSeq = Number.isInteger(action.expectSeq) ? action.expectSeq : null;
+      if (live?.state !== 'blocked' || live.kind !== 'permission' || String(live.msg ?? '') !== action.expect
+        || expectSeq !== liveSeq) {
+        return { ok: false, reason: 'the prompt changed since it was shown; look at it before answering' };
+      }
+      if (menu.provider === 'codex') codexPromptAnswered(paneId);
+      quickFrom = menu;
+      if (action.decision === 'deny') {
+        await typeInto(paneId, workspaceId, MENU_KEYS.cancel);
+        return await screenMovedOn(paneId, menu)
+          ? { ok: true, action: 'deny' }
+          : { ok: false, reason: 'the prompt did not close after Esc' };
+      }
+      if (action.decision !== 'allow') return { ok: false, reason: 'unknown quick answer' };
+      const label = (o) => String(o.label || '').trim();
+      // Codex's one-time yes reads "Yes, proceed" (its "(y)" key hint is off
+      // the label); "Yes, and don't ask again for ..." stays out.
+      const yes = menu.options.find((o) => !o.isText && /^Yes\.?$/i.test(label(o)))
+        || (menu.provider === 'codex' && menu.options.find((o) => !o.isText && /^Yes,? proceed\.?$/i.test(label(o))))
+        || menu.options.find((o) => !o.isText && /^Yes,? but ask again next time\.?$/i.test(label(o)));
+      if (!yes) return { ok: false, reason: 'no plain "Yes" option on this prompt; answer it in the window' };
+      action = { type: 'select', index: yes.index };
+    }
+
     // A multi-select question confirms on its own unnumbered row, drawn under
     // the last option and labelled "Submit" (or "Next", when more questions
     // follow). Measured 2026-08-09, and it corrected the belief this code was
@@ -2349,6 +2480,11 @@ function createSessionSend(deps) {
       || landed.options.find(o => o.index === target)?.label !== option.label)) {
       return { ok: false, reason: 'the permission request changed; review it before sending feedback' };
     }
+    // A one-click Allow presses Enter only on the request it checked above.
+    if (quickFrom && (JSON.stringify(landed.permission) !== JSON.stringify(quickFrom.permission)
+      || landed.options.find((o) => o.index === target)?.label !== option.label)) {
+      return { ok: false, reason: 'the prompt changed since it was shown; look at it before answering' };
+    }
 
     // Tick a multi-select row. Space toggles, and the row draws its own state,
     // so the flip is CONFIRMED by re-reading the checkbox rather than assumed.
@@ -2403,6 +2539,33 @@ function createSessionSend(deps) {
     // chat message. So a typed answer destroyed the whole batch and never
     // answered anything, which is both halves of Pat's report: no way to
     // type, and one Enter submitting everything.
+    //
+    // CODEX'S FREE-FORM ANSWER IS A NOTE (measured on 0.160). Its question has
+    // no text row; "None of the above" plus a note is how an answer of your
+    // own is given. Tab opens the note line under the rows, typing fills it,
+    // Enter answers (and advances, or submits all on the last open question).
+    // The note is READ BACK before Enter, for the same reason Claude's text row
+    // is: an Enter on an empty note would answer "None of the above" with
+    // nothing.
+    if (action.type === 'text' && action.text && landed.provider === 'codex') {
+      const text = String(action.text);
+      if (!landed.codex?.notesOpen) {
+        await typeInto(paneId, workspaceId, landed.notesKey || '\t');
+        await sleep(160);
+      }
+      await typeInto(paneId, workspaceId, `\x1b[200~${text}\x1b[201~`);
+      await sleep(160);
+      const typed = await readMenu(paneId);
+      if (!typed?.codex?.notesOpen || !squashSpace(typed.codex.notes).endsWith(squashSpace(text).slice(-SEND_TAIL_CHARS))) {
+        return { ok: false, reason: 'the answer never reached Codex\'s note line, so nothing was submitted' };
+      }
+      await typeInto(paneId, workspaceId, MENU_KEYS.enter);
+      if (!(await screenMovedOn(paneId, typed))) {
+        return { ok: false, reason: 'the dialog did not change after Enter, so the answer did not register' };
+      }
+      return { ok: true, action: 'text', index: target };
+    }
+
     if (action.type === 'text' && action.text) {
       const before = landed.options.find((o) => o.index === target)?.label ?? '';
       const text = String(action.text);
@@ -2448,12 +2611,16 @@ function createSessionSend(deps) {
       // CLI 2.1.288, measured in an isolated live Edit: No rejects the tool
       // and returns to the composer. This stays inside answerMenu's pane
       // mutex and control hold, including deliver's guarded Enter watcher.
+      // Codex's "No, and tell Codex what to do differently" interrupts the
+      // turn and returns its own composer; the feedback goes in as a Codex send.
+      const feedbackProvider = landed.provider === 'codex' ? 'codex' : 'claude';
+      const boxState = feedbackProvider === 'codex' ? codexSendState : composerSendState;
       for (let poll = 0; poll < 40; poll += 1) {
         const screen = await readScreen(paneId, MENU_READ_LINES);
-        if (screen && !classifyBlocked(screen) && composerSendState(screen) !== 'nobox') {
+        if (screen && !classifyBlocked(screen) && boxState(screen) !== 'nobox') {
           try {
-            const state = await deliver(paneId, workspaceId, String(action.text), [], 'claude');
-            return state === 'taken' ? { ok: true, action: 'permission-feedback', index: target }
+            const state = await deliver(paneId, workspaceId, String(action.text), [], feedbackProvider);
+            return state === 'taken' || state === 'steered' ? { ok: true, action: 'permission-feedback', index: target }
               : { ok: false, reason: 'the tool was declined, but feedback submission could not be confirmed; check the composer before retrying' };
           } catch (error) {
             return { ok: false, reason: 'the tool was declined, but feedback could not be sent: ' + error.message };
@@ -2616,6 +2783,16 @@ function createSessionSend(deps) {
       }
     }
 
+    // Codex has no review screen: Enter on the last open question submits the
+    // whole set, so the dialog closing IS the submit. Anything still on
+    // screen (Codex's "Submit with unanswered questions?" among them) is
+    // reported, never pressed through.
+    if (batch && opening.provider === 'codex') {
+      const after = await readMenu(paneId);
+      if (after) return { ok: false, reason: 'every answer was entered, but Codex is still showing a prompt; check the window before resubmitting' };
+      return { ok: true, action: 'sheet', delivered: answers.length };
+    }
+
     if (batch) {
       let review = null;
       for (let hop = 0; hop <= questions.length + 1; hop += 1) {
@@ -2750,7 +2927,30 @@ function createSessionSend(deps) {
     [/accept edits on/i, 'accept-edits'],
     [/auto mode on/i, 'auto'],
   ];
+  // A Codex pane draws no mode in its footer, so the Claude scrape answered
+  // "default" for a pane launched with full bypass. Its rollout records the
+  // posture of every turn (turn_context), which is the honest readback.
+  const paneAgent = async (paneId) => {
+    try {
+      const pane = ((await snapshot()).panes || []).find((p) => p.pane_id === paneId);
+      if (!pane) return null;
+      const id = typeof pane.agent_session === 'string' ? pane.agent_session : pane.agent_session?.value || null;
+      return { agent: pane.agent || null, sessionId: id };
+    } catch { return null; }
+  };
+  const readCodexPermissionMode = async (sessionId) => {
+    if (!sessionId || typeof resolveTranscriptPath !== 'function') return { mode: null, reason: 'this Codex session has not named itself yet' };
+    try {
+      const file = await resolveTranscriptPath(sessionId);
+      const read = file ? codexPermissionMode(readCodexState(file)) : null;
+      return read || { mode: null, reason: 'Codex has not started a turn yet, so its permissions are not on record' };
+    } catch (error) {
+      return { mode: null, reason: error.message };
+    }
+  };
   const readPermissionMode = async (paneId) => {
+    const owner = await paneAgent(paneId);
+    if (owner?.agent === 'codex') return readCodexPermissionMode(owner.sessionId);
     let screen = '';
     try { screen = await readPane(paneId); } catch { return { mode: null }; }
     if (!screen) return { mode: null };
@@ -2763,6 +2963,11 @@ function createSessionSend(deps) {
   // (ESC [ Z). We do not fake a "set bypass" button (bypass can be
   // org-disabled); we cycle and re-scrape so the UI reports the landed mode.
   const cyclePermissionMode = async (paneId, workspaceId) => {
+    // shift+tab is Claude's mode cycle; in Codex it switches collaboration
+    // mode, so it is never pressed on a Codex pane in the name of permissions.
+    if ((await paneAgent(paneId))?.agent === 'codex') {
+      throw new Error('a Codex session\'s permissions are set when it launches; start a new session to change them');
+    }
     const state = terminalBridge.getState();
     if (state.controlledPaneId !== paneId) {
       await terminalBridge.requestFocusPane({ paneId, workspaceId }).catch(() => {});
@@ -2927,7 +3132,9 @@ function createSessionSend(deps) {
             }, checkingSeq, imagePaths.length);
             return { ok: true, paneId: target.paneId, delivery: 'confirming' };
           }
-          status(sessionId, 'sent', normalizedNote || undefined);
+          status(sessionId, 'sent', enterState === 'steered'
+            ? 'Codex is busy: it takes this after its next tool call (Send now interrupts and sends it at once)'
+            : normalizedNote || undefined);
           if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, null, imagePaths.length);
           return { ok: true, paneId: target.paneId, delivery: trimmed ? 'confirming' : 'delivered' };
         } catch (error) {
@@ -3188,6 +3395,7 @@ function createSessionSend(deps) {
   // Everything a keystroke can change on a dialog screen: which question, the
   // pointer, and every checkbox (Enter on a multi-select option toggles it).
   const screenSignature = (menu) => JSON.stringify([
+    menu.codex ? [menu.codex.questionIndex, menu.codex.notesOpen, menu.codex.notes] : null,
     menu.question,
     menu.multiSelect,
     menu.selectedIndex,
@@ -3349,6 +3557,48 @@ function createSessionSend(deps) {
     } catch { return null; }
   };
 
+  // What a Codex pane is holding for its running turn: steers (Enter mid-turn,
+  // taken after the next tool call) and queued follow-ups (taken when the turn
+  // ends). Codex writes neither to its rollout until it delivers them, so the
+  // command bar reads them here, off the screen. Null when not Codex.
+  const getCliQueue = async ({ pane, provider } = {}) => {
+    if (!pane?.paneId || provider !== 'codex') return null;
+    const screen = await readScreen(pane.paneId, MENU_READ_LINES);
+    if (!screen || isCodexBlocked(screen)) return null;
+    const pending = codexPendingInputs(screen);
+    return { working: isCodexWorking(screen), steer: pending.steer, queued: pending.queued, count: pending.steer.length + pending.queued.length };
+  };
+
+  // Codex's own "send now": its pending-steer banner says "press esc to
+  // interrupt and send immediately", and that is what Esc does (measured:
+  // "Model interrupted to submit steer instructions.", the steer lands at
+  // once, the turn carries on). Esc with nothing pending only interrupts the
+  // turn, so it is pressed only over a pending steer, and that is checked
+  // TWICE: the steer can be delivered at the turn's next tool call while
+  // control is being acquired, so the screen is read again once control is
+  // held and Esc goes only if the same steer is still pending.
+  const sendNowCodex = ({ pane } = {}) => serializeOnPane(pane?.paneId, async () => {
+    if (!pane?.paneId) return { ok: false, reason: 'no live pane to send into' };
+    const screen = await readScreen(pane.paneId, MENU_READ_LINES);
+    if (!screen || isCodexBlocked(screen)) return { ok: false, reason: 'Codex is showing a prompt; answer it first' };
+    const steer = codexPendingInputs(screen).steer;
+    if (!steer.length) return { ok: false, reason: 'nothing is waiting to be sent into this turn' };
+    terminalBridge.holdControl?.(pane.paneId);
+    try {
+      await acquireControl(pane.paneId, pane.workspaceId);
+      const now = await readScreen(pane.paneId, MENU_READ_LINES);
+      if (!now || isCodexBlocked(now)) return { ok: false, reason: 'Codex is showing a prompt; answer it first' };
+      const pendingNow = codexPendingInputs(now).steer;
+      if (!pendingNow.length || !steer.every((item) => pendingNow.includes(item))) {
+        return { ok: false, reason: 'the message was already sent into the turn (or changed) before Send now could press Esc, so nothing was pressed' };
+      }
+      await typeInto(pane.paneId, pane.workspaceId, MENU_KEYS.cancel);
+      return { ok: true };
+    } finally {
+      terminalBridge.releaseControlHold?.(pane.paneId);
+    }
+  });
+
   return {
     emitter,
     // The ADOPT path lives in actions/takeover.js and emits its own statuses, so
@@ -3362,6 +3612,8 @@ function createSessionSend(deps) {
     getMenu,
     getSuggestion,
     getWorkMeter,
+    getCliQueue,
+    sendNowCodex,
     answerMenu: answerMenuFor,
     findFreshPane,
     findFreshTranscript,
@@ -3393,4 +3645,5 @@ module.exports = {
   codexChangeNote,
   composerBox,
   isFleetView,
+  quickStatusFromScreen,
 };

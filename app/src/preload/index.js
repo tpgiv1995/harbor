@@ -59,9 +59,17 @@ const api = {
     getSendQueue: (payload) => ipcRenderer.invoke('session:send-queue', payload),
     cancelSend: (payload) => ipcRenderer.invoke('session:cancel-send', payload),
     interrupt: (payload) => ipcRenderer.invoke('session:interrupt', payload),
+    cliQueue: (payload) => ipcRenderer.invoke('session:cli-queue', payload),
+    sendSteerNow: (payload) => ipcRenderer.invoke('session:send-steer-now', payload),
     remove: (payload) => ipcRenderer.invoke('session:delete', payload),
     runWorkflow: (payload) => ipcRenderer.invoke('workflow:run', payload),
     workflowRuns: (payload) => ipcRenderer.invoke('session:workflow-runs', payload),
+    // A clicked notification names the session it was about.
+    onReveal: (listener) => {
+      const handler = (_event, payload) => listener(payload);
+      ipcRenderer.on('session:reveal', handler);
+      return () => ipcRenderer.removeListener('session:reveal', handler);
+    },
     onLaunched: (listener) => {
       const handler = (_event, payload) => listener(payload);
       ipcRenderer.on('session:launched', handler);
@@ -204,6 +212,10 @@ const api = {
   },
   workers: {
     close: (payload) => ipcRenderer.invoke('worker:close', payload),
+  },
+  notify: {
+    getPrefs: () => ipcRenderer.invoke('notify:get-prefs'),
+    setPrefs: (payload) => ipcRenderer.invoke('notify:set-prefs', payload),
   },
   usage: {
     getAll: () => ipcRenderer.invoke('usage:get-all'),

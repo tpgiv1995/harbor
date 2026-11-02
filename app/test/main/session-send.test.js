@@ -1077,6 +1077,12 @@ test('a message already sitting in the prompt from an earlier attempt is submitt
   assert.deepEqual(typed(h), ['\r']);
 });
 
+// An idle Codex 0.160 pane: its composer is a column-0 `›` line, and a Codex
+// send refuses any screen without one, so the codex specs below stand on a
+// real composer rather than a Claude-ish `> `.
+const CODEX_IDLE = 'codex\n\n› Ask Codex to do anything\n\n  gpt-5.6 low · /tmp/x';
+const codexWorking = (n) => `codex\n\n• Working (${n}s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  gpt-5.6 low · /tmp/x`;
+
 // Live-caught 2026-08-08. A brand-new codex session took a message and the
 // rollout recorded it with the LEADING characters missing, because Harbor typed
 // into the pane while codex was still starting its TUI. waitForProviderReady
