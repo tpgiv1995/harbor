@@ -3,8 +3,9 @@ import { useProfiles, providerIdentity } from '../providers.js';
 import { CopySessionId } from '../stage/CopySessionId.jsx';
 import { AgentCard, AgentChip } from './AgentCard.jsx';
 import { AgentDrawer } from './AgentDrawer.jsx';
+import { SubTray, SUB_TRAY_CAP } from './SubWorkers.jsx';
 import { WarnIcon, PinIcon, StatusIcon, CloseIcon, MinusIcon, PlusIcon, FitIcon } from './TeamIcons.jsx';
-import { STATE_FILTERS, filterTeam, countsText, warningText, edgeTitle, clockText, ago, homeLabel } from './team-text.cjs';
+import { STATE_FILTERS, filterTeam, countsText, warningText, edgeTitle, clockText, ago, homeLabel, expireSubWorkers } from './team-text.cjs';
 import { connectorPaths } from './team-layout.cjs';
 import { etaText, groupBatches, runCounts, waitingText } from './orch-text.cjs';
 
@@ -70,9 +71,15 @@ function TreeNode({ id, ctx }) {
   const member = ctx.team.members[id];
   if (!member || !ctx.visible.has(id)) return null;
   const kids = (member.children || []).filter((kid) => ctx.visible.has(kid) && ctx.team.members[kid]);
+  const dim = ctx.filtering && !ctx.matched.has(id);
+  // The card and its sub-worker tray are one unit on the board: lines arrive
+  // at the card's top and leave from under the tray.
   return (
     <div className="tc-node">
-      <AgentCard member={member} now={ctx.now} profiles={ctx.profiles} selected={ctx.selected === id} dim={ctx.filtering && !ctx.matched.has(id)} onSelect={ctx.onSelect} />
+      <div className="tc-unit" data-unit-id={id}>
+        <AgentCard member={member} now={ctx.now} profiles={ctx.profiles} selected={ctx.selected === id} dim={dim} onSelect={ctx.onSelect} />
+        <SubTray entries={member.subWorkers} now={ctx.now} dim={dim} expanded={ctx.openTrays.has(id)} onToggle={() => ctx.toggleTray(id)} onOpen={(entry) => ctx.openSub(entry, id)} />
+      </div>
       {kids.length ? <div className={`tc-kids${kids.length > 1 ? ' many' : ''}`}>{kids.map((kid) => <TreeNode key={kid} id={kid} ctx={ctx} />)}</div> : null}
     </div>
   );
@@ -176,10 +183,14 @@ function Board({ ctx, layoutKey, children }) {
     const base = el.getBoundingClientRect();
     const rects = {};
     for (const card of el.querySelectorAll('.tc-card[data-member-id]')) {
-      const r = card.getBoundingClientRect();
+      // A card's unit includes its sub-worker tray; cross lines still meet
+      // the card itself, at its middle (portY).
+      const r = (card.closest('.tc-unit') || card).getBoundingClientRect();
+      const own = card.getBoundingClientRect();
       const n = card.closest('.tc-node')?.getBoundingClientRect() || r;
       rects[card.dataset.memberId] = {
         left: r.left - base.left, top: r.top - base.top, right: r.right - base.left, bottom: r.bottom - base.top,
+        portY: (own.top + own.bottom) / 2 - base.top,
         node: { left: n.left - base.left, top: n.top - base.top, right: n.right - base.left, bottom: n.bottom - base.top },
       };
     }
@@ -340,12 +351,17 @@ function Select({ label, value, onChange, options }) {
 
 export function TeamChart({ onPick, onOpenSession, focusId }) {
   const { profiles } = useProfiles();
-  const now = useNow();
+  const liveNow = useNow();
   const [live, setLive] = useState(null);
   const [pinView, setPinView] = useState(null);
+  // ONE display clock (Astra review, 2026-11-03): a pinned moment is read at
+  // the moment it was pinned, everywhere (expiry, statuses, counts, drawer),
+  // never half at its own time and half at today's.
+  const now = pinView ? pinView.pinnedMs : liveNow;
   const [error, setError] = useState(null);
   const [filters, setFiltersState] = useState(readFilters);
   const [selected, setSelected] = useState(null);
+  const [openTrays, setOpenTrays] = useState(() => new Set());
   const setFilters = (patch) => setFiltersState((previous) => {
     const next = { ...previous, ...patch };
     try { localStorage.setItem(FILTER_KEY, JSON.stringify(next)); } catch { /* private storage */ }
@@ -384,7 +400,8 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
     return () => { active = false; off?.(); api.unwatchTeam?.(); };
   }, []);
 
-  const team = pinView?.team || live;
+  // Sub-worker time limits run on this chart's clock (a pin: its own moment).
+  const team = useMemo(() => expireSubWorkers(pinView?.team || live, now), [pinView, live, now]);
   const view = useMemo(() => filterTeam(team, filters), [team, filters]);
   const filtering = filters.project !== 'all' || filters.home !== 'all' || filters.provider !== 'all' || filters.state !== 'all' || filters.warningsOnly;
   const members = team?.members || {};
@@ -421,7 +438,7 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
       if (filtering && filters.project === 'all') continue;
       list.push({ project: name, counts: null, roots: [], idle: [], memberIds: [], warningIds: [] });
     }
-    return list.filter((p) => p.roots.length || p.idle.length || runsByProject.has(p.project));
+    return list.filter((p) => p.roots.length || p.idle.length || p.loose?.length || runsByProject.has(p.project));
   }, [view, runsByProject, filters, filtering]);
 
   const homes = [...new Set(memberList.map((m) => m.home).filter(Boolean))];
@@ -429,8 +446,18 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
   // What decides the board's size: which frames, which cards, which idle
   // rows. A status or description change does not, so Fit never re-runs on
   // a tick (cards are one fixed size).
-  const layoutKey = sections.map((s) => `${s.project}:${s.roots.join(',')}:${s.idle.length}:${(runsByProject.get(s.project) || []).length}`).join('|') + `#${[...(view.visible || [])].sort().join(',')}`;
-  const ctx = { team: team || { members: {}, edges: [] }, now, profiles, selected, onSelect: (id) => setSelected((current) => (current === id ? null : id)), visible: view.visible, matched: view.matched, filtering };
+  // A tray's height is its number of shown rows, so its size counts too.
+  const trayRows = (list, key) => (list?.length ? `${openTrays.has(key) ? list.length : Math.min(list.length, SUB_TRAY_CAP)}${list.length > SUB_TRAY_CAP ? '+' : ''}` : '0');
+  const layoutKey = sections.map((s) => `${s.project}:${s.roots.join(',')}:${s.idle.length}:${(runsByProject.get(s.project) || []).length}:${trayRows(s.loose, `loose:${s.project}`)}`).join('|')
+    + `#${[...(view.visible || [])].sort().map((id) => `${id}/${trayRows(members[id]?.subWorkers, id)}`).join(',')}`;
+  const toggleTray = (key) => setOpenTrays((current) => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; });
+  // A sub-worker with a session opens its conversation; a Task helper has
+  // none of its own, so it opens its parent's drawer, which lists it.
+  const openSub = (entry, ownerId) => {
+    if (entry.sessionId && onOpenSession) onOpenSession(entry.sessionId);
+    else if (ownerId) setSelected(ownerId);
+  };
+  const ctx = { team: team || { members: {}, edges: [] }, now, profiles, selected, onSelect: (id) => setSelected((current) => (current === id ? null : id)), visible: view.visible, matched: view.matched, filtering, openTrays, toggleTray, openSub };
 
   return (
     <div className="team-chart">
@@ -479,7 +506,7 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
               <section className="tc-frame tc-project" key={section.project} aria-label={`${section.project} agents`}>
                 <header className="tc-project-head">
                   <h3>{section.project}</h3>
-                  {section.counts ? <span className="tc-counts">{countsText(filtering ? countMatched(section, view.matched, members) : section.counts)}{filtering ? ' match' : ''}</span> : <span className="tc-counts">No agents running</span>}
+                  {section.counts?.total ? <span className="tc-counts">{countsText(filtering ? countMatched(section, view.matched, members) : section.counts)}{filtering ? ' match' : ''}</span> : <span className="tc-counts">No agents running</span>}
                 </header>
                 {projectWarnings.length ? (
                   <ul className="tc-project-warnings">
@@ -488,6 +515,7 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
                 ) : null}
                 {(runsByProject.get(section.project) || []).map((run) => <RunSummary key={run.queueId || run.workspace} run={run} onPick={pinView ? null : onPick} />)}
                 {section.roots.length ? <div className="tc-forest">{section.roots.map((id) => <TreeNode key={id} id={id} ctx={ctx} />)}</div> : null}
+                <SubTray loose entries={section.loose} now={now} expanded={openTrays.has(`loose:${section.project}`)} onToggle={() => toggleTray(`loose:${section.project}`)} onOpen={(entry) => ctx.openSub(entry, null)} />
                 {section.idle.length ? (
                   <details className="tc-idle">
                     <summary>{`Idle over 30 minutes (${section.idle.length})`}</summary>
@@ -518,7 +546,7 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
       ) : null}
 
       {selectedMember ? (
-        <AgentDrawer member={selectedMember} team={team} now={now} profiles={profiles} onClose={() => setSelected(null)} onSelect={setSelected} onOpenSession={onOpenSession} returnFocusTo={selected} />
+        <AgentDrawer member={selectedMember} team={team} now={now} profiles={profiles} onClose={() => setSelected(null)} onSelect={setSelected} onOpenSession={onOpenSession} onOpenSub={(entry) => openSub(entry, null)} returnFocusTo={selected} />
       ) : null}
     </div>
   );

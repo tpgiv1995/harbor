@@ -24,6 +24,24 @@ const WORKING_FRESH_MS = 3 * 60 * 1000;
 const PLAN_NEAR_LIMIT_PCT = 90;
 const MANY_TEST_RUNS = 4;
 const USAGE_STALE_MS = 6 * 60 * 60 * 1000;
+// SUB-WORKERS ON THE CHART (Pat, 2026-11-03: "one of the whole points of this
+// orchestration diagram ... was to see these little sub workers ... showing
+// all these down below defeats the whole point"). A machine-made session
+// (Codex sub-agent or approval review, headless `claude -p` run, `codex exec`
+// root, batch worker) or a Claude Task helper hangs in a tray under the card
+// of the agent that started it, for as long as an ended agent stays in the
+// "Ended in the last 6 hours" strip. A project with only unlinked sub-workers
+// gets a frame while one of them was active in the last 30 minutes.
+const SUB_WINDOW_MS = 6 * 60 * 60 * 1000;
+const SUB_LOOSE_FRAME_MS = 30 * 60 * 1000;
+const SUB_KIND_TEXT = {
+  helper: 'Sub-agent (Task)',
+  'sub-agent': 'Sub-agent',
+  'approval review': 'Approval review',
+  'headless Claude': 'Headless run',
+  'exec run': 'Codex exec run',
+  'batch worker': 'Batch worker',
+};
 
 // Which evidence wins when two sources name a different parent. A team's own
 // declaration (TEAM.json reports_to) wins: whoever STARTS a run is not always
@@ -110,6 +128,41 @@ function argvValue(argv, ...names) {
   return null;
 }
 
+// A sub-worker's name: a Codex sub-agent's nickname ("Rawls"), "Approval
+// review", "Message to <session>" for a courier run (one that opens with
+// ListAgents or SendMessage and names the session it delivers to: "to the
+// session named X", "If no session named X", "the session whose name starts
+// with X"), else the session's title or first line, cleaned like a card's.
+function subWorkerName(row) {
+  if (row.kind === 'approval review') return 'Approval review';
+  if (row.nickname) return String(row.nickname);
+  const prompt = String(row.firstPrompt || '');
+  if (/^\s*(?:First\s+)?Use\s+(?:the\s+)?(?:ListAgents|SendMessage)\b/i.test(prompt)) {
+    // "named exactly X" and quoted names are common; the filler word and the
+    // quotes are not the name (2026-11-03: "Message to exactly" on the board).
+    const target = /\bsession\s+(?:named|whose name starts with)\s+(?:exactly\s+)?["'`]?([^\s,;"'`]+(?:\s\[[0-9a-f]{4,}\])?)/i.exec(prompt);
+    if (target) return `Message to ${target[1].replace(/[.:]+$/, '')}`;
+  }
+  const title = row.title && !/^\(.*session\)$/i.test(row.title) ? row.title : prompt;
+  return cleanTitle(title) || 'Untitled run';
+}
+
+// Running at a given moment: not finished, and either it wrote in the last
+// three minutes or it holds a tool open that started within the last 30
+// minutes of its activity. A fold's `working` flag alone is not evidence: a
+// helper interrupted mid-turn keeps it forever (Astra review, 2026-11-03).
+// team-text.cjs `subStatus` applies the same rule with the renderer's clock.
+function subWorkerActive(entry, now) {
+  if (entry.finished || !entry.lastEventMs) return false;
+  if (entry.openTool && now - entry.lastEventMs < IDLE_ROW_MS) return true;
+  return now - entry.lastEventMs < WORKING_FRESH_MS;
+}
+
+function sortSubWorkers(list, now) {
+  return list.sort((a, b) => Number(subWorkerActive(b, now)) - Number(subWorkerActive(a, now))
+    || (b.lastEventMs || b.startedMs || 0) - (a.lastEventMs || a.startedMs || 0));
+}
+
 // What the agent is doing, as a kind a reader can filter on plus the evidence
 // time; the renderer turns it into "Working", "Idle 12m", "Bash open 4m".
 function memberStatus({ alive, facts, pane, createdMs, endedMs }, now) {
@@ -190,6 +243,8 @@ function deriveTeam(inputs = {}, now = Date.now()) {
   // both CODEX_THREAD_ID and the inherited CLAUDE_CODE_SESSION_ID. The nearer
   // one is the thread whose own parent is the other.
   const childOfLaunch = new Map((inputs.launches || []).filter((l) => l.child?.session).map((l) => [l.child.session, l.parent?.session || null]));
+  // Resolved after launchParent is defined (below): who each launched
+  // session reports to, with the Codex-inside-Claude rule applied.
   const parentOfSession = (id) => sessions[id]?.delegatedBy || sessions[id]?.parentThreadId || childOfLaunch.get(id) || null;
   const launchParent = (launch) => {
     const both = launch.parents;
@@ -199,6 +254,8 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     }
     return launch.parent?.session || null;
   };
+
+  const launchParentOf = new Map((inputs.launches || []).filter((l) => l.child?.session).map((l) => [l.child.session, launchParent(l)]));
 
   // 2. Launch records: the launcher said who started it.
   const launchByChildPid = new Map();
@@ -445,6 +502,106 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     member.children = [...members.values()].filter((other) => other.parent === member.id).map((other) => other.id);
   }
 
+  // 6. Sub-workers. Each live card carries the machine-made sessions it
+  // started, plus its Claude Task helpers. The parent is, in order: the
+  // session's own parent link (a Codex `thread_spawn` parent or Harbor's
+  // delegatedBy), walking up through sub-workers to the nearest card; the
+  // launch record that names the session; and, only when exactly one live
+  // agent works in that folder and started before the run, that agent
+  // ("same folder", said as such). Anything else is loose: it shows in its
+  // project's frame, never guessed onto a card.
+  const liveList = [...members.values()].filter((m) => m.alive);
+  const memberBySession = new Map(liveList.filter((m) => m.sessionId).map((m) => [m.sessionId, m]));
+  const memberSessions = new Set([...members.values()].flatMap((m) => [m.id, m.sessionId]).filter(Boolean));
+  const folderKey = (cwd) => slashes(cwd).toLowerCase().replace(/\/+$/, '');
+  const byFolder = new Map();
+  for (const m of liveList) {
+    if (!m.cwd) continue;
+    const key = folderKey(m.cwd);
+    if (!byFolder.has(key)) byFolder.set(key, []);
+    byFolder.get(key).push(m);
+  }
+  for (const member of liveList) {
+    member.subWorkers = member.helpers.map((helper) => ({
+      key: `helper:${member.id}:${helper.id}`,
+      kind: 'helper',
+      kindText: helper.agentType ? `${helper.agentType} sub-agent (Task)` : SUB_KIND_TEXT.helper,
+      provider: 'claude',
+      name: helper.description || helper.agentType || 'Sub-agent',
+      sessionId: null,
+      modelLabel: helper.modelLabel || null,
+      startedMs: helper.startedMs || null,
+      lastEventMs: helper.lastEventMs || null,
+      finished: Boolean(helper.finished),
+      working: Boolean(helper.working),
+      openTool: helper.openTool?.name || null,
+      source: 'transcript',
+    })).filter((entry) => !entry.lastEventMs || now - entry.lastEventMs <= SUB_WINDOW_MS);
+  }
+  const subRows = (inputs.subSessions || []).filter((row) => row?.id && !memberSessions.has(row.id));
+  const subById = new Map(subRows.map((row) => [row.id, row]));
+  const loose = [];
+  for (const row of subRows) {
+    const last = row.lastEventMs || row.startedMs || 0;
+    if (!last || now - last > SUB_WINDOW_MS) continue;
+    let parent = null;
+    let source = null;
+    let via = null;
+    // Up the parent links, through sub-workers, to the nearest live card.
+    // The provider resolves the chain over ALL history (`ancestors`), so an
+    // intermediate older than the display window still links a fresh leaf;
+    // without it, walk the rows given here.
+    const chain = Array.isArray(row.ancestors) ? row.ancestors : [];
+    if (!Array.isArray(row.ancestors)) {
+      for (let link = row.parentId || null, hops = 0; link && hops < 6; hops += 1) {
+        const step = subById.get(link);
+        chain.push({ id: link, name: step ? subWorkerName(step) : null });
+        link = step?.parentId || null;
+      }
+    }
+    for (let i = 0; i < chain.length; i += 1) {
+      const found = memberBySession.get(chain[i].id);
+      if (!found) continue;
+      parent = found;
+      source = i === 0 ? 'spawned' : 'spawned-via';
+      via = i === 0 ? null : chain[0].name || null;
+      break;
+    }
+    const launchedBy = launchParentOf.get(row.id) || null;
+    if (!parent && launchedBy && memberBySession.has(launchedBy)) {
+      parent = memberBySession.get(launchedBy);
+      source = 'launch';
+    }
+    // Folder: only when nothing on record names a parent (a recorded parent
+    // that has ended is still a parent, never the neighbour), only when ONE
+    // live agent works in that folder at all, and only when both start times
+    // are known and the agent started first.
+    if (!parent && !row.parentId && !launchedBy && row.cwd && row.startedMs) {
+      const here = byFolder.get(folderKey(row.cwd)) || [];
+      if (here.length === 1 && here[0].createdMs && here[0].createdMs <= row.startedMs) { parent = here[0]; source = 'folder'; }
+    }
+    const entry = {
+      key: `session:${row.id}`,
+      kind: row.kind,
+      kindText: SUB_KIND_TEXT[row.kind] || 'Sub-session',
+      provider: row.provider || 'claude',
+      name: subWorkerName(row),
+      detail: row.agentPath || null,
+      sessionId: row.id,
+      startedMs: row.startedMs || null,
+      lastEventMs: row.lastEventMs || null,
+      finished: false,
+      working: false,
+      openTool: null,
+      source,
+      via,
+    };
+    if (parent) { parent.subWorkers.push(entry); continue; }
+    const projectCwd = canonicalProjectCwd(row.cwd);
+    loose.push({ ...entry, cwd: row.cwd || null, project: projectCwd ? projectLabel(projectCwd) : (row.project || 'No project') });
+  }
+  for (const member of liveList) sortSubWorkers(member.subWorkers, now);
+
   const warnings = [];
   const warn = (warning) => { warnings.push({ id: `${warning.kind}:${(warning.memberIds || []).join(',')}${warning.home ? `:${warning.home}` : ''}`, ...warning }); };
   const live = [...members.values()].filter((m) => m.alive);
@@ -538,8 +695,26 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     const group = projects.get(member.teamProject);
     const idleLong = ['idle', 'quiet'].includes(member.status.kind) && member.status.sinceMs && now - member.status.sinceMs >= IDLE_ROW_MS;
     const hasLiveChildren = member.children.some((id) => members.get(id)?.alive);
-    if (idleLong && !hasLiveChildren && !(member.warnings || []).length) group.idle.push(member.id);
+    // Its sub-workers would be hidden in the idle row; a parent with one at
+    // work, or one active in the last 30 minutes, keeps its card.
+    const recentSubs = (member.subWorkers || []).some((entry) => subWorkerActive(entry, now) || (entry.lastEventMs && now - entry.lastEventMs < IDLE_ROW_MS));
+    if (idleLong && !hasLiveChildren && !recentSubs && !(member.warnings || []).length) group.idle.push(member.id);
     else group.roots.add(member.id);
+  }
+  // Loose sub-workers join their project's frame; a project that has nothing
+  // else on the chart gets a frame while one of them was active in the last
+  // 30 minutes.
+  const looseByProject = new Map();
+  for (const entry of loose) {
+    if (!looseByProject.has(entry.project)) looseByProject.set(entry.project, []);
+    looseByProject.get(entry.project).push(entry);
+  }
+  for (const [project, list] of looseByProject) {
+    if (!projects.has(project)) {
+      if (!list.some((entry) => entry.lastEventMs && now - entry.lastEventMs <= SUB_LOOSE_FRAME_MS)) continue;
+      projects.set(project, { project, roots: new Set(), idle: [], members: [] });
+    }
+    projects.get(project).loose = sortSubWorkers(list, now);
   }
   const statusCounts = (ids) => {
     const counts = { working: 0, tool: 0, idle: 0, quiet: 0, starting: 0, total: ids.length };
@@ -552,6 +727,7 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     counts: statusCounts(group.members),
     roots: order([...group.roots]),
     idle: order(group.idle),
+    loose: group.loose || [],
     memberIds: group.members,
     warningIds: warnings.filter((w) => w.memberIds?.some((id) => group.members.includes(id))).map((w) => w.id),
   })).sort((a, b) => (b.counts.working + b.counts.tool) - (a.counts.working + a.counts.tool) || b.counts.total - a.counts.total || a.project.localeCompare(b.project));
@@ -589,6 +765,6 @@ function deriveTeam(inputs = {}, now = Date.now()) {
 }
 
 module.exports = {
-  IDLE_ROW_MS, ENDED_WINDOW_MS, STUCK_TOOL_MS, QUIET_PANE_MS, PLAN_NEAR_LIMIT_PCT, MANY_TEST_RUNS, USAGE_STALE_MS,
-  canonicalProjectCwd, cleanTitle, modelLabel, argvValue, memberStatus, deriveTeam,
+  IDLE_ROW_MS, ENDED_WINDOW_MS, STUCK_TOOL_MS, QUIET_PANE_MS, PLAN_NEAR_LIMIT_PCT, MANY_TEST_RUNS, USAGE_STALE_MS, SUB_WINDOW_MS, SUB_LOOSE_FRAME_MS,
+  canonicalProjectCwd, cleanTitle, modelLabel, argvValue, memberStatus, deriveTeam, subWorkerName, subWorkerActive,
 };

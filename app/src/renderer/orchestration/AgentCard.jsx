@@ -1,7 +1,7 @@
 import React from 'react';
 import { providerIdentity } from '../providers.js';
 import { CopySessionId } from '../stage/CopySessionId.jsx';
-import { StatusIcon, WarnIcon, HelperIcon } from './TeamIcons.jsx';
+import { StatusIcon, WarnIcon } from './TeamIcons.jsx';
 import { effortStep, runModeText, statusText, ago } from './team-text.cjs';
 
 // One agent on the team board (2026-11-02). A short, wide card of one fixed
@@ -87,7 +87,6 @@ export function AgentCard({ member, now, profiles, selected, dim, onSelect }) {
   const identity = providerIdentity(member.provider);
   const profile = (profiles || []).find((p) => p.id === member.home);
   const warnings = member.warnings?.length || 0;
-  const runningHelpers = (member.helpers || []).filter((h) => !h.finished).length;
   const kind = member.status?.kind || 'idle';
   const usage = member.usage;
   const pct = usage?.weeklyPct;
@@ -109,7 +108,6 @@ export function AgentCard({ member, now, profiles, selected, dim, onSelect }) {
         </div>
         <div className="tc-marks">
           {warnings ? <span className="tc-warn-count" title={`${warnings} warning${warnings === 1 ? '' : 's'}; open the card to read`}><WarnIcon />{warnings}</span> : null}
-          {runningHelpers ? <span className="tc-helpers" title={`${runningHelpers} helper${runningHelpers === 1 ? '' : 's'} running`}><HelperIcon />{runningHelpers}</span> : null}
           <CopySessionId sessionId={member.sessionId} className="tc-copy" />
         </div>
       </header>

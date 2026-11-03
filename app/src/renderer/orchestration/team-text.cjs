@@ -29,6 +29,91 @@ function statusText(status, now) {
   }
 }
 
+// A sub-worker's state in words, with the chart's clock: "Working",
+// "Bash open", "Finished 5m ago", "Idle 12m" (the cards' own word; the
+// longer "Last active 1h 22m ago" did not fit a mini card). Only fresh evidence
+// counts, the same rule as team-model.cjs `subWorkerActive`: a write in the
+// last three minutes, or an open tool within 30 minutes of its last activity.
+// A fold's `working` flag alone is not (an interrupted helper keeps it).
+const SUB_FRESH_MS = 3 * 60 * 1000;
+const SUB_TOOL_MS = 30 * 60 * 1000;
+const SUB_WINDOW_MS = 6 * 60 * 60 * 1000;
+const SUB_LOOSE_FRAME_MS = 30 * 60 * 1000;
+const IDLE_ROW_MS = 30 * 60 * 1000;
+function subStatus(entry, now) {
+  const since = ago(entry?.lastEventMs, now);
+  const age = entry?.lastEventMs ? now - entry.lastEventMs : Infinity;
+  if (entry?.finished) return { kind: 'ended', live: false, text: since ? `Finished ${since} ago` : 'Finished' };
+  if (entry?.openTool && age < SUB_TOOL_MS) return { kind: 'tool', live: true, text: `${entry.openTool} open` };
+  if (age < SUB_FRESH_MS) return { kind: 'working', live: true, text: 'Working' };
+  return { kind: 'idle', live: false, text: since ? `Idle ${since}` : 'Idle' };
+}
+
+// A member's sub-workers. A pin saved before 2026-11-03 has only `helpers`;
+// they become tray entries here so an old pin still shows them.
+function subWorkersOf(member) {
+  if (Array.isArray(member?.subWorkers)) return member.subWorkers;
+  return (member?.helpers || []).map((helper) => ({
+    key: `helper:${member.id}:${helper.id}`, kind: 'helper',
+    kindText: helper.agentType ? `${helper.agentType} sub-agent (Task)` : 'Sub-agent (Task)',
+    provider: 'claude', name: helper.description || helper.agentType || 'Sub-agent', sessionId: null, modelLabel: helper.modelLabel || null,
+    startedMs: helper.startedMs || null, lastEventMs: helper.lastEventMs || null, finished: Boolean(helper.finished), working: Boolean(helper.working),
+    openTool: helper.openTool?.name || null, source: 'transcript',
+  }));
+}
+
+// The chart's time limits applied with ITS clock (a live chart: now; a pin:
+// the moment it was pinned), because main recomputes only on events and a
+// quiet machine sends none: sub-workers older than 6 hours leave their tray,
+// and a frame that holds nothing but loose sub-workers leaves once none of
+// them was active in the last 30 minutes (Astra review, 2026-11-03).
+function expireSubWorkers(team, at) {
+  if (!team) return team;
+  const keep = (list) => (list || []).filter((entry) => !entry.lastEventMs || at - entry.lastEventMs <= SUB_WINDOW_MS);
+  const members = {};
+  for (const [id, member] of Object.entries(team.members || {})) members[id] = { ...member, subWorkers: keep(subWorkersOf(member)) };
+  // The idle-row rule of team-model.cjs, re-read on this clock: a card kept
+  // open only by recent sub-workers folds once they have been quiet for 30
+  // minutes, with no event from main needed. Cards are only ever folded
+  // here, never unfolded: a card main folded stays folded until main says.
+  const folds = (id) => {
+    const member = members[id];
+    const status = member?.status;
+    if (!member || !['idle', 'quiet'].includes(status?.kind) || !status.sinceMs || at - status.sinceMs < IDLE_ROW_MS) return false;
+    if ((member.children || []).some((kid) => members[kid]) || (member.warnings || []).length) return false;
+    return !member.subWorkers.some((entry) => subStatus(entry, at).live || (entry.lastEventMs && at - entry.lastEventMs < IDLE_ROW_MS));
+  };
+  const projects = (team.projects || []).map((project) => {
+    const folded = (project.roots || []).filter(folds);
+    return {
+      ...project,
+      loose: keep(project.loose),
+      roots: folded.length ? project.roots.filter((id) => !folded.includes(id)) : (project.roots || []),
+      idle: folded.length ? [...(project.idle || []), ...folded] : (project.idle || []),
+    };
+  }).filter((project) => (project.memberIds || []).length || (project.roots || []).length || (project.idle || []).length
+    || project.loose.some((entry) => entry.lastEventMs && at - entry.lastEventMs <= SUB_LOOSE_FRAME_MS));
+  return { ...team, members, projects };
+}
+
+function subCountText(list, now) {
+  const total = (list || []).length;
+  const running = (list || []).filter((entry) => subStatus(entry, now).live).length;
+  return `${total} sub-worker${total === 1 ? '' : 's'}${running ? `, ${running} running` : ''}`;
+}
+
+const SUB_SOURCE_WORDS = {
+  transcript: 'a Task sub-agent inside this agent\'s session',
+  spawned: 'started by this agent',
+  launch: 'launched by this agent (launch record)',
+  folder: 'ran in this agent\'s folder after it started; who started it is not on record',
+};
+
+function subSourceText(entry) {
+  if (entry?.source === 'spawned-via') return `started by ${entry.via || 'a sub-worker'}, which this agent started`;
+  return SUB_SOURCE_WORDS[entry?.source] || 'the agent that started it is not on the chart';
+}
+
 function effortStep(effort) {
   const index = EFFORT_STEPS.indexOf(String(effort || '').toLowerCase());
   return index < 0 ? null : index + 1;
@@ -145,9 +230,13 @@ function filterTeam(team, filters = {}) {
     const seen = new Set();
     while (cursor?.parent && !seen.has(cursor.parent)) { seen.add(cursor.parent); visible.add(cursor.parent); cursor = members[cursor.parent]; }
   }
+  // A project's loose sub-workers belong to no card, so a plan, provider,
+  // state or warnings filter has nothing to match them on: they hide.
+  const memberFilter = (filters.home && filters.home !== 'all') || (filters.provider && filters.provider !== 'all')
+    || (filters.state && filters.state !== 'all') || filters.warningsOnly;
   const projects = (team.projects || [])
     .filter((p) => !filters.project || filters.project === 'all' || p.project === filters.project)
-    .map((p) => ({ ...p, roots: p.roots.filter((id) => visible.has(id)), idle: p.idle.filter((id) => visible.has(id)) }));
+    .map((p) => ({ ...p, roots: p.roots.filter((id) => visible.has(id)), idle: p.idle.filter((id) => visible.has(id)), loose: memberFilter ? [] : (p.loose || []) }));
   return { projects, visible, matched };
 }
 
@@ -167,4 +256,4 @@ function clockText(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-module.exports = { EFFORT_STEPS, STATE_FILTERS, ago, statusText, effortStep, runModeText, warningText, edgeTitle, filterTeam, countsText, clockText, resetText, homeLabel };
+module.exports = { EFFORT_STEPS, STATE_FILTERS, ago, statusText, subStatus, subCountText, subSourceText, subWorkersOf, expireSubWorkers, effortStep, runModeText, warningText, edgeTitle, filterTeam, countsText, clockText, resetText, homeLabel };

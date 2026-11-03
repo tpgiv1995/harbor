@@ -112,3 +112,12 @@ test('neighbours side by side get a straight line between facing edges', () => {
   const [path] = connectorPaths(rects, [], [{ from: 'a', to: 'b', kind: 'keeps-alive' }]);
   assert.equal(path.d, 'M312 79H399');
 });
+
+test('a card with a sub-worker tray is one box for the lines, but a cross line meets the card itself, not the tray', () => {
+  // Card 158 tall with a 120 tall tray under it: the unit is 0..278; the card's middle is 79.
+  const rects = { a: { ...box(0, 0, 312, 278), portY: 79 }, b: box(400, 0) };
+  const [path] = connectorPaths(rects, [], [{ from: 'b', to: 'a', kind: 'reviews' }]);
+  assert.equal(path.d, 'M400 79H313');
+  const tree = connectorPaths({ lead: { ...box(200, 0, 312, 278), portY: 79 }, kid: box(200, 330) }, [{ parent: 'lead', children: [{ id: 'kid', kind: 'directs' }] }], [], { gap: 44 });
+  assert.ok(tree.find((p) => p.kind === 'bus').d.startsWith('M356 278'), 'the reporting line leaves from under the tray');
+});

@@ -1,0 +1,39 @@
+# Adversarial review: sub-workers on the Orch team chart (Harbor)
+
+You are the adversarial reviewer for an uncommitted change in this repo (C:\dev\harbor, Harbor, an Electron app that hosts many Claude Code and Codex sessions). A Claude session wrote it. REVIEW ONLY: do not edit, create, stage, commit or delete any file. Return the full review as your final message (it is saved for you; do not write it to a file yourself).
+
+## What Pat asked for
+
+Pat (the owner), looking at the Orch view: "one of the whole points of this orchestration diagram / visual view update was to see these little sub workers. you can play around with how best to do this but showing all these down below defeats the whole point. need to get these included". Below the team chart (a Miro-style board of agent cards with reporting lines, landed 2026-11-02) sat a long separate "Sub-sessions" list: Codex sub-agents (thread_spawn children like "Rawls (/root/runtime_foundations)"), approval reviews, headless `claude -p` runs (sdk-cli entrypoint), `codex exec` roots and batch workers, grouped by parent or "Without a known parent".
+
+## What the change does
+
+- `app/src/shared/team-model.cjs` (`deriveTeam`, pure): a new input `subSessions` and a new step 6. Every live card gets `subWorkers`: its Claude Task helpers (already read from `<transcript>/subagents/`) plus each recent machine-made session whose parent resolves to that card, in order: the session's own parent link (Codex parentThreadId / Harbor delegatedBy), walking up through other sub-workers to the nearest card ("spawned-via"); a launch record naming the session; and, only when the run has NO parent link and exactly one live agent works in that folder and started before it, that agent ("folder"). Everything else is "loose" and shows in its project's frame; a project with nothing but loose sub-workers gets a frame only while one was active in the last 30 minutes. Window: 6 hours. A long-idle parent with a sub-worker active in the last 30 minutes keeps its full card instead of folding into the idle row. Names: Codex nickname, "Approval review", "Message to <session>" for a run whose first prompt is one SendMessage, else the cleaned title.
+- `app/src/main/providers/team.js`: `recentSubSessions` builds that input from the history rows the sidebar bridge already holds (`bridge.getHistoryRows()`), with the same classifier as the old list (`shared/sub-sessions.cjs` `subSessionKind`), re-read only on the bridge's `history-refreshed` event and at start (the provider has no polling clock; keep it that way). Start time from `meta.start`, or from a Codex UUID v7 thread id.
+- Renderer (`app/src/renderer/orchestration/`): `SubWorkers.jsx` (new: the tray of mini cards under a card, cap 4 with "Show N more", the loose row, the drawer list), `team-subs.css` (new), `TeamChart.jsx` (each card and its tray are one `.tc-unit`; the connector-line measurement now measures the unit, so lines land on the card top and leave from under the tray; tray open state and tray sizes are in the Fit layout key; loose rows in frames), `AgentDrawer.jsx` (a "Sub-workers" section replaces "Helpers"; a mini card with a session opens its read-only conversation, a Task helper opens the parent's drawer), `AgentCard.jsx` (the helper-count badge is dropped as redundant), `team-text.cjs` (`subStatus`, `subCountText`, `subSourceText`; loose rows hide under a plan, provider, state or warnings filter), `OrchLiveRuns.jsx` (the old list is folded shut under "Search all sub-sessions" and not mounted until opened, so its 30-second poll stops while shut).
+- Tests: `app/test/shared/team-model.test.js` (six new cases at the end), `app/test/providers/team-sub-sessions.test.js`, `app/test/renderer/team-text-subs.test.js`. Drive: `app/scripts/drive-team-chart-win.js` (geometry checks measure units; the invented deep team now carries trays; a tray is opened and the lines re-checked; a live sub-worker is clicked open). The coordinator already ran the drive against the live machine; do NOT run it, and do not launch Electron or Harbor.
+
+The exact scope is these files only (other sessions have unrelated uncommitted work in this tree; ignore it):
+app/src/shared/team-model.cjs, app/src/main/providers/team.js, app/src/renderer/orchestration/{AgentCard.jsx,AgentDrawer.jsx,OrchLiveRuns.jsx,TeamChart.jsx,team-text.cjs,team-layout.cjs,SubWorkers.jsx,team-subs.css}, app/test/shared/team-model.test.js, app/test/providers/team-sub-sessions.test.js, app/test/renderer/team-text-subs.test.js, app/test/renderer/team-layout.test.js, app/scripts/drive-team-chart-win.js, and the new bullet "SUB-WORKERS ARE ON THE CHART" in docs/claude/views.md (check that it states what the code does). In `team-layout.cjs`, a box may now carry `portY` (the card's own middle when the box is card plus tray) and cross lines meet that, not the box's middle.
+See the change with `git diff -- <those tracked files>` and read the two new source files and two new test files whole.
+
+## Rules this repo holds you to (read before judging)
+
+- `CLAUDE.md` at the root, and `docs/claude/views.md`, the bullet "THE ORCH VIEW'S TEAM CHART" (lines, Fit, zoom, the measured-box rule, no polling) and the two sub-session bullets near the top ("MACHINE-MADE SUB-SESSIONS BELONG IN ORCH", "A PERSON CAN PIN A MACHINE-MADE SESSION TO THE RAIL").
+- No animations anywhere (status lights are static). No polling clocks in the provider. Nothing that names real people, clients or employers in tracked files (Harbor is published publicly; test data must be invented).
+- `.js`/`.cjs` twins in `src/shared/` must match (team-model.cjs is main-and-test only and has no twin).
+
+## What to attack
+
+1. Wrong attribution: any way a sub-worker lands on the WRONG card, or two cards, or a card it does not belong to (for example, folder inference where the folder is shared, a resumed lane whose earlier session is in the same folder, a Codex sub-agent whose parent thread is itself a sub-agent, a run whose parent link points at an ended agent, id collisions between `members` keys and session ids, launch records with no session yet).
+2. Things that vanish: any sub-session the old list showed within 6 hours that now appears nowhere on the chart while the list is folded, and whether that is honest. Whether loose-only frames appear and leave correctly.
+3. Main-process cost and staleness: `recentSubSessions` runs over every history row (thousands) on each history refresh; the recompute is on a 250 ms debounce and pushes only when the derived JSON changes. Does anything here make the pushed JSON change on every tick (and so re-render the board), or keep "Working" stale?
+4. The board: units vs cards in the line router and Fit; the `layoutKey`; whether trays can overlap other cards or lines; the idle-row change; filters; pins (a pinned snapshot from before this change has no `subWorkers`/`loose`).
+5. Renderer correctness: React keys, `onToggle` on `<details>`, CopySessionId inside a mini card button area, keyboard access, the open action when `onOpenSession` is missing, the drawer's `onOpenSub`.
+6. The tests: do they prove the rules, would they fail on the code before this change, and are any assertions weak or wrong.
+
+You may run `cd app; node --test test/shared/team-model.test.js test/providers/team-sub-sessions.test.js test/renderer/team-text-subs.test.js test/renderer/team-layout.test.js` and other single test files that touch this change. Do NOT run the full suite. Do not use the browser MCP or god Chrome.
+
+## Done when
+
+Your final message is the review: findings ranked most severe first, each with the file and line, a concrete failure scenario (inputs or state, then the wrong result), and the fix you recommend; then anything you checked and found sound; then your overall confidence that this is safe to land. Say plainly when something is a judgment call rather than a defect.

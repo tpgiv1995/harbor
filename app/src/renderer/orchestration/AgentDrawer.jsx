@@ -4,6 +4,7 @@ import { providerIdentity } from '../providers.js';
 import { CopySessionId } from '../stage/CopySessionId.jsx';
 import { StatusIcon, WarnIcon, CloseIcon, OpenIcon } from './TeamIcons.jsx';
 import { PlanMark, EffortPips } from './AgentCard.jsx';
+import { SubWorkerList } from './SubWorkers.jsx';
 import { ago, clockText, statusText, runModeText, warningText, resetText } from './team-text.cjs';
 
 // The side drawer: everything Harbor knows about one agent, read-only (Pat,
@@ -29,7 +30,7 @@ function MemberLink({ id, team, onSelect }) {
   return <button type="button" className="tcd-link" onClick={() => onSelect(id)}>{member.name}</button>;
 }
 
-export function AgentDrawer({ member, team, now, profiles, onClose, onSelect, onOpenSession, returnFocusTo }) {
+export function AgentDrawer({ member, team, now, profiles, onClose, onSelect, onOpenSession, onOpenSub, returnFocusTo }) {
   const panel = useRef(null);
   useEffect(() => {
     panel.current?.querySelector('h2')?.focus();
@@ -114,17 +115,10 @@ export function AgentDrawer({ member, team, now, profiles, onClose, onSelect, on
           </section>
         ) : null}
 
-        {member.helpers?.length ? (
+        {member.subWorkers?.length ? (
           <section className="tcd-section">
-            <h3>Helpers</h3>
-            <ul className="tcd-helpers">
-              {member.helpers.map((helper) => (
-                <li key={helper.id}>
-                  <span className="tcd-helper-name">{helper.description || helper.agentType || 'Helper'}</span>
-                  <span className="tcd-muted">{[helper.modelLabel, helper.finished ? 'finished' : helper.openTool ? `${helper.openTool.name} open` : 'running', `last activity ${ago(helper.lastEventMs, now) || 'unknown'} ago`].filter(Boolean).join(' · ')}</span>
-                </li>
-              ))}
-            </ul>
+            <h3>Sub-workers in the last 6 hours ({member.subWorkers.length})</h3>
+            <SubWorkerList entries={member.subWorkers} now={now} onOpen={(entry) => onOpenSub?.(entry)} />
           </section>
         ) : null}
 

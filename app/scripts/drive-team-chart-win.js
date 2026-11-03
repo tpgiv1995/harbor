@@ -61,7 +61,7 @@ function fixtureTeam(now) {
       description: `${['Polishing', 'Checking', 'Logging', 'Testing', 'Fixing'][n % 5]} the ${name.toLowerCase()} and reporting what it finds to the crew above it.`,
       sessionId: `f0000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
       runMode: pane ? 'pane' : undefined, launcher: pane ? undefined : 'claude-worker',
-      parent, parentSource: parent ? 'launch' : undefined, children: [], warnings: [], helpers: [],
+      parent, parentSource: parent ? 'launch' : undefined, children: [], warnings: [], helpers: [], subWorkers: [],
       teamProject: project, project, cwd: `C:\\work\\${project}`, createdMs: now - n * 600000, lastEventMs: now - n * 30000,
     };
     if (parent) { members[parent].children.push(id); edges.push({ from: parent, to: id, kind: 'directs', source: 'launch' }); }
@@ -91,12 +91,23 @@ function fixtureTeam(now) {
   add('deckhand', 'Deckhand', { ...Y, parent: 'mate' });
   add('cabin', 'Cabin hand', { ...Y, parent: 'deckhand' });
   add('night', 'Night watch', { ...Y });
+  // Sub-worker trays (2026-11-03): a small one, one past the four-card cap
+  // (its "Show more" opens it), one on a leaf, and a loose row in a frame.
+  const subs = (owner, names, { running = 1, provider = 'codex' } = {}) => names.map((name, i) => ({
+    key: `session:${owner}-${i}`, kind: provider === 'codex' ? 'sub-agent' : 'headless Claude', kindText: provider === 'codex' ? 'Sub-agent' : 'Headless run',
+    provider, name, sessionId: `f1000000-0000-4000-8000-${String(i).padStart(4, '0')}${owner.slice(0, 8).padEnd(8, '0').replace(/[^0-9a-f]/g, 'a')}`,
+    startedMs: now - (i + 2) * 60000, lastEventMs: i < running ? now - 20000 : now - (i + 3) * 60000, finished: false, working: false, openTool: null, source: 'spawned',
+  }));
+  members.lens.subWorkers = subs('lens', ['Tide check', 'Beacon log', 'Rope count'], { running: 1 });
+  members.lamp.subWorkers = subs('lamp', ['Gull', 'Tern', 'Heron', 'Petrel', 'Puffin', 'Skua'], { running: 2 });
+  members.glass.subWorkers = subs('glass', ['Message to lighthouse-7'], { running: 0, provider: 'claude' });
+  const yardLoose = subs('yard', ['Sort the driftwood', 'Tar the hull'], { running: 1, provider: 'claude' }).map((entry) => ({ ...entry, source: null }));
   edges.push({ from: 'radio', to: 'lens', kind: 'reviews', source: 'declared' });
   edges.push({ from: 'logbook', to: 'glass', kind: 'keeps-alive', source: 'process' });
   const list = [...projects.values()].map((p) => {
     const counts = { working: 0, tool: 0, idle: 0, quiet: 0, starting: 0, total: 0 };
     for (const id of p.memberIds) { counts.total += 1; counts[members[id].status.kind] += 1; }
-    return { ...p, counts };
+    return { ...p, counts, loose: p.project === 'harbour-yard' ? yardLoose : [] };
   });
   return { members, edges, projects: list, warnings: [], runs: [], ended: [], fixture: true };
 }
@@ -105,9 +116,11 @@ function fixtureTeam(now) {
 const LINES = `(() => {
   const inner = document.querySelector('.tc-board-inner');
   const base = inner.getBoundingClientRect();
+  // A card's unit (the card and its sub-worker tray) is what lines meet.
   const cards = [...document.querySelectorAll('.tc-card[data-member-id]')].map((c) => {
-    const r = c.getBoundingClientRect();
-    return { id: c.dataset.memberId, l: r.left - base.left, t: r.top - base.top, r: r.right - base.left, b: r.bottom - base.top };
+    const r = (c.closest('.tc-unit') || c).getBoundingClientRect();
+    const own = c.getBoundingClientRect();
+    return { id: c.dataset.memberId, l: r.left - base.left, t: r.top - base.top, r: r.right - base.left, b: r.bottom - base.top, mid: (own.top + own.bottom) / 2 - base.top };
   });
   const byId = Object.fromEntries(cards.map((c) => [c.id, c]));
   const near = (a, b) => Math.abs(a - b) <= 1.5;
@@ -129,7 +142,8 @@ const LINES = `(() => {
     if (isCross) {
       curves += 1;
       const first = segs[0]; const last = real.at(-1);
-      const onSide = (px, py, offset) => cards.some((c) => near(py, (c.t + c.b) / 2) && (near(px, c.l - offset) || near(px, c.r + offset)));
+      // Cross lines meet a card's side at the card's own middle, above its tray.
+      const onSide = (px, py, offset) => cards.some((c) => near(py, c.mid) && (near(px, c.l - offset) || near(px, c.r + offset)));
       if (!onSide(first.x, first.y, 0)) problems.push('a cross line does not leave from the side of a card: ' + d.slice(0, 60));
       if (!onSide(last.x2, last.y2, 1)) problems.push('a cross line does not end on the side of a card: ' + d.slice(-60));
     } else if (line.getAttribute('marker-end')) drops.push(...real); else busSegs.push(...real);
@@ -224,6 +238,11 @@ const STATE = `(() => {
     empty: document.querySelector('.tc-empty')?.textContent || null,
     lines: document.querySelectorAll('.tc-edge').length,
     drawer: Boolean(document.querySelector('.tc-drawer')),
+    trays: document.querySelectorAll('.tc-subs:not(.loose)').length,
+    looseTrays: document.querySelectorAll('.tc-subs.loose').length,
+    subs: document.querySelectorAll('.tc-sub').length,
+    subNames: [...document.querySelectorAll('.tc-sub-name')].slice(0, 40).map((el) => el.textContent),
+    subListMounted: Boolean(document.querySelector('.sub-sessions')),
   };
 })()`;
 
@@ -294,6 +313,13 @@ async function main() {
     results.steps.push({ step: 'overview', ...first });
     await cdp.shot('01-overview');
     check(first.cards > 0, 'no cards on the live chart');
+    check(!first.subListMounted, 'the sub-sessions list is mounted under the chart while folded shut');
+    // The live trays, close up, and one live sub-worker opened.
+    if (first.trays + first.looseTrays) {
+      await cdp.eval(`document.querySelector('.tc-subs').scrollIntoView({ block: 'center' }); true`);
+      await sleep(300);
+      await cdp.shot('01d-live-tray');
+    }
 
     // The board: Fit is the default; zoom out, Ctrl+wheel, 100%, and back to
     // Fit. At every zoom no two cards may overlap and every card keeps the
@@ -301,7 +327,9 @@ async function main() {
     const BOARD = `(() => {
       const b = document.querySelector('.tc-board'); const br = b.getBoundingClientRect();
       const cards = [...document.querySelectorAll('.tc-card')];
-      const boxes = cards.map((c) => c.getBoundingClientRect());
+      // Units, so a tray overlapping another card counts.
+      const boxes = cards.map((c) => (c.closest('.tc-unit') || c).getBoundingClientRect());
+      const cardBox = cards[0]?.getBoundingClientRect();
       const overlaps = [];
       for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
         const a = boxes[i]; const c = boxes[j];
@@ -310,7 +338,7 @@ async function main() {
       return {
         zoom: document.querySelector('.tc-zoom-pct')?.textContent, fit: document.querySelector('.tc-zoom-fit')?.getAttribute('aria-pressed'),
         cards: cards.length, inView: boxes.filter((r) => r.top >= br.top - 1 && r.bottom <= br.bottom + 1).length,
-        cardPx: boxes[0] ? [Math.round(boxes[0].width), Math.round(boxes[0].height)] : null,
+        cardPx: cardBox ? [Math.round(cardBox.width), Math.round(cardBox.height)] : null,
         overflow: b.scrollHeight > b.clientHeight + 1, lines: document.querySelectorAll('.tc-edge').length, overlaps,
       };
     })()`;
@@ -392,6 +420,19 @@ async function main() {
       check(!lines.problems.length, `deep tree at ${label}: ${lines.problems.join('; ')}`);
       check(!board.overlaps.length, `deep tree at ${label}: cards overlap ${JSON.stringify(board.overlaps)}`);
     }
+    // A tray past its cap opens with "Show N more"; the lines move with it.
+    await cdp.click('.tc-unit[data-unit-id="lamp"] .tc-subs-more');
+    await sleep(500);
+    await cdp.eval(`document.querySelector('.tc-board').scrollTo(0, 0); document.querySelector('.orch-overview').scrollTo(0, 0); true`);
+    const trayOpen = { lines: await cdp.eval(LINES), board: await cdp.eval(BOARD), subs: await cdp.eval(`document.querySelectorAll('.tc-unit[data-unit-id="lamp"] .tc-sub').length`), more: await cdp.eval(`document.querySelector('.tc-unit[data-unit-id="lamp"] .tc-subs-more')?.textContent`) };
+    results.steps.push({ step: 'deep tree, a tray opened', ...trayOpen });
+    await cdp.shot('10-deep-tree-tray-open');
+    check(trayOpen.subs === 6 && trayOpen.more === 'Show fewer', `the lamp tray did not open to all six: ${JSON.stringify({ subs: trayOpen.subs, more: trayOpen.more })}`);
+    check(!trayOpen.lines.problems.length, `deep tree with a tray open: ${trayOpen.lines.problems.join('; ')}`);
+    check(!trayOpen.board.overlaps.length, `deep tree with a tray open: units overlap ${JSON.stringify(trayOpen.board.overlaps)}`);
+    check(await cdp.eval(`document.querySelectorAll('.tc-subs.loose .tc-sub').length`) === 2, 'the loose row of the harbour-yard frame is missing');
+    await cdp.click('.tc-unit[data-unit-id="lamp"] .tc-subs-more');
+    await sleep(300);
     // A filter keeps the matches' ancestors on the board; the lines still meet.
     await cdp.eval(`(${setSelect('State')})('idle')`);
     await sleep(500);
@@ -460,6 +501,25 @@ async function main() {
       check(tick === '✓', 'the copy control did not show its tick');
       check(clip === expected, `clipboard holds ${clip}, expected ${expected}`);
     } else check(false, 'no card with a copyable session id');
+
+    // A live sub-worker with a session opens its conversation from the tray.
+    const subTarget = await cdp.eval(`(() => { const li = [...document.querySelectorAll('.tc-sub')].find((el) => el.querySelector('.tc-sub-copy')); if (!li) return null; li.setAttribute('data-drive-sub', '1'); return { key: li.dataset.subKey, name: li.querySelector('.tc-sub-name').textContent }; })()`);
+    if (subTarget) {
+      const sessionId = subTarget.key.replace(/^session:/, '');
+      await cdp.click('[data-drive-sub="1"] .tc-sub-open');
+      await sleep(1500);
+      // The requested session, in a real conversation window (a stage tile,
+      // not a rail row), marked read-only like the old list opened it.
+      const opened = await cdp.eval(`(() => { const tile = document.querySelector('.win2[data-session-id="${sessionId}"]'); return { chart: Boolean(document.querySelector('.team-chart')), tile: Boolean(tile), readOnly: Boolean(tile?.querySelector('.ro-flag')) }; })()`);
+      results.steps.push({ step: 'open a live sub-worker', ...subTarget, ...opened });
+      await cdp.shot('08-sub-opened');
+      check(opened.tile, `opening sub-worker ${subTarget.name} did not open its own conversation window: ${JSON.stringify(opened)}`);
+      check(opened.readOnly, `sub-worker ${subTarget.name} opened writable; machine-made sessions open read-only`);
+      if (!opened.chart) {
+        await cdp.click('.view-switch-btn[aria-label="Orch"]');
+        await waitFor(cdp, `Boolean(document.querySelector('.team-chart'))`, 'team chart again');
+      }
+    } else results.steps.push({ step: 'open a live sub-worker: NOT CHECKED, none with a session on the board right now' });
 
     if (START_SESSION) {
       const parent = process.env.CLAUDE_CODE_SESSION_ID;

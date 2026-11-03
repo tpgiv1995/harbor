@@ -19,7 +19,8 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { deriveTeam, canonicalProjectCwd, ENDED_WINDOW_MS } = require('../../shared/team-model.cjs');
+const { deriveTeam, canonicalProjectCwd, subWorkerName, ENDED_WINDOW_MS, SUB_WINDOW_MS } = require('../../shared/team-model.cjs');
+const { subSessionKind } = require('../../shared/sub-sessions.cjs');
 const { buildDescribeContext, isTitlerChildPrompt } = require('./titles.js');
 
 const RECOMPUTE_MS = 250;
@@ -54,6 +55,70 @@ function realHome() {
 function defaultLaunchesFile(env = process.env) {
   if (env.HARBOR_TEAM_LAUNCHES_FILE && path.isAbsolute(env.HARBOR_TEAM_LAUNCHES_FILE)) return env.HARBOR_TEAM_LAUNCHES_FILE;
   return path.join(realHome(), '.harbor', 'team-launches.jsonl');
+}
+
+// A Codex thread id is a UUID v7, whose first 48 bits are its creation time in
+// Unix milliseconds; a rollout carries no other start stamp the index keeps.
+function uuidV7Ms(id) {
+  const text = String(id || '');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/i.test(text)) return null;
+  const ms = parseInt(text.slice(0, 8) + text.slice(9, 13), 16);
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+// "2026-11-03 01:41" (the index's local time) as milliseconds.
+function localStampMs(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(String(value || ''));
+  if (!match) return null;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6] || 0)).getTime();
+}
+
+// The machine-made sessions of the last six hours, for the chart's sub-worker
+// trays: the same classifier as the Orch sub-sessions list, read from the
+// history rows the bridge already holds (no file is opened here). Each carries
+// its ancestry resolved over ALL rows, so a fresh leaf whose intermediate
+// sub-agent went quiet hours ago still reaches the card at the top (Astra
+// review, 2026-11-03).
+const parentLink = (row) => row?.delegatedBy || row?.lineage?.parentThreadId || null;
+function recentSubSessions(rows, now) {
+  const cutoff = now - SUB_WINDOW_MS;
+  const out = [];
+  let byId = null;
+  const ancestorsOf = (row) => {
+    const chain = [];
+    const seen = new Set([row.id]);
+    for (let link = parentLink(row), hops = 0; link && hops < 6 && !seen.has(link); hops += 1) {
+      seen.add(link);
+      byId ||= new Map((rows || []).map((item) => [item.id, item]));
+      const step = byId.get(link);
+      const kind = step ? subSessionKind(step) : null;
+      chain.push({ id: link, name: step && kind ? subWorkerName({ kind, nickname: step.lineage?.nickname || null, firstPrompt: step.firstPrompt || null, title: step.title || null }) : null });
+      link = step ? parentLink(step) : null;
+    }
+    return chain;
+  };
+  for (const row of rows || []) {
+    const last = row.lastWriteMs || row.meta?.mt || localStampMs(row.lastActive);
+    if (!last || last < cutoff) continue;
+    const kind = subSessionKind(row);
+    if (!kind || row.isInternalSession || isTitlerChildPrompt(row.firstPrompt)) continue;
+    out.push({
+      id: row.id,
+      provider: row.provider || 'claude',
+      kind,
+      title: row.title || null,
+      firstPrompt: row.firstPrompt ? String(row.firstPrompt).slice(0, 300) : null,
+      nickname: row.lineage?.nickname || null,
+      agentPath: row.lineage?.agentPath || null,
+      cwd: row.cwd || null,
+      project: row.project || null,
+      parentId: parentLink(row),
+      ancestors: ancestorsOf(row),
+      startedMs: Date.parse(row.meta?.start || '') || uuidV7Ms(row.id) || null,
+      lastEventMs: last,
+    });
+  }
+  return out;
 }
 
 function pidAlive(pid) {
@@ -487,6 +552,10 @@ function createTeamProvider(options = {}) {
       sessionHomes,
       usage,
       delegations: bridge?.listDelegations?.() || [],
+      // Read on every recompute (events only, 250 ms debounce): a rail pin or
+      // a delegation link changes rows and emits `update` without a history
+      // refresh, and must move the tray at once.
+      subSessions: recentSubSessions(bridge?.getHistoryRows?.() || [], now()),
       runs,
       declarations,
       ended,
@@ -689,4 +758,4 @@ function createTeamProvider(options = {}) {
   };
 }
 
-module.exports = { createTeamProvider, readDeclaration, createLaunchReader, defaultLaunchesFile, commandWords, wordValue, mungeCwd, canonicalProjectCwd, MAX_PINS, PIN_TTL_MS };
+module.exports = { createTeamProvider, readDeclaration, createLaunchReader, defaultLaunchesFile, commandWords, wordValue, mungeCwd, canonicalProjectCwd, recentSubSessions, uuidV7Ms, localStampMs, MAX_PINS, PIN_TTL_MS };

@@ -20,6 +20,10 @@
 const ROW_TOLERANCE = 6;
 
 function center(rect) { return (rect.left + rect.right) / 2; }
+// Where a cross line meets a box's side. A box can be a card with its
+// sub-worker tray under it (2026-11-03); the line then aims at the card's own
+// middle (`portY`), not at the gap between the card and the tray.
+function sideY(rect) { return Number.isFinite(rect.portY) ? rect.portY : (rect.top + rect.bottom) / 2; }
 
 function rowsOf(childRects) {
   const rows = [];
@@ -87,8 +91,8 @@ function curveBetween(a, b) {
     c1 = [start[0], start[1] + dy]; c2 = [end[0], end[1] - dy];
   } else {
     const leftToRight = center(a) <= center(b);
-    start = [leftToRight ? a.right : a.left, (a.top + a.bottom) / 2];
-    end = [leftToRight ? b.left - 1 : b.right + 1, (b.top + b.bottom) / 2];
+    start = [leftToRight ? a.right : a.left, sideY(a)];
+    end = [leftToRight ? b.left - 1 : b.right + 1, sideY(b)];
     const dx = Math.max(30, Math.abs(end[0] - start[0]) / 2) * (leftToRight ? 1 : -1);
     c1 = [start[0] + dx, start[1]]; c2 = [end[0] - dx, end[1]];
   }
@@ -109,8 +113,8 @@ function routeAround(rects, fromId, toId, { margin = 8, bend = 30, radius = 6 } 
   const cards = Object.values(rects);
   const blocked = (x1, y1, x2, y2) => cards.some((c) => Math.min(x1, x2) < c.right - 0.5 && Math.max(x1, x2) > c.left + 0.5
     && Math.min(y1, y2) < c.bottom - 0.5 && Math.max(y1, y2) > c.top + 0.5);
-  const midA = (a.top + a.bottom) / 2;
-  const midB = (b.top + b.bottom) / 2;
+  const midA = sideY(a);
+  const midB = sideY(b);
   const ports = (card, mid) => [
     { x: card.right, y: mid, stub: card.right + margin },
     { x: card.left, y: mid, stub: card.left - margin },
