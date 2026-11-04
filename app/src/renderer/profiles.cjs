@@ -40,12 +40,30 @@ function normalizeHome(home, profiles = null) {
   return home || null;
 }
 
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+// A plan's badge normally draws its LETTER in the plan colour over a faint
+// tint of that colour, which only reads when the colour is light enough to
+// read on Slate's near-black. A profile that also names a `textColor` asks for
+// the other look (2026-11-03, the X plan: "black color theme with white
+// font"): the chip is filled solid with the plan colour and every foreground
+// (letter, launch label, meter donut) takes the text colour, with a faint
+// outline in the text colour so a dark chip still has an edge. The extra
+// properties are set ONLY then, so every CSS rule reads them with the plain
+// look as its fallback and an ordinary profile renders exactly as before.
 function profileStyle(profile) {
   if (!profile?.color) return {};
-  return {
+  const style = {
     '--profile-color': profile.color,
     '--profile-rgb': hexToRgb(profile.color),
   };
+  if (HEX_COLOR.test(String(profile.textColor || '').trim())) {
+    const ink = profile.textColor.trim();
+    style['--profile-fg'] = ink;
+    style['--profile-fill'] = profile.color;
+    style['--profile-edge'] = `rgb(${hexToRgb(ink)} / 30%)`;
+  }
+  return style;
 }
 
 // The shell command that reproduces a resume by hand. It used to compose

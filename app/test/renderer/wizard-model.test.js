@@ -519,6 +519,23 @@ test('a re-run opens on the saved profile identity, not on freshly detected seed
   assert.equal(profile.authed, true);
 });
 
+// The optional badge text colour (2026-11-03, a black plan with a white letter)
+// has no field in the wizard, so it must ride through a re-run untouched and be
+// written back at Finish; dropping it would turn a black chip into an invisible
+// black letter. A profile without one must not gain the key.
+test('a re-run carries a saved badge text colour through to the written config', () => {
+  const saved = savedConfig();
+  saved.profiles = [
+    { ...saved.profiles[0], color: '#000000', textColor: '#FFFFFF' },
+    { id: 'plain', label: 'Plain', letter: 'P', color: '#6FA8D8', provider: 'claude', configHome: '/home/tester/.claude-plain', email: null, isDefault: false },
+  ];
+  const state = model.initialState(detectedLinux(), saved);
+  assert.equal(state.claude.profiles[0].textColor, '#FFFFFF');
+  const written = model.configFromWizard(state).profiles;
+  assert.equal(written.find((p) => p.id === 'work').textColor, '#FFFFFF');
+  assert.equal('textColor' in written.find((p) => p.id === 'plain'), false);
+});
+
 test('a re-run keeps saved platform settings and new-session defaults', () => {
   const state = model.initialState(detectedLinux(), savedConfig());
   assert.equal(state.platform.shell, '/bin/zsh');

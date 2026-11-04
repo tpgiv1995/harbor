@@ -94,6 +94,10 @@ function validateConfig(config) {
         throw new TypeError(`profile ${profile.id} requires ${field}`);
       }
     }
+    // profile.textColor is optional and deliberately NOT validated here: it only
+    // decorates a badge, and profileStyle (renderer/profiles.cjs) ignores any
+    // value that is not #rrggbb, so a hand-edit typo costs the look, never the
+    // whole config.
     if (profile.email !== null && typeof profile.email !== 'string') {
       throw new TypeError(`profile ${profile.id} email must be a string or null`);
     }

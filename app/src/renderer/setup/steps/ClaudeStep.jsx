@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import model from '../wizard-model.cjs';
-import { Field, PathInput, Segmented, TextInput, errorFor } from './controls.jsx';
+import { Field, PathInput, Segmented, TextInput, errorFor, setupBadgeStyle } from './controls.jsx';
 
 const LETTERS = ['P', 'T', 'S', 'A', 'B', 'C', 'D', 'E'];
 const COLORS = ['#6fa8d8', '#d68a5a', '#F962BA', '#7bd3a0', '#c9a6ff', '#e8973f', '#79a6ff', '#d98a8a'];
@@ -44,7 +44,7 @@ function ProfileCard({ profile, index, patch, errors, count, bin }) {
   return (
     <div className="setup-card setup-profile" data-profile={profile.id}>
       <div className="setup-profile-head">
-        <span className="setup-badge" style={{ background: profile.color }}>{profile.letter}</span>
+        <span className="setup-badge" style={setupBadgeStyle(profile)}>{profile.letter}</span>
         <strong className="setup-profile-name">{profile.label || 'Unnamed plan'}</strong>
         <label className="setup-default-pick">
           <input

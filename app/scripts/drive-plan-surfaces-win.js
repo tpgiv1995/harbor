@@ -244,6 +244,23 @@ async function main() {
     if (fits === null || fits > PAT_RAIL - 8) problems.push(`the rail head needs ${fits}px; Pat's rail is ${PAT_RAIL}px and wants 8px of slack`);
     await cdp.eval(railGeometry(PAT_RAIL));
     shots.push(await cdp.shot(`1-rail-at-${PAT_RAIL}`));
+    // A filled plan (one with a textColor, e.g. the black X plan) HOVERED: its launch
+    // button must lighten and keep its letter in the text colour (2026-11-03).
+    const rgbOf = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ")})`;
+    for (const p of claudeProfiles.filter((q) => /^#[0-9a-f]{6}$/i.test(String(q.textColor || "")))) {
+      const sel = `.rail-new-split .sidebar-global-new.${p.id}`;
+      const rest = await cdp.eval(`(() => { const b = document.querySelector(${JSON.stringify(sel)}); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, bg: getComputedStyle(b).backgroundColor }; })()`);
+      if (!rest) { problems.push(`no rail launch button for ${p.letter}`); continue; }
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: rest.x, y: rest.y });
+      await sleep(300);
+      const hovered = await cdp.eval(`(() => { const b = document.querySelector(${JSON.stringify(sel)}); const st = getComputedStyle(b); return { hover: b.matches(":hover"), bg: st.backgroundColor, ink: st.color }; })()`);
+      facts[`hover${p.letter}`] = { restBg: rest.bg, ...hovered };
+      shots.push(await cdp.shot(`1c-hover-plus-${p.letter}-at-${PAT_RAIL}`));
+      if (!hovered.hover) problems.push(`could not hover +${p.letter}`);
+      else if (hovered.bg === rest.bg || hovered.ink !== rgbOf(p.textColor)) problems.push(`+${p.letter} hovered is ${hovered.ink} on ${hovered.bg} (rest ${rest.bg})`);
+      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
+      await sleep(200);
+    }
     // The hovered project row, held open the way :hover opens it (buttons shown, the age label hidden), so its buttons are seen, not just measured.
     await cdp.eval(`(() => { const a = document.querySelector('.sidebar-project-actions'); if (!a) return false; a.style.display = 'flex'; const m = a.closest('.sidebar-project-wrap')?.querySelector('.pg-meta'); if (m) m.style.display = 'none'; return true; })()`);
     shots.push(await cdp.shot(`1b-project-row-at-${PAT_RAIL}`));
@@ -253,15 +270,24 @@ async function main() {
     facts.meters = await cdp.eval(`[...document.querySelectorAll('.rail-meters .rm-row:not(.rm-sys)')].map((row) => ({
       letter: row.querySelector('.rm-b')?.textContent.trim(),
       color: getComputedStyle(row).color,
+      badgeBg: row.querySelector('.rm-b') ? getComputedStyle(row.querySelector('.rm-b')).backgroundColor : null,
+      badgeInk: row.querySelector('.rm-b') ? getComputedStyle(row.querySelector('.rm-b')).color : null,
       clipped: row.scrollWidth > row.clientWidth + 1,
     }))`);
     const meterLetters = facts.meters.map((m) => m.letter).join(' ');
     if (meterLetters !== facts.claude) problems.push(`meter rows read "${meterLetters}", config says "${facts.claude}"`);
     for (const m of facts.meters) if (m.clipped) problems.push(`meter row ${m.letter} is clipped`);
+    // A plan with a textColor (a dark plan colour, e.g. the black X plan) draws
+    // its meter in the TEXT colour and its badge filled solid with the plan
+    // colour; every other plan draws in its own colour (profileStyle).
     for (const p of claudeProfiles) {
-      const [r, gg, b] = [1, 3, 5].map((i) => parseInt(p.color.slice(i, i + 2), 16));
+      const inked = /^#[0-9a-f]{6}$/i.test(String(p.textColor || ''));
+      const expected = rgbOf(inked ? p.textColor : p.color);
       const row = facts.meters.find((m) => m.letter === p.letter);
-      if (!row || row.color !== `rgb(${r}, ${gg}, ${b})`) problems.push(`the ${p.letter} meter row is ${row?.color}, expected rgb(${r}, ${gg}, ${b})`);
+      if (!row || row.color !== expected) problems.push(`the ${p.letter} meter row is ${row?.color}, expected ${expected}`);
+      if (row && inked && (row.badgeBg !== rgbOf(p.color) || row.badgeInk !== rgbOf(p.textColor))) {
+        problems.push(`the ${p.letter} badge is ${row.badgeInk} on ${row.badgeBg}, expected ${rgbOf(p.textColor)} on ${rgbOf(p.color)}`);
+      }
     }
 
     // 3. File menu: one "New <plan> session" per profile.

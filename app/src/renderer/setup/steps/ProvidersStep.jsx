@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import model from '../wizard-model.cjs';
-import { Field, PathInput, TextInput, Toggle, errorFor } from './controls.jsx';
+import { Field, PathInput, TextInput, Toggle, errorFor, setupBadgeStyle } from './controls.jsx';
 
 // Step 3. Codex (up to two accounts) and Cursor, same shape as the Claude step:
 // detect the binary, confirm the account where it can be read, allow zero.
@@ -38,7 +38,7 @@ function CodexAccounts({ state, patch, errors }) {
       {accounts.map((account, index) => (
         <div className="setup-subcard" key={account.id}>
           <div className="setup-profile-head">
-            <span className="setup-badge" style={{ background: account.color }}>{account.letter}</span>
+            <span className="setup-badge" style={setupBadgeStyle(account)}>{account.letter}</span>
             <strong className="setup-profile-name">{account.label}</strong>
             {accounts.length > 1 ? (
               <button

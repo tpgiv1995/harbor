@@ -575,18 +575,25 @@ button { font-family: inherit; }
   padding: 0 8px;
   border: 1px solid var(--ln);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.04);
+  /* --profile-fill/-fg/-edge exist only for a plan with a textColor (a dark
+     plan colour: solid chip, letter in the text colour; profileStyle in
+     profiles.cjs). Every other plan takes the fallbacks, i.e. the old look. */
+  background: var(--profile-fill, rgba(255, 255, 255, 0.04));
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
-  border-color: rgb(var(--profile-rgb) / 32%);
-  color: var(--profile-color);
+  border-color: var(--profile-edge, rgb(var(--profile-rgb) / 32%));
+  color: var(--profile-fg, var(--profile-color));
 }
 
 .sidebar-global-new:hover,
 .sidebar-proj-new:hover {
   background: rgba(255, 255, 255, 0.09);
+}
+.sidebar-global-new[style*="--profile-fill"]:hover,
+.sidebar-proj-new[style*="--profile-fill"]:hover {
+  background: color-mix(in srgb, var(--profile-fill) 85%, white);
 }
 
 /* "+O", the one button for every plan that is not a Claude plan (2026-10-29):
@@ -1243,8 +1250,13 @@ button { font-family: inherit; }
 .sr-b.profile-badge,
 .rm-b.profile-badge,
 .apill.profile-badge {
-  background: rgb(var(--profile-rgb) / 18%);
-  color: var(--profile-color);
+  background: var(--profile-fill, rgb(var(--profile-rgb) / 18%));
+  color: var(--profile-fg, var(--profile-color));
+}
+/* A filled chip (a dark plan colour, e.g. the black X plan) gets a faint edge
+   in its text colour, or black on Slate's near-black has no visible shape. */
+.profile-badge[style*="--profile-fill"] {
+  box-shadow: inset 0 0 0 1px var(--profile-edge);
 }
 
 .sr-b {
@@ -1416,7 +1428,7 @@ button { font-family: inherit; }
   gap: 8px;
   min-width: 0;
   max-width: 330px;
-  color: var(--profile-color);
+  color: var(--profile-fg, var(--profile-color));
 }
 
 /* Fixed width, so the first donut of every row starts at the same x. */
@@ -1755,9 +1767,11 @@ button { font-family: inherit; }
    colour Pat's three accounts and a profile is named whatever its owner named
    it. The fallback keeps a profile with no colour looking deliberate. */
 .slot-btn[style*="--profile-color"] {
-  border-color: rgb(var(--profile-rgb) / 32%);
-  color: var(--profile-color);
+  border-color: var(--profile-edge, rgb(var(--profile-rgb) / 32%));
+  color: var(--profile-fg, var(--profile-color));
 }
+.slot-btn[style*="--profile-fill"] { background: var(--profile-fill); }
+.slot-btn[style*="--profile-fill"]:hover { background: color-mix(in srgb, var(--profile-fill) 85%, white); }
 /* Fixed 30px height with a wrappable label overflows the pill: "+ Personal
    session" broke onto a second line that spilled out the bottom. Pre-dates the
    profile work, visible in any capture of the empty stage, and it only got more
@@ -4961,9 +4975,9 @@ button { font-family: inherit; }
 }
 .config-account button:hover { color: var(--tx); }
 .config-account button.active {
-  background: rgb(var(--profile-rgb) / 12%);
-  box-shadow: inset 0 0 0 1px rgb(var(--profile-rgb) / 40%);
-  color: var(--profile-color);
+  background: var(--profile-fill, rgb(var(--profile-rgb) / 12%));
+  box-shadow: inset 0 0 0 1px var(--profile-edge, rgb(var(--profile-rgb) / 40%));
+  color: var(--profile-fg, var(--profile-color));
 }
 
 .cap-effort-slider-wrap { padding: 0 8px 3px; }
@@ -10543,7 +10557,7 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .tc-gauge.usage.stale span { opacity: .4; }
 .tc-plan { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .tc-plan-mark { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
-.tc-plan-letter { display: grid; place-items: center; width: 15px; height: 15px; box-sizing: border-box; border-radius: 4px; border: 1px solid var(--plan); color: var(--plan); font: 700 9px var(--font-ui); flex: none; }
+.tc-plan-letter { display: grid; place-items: center; width: 15px; height: 15px; box-sizing: border-box; border-radius: 4px; border: 1px solid var(--plan-edge, var(--plan)); background: var(--plan-fill, transparent); color: var(--plan-fg, var(--plan)); font: 700 9px var(--font-ui); flex: none; }
 .tc-plan-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tc-plan-pct { margin-left: auto; flex: none; font: 500 11px var(--font-mono); font-variant-numeric: tabular-nums; color: var(--sub); }
 .tc-plan-pct.high { color: var(--err); }

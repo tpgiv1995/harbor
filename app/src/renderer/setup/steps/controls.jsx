@@ -1,4 +1,5 @@
 import React from 'react';
+import { profileStyle } from '../../profiles.cjs';
 
 // Shared wizard controls. Deliberately plain: segmented buttons and text
 // fields, no native <select> anywhere. Every glass surface in Slate sets
@@ -137,4 +138,18 @@ export function Detected({ label, found, value, missing, children }) {
 
 export function errorFor(errors, field) {
   return errors.find((error) => error.field === field)?.message || null;
+}
+
+// The plan badge preview. It fills with the plan colour and draws a dark
+// letter, unless the plan names a textColor (a dark plan colour, e.g. the black
+// X plan), which then takes the letter and a faint edge, the same rule every
+// other badge follows (profileStyle).
+export function setupBadgeStyle(profile) {
+  const inked = profileStyle(profile);
+  const style = { background: profile?.color };
+  if (inked['--profile-fill']) {
+    style.color = inked['--profile-fg'];
+    style.boxShadow = `inset 0 0 0 1px ${inked['--profile-edge']}`;
+  }
+  return style;
 }

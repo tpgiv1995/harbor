@@ -111,6 +111,18 @@ test('codex reasoning levels are discovered from the models_cache, highest prior
   await fsp.rm(dir, { recursive: true, force: true });
 });
 
+// The badge text colour is the one optional profile field the rail, stage and
+// phone need, and this list is the only door profiles take to them; a plan
+// without one keeps its old shape exactly.
+test('new session options pass a profile badge text colour through, and only when set', () => {
+  const options = newSessionOptions({
+    profiles: [PROFILES[0], { ...PROFILES[1], color: '#000000', textColor: '#FFFFFF' }],
+  });
+  const [plain, inked] = options.profiles;
+  assert.equal(inked.textColor, '#FFFFFF');
+  assert.equal('textColor' in plain, false);
+});
+
 test('new session options group multiple Codex profiles and omit disabled providers', () => {
   const options = newSessionOptions({
     profiles: [

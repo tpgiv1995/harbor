@@ -203,9 +203,15 @@ function newSessionOptions(rawConfig, deps = {}) {
     if (configured[id]?.enabled === false) delete registry[id];
     else provider.bin = configured[id]?.bin || (id === 'cursor' ? 'cursor-agent' : id);
   }
+  // textColor is optional (a dark plan colour fills the badge and the letter
+  // takes this colour; profileStyle in renderer/profiles.cjs), so it is passed
+  // only when set and an ordinary profile's shape is unchanged.
   const profiles = (config.profiles || []).map(({
-    id, label, letter, color, provider, configHome, isDefault,
-  }) => ({ id, label, letter, color, provider: provider || 'claude', configHome: configHome || null, isDefault }));
+    id, label, letter, color, textColor, provider, configHome, isDefault,
+  }) => ({
+    id, label, letter, color, ...(textColor ? { textColor } : {}),
+    provider: provider || 'claude', configHome: configHome || null, isDefault,
+  }));
   const profilesByProvider = {};
   const defaultProfiles = {};
   for (const provider of Object.keys(registry)) {

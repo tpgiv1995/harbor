@@ -47,6 +47,24 @@ test('profileStyle exposes colour tokens for data-driven badges', () => {
   });
 });
 
+// A dark plan colour (the X plan is black) cannot be the letter's colour on
+// Slate's near-black, so a profile may name a textColor: the chip fills with
+// the plan colour and the foreground takes the text colour. Without one, no
+// extra token is set, which is what keeps every other plan's look unchanged.
+test('profileStyle adds fill, foreground and edge tokens only when a textColor is set', () => {
+  assert.deepEqual(profileStyle({ id: 'x', letter: 'X', color: '#000000', textColor: '#FFFFFF' }), {
+    '--profile-color': '#000000',
+    '--profile-rgb': '0 0 0',
+    '--profile-fg': '#FFFFFF',
+    '--profile-fill': '#000000',
+    '--profile-edge': 'rgb(255 255 255 / 30%)',
+  });
+  for (const textColor of [undefined, null, '', 'white', '#FFF', 'rgb(1,2,3)']) {
+    const style = profileStyle({ id: 'x', letter: 'X', color: '#000000', textColor });
+    assert.deepEqual(Object.keys(style), ['--profile-color', '--profile-rgb'], `textColor ${textColor} must add nothing`);
+  }
+});
+
 // The copy-resume-command menu item. It used to compose per-account FLAGS by
 // profile index, which emitted the third profile's id as a flag name; on the
 // machine this was built for that id was a person's first name, and on anybody

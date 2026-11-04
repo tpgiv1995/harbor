@@ -1,5 +1,5 @@
 import React from 'react';
-import { providerIdentity } from '../providers.js';
+import { providerIdentity, profileStyle } from '../providers.js';
 import { CopySessionId } from '../stage/CopySessionId.jsx';
 import { StatusIcon, WarnIcon } from './TeamIcons.jsx';
 import { effortStep, runModeText, statusText, ago } from './team-text.cjs';
@@ -14,8 +14,17 @@ import { effortStep, runModeText, statusText, ago } from './team-text.cjs';
 export function PlanMark({ profile, homeId }) {
   if (!homeId) return <span className="tc-plan-none">Not known</span>;
   const color = profile?.color || 'var(--sub)';
+  // A plan with a textColor (a dark plan colour, e.g. the black X plan) gets a
+  // filled letter, by the same rule as every other badge (profileStyle).
+  const inked = profileStyle(profile);
+  const style = { '--plan': color };
+  if (inked['--profile-fill']) {
+    style['--plan-fill'] = inked['--profile-fill'];
+    style['--plan-fg'] = inked['--profile-fg'];
+    style['--plan-edge'] = inked['--profile-edge'];
+  }
   return (
-    <span className="tc-plan-mark" style={{ '--plan': color }} title={profile?.label || homeId}>
+    <span className="tc-plan-mark" style={style} title={profile?.label || homeId}>
       <span className="tc-plan-letter" aria-hidden="true">{profile?.letter || homeId.slice(0, 1).toUpperCase()}</span>
       <span className="tc-plan-name">{profile?.label || homeId}</span>
     </span>

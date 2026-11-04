@@ -136,6 +136,10 @@ function uniqueId(base, taken) {
 // what is the account email), because those are facts about the machine right
 // now and not choices. A home the user has since created is still offered as a
 // new row, so re-running the wizard remains the way to add a plan.
+function textColorOf(profile) {
+  return profile?.textColor ? { textColor: profile.textColor } : {};
+}
+
 function mergeSavedProfiles(saved, homes) {
   const byHome = new Map(homes.filter((home) => home?.path).map((home) => [home.path, home]));
   // CLAIMED, not deleted. Deleting inside the map made a second saved row
@@ -152,6 +156,10 @@ function mergeSavedProfiles(saved, homes) {
       label: profile.label,
       letter: profile.letter,
       color: profile.color,
+      // Optional badge text colour (a dark plan colour fills the chip). The
+      // wizard has no field for it, so it must ride through untouched or a
+      // re-run would silently revert the badge.
+      ...textColorOf(profile),
       provider: 'claude',
       configHome: profile.configHome,
       // No live match means detection did not find that directory at all, so
@@ -223,6 +231,7 @@ function initialState(detected = {}, config = null) {
           label: profile.label,
           letter: profile.letter || 'C',
           color: profile.color || '#7bd3a0',
+          ...textColorOf(profile),
           configHome: profile.configHome,
           email: profile.email ?? null,
         }))
@@ -544,6 +553,7 @@ function configFromWizard(state, base = {}, meta = {}) {
       label: profile.label,
       letter: profile.letter,
       color: profile.color,
+      ...textColorOf(profile),
       provider: 'claude',
       configHome: profile.configHome,
       email: profile.email ?? null,
@@ -557,6 +567,7 @@ function configFromWizard(state, base = {}, meta = {}) {
         label: account.label,
         letter: account.letter || 'C',
         color: account.color || '#7bd3a0',
+        ...textColorOf(account),
         provider: 'codex',
         configHome: account.configHome,
         email: account.email ?? null,
