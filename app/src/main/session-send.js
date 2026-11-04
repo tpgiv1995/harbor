@@ -263,6 +263,54 @@ function textAfterImageChips(text) {
   if (!imageCount) return null;
   return { rest: squashSpace(segments.filter((segment) => !isImagePathSegment(segment)).join('\n')), imageCount };
 }
+// CLAUDE DRAWS THE REST OF A SLASH WORD AFTER THE CURSOR (2026-11-04, Pat from
+// the phone: "I'm in a death loop on this mobile session where it won't let me
+// send messages"). His message ended "Send to me via /dm", and the prompt drew
+// it as "Send to me via /dml-log +3". CLI 2.1.316, read from the binary: in
+// prompt mode, when the text before the cursor ends in a "/word" and the list
+// of matching commands is not open, the prompt draws the first match's
+// remaining letters right after that word, plus " +N" when N more commands
+// match. It is drawn, not typed: only Tab takes it, and Enter submits exactly
+// what was typed (the binary's return handler submits the value; every state
+// driven against the real CLI submitted the typed text). A plain-text read
+// cannot see that it is dim, so it is matched by its shape, and only when the
+// send itself ends in a slash word (the cursor sits at the end of what Harbor
+// typed). The list form, drawn ABOVE the box, never reaches the box. Bash
+// mode's history completion is drawn the same way but can be any text, so a
+// "!" send gets no such slack. Fixture: composer-enter/slash-ghost-2.1.316.txt.
+// The completion is read off the box text BEFORE whitespace is dropped: its
+// letters touch the typed word, and only " +N" has a space. Squashed, "via
+// /dm now please" would end in "nowplease" and pass for one.
+const SLASH_WORD_END_RE = /(?:^|\s)\/[\w:.-]*$/;
+const SLASH_GHOST_TAIL_RE = /([\w:.-]*)( \+\d+)?$/;
+// What a box would read without a drawn completion at its end, whitespace
+// dropped like `inside`: one reading per place the typed word could stop, or
+// none when `text` does not end in a slash word. `raw` is the box's own text
+// (composerBox `raw`), line breaks and single spaces intact.
+function slashGhostRests(raw, text) {
+  const value = String(text || '');
+  if (/^\s*!/.test(value) || !SLASH_WORD_END_RE.test(value)) return [];
+  const box = String(raw || '').replace(/\s+$/, '');
+  const [, word, count = ''] = SLASH_GHOST_TAIL_RE.exec(box);
+  const base = box.slice(0, box.length - word.length - count.length);
+  const rests = [];
+  for (let typed = 0; typed <= word.length; typed += 1) {
+    if (typed === word.length && !count) continue; // nothing drawn after the word
+    // The completion touches the typed word: never a space in front of it.
+    const before = base + word.slice(0, typed);
+    if (!before || /\s$/.test(before)) continue;
+    rests.push(squashSpace(before));
+  }
+  return rests;
+}
+// Does the box end with `needle` (whitespace dropped) followed by nothing but
+// Claude's drawn completion of the send's last slash word? `exact` wants the
+// box to be exactly `needle` plus that completion.
+function slashGhostFollows(raw, needle, text, { exact = false } = {}) {
+  if (!needle) return false;
+  return slashGhostRests(raw, text).some((rest) => (exact ? rest === needle : rest.endsWith(needle)));
+}
+const endsWithSend = (found, needle, text) => found.inside.endsWith(needle) || slashGhostFollows(found.raw, needle, text);
 function composerBox(screen) {
   const lines = String(screen || '').split('\n');
   let bottom = -1;
@@ -276,7 +324,8 @@ function composerBox(screen) {
   const box = top < 0 ? [] : lines.slice(top + 1, bottom);
   if (!box.length || !PROMPT_GLYPH_RE.test(box[0])) return null;
   const shell = /^\s*!/.test(box[0]);
-  return { lines, top, bottom, box, shell, inside: squashSpace(box.join('\n').replace(PROMPT_GLYPH_RE, '')) };
+  const raw = box.join('\n').replace(PROMPT_GLYPH_RE, '');
+  return { lines, top, bottom, box, shell, raw, inside: squashSpace(raw) };
 }
 function composerSendState(screen, { text = '', pasted = false, imageMarker = null } = {}) {
   const found = composerBox(screen);
@@ -291,9 +340,9 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
   // which only counts while the box actually shows a chip.
   const chipped = found.shell ? null : textAfterImageChips(text);
   const chipTail = chipped ? chipped.rest.slice(-SEND_TAIL_CHARS) : '';
-  if (tail ? inside.endsWith(tail) : Boolean(marker && inside.endsWith(marker))) return 'holds';
+  if (tail ? endsWithSend(found, tail, text) : Boolean(marker && inside.endsWith(marker))) return 'holds';
   if (chipped && countImageChips(inside) > 0
-    && (chipTail ? inside.endsWith(chipTail) : /\[Image#\d+\]$/.test(inside))) return 'holds';
+    && (chipTail ? endsWithSend(found, chipTail, text) : /\[Image#\d+\]$/.test(inside))) return 'holds';
   if (pasted && new RegExp(`${PASTE_PLACEHOLDER_RE.source}$`).test(inside)) return 'holds';
   if (tail ? above.includes(tail) : Boolean(marker && above.includes(marker))) return 'taken';
   if (chipTail && above.includes(chipTail)) return 'taken';
@@ -1500,6 +1549,21 @@ function createSessionSend(deps) {
     error.code = 'PROMPT_HOLDS_EARLIER';
     return error;
   };
+  const promptHoldsUnmatchedError = () => {
+    const error = new Error('Claude\'s prompt already has text in it that Harbor cannot match to your message (probably Harbor\'s earlier try, drawn differently), so nothing was typed or sent. Your text is kept. Open the >_ terminal and send or clear what is in the prompt, then send again');
+    error.code = 'PROMPT_HOLDS_UNMATCHED';
+    return error;
+  };
+  // What a Claude prompt holds that someone TYPED: nothing when the box shows
+  // only what Claude draws there itself (a dim prediction, the queue hint, the
+  // welcome hint).
+  const promptDraft = async (paneId, screen) => {
+    const found = composerBox(screen);
+    if (!found || !found.inside) return '';
+    const shown = found.box.join(' ').replace(PROMPT_GLYPH_RE, '').replace(/\s+/g, ' ').trim();
+    if (CLAUDE_BOX_HINT_RE.test(shown) || await dimSuggestion(paneId)) return '';
+    return shown;
+  };
 
   // CODEX TAKES ENTER ONLY ONCE ITS BOX SHOWS THE MESSAGE (2026-10-29, Pat:
   // "have to send like every message in terminal view"). Codex on Windows reads
@@ -1660,11 +1724,16 @@ function createSessionSend(deps) {
   const promptHoldsExactly = (screen, text) => {
     const found = composerBox(screen);
     if (!found || !text || isFleetView(screen)) return false;
-    if (found.inside === (found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text))) return true;
+    const shown = found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text);
+    // Exactly this send, or this send with Claude's drawn completion of its
+    // last slash word after it (slashGhostFollows).
+    if (found.inside === shown || slashGhostFollows(found.raw, shown, text, { exact: true })) return true;
     // Or exactly this send with its image paths drawn as chips, one per path.
     const chipped = found.shell ? null : textAfterImageChips(text);
-    return Boolean(chipped) && countImageChips(found.inside) === chipped.imageCount
-      && found.inside.replace(IMAGE_CHIPS_RE, '') === chipped.rest;
+    if (!chipped || countImageChips(found.inside) !== chipped.imageCount) return false;
+    const rest = found.inside.replace(IMAGE_CHIPS_RE, '');
+    return rest === chipped.rest
+      || slashGhostRests(found.raw, text).some((reading) => reading.replace(IMAGE_CHIPS_RE, '') === chipped.rest);
   };
 
   // No default. A silent `= 'claude'` here is what let a codex pane be driven
@@ -1824,6 +1893,31 @@ function createSessionSend(deps) {
           await captureSendScreen(paneId, 'holds-more', screen);
           throw promptHoldsMoreError();
         }
+        // AN EARLIER TRY THAT "NEVER SHOWED" IS NEVER TYPED OVER (2026-11-04,
+        // the death loop). Harbor misread Pat's message in the prompt (Claude's
+        // drawn completion of "/dm", see slashGhostFollows), so every wait for
+        // the earlier typing ran its full three minutes and gave up, and the
+        // send after each give-up typed the message fresh behind the copy
+        // already there: the prompt reached three copies. While a record of
+        // unshown typing stands, a prompt holding anything that is not this
+        // message is refused at once, nothing typed and the record kept, so
+        // repeated sends cannot stack. An EMPTY prompt in a Claude that has
+        // been running a while has no startup buffer to deliver it later: the
+        // typing is gone, so this send types fresh now instead of waiting.
+        if (earlier && !alreadyInPrompt && composerBox(screen)) {
+          if (await promptDraft(paneId, screen)) {
+            const showsEarlier = composerSendState(screen, earlier.sent) === 'holds';
+            logSend({ paneId, phase: 'prompt-holds-unmatched', earlier: showsEarlier });
+            await captureSendScreen(paneId, 'holds-unmatched', screen);
+            if (!showsEarlier) throw promptHoldsUnmatchedError();
+            throw squashSpace(earlier.sent.text) === squashSpace(text) ? promptHoldsMoreError() : earlierLandedError();
+          }
+          if (deliveredPanes.has(paneId) || await paneIsPastStartup(paneId)) {
+            logSend({ paneId, phase: 'earlier-typing-lost' });
+            unshownTyped.delete(paneId);
+            earlier = null;
+          }
+        }
       }
       // A send whose earlier try is still sitting in Codex's box (the error
       // below says so) presses Enter for it instead of typing it twice.
@@ -1873,17 +1967,24 @@ function createSessionSend(deps) {
         if (held.state !== 'holds') {
           logSend({ paneId, phase: 'prompt-never-held', state: held.state, awaitedEarlier: awaitEarlier });
           await captureSendScreen(paneId, held.state, held.screen);
-          if (awaitEarlier) unshownTyped.delete(paneId);
-          else if ((held.state === 'pending' || held.state === 'nobox') && text && !alreadyInPrompt && !lastImageMarker) {
+          if (awaitEarlier) {
+            // Text in the prompt after the full wait is not "never shown": it
+            // is something Harbor cannot read as the earlier try. Dropping the
+            // record would let the next send type a copy behind it.
+            if (held.state === 'pending' && await promptDraft(paneId, held.screen)) throw promptHoldsUnmatchedError();
+            unshownTyped.delete(paneId);
+          } else if ((held.state === 'pending' || held.state === 'nobox') && text && !alreadyInPrompt && !lastImageMarker) {
             unshownTyped.set(paneId, { sent, at: clock() });
           }
           throw promptNeverHeldError(held.state, { awaitedEarlier: awaitEarlier });
         }
-        unshownTyped.delete(paneId);
+        // The prompt now shows the earlier message, not this one: refused, and
+        // the record stays while it sits there, so a resend cannot type behind it.
         if (awaitEarlier && squashSpace(earlier.sent.text) !== squashSpace(text)) {
           logSend({ paneId, phase: 'earlier-typing-landed' });
           throw earlierLandedError();
         }
+        unshownTyped.delete(paneId);
       } else if (codexGated) {
         const held = await waitForCodexBox(paneId, sent, (state) => state === 'exact' || state === 'holds', CODEX_HOLD_POLLS);
         if (held.state !== 'exact' && held.state !== 'holds') {
@@ -3393,4 +3494,6 @@ module.exports = {
   codexChangeNote,
   composerBox,
   isFleetView,
+  slashGhostRests,
+  slashGhostFollows,
 };

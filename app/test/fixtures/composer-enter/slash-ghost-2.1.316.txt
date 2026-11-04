@@ -1,0 +1,22 @@
+● The art's top edge reads as a hard line on the poster, so I'm fading it in there too.
+
+● Bash(cd C:/proof/kit && python -I build.py social 2>&1 | tail -1)
+  ⎿  ok social.typ -> digital/social
+
+  Reading 1 file… (ctrl+o to expand)
+  ⎿  C:\t\bg\big.png
+
+* Razzmatazzing… (18m 2s · ↓ 95.3k tokens · thinking with xhigh effort)
+  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Not sure I quite loved the back of the card (with the name and details). Can you clean that up?
+
+  Then can you make a simple high quality animation of the front flipping over to show the detail, and shuffling
+  through each of the three cards? Send it to me via /dml-log +3
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  personal  ·  Opus 5.5  ·  print  ·  ctx 55%  ·  5h --  ·  wk 59%  ·  $139.89                   3% until auto-compact
+  ⏵⏵ bypass permissions on · 1 shell
+
+  ● main
+  ◯ general-purpose  Viewing a preview                                                    2m 53s · ↓ 129.6k tokens

@@ -453,11 +453,16 @@ const enterFixture = (name) => fs.readFileSync(
 // newline and at every space that starts a path, each segment that names an
 // image file becomes an [Image #N] chip, and the chips come first, followed by
 // the other segments joined with newlines. `initialDraft` is text an earlier
-// attempt left in the prompt.
+// attempt left in the prompt. `drawAfter(draft)` is text the prompt draws
+// after the draft that nobody typed (Claude's completion of a trailing slash
+// word); `dropTypings` loses that many typings, as a prompt that took none of
+// the keys does.
 const PASTE_SEGMENT_SPLIT = / (?=\/|[A-Za-z]:\\)/;
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp)$/i;
-function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0 } = {}) {
+function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0, drawAfter = null, dropTypings = 0 } = {}) {
   let draft = initialDraft;
+  let dropped = 0;
+  const state = { reads: 0 };
   let swallowed = 0;
   let images = imagesBefore;
   let hideReads = 0;
@@ -486,7 +491,9 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
   // A submitted prompt is echoed above the box, as Claude draws it; a busy CLI
   // shows nothing new for `renderDelayReads` reads after each keystroke.
   h.deps.readPane = async () => {
-    const shown = hideReads > 0 ? '' : draft;
+    state.reads += 1;
+    const typedShown = hideReads > 0 ? '' : draft;
+    const shown = typedShown && drawAfter ? `${typedShown}${drawAfter(typedShown)}` : typedShown;
     if (hideReads > 0) hideReads -= 1;
     const above = echoed.map((line) => `❯ ${line}`).join('\n');
     return `conversation\n${above}\n${divider}\n❯ ${shown}\n${divider}\n  personal  ·  Opus 5.5\n  ⏵⏵ auto mode on`;
@@ -500,6 +507,8 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
     } else if (text === IMAGE_PASTE) {
       images += 1;
       draft += `[Image #${images}] `;
+    } else if (dropped < dropTypings) {
+      dropped += 1;
     } else if (text.startsWith('\x1b[200~')) {
       draft += drawPaste(text.replace(/\x1b\[20[01]~/g, ''));
       hideReads = renderDelayReads;
@@ -509,7 +518,7 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
     }
     return result;
   };
-  return { get draft() { return draft; }, get echoed() { return echoed; } };
+  return { get draft() { return draft; }, get echoed() { return echoed; }, get reads() { return state.reads; } };
 }
 
 const typed = (h) => h.sent.map(({ text }) => text);
@@ -1008,6 +1017,96 @@ test('a prompt already holding the message twice gets nothing typed and no Enter
     (error) => error.code === 'PROMPT_HOLDS_MORE' && /typed and sent nothing/.test(error.message),
   );
   assert.deepEqual(typed(h), []);
+});
+
+// 2026-11-04, Pat from the phone: "I'm in a death loop on this mobile session
+// where it won't let me send messages". His message ended "Send to me via /dm",
+// and Claude 2.1.316 drew the rest of the matching command after it ("/dml-log
+// +3"), which only Tab takes. Harbor read that as part of the message, refused
+// every send as "never shown", and each give-up let the next send type the
+// message again behind the copy already there, until the prompt held three.
+const GHOST_MESSAGE = 'Not sure I quite loved the back of the card (with the name and details). Can you clean that up?\n\n'
+  + 'Then can you make a simple high quality animation of the front flipping over to show the detail, and shuffling '
+  + 'through each of the three cards? Send it to me via /dm';
+const endsInSlashWord = (draft) => (/(?:^|\s)\/[\w:.-]*$/.test(draft) ? 'l-log +3' : '');
+const LONG_AGO = () => new Date(Date.now() - 12 * 60 * 60_000).toISOString();
+
+test('a prompt that draws the rest of a trailing slash word after the message holds the message (real 2.1.316 layout)', () => {
+  const screen = enterFixture('slash-ghost-2.1.316.txt');
+  assert.equal(composerSendState(screen, { text: GHOST_MESSAGE, pasted: true }), 'holds');
+  // Only the completion's own shape is drawn: letters touching the typed word,
+  // then " +N". Other words after it are text someone typed.
+  const box = (inside) => `${PROMPT_RULE}\n❯ ${inside}\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`;
+  assert.equal(composerSendState(box('send it via /dml-log'), { text: 'send it via /dm' }), 'holds');
+  assert.equal(composerSendState(box('send it via /dm +2'), { text: 'send it via /dm' }), 'holds');
+  assert.equal(composerSendState(box('send it via /dm now please'), { text: 'send it via /dm' }), 'pending');
+  assert.equal(composerSendState(box('send it via /dm l-log +3'), { text: 'send it via /dm' }), 'pending');
+  // No slack for a message that does not end in a slash word, or a shell command.
+  assert.equal(composerSendState(box('send it via email-later'), { text: 'send it via email' }), 'pending');
+  assert.equal(composerSendState(`${PROMPT_RULE}\n! ls /devices\n${PROMPT_RULE}\n  ! for bash mode`, { text: '!ls /dev' }), 'pending');
+});
+
+test('a message ending in a slash word is sent once although Claude draws the rest of the command after it', async () => {
+  const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: LONG_AGO() }], controlled: 'pane-1' });
+  const pane = composerPane(h, { drawAfter: endsInSlashWord });
+  const send = createSessionSend(h.deps);
+
+  const result = await send.send({ sessionId: 's-ghost', text: GHOST_MESSAGE, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(typed(h), [`\x1b[200~${GHOST_MESSAGE}\x1b[201~`, '\r'], 'typed once, one Enter');
+  assert.deepEqual(pane.echoed, [GHOST_MESSAGE]);
+});
+
+test('a resend finds its earlier try in the prompt beside the drawn completion and presses Enter only', async () => {
+  const short = 'ping me via /dm';
+  const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: LONG_AGO() }], controlled: 'pane-1' });
+  const pane = composerPane(h, { initialDraft: short, drawAfter: endsInSlashWord });
+  const send = createSessionSend(h.deps);
+
+  await send.send({ sessionId: 's-ghost-resend', text: short, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(typed(h), ['\r'], 'nothing typed twice');
+  assert.deepEqual(pane.echoed, [short]);
+});
+
+test('sends after a refused one never type a second copy behind the text already in the prompt', async () => {
+  const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: LONG_AGO() }], controlled: 'pane-1' });
+  // A prompt that shows the message with something Harbor cannot read after it.
+  const pane = composerPane(h, { drawAfter: () => ' ⟦unreadable⟧' });
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+
+  await assert.rejects(send.send({ sessionId: 's-stack', text: GHOST_MESSAGE, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  const readsAfterFirst = pane.reads;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await assert.rejects(
+      send.send({ sessionId: 's-stack', text: GHOST_MESSAGE, pane: target }),
+      (e) => e.code === 'PROMPT_HOLDS_UNMATCHED' && /nothing was typed or sent/.test(e.message),
+    );
+  }
+  assert.deepEqual(typed(h), [`\x1b[200~${GHOST_MESSAGE}\x1b[201~`], 'one copy typed, no Enter');
+  assert.equal(pane.draft, GHOST_MESSAGE, 'the prompt holds exactly one copy');
+  assert.ok(pane.reads - readsAfterFirst < 20, `refused at once, not after a three-minute wait (${pane.reads - readsAfterFirst} reads)`);
+  // A different message is refused the same way, never typed behind it.
+  await assert.rejects(send.send({ sessionId: 's-stack', text: 'something else entirely', pane: target }), (e) => e.code === 'PROMPT_HOLDS_UNMATCHED');
+  assert.equal(typed(h).length, 1);
+});
+
+test('after a refusal, an empty prompt in a Claude that has been running a while gets the message typed fresh at once', async () => {
+  const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: LONG_AGO() }], controlled: 'pane-1' });
+  const pane = composerPane(h, { dropTypings: 1 });
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  const message = 'these keys were lost the first time';
+
+  await assert.rejects(send.send({ sessionId: 's-lost-running', text: message, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  const readsAfterFirst = pane.reads;
+  await send.send({ sessionId: 's-lost-running', text: message, pane: target });
+
+  assert.deepEqual(typed(h), [message, message, '\r']);
+  assert.deepEqual(pane.echoed, [message]);
+  assert.ok(pane.reads - readsAfterFirst < 100, `no three-minute wait for typing that is gone (${pane.reads - readsAfterFirst} reads)`);
 });
 
 test('a plan move never types /exit into the sessions view, and says why', async () => {
