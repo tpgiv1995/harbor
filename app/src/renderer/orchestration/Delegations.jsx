@@ -31,7 +31,7 @@ export function Delegations({ groups, focusParentId, onOpenSession }) {
     <h3>Delegated agents</h3>
     {visible.map((group) => <article className={`delegation-group${group.parentId === focusParentId ? ' focused-group' : ''}`} key={group.parentId} data-parent-id={group.parentId}>
       <header className="delegation-group-head">
-        <div><span className="delegation-project">{group.project}</span><button type="button" onClick={() => onOpenSession(group.parentId)}>{group.title}</button></div>
+        <div><span className="delegation-project">{group.project}</span><span className="delegation-parent-title">{group.provider && group.provider !== 'claude' ? <img src={providerIdentity(group.provider).logo} alt={providerIdentity(group.provider).label} /> : null}<button type="button" onClick={() => onOpenSession(group.parentId)}>{group.title}</button></span></div>
         <span className={`delegation-state state-${group.state}`}>{group.state}</span>
       </header>
       {group.agents.map((agent) => {
@@ -50,11 +50,14 @@ export function Delegations({ groups, focusParentId, onOpenSession }) {
           <details className="delegation-rounds"><summary>{agent.rounds.length} round{agent.rounds.length === 1 ? '' : 's'}</summary>
             <ol>{agent.rounds.map((round) => <li key={round.id}><span>{round.description}</span><span>{new Date(round.startedMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · {['ended', 'ended with session'].includes(round.outcome) ? 'end time unknown' : `${Math.max(0, Math.round(((round.endedMs || now) - round.startedMs) / 60000))}m`} · {round.outcome}</span></li>)}</ol>
           </details>
+          {agent.error ? <p className="delegation-error" title={agent.error}>{`failed: ${agent.error}`}</p> : null}
+          {agent.result ? <details className="delegation-result"><summary>result</summary><pre>{agent.result}</pre></details> : null}
           <AgentChildren children={agent.children || []} onOpenSession={onOpenSession} now={now} />
           {reviews ? <div className="delegation-reviewers">{reviews} approval review{reviews === 1 ? '' : 's'}</div> : null}
         </div>;
       })}
-      {group.tasks.length ? <details className="delegation-tasks"><summary>{group.tasks.length} other background item{group.tasks.length === 1 ? '' : 's'}</summary><ul>{group.tasks.map((task) => <li key={task.id}><span>{task.description}</span><span>{task.kind} · {task.kind === 'cron' && task.status === 'running' ? 'registered' : task.status}</span></li>)}</ul></details> : null}
+      {group.tasks.length ? <details className="delegation-tasks"><summary>{group.tasks.length} other background item{group.tasks.length === 1 ? '' : 's'}</summary><ul>{group.tasks.map((task) => <li key={task.id}><span title={task.result || undefined}>{task.description}</span><span>{task.kind} · {task.kind === 'cron' && task.status === 'running' ? 'registered' : task.status}{task.note ? ` · ${task.note}` : ''}</span></li>)}</ul></details> : null}
+      {group.reviews ? <div className="delegation-reviewers">{group.reviews} approval review{group.reviews === 1 ? '' : 's'}</div> : null}
     </article>)}
   </section>;
 }
