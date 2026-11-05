@@ -283,6 +283,40 @@ async function main() {
     else if (!facts.lockSeen) failure = 'the box never locked, so nothing was proven';
     else if (!facts.afterFlicker.focused) failure = `focus was lost to ${facts.afterFlicker.active} after a one-publish lock`;
     else if (facts.finalText !== 'hello world') failure = `typing after the lock produced "${facts.finalText}"`;
+
+    // Round 2 (same night: "you said you fixed it yet keeps happening"). Focus
+    // taken with NO click or key from the user, the two ways it can go:
+    // STOLEN by another element (the rail search box, focused by script), and
+    // DROPPED to nowhere (blur()). Each must come back with typing intact.
+    // Then the control: a REAL mouse click on the search box keeps focus there.
+    const boxFocused = "document.activeElement === document.querySelector('.ubar-input')";
+    const activeName = "document.activeElement?.tagName + '.' + (document.activeElement?.className || '')";
+    if (!failure) {
+      step('steal: script focuses the rail search box');
+      await cdp.eval("setTimeout(() => document.querySelector('.sidebar-search-input').focus(), 0); true");
+      await sleep(300);
+      facts.afterSteal = await cdp.eval(`({ focused: ${boxFocused}, active: ${activeName} })`);
+      await type(cdp, '!');
+      step('drop: script blurs the box');
+      await cdp.eval("document.querySelector('.ubar-input').blur(); true");
+      await sleep(300);
+      facts.afterDrop = await cdp.eval(`({ focused: ${boxFocused}, active: ${activeName} })`);
+      await type(cdp, '?');
+      await sleep(200);
+      facts.textAfterTheft = await cdp.eval("document.querySelector('.ubar-input').innerText.trim()");
+      step('control: a real click on the search box');
+      const box = await cdp.eval("(() => { const r = document.querySelector('.sidebar-search-input').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()");
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await cdp.send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 });
+      }
+      await sleep(400);
+      facts.afterClick = await cdp.eval(`({ searchFocused: document.activeElement === document.querySelector('.sidebar-search-input'), active: ${activeName} })`);
+      await cdp.shot('after-theft');
+      if (!facts.afterSteal.focused) failure = `focus stolen by script stayed on ${facts.afterSteal.active}`;
+      else if (!facts.afterDrop.focused) failure = `focus dropped by script stayed on ${facts.afterDrop.active}`;
+      else if (facts.textAfterTheft !== 'hello world!?') failure = `typing after the theft produced "${facts.textAfterTheft}"`;
+      else if (!facts.afterClick.searchFocused) failure = `a real click on the search box was undone (focus on ${facts.afterClick.active})`;
+    }
     try { await cdp.eval('window.harbor.e2e.quit()'); } catch { /* quitting */ }
   } catch (error) {
     failure = `drive error: ${error.message}`;
@@ -301,7 +335,7 @@ async function main() {
     console.log(`PROOF FAILED: ${failure}`);
     process.exitCode = 1;
   } else {
-    console.log('PROOF OK: the message box kept focus and the caret through a one-publish lock, and typing continued where it left off');
+    console.log('PROOF OK: the message box kept focus and caret through a one-publish lock, got focus back when a script stole or dropped it, and a real click elsewhere kept its focus');
   }
 }
 

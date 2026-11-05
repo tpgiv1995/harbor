@@ -813,55 +813,109 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
     get element() { return editorRef.current; },
   }), []);
 
-  // FOCUS A MOMENTARY LOCK TOOK COMES BACK (2026-11-04, Pat: "as i'll be
-  // typing in the text input box something will happen that will like 'click
-  // me out' of it and i cant type anymore. seems like its something loading or
-  // like a turn finishing"). The box is editable only while the command bar
-  // says it can type, and that flips off for an instant whenever the selected
-  // session is missing from one model publish (about two a second), the pane
-  // reads as controlled by another client, and so on. contentEditable=false on
-  // the FOCUSED box makes Chromium drop focus to <body>, and nothing gave it
-  // back: the command bar arms the box once per session id. So a blur that
-  // happens because the box stopped being editable keeps the caret, and when
-  // the box is editable again with nothing else focused, focus and caret come
-  // back. Every loss is logged (renderer-stalls.jsonl, kind
-  // composer-focus-lost) with what locked the box, so the trigger is named next
-  // time; a blur to nowhere with no click, key or lock is logged as
-  // "unexplained" and left alone.
+  // FOCUS NOBODY MOVED COMES BACK (2026-11-04, two rounds the same night).
+  // Round 1, Pat: "as i'll be typing in the text input box something will
+  // happen that will like 'click me out' of it and i cant type anymore. seems
+  // like its something loading or like a turn finishing". The box is editable
+  // only while the command bar says it can type, and that flips off for an
+  // instant whenever the selected session is missing from one model publish,
+  // the pane reads as controlled by another client, and so on.
+  // contentEditable=false on the FOCUSED box makes Chromium drop focus to
+  // <body>, and nothing gave it back. So a blur caused by the lock keeps the
+  // caret, and when the box is editable again with nothing else focused, focus
+  // and caret come back (the layout effect below).
+  // Round 2, after round 1 shipped: "you said you fixed it yet keeps
+  // happening. just happened while typing this", and the log held NO row:
+  // round 1 logged a loss only when no key had been pressed for 400 ms (so
+  // never while typing) and ignored any loss to another element. Now every
+  // loss of focus is sorted by what the USER did:
+  // - a click, or a key that moves focus (Tab, Escape, F-keys, any
+  //   Ctrl/Alt/Meta chord), in the last 400 ms: the user moved it; left alone.
+  // - window-blur: another app took the foreground. Logged only; the page
+  //   cannot fix it, and Chromium hands focus back to the box when the window
+  //   is active again.
+  // - stolen (to another element) or dropped (to nowhere) while the window
+  //   stayed active and the user did nothing: logged with what took it, and
+  //   given back with the caret on the next frame, unless the user has moved
+  //   focus since or something other than the thief holds it.
+  // Every loss lands in renderer-stalls.jsonl as kind composer-focus-lost.
   const lockLossRef = useRef(null);
   const placeholderRef = useRef(placeholder);
   placeholderRef.current = placeholder;
   useEffect(() => {
     const root = editorRef.current;
     if (!root) return undefined;
-    let lastUserAt = 0;
-    const noteUser = () => { lastUserAt = Date.now(); };
-    const report = (cause) => {
+    let lastMoveAt = 0; // a click, or a key that can move focus
+    let lastTypeAt = 0; // a key typed into the box
+    const onPointer = () => { lastMoveAt = Date.now(); };
+    const onKey = (event) => {
+      const chord = event.ctrlKey || event.metaKey || event.altKey;
+      if (chord || event.key === 'Tab' || event.key === 'Escape' || /^F\d+$/.test(event.key || '')) lastMoveAt = Date.now();
+      else if (root.contains(event.target)) lastTypeAt = Date.now();
+    };
+    const describe = (element) => {
+      if (!element || !element.tagName) return null;
+      const classes = typeof element.className === 'string'
+        ? element.className.trim().split(/\s+/).filter(Boolean).slice(0, 3).join('.')
+        : '';
+      return `${element.tagName.toLowerCase()}${classes ? `.${classes}` : ''}`;
+    };
+    const report = (cause, extra = {}) => {
       try {
+        const now = Date.now();
         window.harbor?.perf?.stall?.({
-          kind: 'composer-focus-lost', ms: 0, at: Date.now(),
-          context: { cause, reason: String(placeholderRef.current || ''), windowFocused: document.hasFocus() },
+          kind: 'composer-focus-lost', ms: 0, at: now,
+          context: {
+            cause,
+            reason: String(placeholderRef.current || ''),
+            windowFocused: document.hasFocus(),
+            sinceTypeMs: lastTypeAt ? now - lastTypeAt : null,
+            sinceMoveMs: lastMoveAt ? now - lastMoveAt : null,
+            ...extra,
+          },
         });
       } catch { /* diagnostics never break typing */ }
     };
+    const caret = () => {
+      const selection = window.getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      return range && root.contains(range.startContainer) ? range.cloneRange() : null;
+    };
     const onFocusOut = (event) => {
-      if (event.relatedTarget) { lockLossRef.current = null; return; } // focus moved somewhere on purpose
       if (!root.isContentEditable) {
-        const selection = window.getSelection();
-        const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-        lockLossRef.current = { range: range && root.contains(range.startContainer) ? range.cloneRange() : null };
+        lockLossRef.current = { range: caret() };
         report('lock');
         return;
       }
-      if (document.hasFocus() && Date.now() - lastUserAt > 400) report('unexplained');
+      lockLossRef.current = null;
+      const lostAt = Date.now();
+      if (lostAt - lastMoveAt < 400) return; // a click or a shortcut moved focus on purpose
+      if (!document.hasFocus()) { report('window-blur'); return; }
+      const thief = event.relatedTarget;
+      const range = caret();
+      report(thief ? 'stolen' : 'dropped', { to: describe(thief) });
+      requestAnimationFrame(() => {
+        if (lastMoveAt >= lostAt || !root.isConnected || !root.isContentEditable || !document.hasFocus()) return;
+        const active = document.activeElement;
+        if (active && active !== document.body && active !== thief) return;
+        root.focus({ preventScroll: true });
+        const selection = window.getSelection();
+        if (!selection) return;
+        selection.removeAllRanges();
+        if (range && root.contains(range.startContainer)) { selection.addRange(range); return; }
+        const end = document.createRange();
+        end.selectNodeContents(root);
+        end.collapse(false);
+        selection.addRange(end);
+      });
     };
     root.addEventListener('focusout', onFocusOut);
-    document.addEventListener('pointerdown', noteUser, true);
-    document.addEventListener('keydown', noteUser, true);
+    document.addEventListener('pointerdown', onPointer, true);
+    document.addEventListener('keydown', onKey, true);
     return () => {
       root.removeEventListener('focusout', onFocusOut);
-      document.removeEventListener('pointerdown', noteUser, true);
-      document.removeEventListener('keydown', noteUser, true);
+      document.removeEventListener('pointerdown', onPointer, true);
+      document.removeEventListener('keydown', onKey, true);
     };
   }, []);
   useLayoutEffect(() => {
