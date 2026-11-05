@@ -59,6 +59,7 @@ const api = {
     getSendQueue: (payload) => ipcRenderer.invoke('session:send-queue', payload),
     cancelSend: (payload) => ipcRenderer.invoke('session:cancel-send', payload),
     interrupt: (payload) => ipcRenderer.invoke('session:interrupt', payload),
+    sendNow: (payload) => ipcRenderer.invoke('session:send-now', payload),
     remove: (payload) => ipcRenderer.invoke('session:delete', payload),
     runWorkflow: (payload) => ipcRenderer.invoke('workflow:run', payload),
     workflowRuns: (payload) => ipcRenderer.invoke('session:workflow-runs', payload),

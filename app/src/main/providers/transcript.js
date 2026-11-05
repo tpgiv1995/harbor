@@ -996,7 +996,16 @@ class TranscriptParser {
     this.imageChanges = new Set();
     // Messages waiting in Claude's own queue (see the queue-operation branch of
     // applyLine): { key, ts, from: 'you' | 'peer' | 'task', block }, oldest first.
+    // Every enqueue is tracked, task notifications included, because a dequeue
+    // carries no content and pops whatever is oldest. header.queue is the
+    // window's "waiting" line; header.queuedPending (the typed ones, you and
+    // peer) is what the command bar's "Send now" offers to flush.
     this.queuePending = [];
+    // A dequeue is followed by the user record that delivers it. A typed
+    // prompt with no dequeue before it was typed at an idle composer, and
+    // Claude drains its queue before it is idle, so any human entry still
+    // mirrored then is left over from a CLI that died with it queued.
+    this.dequeuedSinceUser = false;
     this.header = {
       model: seedModel && seedModel !== 'default' ? modelDisplay(seedModel) : null,
       effort: null,
@@ -1011,6 +1020,7 @@ class TranscriptParser {
       // transcript event.
       cacheTtlMs: null,
       cacheTouchedMs: null,
+      queuedPending: 0, // human messages sitting in Claude's queue (see queuePending)
     };
     this.seq = 0;
     // Once set, remains true: any evidence of a 1M context window (high-water
@@ -1023,6 +1033,7 @@ class TranscriptParser {
   // What still waits in Claude's queue, for the window header: how many, who
   // sent them, and since when (the oldest). Facts only; ages are drawn at render.
   noteQueue() {
+    this.countQueued();
     const waiting = this.queuePending;
     if (!waiting.length) {
       this.header.queue = null;
@@ -1042,6 +1053,30 @@ class TranscriptParser {
     if (tokens) {
       this.header.contextPct = Math.max(1, Math.min(99, Math.round((tokens / windowTokens) * 100)));
     }
+  }
+
+  // The typed messages (you or another session) still waiting: what the
+  // command bar's "Send now" offers to flush.
+  countQueued() {
+    this.header.queuedPending = this.queuePending.filter((item) => item.from !== 'task').length;
+  }
+
+  // Once per user record that carries text (a tool_result record carries
+  // none). A typed prompt that no dequeue delivered started its turn at an idle
+  // composer, so no human message can still be in Claude's queue: drop the
+  // human entries a dead CLI left behind (see dequeuedSinceUser). Task
+  // notifications stay, so the next dequeue still pops in step.
+  noteUserRecord(obj, content) {
+    const parts = Array.isArray(content) ? content.filter((part) => part?.type === 'text') : null;
+    if (typeof content !== 'string' && !parts?.length) return;
+    const text = typeof content === 'string' ? content : parts.map((part) => part.text || '').join('\n');
+    const delivered = this.dequeuedSinceUser;
+    this.dequeuedSinceUser = false;
+    const typed = !obj.isMeta && !isCompactContinuation(obj, text) && Boolean(userTextFor(text));
+    if (!typed || delivered || !this.header.queuedPending) return;
+    for (const item of this.queuePending) if (item.from !== 'task' && item.block) delete item.block.queueState;
+    this.queuePending = this.queuePending.filter((item) => item.from === 'task');
+    this.noteQueue();
   }
 
   push(block) {
@@ -1267,6 +1302,7 @@ class TranscriptParser {
 
     if (obj.type === 'user') {
       const content = obj.message?.content;
+      this.noteUserRecord(obj, content);
       if (typeof content === 'string') {
         if (obj.isMeta) return changed;
         if (isCompactContinuation(obj, content)) {
@@ -1379,6 +1415,8 @@ class TranscriptParser {
         return changed;
       }
       if (obj.operation === 'dequeue' || obj.operation === 'remove') {
+        // A dequeue is followed by the user record that delivers it (noteUserRecord).
+        if (obj.operation === 'dequeue') this.dequeuedSinceUser = true;
         // `remove` names its message; `dequeue` takes the oldest. A `remove`
         // whose text matches nothing waiting (its enqueue was before this read
         // began) changes nothing.
