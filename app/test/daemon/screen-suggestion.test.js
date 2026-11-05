@@ -48,3 +48,11 @@ test('a ❯ row without the divider above it (a menu) is ignored', async () => {
   await screen.write(['Pick one', `❯ ${DIM('1. Yes')}`, '  2. No'].join('\r\n'));
   assert.equal((await screen.read(0)).suggestion, null);
 });
+
+test('a named session draws its name in the top edge and still has a suggestion (CLI 2.1.316)', async () => {
+  const screen = new ScreenModel({ cols: COLS, rows: 12, scrollback: 0 });
+  const named = `${'─'.repeat(COLS - ' vm-template-build ─'.length)} vm-template-build ─`;
+  const lines = ['⏺ Done.', '', named, `❯ ${DIM('push it to the forge')}`, DIV, '  ⏵⏵ bypass permissions on'];
+  await screen.write(lines.join('\r\n'));
+  assert.equal((await screen.read(0)).suggestion, 'push it to the forge');
+});

@@ -1,0 +1,14 @@
+⏺ The build is waiting on you before it can go on.
+
+  What I need from you (one of):
+  1. Open the console for the template VM and tell me what is on screen.
+  2. Or OK one more remote login attempt.
+
+✻ Cooked for 1m 28s · done 3:32 PM
+
+⏺ Background shell command didn't finish before the previous session ended
+
+──────────────────────────────────────────────────────────────────────────────────────────────────── vm-template-build ─
+❯ [Image #1] can you not open the console?
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

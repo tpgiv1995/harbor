@@ -16,7 +16,7 @@ const { StringDecoder } = require('node:string_decoder');
 const { parseMenu, menuArrowToward, MENU_KEYS } = require('./menu-parse.js');
 const { parseGenericList, locateRow } = require('./generic-list.js');
 const { parseWorkMeter } = require('./work-meter.js');
-const { isDividerLine } = require('../shared/divider.cjs');
+const { isComposerEdge } = require('../shared/divider.cjs');
 const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFromStrip, CHAT_ROW_RE } = require('./ask-question.js');
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
@@ -145,7 +145,7 @@ function isComposerLine(lines, i) {
   if (!/^\s*❯(?:\s|$)/.test(line)) return false;
   if (NUMBERED_ROW_RE.test(line)) return false;        // a menu row, not a prompt
   if (/^\s*❯\s*$/.test(line)) return true;             // an empty composer
-  return isDividerLine(lines[i - 1]);                 // else require the box edge
+  return isComposerEdge(lines[i - 1]);                // else require the box edge
 }
 
 // A DRAFT THAT STARTS WITH A NUMBER IS STILL A DRAFT (2026-10-13, Pat: "whats
@@ -331,7 +331,7 @@ function composerBox(screen) {
   let bottom = -1;
   let top = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (!isDividerLine(lines[i])) continue;
+    if (!isComposerEdge(lines[i])) continue;
     if (bottom < 0) { bottom = i; continue; }
     top = i;
     break;
@@ -3363,7 +3363,7 @@ function createSessionSend(deps) {
             throw new Error('The session is not at an idle composer. Nothing was stopped.');
           }
           const lines = screen.split('\n');
-          const edges = lines.map((line, i) => isDividerLine(line) ? i : -1).filter(i => i >= 0);
+          const edges = lines.map((line, i) => isComposerEdge(line) ? i : -1).filter(i => i >= 0);
           const box = lines.slice(edges.at(-2) + 1, edges.at(-1)).join('\n').replace(/^\s*❯/, '').trim();
           if (box) throw new Error('Clear or send the terminal draft before changing plans. Nothing was stopped.');
           await deliver(pane.paneId, pane.workspaceId, '/exit', [], 'claude');

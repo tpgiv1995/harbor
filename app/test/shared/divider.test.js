@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isDividerLine } = require('../../src/shared/divider.cjs');
+const { isDividerLine, isComposerEdge } = require('../../src/shared/divider.cjs');
 test('divider tolerance accepts limited replacement damage, never words or digits', () => {
   for (const glyph of ['\u2500', '\u2501', '\u2014', '_', '-']) {
     assert.equal(isDividerLine(glyph.repeat(40)), true);
@@ -17,4 +17,15 @@ test('divider tolerance accepts limited replacement damage, never words or digit
   assert.equal(isDividerLine('---'), false);
   assert.equal(isDividerLine('---', 3), true);
   assert.equal(isDividerLine(''), false);
+});
+
+test('a composer edge may carry the session name; a plain divider never does', () => {
+  const named = `${'─'.repeat(97)} vm-template-build ─`;
+  assert.equal(isComposerEdge(named), true);
+  assert.equal(isComposerEdge(`  ${'─'.repeat(20)} my session name ──  `), true);
+  assert.equal(isDividerLine(named), false);
+  assert.equal(isComposerEdge('─'.repeat(40)), true);
+  for (const line of ['', 'yes', `─── short ─`, `${'─'.repeat(20)} trailing words`, `words ${'─'.repeat(20)}`, `${'─'.repeat(20)}  ─`]) {
+    assert.equal(isComposerEdge(line), false, line);
+  }
 });

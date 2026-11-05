@@ -9,3 +9,10 @@ export function isDividerLine(value, minimum = 8) {
   if (!damaged) return intact >= minimum;
   return intact >= Math.max(minimum, 16) && damaged <= 3 && intact / line.length >= 0.9;
 }
+
+// A named session's prompt carries its name in the top edge (CLI 2.1.316); see
+// divider.cjs. Only the composer's edge takes the name.
+const NAMED_EDGE_RE = /^[─━]{8,} \S(?:.*\S)? [─━]+$/u;
+export function isComposerEdge(value, minimum = 8) {
+  return isDividerLine(value, minimum) || NAMED_EDGE_RE.test(String(value ?? '').trim());
+}
