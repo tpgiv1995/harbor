@@ -15,8 +15,9 @@
 // index reads a synthetic chat written into its own transcript folder: two
 // 480x320 PNGs in one prompt and a 1600x1000 PNG in another. Pass: all three
 // draw from harbor-image:// at their real sizes, no image bytes sit in the
-// page, an unknown id answers 404, and clicking the large one opens it full
-// size. Screenshots: window.png and lightbox.png in the output folder.
+// page, an unknown id answers 404, clicking the large one opens it full size,
+// and an image whose bytes are gone shows the plain fallback line.
+// Screenshots: window.png, lightbox.png and image-gone.png in the output folder.
 //
 // Usage (from app/): node scripts/drive-transcript-images-win.js [renderer index.html]
 // With no argument it loads app/dist (run `npm run build` first). A path loads
@@ -318,6 +319,18 @@ async function main() {
     await cdp.shot('lightbox');
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    // An image whose bytes the store evicted: point the first one at an id the
+    // real protocol does not hold (it answers 404, checked above) and require
+    // the plain fallback line in its place, not a broken-image box.
+    step('an image whose bytes are gone shows the fallback line');
+    await waitFor(cdp, "!document.querySelector('.conv-lightbox-img')", 'the full-size view to close', 5_000);
+    await cdp.eval(`document.querySelectorAll('.conv-img')[0].setAttribute('src', 'harbor-image://img/${'0'.repeat(32)}'); true`);
+    await waitFor(cdp, "Boolean(document.querySelector('.conv-img-gone'))", 'the fallback line', 10_000);
+    facts.goneText = await cdp.eval("document.querySelector('.conv-img-gone').textContent");
+    facts.imagesAfterGone = await cdp.eval("document.querySelectorAll('.conv-img').length");
+    await cdp.eval("document.querySelector('.conv-img-gone').scrollIntoView({ block: 'center' }); true");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await cdp.shot('image-gone');
     const widths = facts.images.map((i) => i.width).join(',');
     if (facts.images.length < 3) failure = `only ${facts.images.length} images rendered`;
     else if (!facts.images.every((i) => i.src.startsWith('harbor-image://img/'))) failure = `an image did not load through harbor-image:// (${JSON.stringify(facts.images)})`;
@@ -325,6 +338,8 @@ async function main() {
     else if (facts.dataUriImages !== 0) failure = `${facts.dataUriImages} images still carry their bytes in the page`;
     else if (facts.missingStatus !== 404) failure = `an unknown image id answered ${facts.missingStatus}, not 404`;
     else if (facts.lightbox.width !== 1600 || !facts.lightbox.src.startsWith('harbor-image://img/')) failure = `the full-size view showed ${JSON.stringify(facts.lightbox)}`;
+    else if (facts.goneText !== 'Image no longer loaded. Reopen this window to see it.') failure = `a missing image showed ${JSON.stringify(facts.goneText)}`;
+    else if (facts.imagesAfterGone !== 2) failure = `the missing image's neighbours changed: ${facts.imagesAfterGone} images left, expected 2`;
     try { await cdp.eval('window.harbor.e2e.quit()'); } catch { /* quitting */ }
   } catch (error) {
     failure = `drive error: ${error.message}`;
