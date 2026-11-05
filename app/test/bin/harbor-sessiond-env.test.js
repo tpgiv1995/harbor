@@ -26,3 +26,19 @@ test('job policy settings survive the CLI env filter, and session ids still do n
   assert.equal(env.HARBOR_SESSIOND_NO_JOB, '1');
   assert.equal(env.CLAUDE_SESSION_ID_SAMPLE, undefined, 'the allowlist still keeps a session\'s own variables out');
 });
+
+test('dormancy settings and the config location survive the CLI env filter', (t) => {
+  const names = ['HARBOR_SESSIOND_DORMANT_AFTER_MS', 'HARBOR_SESSIOND_MAX_LIVE_SESSIONS', 'HARBOR_CONFIG_FILE', 'XDG_CONFIG_HOME'];
+  const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+  t.after(() => { for (const [n, v] of Object.entries(saved)) { if (v === undefined) delete process.env[n]; else process.env[n] = v; } });
+  process.env.HARBOR_SESSIOND_DORMANT_AFTER_MS = '14400000';
+  process.env.HARBOR_SESSIOND_MAX_LIVE_SESSIONS = '32';
+  process.env.HARBOR_CONFIG_FILE = '/tmp/harbor-config.json';
+  process.env.XDG_CONFIG_HOME = '/tmp/xdg';
+  const { cleanDaemonEnv } = require(path.resolve(__dirname, '../../../bin/harbor-sessiond'));
+  const env = cleanDaemonEnv();
+  assert.equal(env.HARBOR_SESSIOND_DORMANT_AFTER_MS, '14400000');
+  assert.equal(env.HARBOR_SESSIOND_MAX_LIVE_SESSIONS, '32');
+  assert.equal(env.HARBOR_CONFIG_FILE, '/tmp/harbor-config.json');
+  assert.equal(env.XDG_CONFIG_HOME, '/tmp/xdg');
+});
