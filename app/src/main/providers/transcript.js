@@ -981,6 +981,8 @@ class TranscriptParser {
     // transcript FILE on demand instead; see providers/pending-ask.js. There is
     // deliberately no second copy of that state here to drift from it.
     this.queuedByText = new Map(); // normalized text -> queued user block (to attach its images)
+    this.dequeuedUser = null;
+    this.imageChanges = new Set();
     // Messages waiting in Claude's own queue (see the queue-operation branch of
     // applyLine): { key, ts, from: 'you' | 'peer' | 'task', block }, oldest first.
     this.queuePending = [];
@@ -1052,8 +1054,13 @@ class TranscriptParser {
       if (dropIndex < 0) dropIndex = this.blocks.findIndex((item) => item.kind === 'user' && !item.images?.length);
       if (dropIndex < 0) dropIndex = 0; // only image-bearing blocks remain
       const [dropped] = this.blocks.splice(dropIndex, 1);
-      if (dropped?.toolId) { this.pendingTools.delete(dropped.toolId); this.delegations.delete(dropped.toolId); }
+      this.releaseBlock(dropped);
     }
+    this.trimImages();
+    return block;
+  }
+
+  trimImages() {
     // Image-payload cap on the LIVE path (2026-09-06). A block's base64 image
     // data URI is the only large thing a block carries; every screenshot a long
     // browser/orchestration session takes rode in the transcript AND out to the
@@ -1066,19 +1073,44 @@ class TranscriptParser {
     // decoded. MAX_IMAGE_BLOCKS already caps the initial prefix scan
     // (readPrefixImageBlocks); enforce the SAME bound live so retained base64 is
     // finite. Drop the oldest image-bearing block once over the cap: the 32 most
-    // recent images stay on screen, and the full image is always in the JSONL
-    // (and the terminal view). Dropping a key makes the next read emit a
-    // wholesale `replace`, so the renderer frees it too.
+    // recent images stay on screen, and the full image is always in the JSONL.
+    // Human text survives payload eviction; changed/removed deltas make the
+    // renderer release the old payload too.
     let imageBlocks = 0;
     for (const item of this.blocks) if (item.images?.length) imageBlocks += 1;
     while (imageBlocks > MAX_IMAGE_BLOCKS) {
       const dropIndex = this.blocks.findIndex((item) => item.images?.length);
       if (dropIndex < 0) break;
-      const [dropped] = this.blocks.splice(dropIndex, 1);
-      if (dropped?.toolId) { this.pendingTools.delete(dropped.toolId); this.delegations.delete(dropped.toolId); }
+      const oldest = this.blocks[dropIndex];
+      if (oldest.kind === 'user' && !oldest.peer && oldest.text) {
+        // The payload limit must not delete the question beside the picture.
+        // Send an explicit empty array so a client also releases its image.
+        oldest.images = [];
+        this.imageChanges.add(oldest.key);
+      } else {
+        const [dropped] = this.blocks.splice(dropIndex, 1);
+        this.releaseBlock(dropped);
+      }
       imageBlocks -= 1;
     }
-    return block;
+  }
+
+  userBlock(raw, user, ts, changed) {
+    const dequeued = this.dequeuedUser;
+    this.dequeuedUser = null;
+    if (dequeued?.block && dequeued.key === normalizeQueuedKey(raw) && this.blocks.includes(dequeued.block)) {
+      changed.push(dequeued.block.key);
+      return dequeued.block;
+    }
+    return this.push({ kind: 'user', text: user.text, command: user.command, ts,
+      ...(isPeerMessage(raw) ? { peer: true, peerFrom: user.peerFrom || null } : {}) });
+  }
+
+  releaseBlock(block) {
+    if (block?.toolId) { this.pendingTools.delete(block.toolId); this.delegations.delete(block.toolId); }
+    for (const [key, value] of this.queuedByText) if (value === block) this.queuedByText.delete(key);
+    for (const entry of this.queuePending) if (entry.block === block) entry.block = null;
+    if (this.dequeuedUser?.block === block) this.dequeuedUser = null;
   }
 
   // PER-TASK TOKENS, like the Claude app's live usage readout. A task runs
@@ -1181,6 +1213,16 @@ class TranscriptParser {
   // Returns the keys of blocks that CHANGED in place (tool results resolving
   // an earlier action row) so the renderer can re-render them.
   applyLine(obj) {
+    const changed = this.applyRecord(obj);
+    // Images can be attached after push(), both in user arrays and in queued
+    // attachments. Enforce the same limit on those paths before publishing.
+    this.trimImages();
+    for (const key of this.imageChanges) if (!changed.includes(key)) changed.push(key);
+    this.imageChanges.clear();
+    return changed;
+  }
+
+  applyRecord(obj) {
     const changed = [];
     if (!obj || typeof obj !== 'object') return changed;
     if (this.provider === 'codex') return this.applyCodexLine(obj);
@@ -1227,7 +1269,7 @@ class TranscriptParser {
         }
         const user = userTextFor(content);
         if (user) {
-          this.startTurn(this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(content) ? { peer: true, peerFrom: user.peerFrom || null } : {}) }), ts);
+          this.startTurn(this.userBlock(content, user, ts, changed), ts);
           this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
         }
         return changed;
@@ -1245,7 +1287,7 @@ class TranscriptParser {
             }
             const user = userTextFor(part.text);
             if (user) {
-              lastUserInLine = this.push({ kind: 'user', text: user.text, command: user.command, ts, ...(isPeerMessage(part.text) ? { peer: true, peerFrom: user.peerFrom || null } : {}) });
+              lastUserInLine = this.userBlock(part.text, user, ts, changed);
               this.startTurn(lastUserInLine, ts);
               this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
             }
@@ -1286,8 +1328,8 @@ class TranscriptParser {
     // Claude works (live-caught: Pat's messages "not showing in chat"). The TEXT
     // is on the queue-operation `enqueue` (always present, even for text-only
     // messages); any pasted IMAGES are on the paired queued_command attachment
-    // (whose prompt is empty for text-only messages). Render the enqueue as a
-    // user bubble and attach the queued_command's images to it by matching text.
+    // (older records use an array; current text-only records use a string).
+    // Render one bubble and reconcile the attachment with its enqueue.
     //
     // WAITING IS SHOWN UNTIL CLAUDE TAKES IT (2026-11-01, Pat: "a lot more
     // messages that are sticking in the queue when i enter the terminal view.
@@ -1303,12 +1345,14 @@ class TranscriptParser {
     // waits so the window says so.
     if (obj.type === 'queue-operation') {
       if (obj.operation === 'enqueue') {
+        this.dequeuedUser = null;
         const user = userTextFor(obj.content);
         const peer = isPeerMessage(obj.content);
         const entry = { key: normalizeQueuedKey(obj.content), ts, from: user ? (peer ? 'peer' : 'you') : 'task', block: null };
         if (user) {
           entry.block = this.push({ kind: 'user', text: user.text, command: user.command, ts, queued: true, queueState: 'waiting', ...(peer ? { peer: true, peerFrom: user.peerFrom || null } : {}) });
-          this.queuedByText.set(normalizeQueuedKey(user.text), entry.block);
+          if (this.blocks.includes(entry.block)) this.queuedByText.set(normalizeQueuedKey(user.text), entry.block);
+          else entry.block = null; // A lower-priority peer may be evicted by its own push.
           this.header.lastSignal = 'user-turn';
         }
         this.queuePending.push(entry);
@@ -1328,6 +1372,7 @@ class TranscriptParser {
         }
         if (index >= 0) {
           const [entry] = this.queuePending.splice(index, 1);
+          this.dequeuedUser = obj.operation === 'dequeue' ? entry : null;
           if (entry.block) {
             entry.block.queueState = 'delivered';
             entry.block.deliveredTs = ts;
@@ -1341,15 +1386,22 @@ class TranscriptParser {
     }
     if (obj.type === 'attachment' && obj.attachment?.type === 'queued_command') {
       if (obj.attachment.origin && obj.attachment.origin.kind !== 'human') return changed;
-      const prompt = Array.isArray(obj.attachment.prompt) ? obj.attachment.prompt : [];
+      const prompt = typeof obj.attachment.prompt === 'string'
+        ? [{ type: 'text', text: obj.attachment.prompt }]
+        : Array.isArray(obj.attachment.prompt) ? obj.attachment.prompt : [];
       const text = prompt.filter((p) => p?.type === 'text').map((p) => p.text || '').join('');
       const images = prompt.map(imageFromPart).filter(Boolean);
-      if (!images.length) return changed;
+      const user = userTextFor(text);
+      if (!images.length && !user) return changed;
       // Attach to the enqueue block with matching text; otherwise render the
-      // queued_command on its own (an image with no separate enqueue text).
-      const existing = this.queuedByText.get(normalizeQueuedKey(userTextFor(text)?.text || ''));
-      if (existing) {
+      // queued_command on its own when the enqueue is outside this read.
+      const existing = this.queuedByText.get(normalizeQueuedKey(user?.text || ''));
+      if (existing && this.blocks.includes(existing)) {
         attachImages(existing, images);
+        existing.queueState = 'delivered';
+        existing.deliveredTs = ts;
+        this.queuePending = this.queuePending.filter(item => item.block !== existing);
+        this.noteQueue();
         // The bubble was drawn from its enqueue, often minutes earlier: a
         // message queued mid-turn gets its queued_command (the one record that
         // carries the IMAGES) only when Claude absorbs it. Without reporting the
@@ -1357,13 +1409,14 @@ class TranscriptParser {
         // screenshot never appeared (2026-11-02, "now cant even see images?").
         if (this.blocks.includes(existing) && !changed.includes(existing.key)) changed.push(existing.key);
       } else {
-        this.push({ kind: 'user', text: userTextFor(text)?.text || '', images, ts, queued: true });
+        this.push({ kind: 'user', text: user?.text || '', images, ts, queued: true, queueState: 'delivered' });
       }
       this.header.lastSignal = 'user-turn';
       return changed;
     }
 
     if (obj.type === 'assistant') {
+      this.dequeuedUser = null;
       const message = obj.message || {};
       // "<synthetic>" stamps system-generated messages ("No response
       // requested."), not a real model; never let it take the chip.
@@ -1666,6 +1719,94 @@ async function readPrefixImageBlocks(filePath, endOffset, provider = 'claude') {
   return images;
 }
 
+// THE USER'S OWN MESSAGES ABOVE THE WINDOW COME BACK (2026-11-04, Pat: "im
+// also seeing that im missing messaging in my harbor transcripts repeatedly...
+// like looking back up in chat and i see missing messages (mainly from me)").
+// A window opens on its last MAX_INITIAL_BYTES, and nothing ever pages a
+// desktop window back (pageTranscript has no desktop caller). In a busy session
+// that megabyte is minutes: measured on this very session, 17.3 MB, the last
+// 1 MB began 20 minutes back, because tool results and the CLI's
+// api-request-blob records dwarf the prompts. So after any restart or reload
+// (five that evening) every window showed its opening prompt, then a jump, and
+// Claude's replies to messages that were no longer on screen. The skipped
+// prefix is already streamed once for images (readPrefixImageBlocks), so the
+// same pass now also picks out the user's prompts and mid-turn (queued)
+// messages, parsed in file order by one real parser so an enqueue and its
+// remove pair up, and seeds the most recent MAX_PREFIX_USER_BLOCKS of them.
+// Tool output and Claude's prose stay out: the 240-block trim protects user
+// turns, so seeding prose would only be evicted again, while seeding Pat's own
+// messages is what was missing. A cap keeps a chatty session from filling the
+// window with prompts and starving the live rows (the peer-message lesson).
+const MAX_PREFIX_USER_BLOCKS = 40;
+const PREFIX_USER_LINE = /"type"\s*:\s*"user"/;
+const PREFIX_QUEUE_LINE = /"type"\s*:\s*"queue-operation"|"queued_command"/;
+const PREFIX_IMAGE_LINE = /"type"\s*:\s*"image"/;
+const SOURCE_RECORD = Symbol('source-record');
+
+async function readPrefixBlocks(filePath, endOffset, provider = 'claude', { maxUserBlocks = MAX_PREFIX_USER_BLOCKS } = {}) {
+  return (await readPrefixState(filePath, endOffset, provider, maxUserBlocks)).blocks;
+}
+
+async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MAX_PREFIX_USER_BLOCKS) {
+  const conversation = new TranscriptParser(provider);
+  if (endOffset <= 0) return { blocks: [], conversation, retained: new Map() };
+  const stream = fs.createReadStream(filePath, { start: 0, end: endOffset - 1, encoding: 'utf8' });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  const order = new WeakMap();
+  const source = new WeakMap();
+  const images = [];
+  let lineNo = 0;
+  let opening = null;
+  for await (const line of lines) {
+    lineNo += 1;
+    const prompt = PREFIX_USER_LINE.test(line) && !line.includes('"tool_result"');
+    const queued = !prompt && PREFIX_QUEUE_LINE.test(line);
+    const image = !prompt && !queued && PREFIX_IMAGE_LINE.test(line);
+    if (!prompt && !queued && !image) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; } // the line the tail start cut in half
+    if (image) {
+      // Images outside a prompt (a tool's screenshot): per line, as before.
+      const parser = new TranscriptParser(provider);
+      parser.applyLine(obj);
+      for (const block of parser.blocks) {
+        if (!block.images?.length) continue;
+        const { key: _key, ...retained } = block;
+        order.set(retained, lineNo);
+        images.push(retained);
+        if (images.length > MAX_IMAGE_BLOCKS) images.shift();
+      }
+      continue;
+    }
+    const before = new Set(conversation.blocks);
+    const beforeSeq = conversation.seq;
+    conversation.applyLine(obj);
+    if (!opening) opening = conversation.blocks.find(block => block.kind === 'user') || null;
+    for (const block of conversation.blocks) if (!before.has(block)) {
+      order.set(block, lineNo);
+      source.set(block, `${lineNo}:${Number(block.key.slice(1)) - beforeSeq}`);
+    }
+  }
+  const kept = [];
+  const retained = new Map();
+  const selected = new Set(conversation.blocks.filter((item) => item.kind === 'user' && !item.peer).slice(-maxUserBlocks));
+  // The separately seeded opening needs its final delivery state even when
+  // it predates the recent forty prompts or the parser's retained window.
+  if (opening) selected.add(opening);
+  // Prompt images share the image allowance, not the forty human-text slots.
+  // Peer traffic must never spend those slots either.
+  for (const block of conversation.blocks) if (block.images?.length) selected.add(block);
+  for (const block of selected) {
+    const { key: _key, ...copy } = block;
+    Object.defineProperty(copy, SOURCE_RECORD, { value: source.get(block) });
+    order.set(copy, order.get(block) || 0);
+    retained.set(block, copy);
+    kept.push(copy);
+  }
+  kept.push(...images);
+  return { blocks: kept.sort((a, b) => (order.get(a) || 0) - (order.get(b) || 0)), conversation, retained };
+}
+
 // THE SESSION'S OPENING PROMPT IS NEVER OUT OF REACH (2026-08-13). A large
 // transcript initializes from its last MAX_INITIAL_BYTES, so the first thing
 // the user typed — the message the whole session is an answer to — fell outside
@@ -1687,11 +1828,31 @@ async function readPrefixImageBlocks(filePath, endOffset, provider = 'claude') {
 const OPENING_SCAN_BYTES = 16 * 1024 * 1024;
 const OPENING_CHUNK_BYTES = 256 * 1024;
 
+// Both sides must own complete JSONL records. An arbitrary byte boundary
+// dropped the crossing line from the prefix AND the tail, including prompts.
+async function initialTailOffset(filePath, size) {
+  let end = Math.max(0, size - MAX_INITIAL_BYTES);
+  if (!end) return 0;
+  const handle = await fsp.open(filePath, 'r');
+  try {
+    while (end > 0) {
+      const start = Math.max(0, end - 64 * 1024);
+      const buffer = Buffer.alloc(end - start);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+      const newline = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
+      if (newline >= 0) return start + newline + 1;
+      end = start;
+    }
+    return 0;
+  } finally { await handle.close(); }
+}
+
 async function readOpeningBlock(filePath, provider = 'claude', limitBytes = OPENING_SCAN_BYTES) {
   const handle = await fsp.open(filePath, 'r');
   const parser = new TranscriptParser(provider);
   let carry = Buffer.alloc(0);
   let position = 0;
+  let lineNo = 0;
   try {
     while (position < limitBytes) {
       const want = Math.min(OPENING_CHUNK_BYTES, limitBytes - position);
@@ -1707,14 +1868,17 @@ async function readOpeningBlock(filePath, provider = 'claude', limitBytes = OPEN
         // Split on raw '\n' bytes: 0x0a never occurs inside a multi-byte UTF-8
         // sequence, so line boundaries stay exact without decoding first.
         if (data[i] !== 0x0a) continue;
+        lineNo += 1;
         const line = data.toString('utf8', lineStart, i);
         lineStart = i + 1;
         let obj = null;
         try { obj = JSON.parse(line); } catch { continue; }
+        const beforeSeq = parser.seq;
         parser.applyLine(obj);
         const opening = parser.blocks.find((block) => block.kind === 'user');
         if (opening) {
           const { key: _key, ...retained } = opening;
+          Object.defineProperty(retained, SOURCE_RECORD, { value: `${lineNo}:${Number(opening.key.slice(1)) - beforeSeq}` });
           return retained;
         }
       }
@@ -1963,7 +2127,7 @@ function createTranscriptProvider(options = {}) {
     // opening would be trimmed straight back out; it pages in instead. Same
     // reasoning as the image seeder immediately below.
     if (entry.windowBlocks) return null;
-    const opening = await readOpeningBlock(entry.path, entry.provider).catch(() => null);
+    const opening = await readOpeningBlock(entry.path, entry.provider, Math.min(OPENING_SCAN_BYTES, entry.offset)).catch(() => null);
     if (!opening) return null;
     entry.parser.push(opening);
     return opening;
@@ -1979,11 +2143,30 @@ function createTranscriptProvider(options = {}) {
     // there, images included, with full fidelity. Unwindowed desktop opens
     // are untouched, so the measured-and-cleared cost stays exactly as is.
     if (entry.windowBlocks) return;
-    const blocks = await readPrefixImageBlocks(entry.path, entry.offset, entry.provider);
+    const { blocks, conversation, retained } = await readPrefixState(entry.path, entry.offset, entry.provider);
+    const seededBlocks = new Map();
     for (const block of blocks) {
-      if (seeded && block.ts === seeded.ts && block.text === seeded.text) continue;
-      entry.parser.push(block);
+      if (seeded && block[SOURCE_RECORD] !== undefined && block[SOURCE_RECORD] === seeded[SOURCE_RECORD]) {
+        Object.assign(seeded, block); // Keep delivery state learned after the opening enqueue.
+        seededBlocks.set(block, seeded);
+      } else {
+        entry.parser.push(block);
+        seededBlocks.set(block, block);
+      }
     }
+    const liveBlock = block => {
+      const live = seededBlocks.get(retained.get(block));
+      return live && entry.parser.blocks.includes(live) ? live : null;
+    };
+    // A prefix is part of this parser's history. Its pending queue must travel
+    // with the bubbles, or a tail remove/dequeue cannot settle them.
+    entry.parser.queuePending = conversation.queuePending.map(item => ({ ...item, block: liveBlock(item.block) }));
+    for (const [key, block] of conversation.queuedByText) {
+      const live = liveBlock(block);
+      if (live) entry.parser.queuedByText.set(key, live);
+    }
+    if (conversation.dequeuedUser) entry.parser.dequeuedUser = { ...conversation.dequeuedUser, block: liveBlock(conversation.dequeuedUser.block) };
+    entry.parser.noteQueue();
   };
 
   // Which images each block carried when it was last SENT (by reference: the
@@ -2064,9 +2247,9 @@ function createTranscriptProvider(options = {}) {
         entry.needsReplace = true;
         entry.skipFirstPartial = false;
         if (stat.size > MAX_INITIAL_BYTES) {
-          entry.offset = stat.size - MAX_INITIAL_BYTES;
+          entry.offset = await initialTailOffset(entry.path, stat.size);
           entry.tailStartOffset = entry.offset;
-          entry.skipFirstPartial = true;
+          entry.skipFirstPartial = false;
           await seedPrefixImages(entry, await seedOpeningBlock(entry));
         }
       }
@@ -2425,9 +2608,9 @@ function createTranscriptProvider(options = {}) {
     try {
       const stat = await fsp.stat(entry.path);
       if (stat.size > MAX_INITIAL_BYTES) {
-        entry.offset = stat.size - MAX_INITIAL_BYTES;
+        entry.offset = await initialTailOffset(entry.path, stat.size);
         entry.tailStartOffset = entry.offset;
-        entry.skipFirstPartial = true; // first read lands mid-line
+        entry.skipFirstPartial = false; // aligned to the beginning of a complete record
         await seedPrefixImages(entry, await seedOpeningBlock(entry));
       }
     } catch { /* not on disk yet */ }
@@ -2573,6 +2756,7 @@ module.exports = {
   extractHandoffPath,
   waitForHandoffPath,
   readArchiveBlocksBeforeOffset,
+  readPrefixBlocks,
   DEFAULT_WINDOW_BLOCKS,
   MAX_BLOCKS,
   MAX_IMAGE_BLOCKS,

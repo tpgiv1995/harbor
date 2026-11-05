@@ -335,6 +335,14 @@ export function CommandBar({
     armedForRef.current = session.id;
     inputRef.current?.focus();
   }, [session?.id, canType]);
+  // A window click that must NOT arm the composer (text just highlighted in it,
+  // an input inside it, its raw terminal) marks that session armed before it is
+  // selected, so the effect above leaves focus and the highlight where they are.
+  useEffect(() => {
+    const onHold = (event) => { if (event.detail?.sessionId) armedForRef.current = event.detail.sessionId; };
+    window.addEventListener('harbor-composer-hold', onHold);
+    return () => window.removeEventListener('harbor-composer-hold', onHold);
+  }, []);
 
   // Tile clicks ask for focus explicitly (the selection may not have changed:
   // clicking the already-selected window must still arm the composer).

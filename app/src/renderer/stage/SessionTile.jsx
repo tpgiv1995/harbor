@@ -265,7 +265,6 @@ export const SessionTile = memo(forwardRef(function SessionTile({
       data-session-id={session.id}
       data-slot={slot}
       onClick={dragging ? undefined : (event) => {
-        onSelect();
         // Clicking a window ARMS its composer (Pat, 2026-07-25: no second
         // click into the text box), except when the click was aimed at
         // something interactive inside the window (an ask-panel input, the
@@ -278,6 +277,15 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           interactive: Boolean(event.target.closest('button, input, textarea, select, a, [contenteditable], .terminal-pane')),
           selecting: Boolean(selection && !selection.isCollapsed),
         });
+        // The command bar ALSO arms itself whenever the selected session
+        // changes (its armedForRef effect), so selecting a window that was not
+        // selected took focus anyway: a path highlighted in another session's
+        // window was wiped before Ctrl+C could copy it (Pat, 2026-11-04: "hit
+        // ctrl + c, then in another session's textbox hit ctrl + v and it didnt
+        // show up"). A click that must not arm the composer says so BEFORE the
+        // selection changes. Proof: scripts/drive-composer-paste-win.js.
+        if (arms !== 'composer') window.dispatchEvent(new CustomEvent('harbor-composer-hold', { detail: { sessionId: session.id } }));
+        onSelect();
         if (arms === 'terminal') event.currentTarget.querySelector('.terminal-pane textarea')?.focus();
         else if (arms === 'composer') window.dispatchEvent(new CustomEvent('harbor-focus-composer'));
       }}

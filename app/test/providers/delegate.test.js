@@ -519,7 +519,9 @@ test('watchQueue repaints a genuinely live real-fixture queue through the filesy
   live.batches.find((batch) => batch.id === 'batch-8').status = 'done';
   await fs.promises.writeFile(queueFile, JSON.stringify(live));
 
-  await waitFor(() => summaries.some((summary) => summary.done === initialDone + 1), 1000);
+  // A watcher event can land while the file is half-written; that read yields
+  // no summary (null), which is a miss to wait past, not a failure.
+  await waitFor(() => summaries.some((summary) => summary?.done === initialDone + 1), 1000);
 });
 
 test('getEvents reads the optional sidecar and watchQueue observes it when queue id is known', async () => {

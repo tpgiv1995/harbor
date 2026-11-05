@@ -860,6 +860,11 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
         : '';
       return `${element.tagName.toLowerCase()}${classes ? `.${classes}` : ''}`;
     };
+    // focusout fires synchronously INSIDE whatever took focus (an element's
+    // focus() or blur(), React committing contentEditable=false, a node being
+    // hidden), so the stack at this moment names the code that did it.
+    const takerStack = () => String(new Error().stack || '').split('\n').slice(3, 18)
+      .map((line) => line.trim()).join(' | ').slice(0, 2000);
     const report = (cause, extra = {}) => {
       try {
         const now = Date.now();
@@ -881,10 +886,16 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
       const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
       return range && root.contains(range.startContainer) ? range.cloneRange() : null;
     };
+    // A focused node that is REMOVED (the box torn down and rebuilt) fires no
+    // focusout, so a flag that is still set when this effect is cleaned up means
+    // the box went away while it held focus.
+    let holdsFocus = document.activeElement === root;
+    const onFocusIn = () => { holdsFocus = true; };
     const onFocusOut = (event) => {
+      holdsFocus = false;
       if (!root.isContentEditable) {
         lockLossRef.current = { range: caret() };
-        report('lock');
+        report('lock', { stack: takerStack() });
         return;
       }
       lockLossRef.current = null;
@@ -893,7 +904,7 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
       if (!document.hasFocus()) { report('window-blur'); return; }
       const thief = event.relatedTarget;
       const range = caret();
-      report(thief ? 'stolen' : 'dropped', { to: describe(thief) });
+      report(thief ? 'stolen' : 'dropped', { to: describe(thief), stack: takerStack() });
       requestAnimationFrame(() => {
         if (lastMoveAt >= lostAt || !root.isConnected || !root.isContentEditable || !document.hasFocus()) return;
         const active = document.activeElement;
@@ -909,10 +920,13 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
         selection.addRange(end);
       });
     };
+    root.addEventListener('focusin', onFocusIn);
     root.addEventListener('focusout', onFocusOut);
     document.addEventListener('pointerdown', onPointer, true);
     document.addEventListener('keydown', onKey, true);
     return () => {
+      if (holdsFocus) report('unmounted', { stack: takerStack() });
+      root.removeEventListener('focusin', onFocusIn);
       root.removeEventListener('focusout', onFocusOut);
       document.removeEventListener('pointerdown', onPointer, true);
       document.removeEventListener('keydown', onKey, true);

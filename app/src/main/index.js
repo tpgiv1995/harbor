@@ -459,6 +459,7 @@ function projectLabelForCwd(cwd) {
 }
 
 const WINDOW_STATE_PATH = path.join(os.homedir(), '.cache', 'harbor', 'window-state.json');
+const windowPresentation = require('./window-presentation.js');
 
 function readWindowState() {
   try { return JSON.parse(require('node:fs').readFileSync(WINDOW_STATE_PATH, 'utf8')); }
@@ -469,9 +470,9 @@ function persistWindowState(window) {
   try {
     // While maximized, getBounds() is the full screen rect; save the normal
     // bounds so un-maximizing later restores the real size.
-    const bounds = window.isMaximized() ? window.getNormalBounds() : window.getBounds();
+    const state = windowPresentation.savedState(window);
     require('node:fs').mkdirSync(path.dirname(WINDOW_STATE_PATH), { recursive: true });
-    require('node:fs').writeFileSync(WINDOW_STATE_PATH, JSON.stringify({ ...bounds, maximized: window.isMaximized() }));
+    require('node:fs').writeFileSync(WINDOW_STATE_PATH, JSON.stringify(state));
   } catch { /* never let state saving break the app */ }
 }
 
@@ -936,8 +937,8 @@ function registerIpc() {
   ipcMain.on('window:minimize', () => mainWindow?.minimize());
   ipcMain.on('window:toggle-maximize', () => {
     if (!mainWindow) return;
-    if (mainWindow.isMaximized()) mainWindow.unmaximize();
-    else mainWindow.maximize();
+    windowPresentation.toggleMaximized(mainWindow);
+    sendToRenderer('window:maximize-changed', windowPresentation.isMaximized(mainWindow));
   });
   ipcMain.on('window:close', () => mainWindow?.close());
   // Pop a board out into its own OS window (see createBoardWindow). User-initiated
@@ -974,14 +975,14 @@ function registerIpc() {
     // seconds (see maybeSnapshotRendererHeap).
     if (payload?.kind === 'renderer-memory') maybeSnapshotRendererHeap(payload.context?.usedHeapMB);
   });
-  ipcMain.handle('window:is-maximized', () => Boolean(mainWindow?.isMaximized()));
+  ipcMain.handle('window:is-maximized', () => Boolean(mainWindow && windowPresentation.isMaximized(mainWindow)));
   // Custom edge/corner resize grips drive the frameless window directly, so
   // resizing never depends on the window manager honoring undecorated edges.
   ipcMain.handle('window:get-bounds', () => mainWindow?.getBounds() || null);
   ipcMain.on('window:set-bounds', (_event, bounds) => {
     // Ignore grip-resize while maximized so isMaximized() can't desync from an
     // arbitrarily-sized window (the restore glyph would otherwise lie).
-    if (mainWindow && !mainWindow.isDestroyed() && bounds && !mainWindow.isMaximized()) {
+    if (mainWindow && !mainWindow.isDestroyed() && bounds && !windowPresentation.isMaximized(mainWindow)) {
       mainWindow.setBounds(bounds);
     }
   });
@@ -1005,7 +1006,10 @@ function registerIpc() {
       // (the reason a build-on-disk needs more than wc.reload). Pat clicks this
       // himself, so it never steals his screen the way an out-of-band restart
       // would.
-      case 'restart': app.relaunch(); app.exit(0); break;
+      // Pat asked for this restart, so the new window may come forward: a
+      // --no-focus-steal inherited from a scripted launch is dropped here, or
+      // his own Restart would come back behind whatever he had (2026-11-04).
+      case 'restart': app.relaunch({ args: process.argv.slice(1).filter((arg) => arg !== '--no-focus-steal') }); app.exit(0); break;
       case 'devtools': wc.toggleDevTools(); break;
       case 'zoom-in': wc.setZoomLevel(Math.min(3, wc.getZoomLevel() + 0.5)); break;
       case 'zoom-out': wc.setZoomLevel(Math.max(-3, wc.getZoomLevel() - 0.5)); break;
@@ -1944,7 +1948,7 @@ function createBoardWindow() {
     icon: path.join(__dirname, '../../assets/icon-512.png'),
     title: 'Harbor Board',
     autoHideMenuBar: true,
-    show: true,
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -1958,6 +1962,10 @@ function createBoardWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   boardWindows.add(win);
   win.on('closed', () => boardWindows.delete(win));
+  win.once('ready-to-show', () => {
+    if (e2eMode) win.showInactive();
+    else win.show();
+  });
   if (process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(`${process.env.VITE_DEV_SERVER_URL}?window=board`);
   } else {
@@ -1983,7 +1991,11 @@ function createWindow() {
     ...(e2eMode ? { x: -4200, y: 100 } : {}),
     backgroundColor: '#05080c',
     icon: path.join(__dirname, '../../assets/icon-512.png'),
-    show: e2eMode,
+    // Born HIDDEN, harness or not, and shown from ready-to-show. show:true at
+    // construction ACTIVATES the window on Windows, offscreen or not: the
+    // 2026-11-04 foreground log caught a harness Harbor at x=-4200 taking the
+    // foreground from Pat's real Harbor mid-sentence.
+    show: false,
     // Own the whole window: no OS titlebar, no 1995 grey chrome, no default
     // menu bar. A custom in-renderer titlebar provides brand + window controls;
     // edge-resize stays native (frameless Linux windows resize from the edges).
@@ -2063,19 +2075,27 @@ function createWindow() {
   // Keep the renderer's maximize/restore control glyph in sync with real state.
   const sendMaxState = () => {
     if (window.isDestroyed()) return;
-    sendToRenderer('window:maximize-changed', window.isMaximized());
+    sendToRenderer('window:maximize-changed', windowPresentation.isMaximized(window));
   };
   window.on('maximize', sendMaxState);
   window.on('unmaximize', sendMaxState);
   window.once('ready-to-show', () => {
-    if (noFocusSteal) {
+    if (noFocusSteal || e2eMode) {
       // ORDER IS THE BUG THIS FIXES (2026-07-27, a restart landed on top of
       // a full-screen game and interrupted it): maximizing a window that is ALREADY
       // MAPPED asks mutter to activate it, so `showInactive()` followed by
       // `maximize()` handed over the screen the flag existed to protect.
       // Maximizing while still hidden shows it unfocused instead.
+      // WINDOWS IS DIFFERENT (2026-11-04): maximize() is ShowWindow(SW_MAXIMIZE),
+      // which ACTIVATES the window whether it was hidden or not, so every
+      // flagged relaunch took the foreground anyway (foreground log: the
+      // restarted Harbor came forward with no input from Pat). There it fills
+      // the work area UNFOCUSED and becomes truly maximized the first time Pat
+      // activates it, which looks the same and steals nothing.
       const previousActive = platform.readActiveWindow();
-      if (savedState?.maximized) window.maximize();
+      if (savedState?.maximized && !e2eMode && process.platform === 'win32') {
+        windowPresentation.showInactiveMaximized(window, require('electron').screen, sendMaxState);
+      } else if (savedState?.maximized && !e2eMode) window.maximize();
       else window.showInactive();
       // And the outcome is CHECKED rather than assumed: a flag driving a WM
       // hint is a proxy, and believing the proxy is what put the window on his

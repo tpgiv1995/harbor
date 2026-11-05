@@ -22,6 +22,8 @@ test('the app menu offers Restart Harbor next to Reload', () => {
 
 test('the restart action relaunches the whole app, not just the window', () => {
   const handler = main.slice(main.indexOf("ipcMain.on('window:menu-action'"));
-  assert.match(handler, /case 'restart': app\.relaunch\(\); app\.exit\(0\); break;/);
+  // The relaunch drops an inherited --no-focus-steal (2026-11-04): a restart Pat
+  // asks for from the menu should come up like any launch he makes.
+  assert.match(handler, /case 'restart': app\.relaunch\(\{ args: process\.argv\.slice\(1\)\.filter\(\(arg\) => arg !== '--no-focus-steal'\) \}\); app\.exit\(0\); break;/);
   assert.match(handler, /case 'reload':[\s\S]*?wc\.reload\(\);/);
 });
