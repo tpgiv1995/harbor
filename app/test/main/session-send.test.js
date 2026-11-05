@@ -1399,6 +1399,46 @@ test('a send into an Ultra Codex (box drawn with ») is typed, submitted and con
   assert.equal(typed(h).filter((t) => t === '\r').length, 1, 'one Enter, taken');
 });
 
+// A LONG PASTE TAKES CODEX SECONDS TO SHOW (2026-11-05, Pat's 21,300-character
+// handoff): on Windows it arrives one key event per character and nothing is
+// drawn until the last one, measured at 0.7 to 0.85 ms per character (21,300
+// characters: 14.7 s at 4 load workers, 18.0 s at 10). The old wait was 60
+// reads whatever the size. In this fake each read is one wait step.
+test('a 21,300-character Codex message that takes 150 reads to show is sent once, and the status says why it waits', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { glyph: '»', burstReads: 150 });
+  const send = createSessionSend(h.deps);
+  const details = [];
+  send.emitter.on('status', (s) => { if (s.phase === 'sending' && s.detail) details.push(s.detail); });
+  let text = '';
+  while (text.length < 21_300) text += proofWords;
+  text = text.slice(0, 21_300).trimEnd() + 'x';
+
+  await send.send({ sessionId: 'pane:pane-1', provider: 'codex', text, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.equal(pane.echoed.length, 1, 'submitted once');
+  assert.equal(pane.echoed[0], text.trim());
+  assert.equal(typed(h).filter((t) => t === '\r').length, 1);
+  assert.ok(details.some((d) => /still taking in your message \(21,300 characters/.test(d)), `the wait is explained: ${JSON.stringify(details)}`);
+});
+
+test('a long Codex message whose box never shows it still fails honestly after a bounded wait', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { burstReads: 1_000_000 });
+  const send = createSessionSend(h.deps);
+  let text = '';
+  while (text.length < 21_300) text += proofWords;
+  text = text.slice(0, 21_300).trimEnd() + 'x';
+
+  await assert.rejects(
+    send.send({ sessionId: 'pane:pane-1', provider: 'codex', text, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PROMPT_NEVER_HELD',
+  );
+  assert.equal(typed(h).filter((t) => t === '\r').length, 0, 'no Enter on a box that never showed it');
+  // 60 reads plus 3 ms per character at 250 ms per read, plus the reads before typing.
+  assert.ok(pane.reads < 60 + Math.ceil((21_300 * 3) / 250) + 40, `bounded: ${pane.reads} reads`);
+});
+
 test('an Ultra Codex box that already holds someone else\'s text is still refused as busy, not typed into', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   codexPane(h, { glyph: '»', prefill: 'a half-written note from someone else' });

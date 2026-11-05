@@ -36,6 +36,7 @@
 //   HARBOR_PROBE_EFFORT=<effort>      reasoning effort (default low); ultra draws
 //                                     the box with "»" instead of "›" (2026-11-05)
 //   HARBOR_PROBE_SCENARIOS=<n>        run only the first n send scenarios
+//   HARBOR_PROBE_ONLY=<words>         run only the send scenarios whose name has these words
 // Costs one tiny gpt-6.1-sol turn (low effort) per scenario.
 
 const { execPath: guiNodeExec } = require('../test/support/gui-node.js');
@@ -62,6 +63,7 @@ const CAPTURE = process.env.HARBOR_PROBE_CAPTURE || '';
 const MODEL = process.env.HARBOR_PROBE_MODEL || 'gpt-6.1-sol';
 const EFFORT = process.env.HARBOR_PROBE_EFFORT || 'low';
 const SCENARIO_LIMIT = Number(process.env.HARBOR_PROBE_SCENARIOS || 0);
+const SCENARIO_ONLY = process.env.HARBOR_PROBE_ONLY || '';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const tmp = fs.realpathSync.native(os.tmpdir());
 const store = fs.mkdtempSync(path.join(tmp, 'harbor-codex-send-proof-'));
@@ -128,6 +130,8 @@ const SCENARIOS = [
   { name: 'a 700-character line', text: (m) => `Reply with just OK. ${words.repeat(15)}${m}` },
   { name: 'a pasted body with paragraphs', text: (m) => `Reply with just OK.\n\nThis body has paragraphs, like a real message. ${words.repeat(4)}\n\nAnd a last one. ${m}` },
   { name: 'a 2,000-character paste (Codex draws a placeholder)', text: (m) => `Reply with just OK. ${words.repeat(45)}${m}` },
+  // Pat's 2026-11-05 handoff: Codex took longer than the old fixed wait to show it.
+  { name: 'a 21,300-character handoff (arrives one key at a time)', text: (m) => `Reply with just OK. ${words.repeat(483)}${m}` },
   { name: 'a phone message with an image (no clipboard)', text: (m) => `Reply with just OK. ${m}`, image: true, phone: true },
   { name: 'a desktop message with an image', text: (m) => `Reply with just OK. ${m}`, image: true },
 ];
@@ -252,7 +256,8 @@ async function main() {
 
   const failures = [];
   let index = 0;
-  for (const scenario of SCENARIO_LIMIT > 0 ? SCENARIOS.slice(0, SCENARIO_LIMIT) : SCENARIOS) {
+  const chosen = SCENARIOS.filter((scenario) => !SCENARIO_ONLY || scenario.name.includes(SCENARIO_ONLY));
+  for (const scenario of SCENARIO_LIMIT > 0 ? chosen.slice(0, SCENARIO_LIMIT) : chosen) {
     index += 1;
     const send = scenario.phone ? phone : desktop;
     const marker = `codex-proof-${randomUUID().slice(0, 8)}`;

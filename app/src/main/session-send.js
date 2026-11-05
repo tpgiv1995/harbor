@@ -387,6 +387,12 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
 // prompts. Knowing only "›", Harbor saw no box in any Ultra pane and refused
 // every send with "Codex is not showing its prompt box". Either mark is the
 // box; it is still the LAST such line, and every other rule here is unchanged.
+// Extra time a Codex box may take to show a pasted message, on top of the base
+// wait: 3 ms per character, about four times the slowest rate measured
+// (2026-11-05, see CODEX_HOLD_POLLS in createSessionSend). Shared with the
+// cross-session typer (C:\tools\harbor-peek\type.cjs).
+const CODEX_ABSORB_MS_PER_CHAR = 3;
+const codexAbsorbAllowanceMs = (text) => [...String(text || '')].length * CODEX_ABSORB_MS_PER_CHAR;
 const CODEX_PROMPT_RE = /^[›»](?:\s|$)/u;
 const CODEX_LIST_ROW_RE = /^[›»]\s*\d+\.\s/u;
 const CODEX_FOOTER_RE = /^\s+\S.*?\s·\s(?:~|[A-Za-z]:|\/)/u;
@@ -1609,6 +1615,24 @@ function createSessionSend(deps) {
   const CODEX_ENTER_SETTLE_MS = 250;
   const CODEX_ENTER_POLLS = 8;
   const CODEX_SLASH_SHOW_POLLS = 20;
+  // A LONG PASTE TAKES CODEX SECONDS PER THOUSAND CHARACTERS TO SHOW (2026-11-05,
+  // Pat: a 21,300-character handoff refused "Codex's box never showed your
+  // text" while it was still arriving; it sat in the box as "[Pasted Content
+  // 21300 chars]" afterwards). On Windows the paste reaches Codex one key event
+  // per character and the paste-burst buffer draws nothing until the last one,
+  // so there is no progress to see. Measured on the Legion in an isolated
+  // Codex 0.166.0 (gpt-6-astra ultra): 5,000 characters showed in 3.5 s, 10,000
+  // in 7.1 s, 21,300 in 14.7 s at 4 load workers and 18.0 s at 10, 40,000 in
+  // 29.9 s at 10: 0.7 to 0.85 ms per character, rising with load. The fixed
+  // 60 polls (about 18 s) failed anything past ~20,000 characters on a busy
+  // machine. The wait now grows by CODEX_ABSORB_MS_PER_CHAR, about four times
+  // the slowest rate measured; it still ends the moment the box shows the text,
+  // so the extra allowance costs nothing when Codex is quick.
+  // The allowance itself is module-level (codexAbsorbAllowanceMs) so the
+  // cross-session typer waits by the same rule.
+  const CODEX_HOLD_NOTICE_POLLS = 20;
+  const codexHoldPolls = (text) => CODEX_HOLD_POLLS + Math.ceil(codexAbsorbAllowanceMs(text) / CODEX_POLL_MS);
+  const codexHoldNotice = (text) => `Codex is still taking in your message (${[...String(text || '')].length.toLocaleString('en-US')} characters reach it one key at a time). Harbor presses Enter as soon as its box shows it`;
   // Codex Desktop holds a thread it has open (thread-writer-locks), and a
   // resume of that thread lands on "This conversation is open in another app",
   // whose keys are r (retry), f (fork) and q (quit): the one recorded Codex
@@ -1656,10 +1680,13 @@ function createSessionSend(deps) {
     error.code = 'CODEX_NOT_SUBMITTED';
     return error;
   };
-  const waitForCodexBox = async (paneId, sent, done, polls) => {
+  const waitForCodexBox = async (paneId, sent, done, polls, { onWait = null } = {}) => {
     let screen = '';
     let state = 'noprompt';
     for (let poll = 0; poll < polls; poll += 1) {
+      if (poll === CODEX_HOLD_NOTICE_POLLS && onWait) {
+        try { onWait(); } catch { /* a status line must never break a send */ }
+      }
       screen = await readScreen(paneId, CODEX_READ_LINES);
       state = codexBoxState(screen, sent);
       if (done(state)) break;
@@ -2035,7 +2062,9 @@ function createSessionSend(deps) {
         }
         unshownTyped.delete(paneId);
       } else if (codexGated) {
-        const held = await waitForCodexBox(paneId, sent, (state) => state === 'exact' || state === 'holds', CODEX_HOLD_POLLS);
+        const held = await waitForCodexBox(paneId, sent, (state) => state === 'exact' || state === 'holds', codexHoldPolls(text), {
+          onWait: onWait ? () => onWait(codexHoldNotice(text)) : null,
+        });
         if (held.state !== 'exact' && held.state !== 'holds') {
           logSend({ paneId, phase: 'prompt-never-held', state: held.state });
           await captureSendScreen(paneId, `codex-${held.state}`, held.screen);
@@ -3555,6 +3584,7 @@ module.exports = {
   codexStartupEcho,
   codexSafeText,
   codexChangeNote,
+  codexAbsorbAllowanceMs,
   composerBox,
   isFleetView,
   slashGhostRests,
