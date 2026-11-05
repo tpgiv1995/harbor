@@ -33,7 +33,7 @@ function eventStamp(value, full = false) {
 function BatchCard({ batch, onPreview, previewText, previewLoading }) {
   const [expanded, setExpanded] = useState(false);
   const hasExcerpt = batch.notes || batch.done_when || batch.worktree || batch.last_error
-    || batch.last_result_excerpt || batch.last_session_id;
+    || batch.last_result_excerpt || batch.last_session_id || batch.workerResult || batch.workerError;
   const hasSession = Boolean(batch.last_session_id);
   const lastEvent = batch.notes || batch.last_error;
   const stateLabel = batch.workerState === 'quiet'
@@ -43,7 +43,9 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
     : batch.workerState === 'awaiting-review' ? 'awaiting review'
       : batch.workerState === 'error-blocked' ? 'error / blocked'
         : batch.workerState === 'no-signal' ? 'no liveness signal'
-          : batch.workerState || batch.status || 'pending';
+          : batch.workerState === 'failed' ? 'worker failed'
+            : batch.workerState === 'stopped' ? 'worker stopped'
+              : batch.workerState || batch.status || 'pending';
 
   return (
     <div className={`orch-batch-card ${STATUS_COLORS[batch.status] || ''} ${batch.workerState === 'quiet' ? 'orch-batch-quiet' : ''}`}>
@@ -89,6 +91,12 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
           {batch.last_result_excerpt && !batch.last_error && (
             <pre className="orch-batch-excerpt">{batch.last_result_excerpt}</pre>
           )}
+          {/* The worker's own last turn, read from its transcript: the queue
+              excerpt only exists once the orchestrator has reviewed it. */}
+          {batch.workerError && <pre className="orch-batch-error">{`Worker turn failed: ${batch.workerError}`}</pre>}
+          {batch.workerResult && !batch.last_result_excerpt && (
+            <pre className="orch-batch-excerpt">{batch.workerResult}</pre>
+          )}
           {batch.notes && <p>{batch.notes}</p>}
           {batch.done_when && <p>{`Done when: ${batch.done_when}`}</p>}
           {batch.worktree && <p title={batch.worktree}>{`Worktree: ${batch.worktree}`}</p>}
@@ -112,6 +120,14 @@ function BatchCard({ batch, onPreview, previewText, previewLoading }) {
   );
 }
 
+// Execute stays locked through `done`, not just `running`: the panel lingers
+// ~900 ms after a successful kickoff, and the pane it started only reaches the
+// mutex on the bridge's next poll, so re-enabling on `done` let a second click
+// start a second orchestrator. `done` lasts until the panel closes.
+export function executeLocked({ mutexBlocked, executeState, sessionId }) {
+  return Boolean(mutexBlocked) || executeState === 'running' || executeState === 'done' || !sessionId;
+}
+
 export function OrchPanel({ project, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -121,6 +137,9 @@ export function OrchPanel({ project, onClose }) {
   const [overrideMutexReason, setOverrideMutexReason] = useState(null);
   const [previewText, setPreviewText] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(null);
+  // Which CLI runs the orchestrator. Codex gets the same workflow as its
+  // opening prompt (actions/orchestration.js), under its own plan's home.
+  const [provider, setProvider] = useState('claude');
 
   // For verify-mode: expose a way to force mutex blocked state
   useEffect(() => {
@@ -184,6 +203,7 @@ export function OrchPanel({ project, onClose }) {
         projectLabel: project.label,
         sessionId,
         goal: researchGoal.trim(),
+        provider,
       });
       if (result?.error) throw new Error(result.error);
       setResearchState('done');
@@ -197,12 +217,13 @@ export function OrchPanel({ project, onClose }) {
   };
 
   const handleExecute = async () => {
-    if (mutex.blocked || executeState === 'running') return;
+    if (executeLocked({ mutexBlocked: mutex.blocked, executeState, sessionId })) return;
     setExecuteState('running');
     try {
       const result = await window.harbor.orchestration.kickoffExecute({
         projectLabel: project.label,
         sessionId,
+        provider,
       });
       if (result?.blocked) {
         setOverrideMutexReason(result.reason);
@@ -287,6 +308,22 @@ export function OrchPanel({ project, onClose }) {
       <div className="orch-section orch-kickoff-section">
         <h3 className="orch-section-label">Kickoff</h3>
 
+        <div className="orch-provider-pick" role="radiogroup" aria-label="Orchestrator">
+          {[['claude', 'Claude'], ['codex', 'Codex']].map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="radio"
+              aria-checked={provider === id}
+              className={`orch-provider-opt${provider === id ? ' on' : ''}`}
+              disabled={researchState === 'running' || executeState === 'running'}
+              onClick={() => setProvider(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="orch-kickoff-research">
           <label className="orch-goal-label" htmlFor="orch-goal-input">Research goal</label>
           <textarea
@@ -303,7 +340,7 @@ export function OrchPanel({ project, onClose }) {
             disabled={!researchGoal.trim() || researchState === 'running' || !sessionId}
             onClick={handleResearch}
           >
-            {researchState === 'running' ? 'Starting...' : 'Start research (team)'}
+            {researchState === 'running' ? 'Starting...' : `Start research (${provider === 'codex' ? 'Codex' : 'team'})`}
           </button>
           {researchState === 'done' && (
             <p className="orch-kickoff-ok">Research session started. Opening its pane...</p>
@@ -314,10 +351,10 @@ export function OrchPanel({ project, onClose }) {
           <button
             type="button"
             className="orch-kickoff-btn orch-execute-btn"
-            disabled={mutex.blocked || executeState === 'running' || !sessionId}
+            disabled={executeLocked({ mutexBlocked: mutex.blocked, executeState, sessionId })}
             onClick={handleExecute}
           >
-            {executeState === 'running' ? 'Starting...' : 'Execute (team)'}
+            {executeState === 'running' ? 'Starting...' : `Execute (${provider === 'codex' ? 'Codex' : 'team'})`}
           </button>
           {mutex.blocked && (
             <p className="orch-mutex-reason">{mutex.reason}</p>
