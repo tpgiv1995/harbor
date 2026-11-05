@@ -23,6 +23,7 @@ for (const provider of ['claude', 'codex']) {
         const checker = createCliUpdateChecker({
           homedir: () => path.join(root, 'home'),
           env: { HARBOR_NPM_PREFIX: path.join(root, 'npm'), LOCALAPPDATA: root },
+          platform: 'win32', // the <prefix>/node_modules layout this fixture builds
           stateFile: path.join(root, 'state.json'),
           execFile: async (file, args, options) => {
             calls.push({ file, args, options });
@@ -75,6 +76,7 @@ for (const nodeOnPath of [true, false]) {
       homedir: () => path.join(root, 'home'),
       env: { HARBOR_NPM_PREFIX: path.join(root, 'npm'), LOCALAPPDATA: root, PATH: [path.join(root, 'empty'), nodeDir].join(path.delimiter) },
       stateFile: path.join(root, 'state.json'),
+      platform: 'win32', // the <prefix>/node_modules layout this fixture builds
       execPath: electron,
       isFile: (file) => nodeOnPath && file === path.join(nodeDir, exe),
       execFile: async (file, args, options) => {
