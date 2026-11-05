@@ -207,7 +207,7 @@ const api = {
   },
   usage: {
     getAll: () => ipcRenderer.invoke('usage:get-all'),
-    getPlans: () => ipcRenderer.invoke('usage:get-plans'),
+    getPlans: (options) => ipcRenderer.invoke('usage:get-plans', options),
     getLean: () => ipcRenderer.invoke('usage:get-lean'),
     setLean: (mode) => ipcRenderer.invoke('usage:set-lean', mode),
     onUpdate: (listener) => {
