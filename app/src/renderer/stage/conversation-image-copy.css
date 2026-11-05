@@ -25,3 +25,13 @@
 .conv-lightbox-copy:hover { background: #29313e; }
 .conv-lightbox-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .conv-lightbox-copy:disabled { cursor: wait; }
+
+/* An image the store no longer holds (see Conversation.jsx ConvImage). */
+.conv-img-gone {
+  display: inline-block;
+  padding: 8px 10px;
+  border: 1px dashed var(--ln2);
+  border-radius: 8px;
+  color: var(--muted);
+  font: 400 12px var(--font-ui);
+}

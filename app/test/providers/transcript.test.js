@@ -32,6 +32,10 @@ const createTranscriptProvider = (options) => createTranscriptProviderImpl({
 
 const TINY_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const TINY_PNG_URI = `data:image/png;base64,${TINY_PNG_B64}`;
+const { imageIdFor, imageStore } = require('../../src/main/providers/image-store.js');
+// What a block carries for an image since 2026-11-05: a reference into the store.
+const imageRef = (mediaType, b64) => ({ mediaType, id: imageIdFor(b64), size: Buffer.from(b64, 'base64').length });
+const TINY_PNG_REF = imageRef('image/png', TINY_PNG_B64);
 
 function imagePart(mediaType = 'image/png', data = TINY_PNG_B64) {
   return { type: 'image', source: { type: 'base64', media_type: mediaType, data } };
@@ -523,10 +527,10 @@ test('user and assistant image parts become block.images with data URIs', () => 
   assert.equal(p.blocks.length, 2);
   assert.equal(p.blocks[0].kind, 'user');
   assert.equal(p.blocks[0].text, 'see screenshot');
-  assert.deepEqual(p.blocks[0].images, [{ mediaType: 'image/png', dataUri: TINY_PNG_URI }]);
+  assert.deepEqual(p.blocks[0].images, [TINY_PNG_REF]);
   assert.equal(p.blocks[1].kind, 'assistant');
   assert.equal(p.blocks[1].text, 'here is the fix');
-  assert.deepEqual(p.blocks[1].images, [{ mediaType: 'image/jpeg', dataUri: 'data:image/jpeg;base64,abc123' }]);
+  assert.deepEqual(p.blocks[1].images, [imageRef('image/jpeg', 'abc123')]);
 });
 
 function enqueueLine(content) {
@@ -597,7 +601,7 @@ test('an image message while busy renders once with its image attached (no dup t
   assert.equal(p.blocks.length, 1, 'one block, not duplicated');
   assert.equal(p.blocks[0].text, '[Image #6] not a fan of the chip');
   assert.equal(p.blocks[0].queued, true);
-  assert.deepEqual(p.blocks[0].images, [{ mediaType: 'image/png', dataUri: TINY_PNG_URI }]);
+  assert.deepEqual(p.blocks[0].images, [TINY_PNG_REF]);
 });
 
 test('a non-human queued_command image is not rendered', () => {
@@ -661,20 +665,19 @@ test('peer messages past the cap never evict every agent row (2026-10-22 lead wi
   assert.ok(p.blocks.some((b) => b.kind === 'user' && !b.peer && b.text === 'run the window'), 'Pat\'s own turn is still protected');
 });
 
-test('the live path caps retained image blocks at MAX_IMAGE_BLOCKS (base64 is the OOM payload)', () => {
+test('images stay as long as the conversation around them: no separate 32-image cap (2026-11-05)', () => {
   const p = new TranscriptParser();
-  // Push many more image-bearing blocks than the cap, interleaved with text so
-  // the total stays under MAX_BLOCKS (the total-block trim must NOT be what
-  // bounds images here — the image cap must).
-  const total = MAX_IMAGE_BLOCKS + 20;
+  // Before 2026-11-05 a window kept only its 32 newest image blocks, so older
+  // screenshots vanished from long chats. A block now carries a reference, so
+  // images obey the same MAX_BLOCKS window as everything else.
+  const total = 100;
   for (let i = 0; i < total; i += 1) {
-    p.push({ kind: 'assistant', text: `img ${i}`, ts: TS, images: [{ mediaType: 'image/png', dataUri: TINY_PNG_URI }] });
+    p.push({ kind: 'assistant', text: `img ${i}`, ts: TS, images: [TINY_PNG_REF] });
   }
   const withImages = p.blocks.filter((b) => b.images?.length);
-  assert.equal(withImages.length, MAX_IMAGE_BLOCKS, 'retained image blocks are bounded by the cap');
-  // The cap drops the OLDEST images; the most recent survive.
-  assert.ok(withImages.some((b) => b.text === `img ${total - 1}`), 'the newest image survived');
-  assert.ok(!p.blocks.some((b) => b.text === 'img 0'), 'the oldest image was evicted');
+  assert.equal(withImages.length, total, 'all 100 image blocks are still there');
+  assert.ok(p.blocks.some((b) => b.text === 'img 0'), 'the oldest image is still there');
+  assert.equal(MAX_IMAGE_BLOCKS, MAX_BLOCKS, 'the image cap is the block window itself');
 });
 
 test('user prompt images stay user-attributed while tool_result images are assistant-attributed', () => {
@@ -689,14 +692,16 @@ test('user prompt images stay user-attributed while tool_result images are assis
   p2.applyLine(userLine([{ type: 'tool_result', tool_use_id: 'tu-img', content: [imagePart('image/png', 'zz')] }]));
   const imgBlock = p2.blocks.find((b) => b.images?.length);
   assert.equal(imgBlock.kind, 'assistant');
-  assert.deepEqual(imgBlock.images, [{ mediaType: 'image/png', dataUri: 'data:image/png;base64,zz' }]);
+  assert.deepEqual(imgBlock.images, [imageRef('image/png', 'zz')]);
 });
 
 test('imageFromPart ignores malformed parts', () => {
   assert.equal(imageFromPart(null), null);
   assert.equal(imageFromPart({ type: 'text', text: 'nope' }), null);
   assert.equal(imageFromPart({ type: 'image', source: { type: 'url', url: 'http://x' } }), null);
-  assert.deepEqual(imageFromPart(imagePart()), { mediaType: 'image/png', dataUri: TINY_PNG_URI });
+  assert.deepEqual(imageFromPart(imagePart()), TINY_PNG_REF);
+  // The bytes went to the store, once, under the id the block carries.
+  assert.deepEqual(imageStore.get(TINY_PNG_REF.id).bytes, Buffer.from(TINY_PNG_B64, 'base64'));
 });
 
 test('parses the user -> action -> result -> reply arc', () => {
@@ -996,7 +1001,7 @@ test('block window retains an early inline image while later text slides', () =>
   }
 
   assert.equal(p.blocks.length, MAX_BLOCKS);
-  assert.deepEqual(p.blocks[0].images, [{ mediaType: 'image/png', dataUri: TINY_PNG_URI }]);
+  assert.deepEqual(p.blocks[0].images, [TINY_PNG_REF]);
   assert.equal(p.blocks.at(-1).text, `later prompt ${MAX_BLOCKS + 39}`);
 });
 
@@ -1355,7 +1360,7 @@ test('provider recovers an image before the initial tail window without parsing 
   await provider.open('large-with-image');
 
   const initial = updates[0].replace;
-  assert.equal(initial.some((block) => block.images?.[0]?.dataUri === TINY_PNG_URI), true);
+  assert.equal(initial.some((block) => block.images?.[0]?.id === TINY_PNG_REF.id), true);
   assert.equal(initial.some((block) => block.text === 'recent tail'), true);
   assert.equal(initial.some((block) => block.text === 'very-old-sentinel'), false);
 

@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { createThrottledPruner } = require('../main/prune-old-files.js');
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const EXTENSIONS = Object.freeze({
@@ -27,6 +28,9 @@ function createImageUploader({ userDataDir, runId = crypto.randomUUID() } = {}) 
   if (!/^[A-Za-z0-9_-]+$/.test(runId)) throw new TypeError('upload:image run id is invalid');
   const uploadRoot = path.join(userData, 'server-upload');
   const scratch = path.join(uploadRoot, runId);
+  // Earlier runs' upload folders older than 14 days go when a new image lands
+  // (see main/prune-old-files.js); the current run's folder is never touched.
+  const prune = createThrottledPruner({ dir: uploadRoot, match: (name) => name !== runId && /^[A-Za-z0-9_-]+$/.test(name) });
 
   return async function uploadImage({ name, mediaType, bytesBase64 } = {}) {
     if (!name || path.basename(name) !== name || path.isAbsolute(name)) {
@@ -53,6 +57,7 @@ function createImageUploader({ userDataDir, runId = crypto.randomUUID() } = {}) 
     const target = path.join(actualScratch, `${crypto.randomUUID()}${extension}`);
     if (path.dirname(target) !== actualScratch) throw new Error('upload:image target escaped scratch directory');
     await fs.writeFile(target, bytes, { flag: 'wx', mode: 0o600 });
+    prune();
     return { ok: true, path: target };
   };
 }

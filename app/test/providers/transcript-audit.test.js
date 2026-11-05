@@ -51,7 +51,9 @@ test('idle dequeue followed by normal user record updates one bubble, while repe
   p.applyLine(user('same question'));
   assert.equal(p.blocks.length,2);
 });
-test('image eviction preserves human text and delivers the payload removal to the reducer', () => {
+// 2026-11-05: images are references with no cap of their own (image-store.js),
+// so these two tests now pin the replacement rules instead of payload eviction.
+test('when images crowd the window, tool screenshots leave before a human prompt and its image', () => {
   const p = new TranscriptParser();
   p.applyLine(user([{type:'text',text:'keep my words'},image(0)]));
   let rendered=structuredClone(p.blocks);
@@ -60,15 +62,15 @@ test('image eviction preserves human text and delivers the payload removal to th
     const changed=p.applyLine(user([{type:'tool_result',tool_use_id:`tool${i}`,content:[image(i)]}]));
     rendered=applyTranscriptUpdate(rendered, {append:structuredClone(p.blocks.filter(b=>!before.has(b.key))),changed:structuredClone(p.blocks.filter(b=>changed.includes(b.key))),removed:[...before].filter(k=>!p.blocks.some(b=>b.key===k))});
   }
-  assert.equal(p.blocks.find(b=>b.text==='keep my words')?.images?.length,0);
-  assert.equal(rendered.find(b=>b.text==='keep my words')?.images?.length,0);
+  assert.equal(p.blocks.find(b=>b.text==='keep my words')?.images?.length,1);
+  assert.equal(rendered.find(b=>b.text==='keep my words')?.images?.length,1);
   assert.equal(p.blocks.filter(b=>b.images?.length).length,MAX_IMAGE_BLOCKS);
 });
-test('attaching an image after push obeys the image cap immediately', () => {
+test('every image prompt that fits the window keeps its image (no separate image cap)', () => {
   const p=new TranscriptParser();
-  for(let i=0;i<=MAX_IMAGE_BLOCKS;i++) p.applyLine(user([{type:'text',text:`question ${i}`},image(i)]));
+  for(let i=0;i<MAX_IMAGE_BLOCKS;i++) p.applyLine(user([{type:'text',text:`question ${i}`},image(i)]));
   assert.equal(p.blocks.filter(b=>b.images?.length).length,MAX_IMAGE_BLOCKS);
-  assert.ok(p.blocks.some(b=>b.text==='question 0'));
+  assert.ok(p.blocks.some(b=>b.text==='question 0' && b.images.length===1));
 });
 test('prefix queue state crosses the initial tail boundary and consumed opening is not stale', async t => {
   const padding={type:'ignored',data:'x'.repeat(1048500)};

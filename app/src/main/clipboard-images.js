@@ -4,12 +4,18 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { registerIpcHandler } = require('./rpc/ipc-transport.js');
+const { createThrottledPruner } = require('./prune-old-files.js');
+
+const PASTE_FILE = /^paste-\d+\.(png|jpg)$/;
 
 function createImageWriter({
   fsImpl = fs,
   cacheDir = path.join(os.homedir(), '.cache', 'harbor', 'pastes'),
   now = Date.now,
   pid = process.pid,
+  // Pastes older than 14 days go, checked when a new one is written (see
+  // prune-old-files.js). Only on the real filesystem, never a test double.
+  prune = fsImpl === fs ? createThrottledPruner({ dir: cacheDir, match: (name) => PASTE_FILE.test(name) }) : null,
 } = {}) {
   return async (bytes, ext = 'png') => {
     const safeExt = String(ext).toLowerCase().replace(/^\./, '') === 'jpg' ? 'jpg' : 'png';
@@ -18,6 +24,7 @@ function createImageWriter({
     fsImpl.mkdirSync(cacheDir, { recursive: true });
     fsImpl.writeFileSync(temporary, Buffer.from(bytes));
     fsImpl.renameSync(temporary, destination);
+    prune?.();
     return destination;
   };
 }

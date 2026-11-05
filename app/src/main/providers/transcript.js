@@ -19,12 +19,21 @@ const readline = require('node:readline');
 const { readSessionBeacon, readOwnerProcessAlive } = require('./session-owner.js');
 const { processAliveFromEvidence } = require('../../shared/session-run-state.cjs');
 const { pastTense, progressive } = require('./plain-english.js');
+const { imageStore } = require('./image-store.js');
 
 
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
 // Keep recent conversation rows plus a bounded set of image-bearing rows.
 const MAX_BLOCKS = 240;
-const MAX_IMAGE_BLOCKS = 32;
+// Images no longer have a cap of their own (2026-11-05): a block carries a small
+// reference and the bytes live once in image-store.js, so an image stays exactly
+// as long as the rest of the conversation around it. The cap was 32 because the
+// base64 rode inside every block, and older screenshots vanished from long chats.
+const MAX_IMAGE_BLOCKS = MAX_BLOCKS;
+// What a window seeds from the part of a transcript it does not read: the most
+// recent image blocks, bounded, because every seeded block takes a slot the live
+// tail needs (push() evicts agent rows first). Was 32.
+const MAX_PREFIX_IMAGE_BLOCKS = 64;
 const MAX_INITIAL_BYTES = 1024 * 1024;
 // An open slower than this is reported to the perf log (see onOpenTiming).
 const SLOW_OPEN_MS = 2000;
@@ -892,12 +901,14 @@ function isCompactContinuation(obj, text) {
   return /^This session is being continued from a previous conversation/.test(String(text ?? '').trim());
 }
 
-// Base64 image parts ride on conversation blocks by reference; never re-encode.
+// A base64 image part becomes a reference to the shared image store (see
+// image-store.js): { mediaType, id, size }. Windows load the bytes on demand.
 function imageFromPart(part) {
   if (!part || part.type !== 'image') return null;
   const src = part.source;
   if (!src || src.type !== 'base64' || !src.media_type || !src.data) return null;
-  return { mediaType: src.media_type, dataUri: `data:${src.media_type};base64,${src.data}` };
+  const { id, size } = imageStore.put(src.media_type, src.data);
+  return { mediaType: src.media_type, id, size };
 }
 
 function imagesFromContent(content) {
@@ -1051,8 +1062,12 @@ class TranscriptParser {
       // work. Peer blocks share the bottom tier with agent rows, so the window
       // stays a time-ordered slice of both.
       let dropIndex = this.blocks.findIndex((item) => (item.kind !== 'user' || item.peer) && !item.images?.length);
+      // Images have no cap of their own since 2026-11-05, so a window can fill
+      // with them: a tool's screenshot (an agent row) leaves before ANY prompt
+      // of Pat's, text-only or with an image.
+      if (dropIndex < 0) dropIndex = this.blocks.findIndex((item) => item.kind !== 'user' || item.peer);
       if (dropIndex < 0) dropIndex = this.blocks.findIndex((item) => item.kind === 'user' && !item.images?.length);
-      if (dropIndex < 0) dropIndex = 0; // only image-bearing blocks remain
+      if (dropIndex < 0) dropIndex = 0; // only Pat's own image prompts remain
       const [dropped] = this.blocks.splice(dropIndex, 1);
       this.releaseBlock(dropped);
     }
@@ -1061,6 +1076,10 @@ class TranscriptParser {
   }
 
   trimImages() {
+    // 2026-11-05: blocks now carry a reference, not the base64 (image-store.js),
+    // so the renderer heap no longer holds image payloads and MAX_IMAGE_BLOCKS
+    // equals MAX_BLOCKS: this no longer fires. It stays as the guard for the day a
+    // block carries bytes again. The history below is why it existed.
     // Image-payload cap on the LIVE path (2026-09-06). A block's base64 image
     // data URI is the only large thing a block carries; every screenshot a long
     // browser/orchestration session takes rode in the transcript AND out to the
@@ -1713,7 +1732,7 @@ async function readPrefixImageBlocks(filePath, endOffset, provider = 'claude') {
       if (!block.images?.length) continue;
       const { key: _key, ...retained } = block;
       images.push(retained);
-      if (images.length > MAX_IMAGE_BLOCKS) images.shift();
+      if (images.length > MAX_PREFIX_IMAGE_BLOCKS) images.shift();
     }
   }
   return images;
@@ -1774,7 +1793,7 @@ async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MA
         const { key: _key, ...retained } = block;
         order.set(retained, lineNo);
         images.push(retained);
-        if (images.length > MAX_IMAGE_BLOCKS) images.shift();
+        if (images.length > MAX_PREFIX_IMAGE_BLOCKS) images.shift();
       }
       continue;
     }
@@ -1804,7 +1823,21 @@ async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MA
     kept.push(copy);
   }
   kept.push(...images);
-  return { blocks: kept.sort((a, b) => (order.get(a) || 0) - (order.get(b) || 0)), conversation, retained };
+  const ordered = kept.sort((a, b) => (order.get(a) || 0) - (order.get(b) || 0));
+  // Seed at most MAX_PREFIX_IMAGE_BLOCKS image blocks, the most recent. An older
+  // prompt keeps its words (the image goes, its text never does); an older
+  // image-only block is not seeded. The opening keeps whatever it carries.
+  const openingCopy = opening ? retained.get(opening) : null;
+  let seenImages = 0;
+  for (let i = ordered.length - 1; i >= 0; i -= 1) {
+    const block = ordered[i];
+    if (!block.images?.length || block === openingCopy) continue;
+    seenImages += 1;
+    if (seenImages <= MAX_PREFIX_IMAGE_BLOCKS) continue;
+    if (block.kind === 'user' && !block.peer && block.text) block.images = [];
+    else ordered[i] = null;
+  }
+  return { blocks: ordered.filter(Boolean), conversation, retained };
 }
 
 // THE SESSION'S OPENING PROMPT IS NEVER OUT OF REACH (2026-08-13). A large
@@ -2765,5 +2798,6 @@ module.exports = {
   DEFAULT_WINDOW_BLOCKS,
   MAX_BLOCKS,
   MAX_IMAGE_BLOCKS,
+  MAX_PREFIX_IMAGE_BLOCKS,
   MAX_INITIAL_BYTES,
 };

@@ -787,7 +787,7 @@ function App() {
         for (const b of (data?.blocks || [])) {
           blocks += 1;
           if (b.text) textBytes += b.text.length;
-          if (b.images?.length) { imageBlocks += 1; for (const img of b.images) imageBytes += (img.dataUri?.length || 0); }
+          if (b.images?.length) { imageBlocks += 1; for (const img of b.images) imageBytes += (img.size || img.dataUri?.length || 0); }
         }
       }
       try {

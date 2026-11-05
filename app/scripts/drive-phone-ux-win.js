@@ -66,6 +66,24 @@ async function shot(page, name, { clip } = {}) {
 
 function minutesAgo(minutes) { return Date.now() - minutes * 60_000; }
 
+// A synthetic 320x200 PNG put in the server process's image store, the way the
+// transcript provider stores every image since 2026-11-05: blocks carry the
+// reference, the phone fetches /transcript-images/<id> when it draws it.
+function solidPng(width, height, [r, g, b]) {
+  const zlib = require('node:zlib');
+  const crc32 = (buf) => { let crc = 0xffffffff; for (const byte of buf) { let c = (crc ^ byte) & 0xff; for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crc = (crc >>> 8) ^ c; } return (crc ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const body = Buffer.concat([Buffer.from(type), data]); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(body)); return Buffer.concat([len, body, crc]); };
+  const row = Buffer.alloc(1 + width * 3);
+  for (let x = 0; x < width; x += 1) { row[1 + x * 3] = r; row[2 + x * 3] = g; row[3 + x * 3] = b; }
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(Buffer.concat(Array.from({ length: height }, () => row)))), chunk('IEND', Buffer.alloc(0))]);
+}
+const PHONE_IMAGE = (() => {
+  const { imageStore } = require('../src/main/providers/image-store.js');
+  const data = solidPng(320, 200, [235, 140, 40]).toString('base64');
+  return { mediaType: 'image/png', ...imageStore.put('image/png', data) };
+})();
+
 function transcriptBlocks() {
   const ts = (minutes) => new Date(minutesAgo(minutes)).toISOString();
   // Earlier turns, so the conversation is long enough to scroll well away
@@ -76,6 +94,7 @@ function transcriptBlocks() {
   ]).flat();
   return [
     ...earlier,
+    { key: 'img1', kind: 'user', text: 'Here is the screenshot of the failing row.', images: [PHONE_IMAGE], ts: ts(60) },
     { key: 'u1', kind: 'user', text: 'Kick off push 16 and tell me what is still open on Prep.', ts: ts(42) },
     { key: 'a1', kind: 'assistant', text: 'Starting push 16. Three things are still open on Prep:\n\n1. **Dependents written only as children.** One run showed it and it never repeated.\n2. **The wage column on Edit.** Fixed in 16h, waiting on a second run.\n3. **Column inventory.** Only matters for parity, not for the release.\n\nI will queue the runs that cover every passing result first.', ts: ts(41) },
     { key: 't1', kind: 'action', verb: 'Read', chip: 'MAP-push16-blast-radius.md', status: 'ok', ts: ts(40) },
@@ -287,6 +306,19 @@ async function openChat(page, title) {
 }
 
 const STATES = {
+  async images(page) {
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    const img = page.locator('.conv-img').first();
+    await img.scrollIntoViewIfNeeded();
+    await expect.poll(() => img.evaluate((el) => el.complete && el.naturalWidth), { timeout: 10000 }).toBe(320);
+    const src = await img.getAttribute('src');
+    assert.ok(src.startsWith('/transcript-images/'), `the phone image loads from the image route (${src})`);
+    assert.equal(await page.locator('.conv-img[src^="data:"]').count(), 0, 'no image bytes ride in the page');
+    await shot(page, '20-image-in-chat');
+    await page.locator('.conv-img-btn').first().click();
+    await expect.poll(() => page.locator('.conv-lightbox-img').evaluate((el) => el.complete && el.naturalWidth), { timeout: 10000 }).toBe(320);
+    await shot(page, '21-image-full-size');
+  },
   async chat(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
     await expect(page.locator('.conv-pane')).toContainText('Push 17 ships once');

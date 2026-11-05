@@ -133,7 +133,12 @@ function configuredProfileId(id) {
 // a file the index found in that one folder, and never a path composed from
 // anything the renderer said.
 const ICON_SCHEME = 'harbor-icon';
+// Transcript images (2026-11-05): conversation blocks carry a reference and the
+// bytes live once in providers/image-store.js; a window loads an image through
+// this scheme only when it draws it. Serves only an id the store holds.
+const IMAGE_SCHEME = 'harbor-image';
 protocol.registerSchemesAsPrivileged([
+  { scheme: IMAGE_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
   { scheme: ARTIFACT_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
   { scheme: ICON_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true } },
 ]);
@@ -3012,6 +3017,24 @@ app.whenReady().then(async () => {
           // The URL carries the file's mtime, so a hit is only ever the same
           // bytes; a replaced icon arrives under a new URL.
           'cache-control': 'public, max-age=31536000, immutable',
+        },
+      });
+    } catch {
+      return new Response('not found', { status: 404 });
+    }
+  });
+  protocol.handle(IMAGE_SCHEME, (request) => {
+    try {
+      const { imageStore } = require('./providers/image-store.js');
+      const hit = imageStore.get(new URL(request.url).pathname.replace(/^\/+/, ''));
+      if (!hit) return new Response('not found', { status: 404 });
+      return new Response(hit.bytes, {
+        headers: {
+          'content-type': hit.mediaType,
+          // The id is a hash of the bytes, so a hit is only ever the same image.
+          'cache-control': 'public, max-age=31536000, immutable',
+          // Read back by canvas for Copy image on formats Electron cannot copy.
+          'access-control-allow-origin': '*',
         },
       });
     } catch {

@@ -48,6 +48,18 @@ function ImageLightbox({ src, alt, onClose }) {
   );
 }
 
+// Transcript images arrive as references ({ mediaType, id, size }); the bytes
+// come from the phone server's /transcript-images/ route only when an image is drawn (src/main/providers/image-store.js).
+const transcriptImageSrc = (img) => img?.dataUri || (img?.id ? `/transcript-images/${img.id}` : '');
+
+// An image the store no longer holds (evicted, or the app restarted under an
+// open window) says so instead of drawing a broken-image icon.
+function ConvImage({ img, onImageLoad }) {
+  const [gone, setGone] = useState(false);
+  if (gone) return <span className="conv-img-gone">Image no longer loaded. Reopen this window to see it.</span>;
+  return <img className="conv-img" src={transcriptImageSrc(img)} alt="" loading="lazy" decoding="async" onLoad={onImageLoad} onError={() => setGone(true)} />;
+}
+
 function ConvImages({ images, onImageLoad }) {
   const [lightbox, setLightbox] = useState(null);
   if (!images?.length) return null;
@@ -61,12 +73,12 @@ function ConvImages({ images, onImageLoad }) {
           onClick={() => setLightbox(img)}
           aria-label="View image full size"
         >
-          <img className="conv-img" src={img.dataUri} alt="" loading="lazy" onLoad={onImageLoad} />
+          <ConvImage img={img} onImageLoad={onImageLoad} />
         </button>
       ))}
       {lightbox ? (
         <ImageLightbox
-          src={lightbox.dataUri}
+          src={transcriptImageSrc(lightbox)}
           alt={lightbox.mediaType || 'Image'}
           onClose={() => setLightbox(null)}
         />

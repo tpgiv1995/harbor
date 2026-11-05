@@ -73,6 +73,7 @@ const REAL_BIG_FILE_PRESENT = fs.existsSync(REAL_BIG_FILE);
 
 const TINY_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const TINY_PNG_URI = `data:image/png;base64,${TINY_PNG_B64}`;
+const { imageIdFor } = require('../../src/main/providers/image-store.js');
 
 function imagePart(mediaType = 'image/png', data = TINY_PNG_B64) {
   return { type: 'image', source: { type: 'base64', media_type: mediaType, data } };
@@ -243,7 +244,7 @@ test('windowed open skips the eager prefix-image scan; paging back still resolve
     const res = await provider.page('windowed-image', { beforeBlockId: cursor, count: 50 });
     assert.equal(res.ok, true);
     if (!res.blocks.length) { hasMore = res.hasMore; continue; }
-    found = res.blocks.find((b) => b.images?.[0]?.dataUri === TINY_PNG_URI);
+    found = res.blocks.find((b) => b.images?.[0]?.id === imageIdFor(TINY_PNG_B64));
     cursor = res.blocks[0].key;
     hasMore = res.hasMore;
   }

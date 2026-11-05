@@ -42,6 +42,7 @@ const { startSessionDaemon } = require('../main/lifecycle.js');
 const { createAppShim } = require('./app-shim.js');
 const { createArtifactHandler } = require('./http/artifacts.js');
 const { createIconHandler } = require('./http/icons.js');
+const { createTranscriptImageHandler } = require('./http/transcript-images.js');
 const { createStaticHandler } = require('./http/static.js');
 const { crossOriginRequestAllowed, setAssetSecurityHeaders, refuseCrossOrigin } = require('./http/request-guard.js');
 const { createWebSocketTransport, createSelfOriginHostsCache } = require('./transport/ws.js');
@@ -662,6 +663,7 @@ async function composeServer(options = {}) {
 
   const artifactHandler = createArtifactHandler({ provider: artifacts });
   const iconHandler = createIconHandler({ provider: icons });
+  const transcriptImageHandler = createTranscriptImageHandler();
   // dist-web, NOT dist/web: the desktop renderer builds into dist/ and vite
   // empties that directory, so the mobile client was deleted by every
   // `npm run build`, and therefore by every E2E gate run. The server then
@@ -747,6 +749,7 @@ async function composeServer(options = {}) {
     }
     if (await artifactHandler(req, res)) return;
     if (await iconHandler(req, res)) return;
+    if (await transcriptImageHandler(req, res)) return;
     if (req.url === '/health') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: true })); return; }
     // The client asks this BEFORE it decides to show a token prompt, so it must
     // never be cached: a stale 'not authenticated' would resurrect the very
