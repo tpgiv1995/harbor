@@ -2335,6 +2335,10 @@ function createTranscriptProvider(options = {}) {
       const seqBefore = entry.parser.seq;
       const changedKeys = new Set();
       let linesSinceYield = 0;
+      // Yield every 256 lines OR every 16 ms, whichever comes first: a count alone let
+      // a run of large records hold the main loop 117 ms on a busy machine (2026-11-04
+      // publish gate), and a busy machine is exactly when Pat is typing.
+      let sliceStartedAt = performance.now();
       while (position < stat.size) {
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
         if (!bytesRead) break;
@@ -2346,9 +2350,10 @@ function createTranscriptProvider(options = {}) {
           try { obj = JSON.parse(line); } catch { continue; }
           for (const key of entry.parser.applyLine(obj)) changedKeys.add(key);
           linesSinceYield += 1;
-          if (linesSinceYield >= 256) {
+          if (linesSinceYield >= 256 || performance.now() - sliceStartedAt > 16) {
             linesSinceYield = 0;
             await yieldToEventLoop();
+            sliceStartedAt = performance.now();
           }
         }
       }
