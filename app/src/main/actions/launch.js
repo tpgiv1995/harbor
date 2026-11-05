@@ -1,7 +1,9 @@
 'use strict';
 
+const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { DEFAULT_CODEX_PERMISSION } = require('../../shared/codex-permission.cjs');
 const { legacyConfig } = require('../config/migrate.js');
 const { scriptExecArgs } = require('../script-exec.js');
 
@@ -58,17 +60,52 @@ function buildResumeArgv({ id, detectedHome, profiles = legacyConfig().profiles,
   return argv;
 }
 
+// The codex home a resume passes as --home: the matching codex profile's
+// configHome, else an absolute path as given, else none (bin/ai then reads
+// CODEX_HOME or ~/.codex, exactly as codexResumeHome below does).
+function codexHomeFlag(detectedHome, profiles) {
+  if (!detectedHome) return null;
+  const profile = profiles.find((item) => (
+    item.provider === 'codex'
+    && (item.id === detectedHome || item.configHome === detectedHome)
+  ));
+  return profile?.configHome || (path.isAbsolute(detectedHome) ? detectedHome : null);
+}
+
+// The home bin/ai will read the rollout from, in its own order: --home, the
+// inherited CODEX_HOME, ~/.codex.
+function codexResumeHome(detectedHome, profiles, env = process.env) {
+  return codexHomeFlag(detectedHome, profiles) || env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
 // Codex/cursor resume rides bin/ai;
 // claude resume stays on bin/claude-sessions (live-guard, config homes).
-function buildProviderResumeArgv({ provider, id, detectedHome = null, profiles = legacyConfig().profiles }) {
+//
+// A codex resume comes back on the session's OWN model, effort and permission
+// mode. `recorded` is what main read off the rollout (resumeProviderSession):
+// all three travel as flags plus --recorded, so bin/ai never needs zstd from
+// the system node. Without it bin/ai reads the record itself (the fallback).
+// `overrides` is the popover's Apply on a dormant codex session: what the user
+// changed wins over the record. Cursor's resume takes none.
+function buildProviderResumeArgv({
+  provider, id, detectedHome = null, profiles = legacyConfig().profiles, overrides = null, recorded = null,
+}) {
   const argv = ['--provider', String(provider), '--resume-id', String(id)];
-  if (provider === 'codex' && detectedHome) {
-    const profile = profiles.find((item) => (
-      item.provider === 'codex'
-      && (item.id === detectedHome || item.configHome === detectedHome)
-    ));
-    const home = profile?.configHome || (path.isAbsolute(detectedHome) ? detectedHome : null);
+  if (provider === 'codex') {
+    const home = codexHomeFlag(detectedHome, profiles);
     if (home) argv.push('--home', home);
+  }
+  const chosen = (key) => (overrides?.[key] && overrides[key] !== 'default' ? String(overrides[key]) : '');
+  if (provider === 'codex' && recorded) {
+    const model = chosen('model') || recorded.model || '';
+    const effort = chosen('effort') || recorded.effort || '';
+    if (model) argv.push('--model', model);
+    if (effort) argv.push('--effort', effort);
+    argv.push('--permission', String(overrides?.permission || recorded.permission || DEFAULT_CODEX_PERMISSION), '--recorded');
+  } else if (provider === 'codex' && overrides) {
+    if (overrides.model && overrides.model !== 'default') argv.push('--model', String(overrides.model));
+    if (overrides.effort && overrides.effort !== 'default') argv.push('--effort', String(overrides.effort));
+    if (overrides.permission) argv.push('--permission', String(overrides.permission));
   }
   return argv;
 }
@@ -84,7 +121,10 @@ function buildProviderResumeArgv({ provider, id, detectedHome = null, profiles =
 // `preacceptFolderTrust`), against the home the child is actually pointed at, so
 // the flags express nothing the path does not and are gone. A profile id no
 // longer has to be one of three specific words.
-function buildNewArgv({ account, profiles = legacyConfig().profiles, provider = 'claude', model = null, effort = 'default', sessionId = null, prompt = null }) {
+function buildNewArgv({
+  account, profiles = legacyConfig().profiles, provider = 'claude', model = null, effort = 'default', sessionId = null, prompt = null,
+  permission = null, search = false, addDirs = [],
+}) {
   const profile = resolveProviderProfile(profiles, account, provider);
   const argv = [];
   // Cursor's home locates history; its CLI has no verified home selector.
@@ -101,6 +141,17 @@ function buildNewArgv({ account, profiles = legacyConfig().profiles, provider = 
   // started typing (2026-07-27).
   if (effort && effort !== 'default') argv.push('--effort', effort);
   if (provider === 'claude' && sessionId) argv.push('--session-id', sessionId);
+  // Codex launch choices: the permission mode (bin/ai has its own default, so
+  // none is sent unless one was picked), live web search, and extra writable
+  // folders. Only absolute folders travel; a relative one would resolve
+  // against whatever cwd the launch happened to have.
+  if (provider === 'codex') {
+    if (permission) argv.push('--permission', String(permission));
+    if (search) argv.push('--search');
+    for (const dir of Array.isArray(addDirs) ? addDirs : []) {
+      if (typeof dir === 'string' && path.isAbsolute(dir)) argv.push('--add-dir', dir);
+    }
+  }
   if (prompt != null && String(prompt)) argv.push(String(prompt));
   return argv;
 }
@@ -114,6 +165,11 @@ function createLaunchActions(options = {}) {
   const resumesInFlight = new Map();
   const profiles = options.profiles || legacyConfig().profiles;
   const rememberProviderIdentity = options.rememberProviderIdentity || null;
+  // What a codex session ran with, read here on Electron's Node (which has
+  // zstd) and handed to bin/ai. A failed read is not a refusal: bin/ai reads
+  // the record itself and refuses with its own one-line reason.
+  const readCodexResumeSettings = options.readCodexResumeSettings
+    || require('../providers/codex-resume-settings.js').readCodexResumeSettings;
 
   // bin/claude-sessions refuses to resume a session whose transcript was
   // written in the last 90 seconds, reasoning that a hot transcript means a
@@ -185,7 +241,7 @@ function createLaunchActions(options = {}) {
   }
 
   // Same single-flight map as claude resumes: one id, one resume process.
-  async function resumeProviderSession({ provider, cwd, id, profileId = null, configHome = null }) {
+  async function resumeProviderSession({ provider, cwd, id, profileId = null, configHome = null, overrides = null }) {
     if (!provider || provider === 'claude') throw new TypeError('resumeProviderSession is codex/cursor only');
     if (!cwd) throw new TypeError(`resuming a ${provider} session requires its working folder`);
     if (!id) throw new TypeError('resumeProviderSession requires id');
@@ -196,19 +252,29 @@ function createLaunchActions(options = {}) {
     }
     if (resumesInFlight.has(id)) return resumesInFlight.get(id);
     const detectedHome = configHome || profileId;
-    const argv = buildProviderResumeArgv({ provider, id, detectedHome, profiles });
     const env = { ...process.env };
-    const run = new Promise((resolve, reject) => {
-      const launch = scriptExecArgs(AI_BIN, argv, { cwd, env });
-      execFile(launch.command, launch.args, launch.options, (error, _stdout, stderr) => {
-        if (error) {
-          const detail = String(stderr || '').trim().split('\n').pop() || error.message;
-          const err = new Error(detail);
-          err.cause = error;
-          reject(err);
-        } else resolve();
+    let argv = null;
+    // The record is read INSIDE the single-flight entry: an await before the
+    // map is populated would let a double click start two resumes.
+    const run = (async () => {
+      const recorded = provider === 'codex'
+        ? await Promise.resolve()
+          .then(() => readCodexResumeSettings(id, codexResumeHome(detectedHome, profiles, env)))
+          .catch(() => null)
+        : null;
+      argv = buildProviderResumeArgv({ provider, id, detectedHome, profiles, overrides, recorded });
+      await new Promise((resolve, reject) => {
+        const launch = scriptExecArgs(AI_BIN, argv, { cwd, env });
+        execFile(launch.command, launch.args, launch.options, (error, _stdout, stderr) => {
+          if (error) {
+            const detail = String(stderr || '').trim().split('\n').pop() || error.message;
+            const err = new Error(detail);
+            err.cause = error;
+            reject(err);
+          } else resolve();
+        });
       });
-    }).finally(() => {
+    })().finally(() => {
       setTimeout(() => resumesInFlight.delete(id), 5000).unref?.();
     });
     resumesInFlight.set(id, run);
@@ -221,13 +287,15 @@ function createLaunchActions(options = {}) {
 
   let newSessionInFlight = null;
 
-  async function newSession({ account, cwd, provider, model, effort, prompt }) {
+  async function newSession({ account, cwd, provider, model, effort, prompt, permission = null, search = false, addDirs = [] }) {
     if (!cwd) throw new TypeError('newSession requires cwd');
     // Double-clicked "+" must not spawn two sessions.
     if (newSessionInFlight) return newSessionInFlight;
     const resolvedProvider = provider || 'claude';
     const sessionId = resolvedProvider === 'claude' ? randomUUID() : null;
-    const argv = buildNewArgv({ account, profiles, provider: resolvedProvider, model, effort, sessionId, prompt });
+    const argv = buildNewArgv({
+      account, profiles, provider: resolvedProvider, model, effort, sessionId, prompt, permission, search, addDirs,
+    });
     const env = { ...process.env };
     newSessionInFlight = new Promise((resolve, reject) => {
       const launch = scriptExecArgs(AI_BIN, argv, { cwd, env });
@@ -256,6 +324,7 @@ module.exports = {
   AI_BIN,
   buildResumeArgv,
   buildProviderResumeArgv,
+  codexResumeHome,
   buildNewArgv,
   resolveProviderProfile,
   resolveResumeHome,
