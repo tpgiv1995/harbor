@@ -6,7 +6,7 @@ const { createControlClient } = require('./session-daemon/factory.js');
 const { createHistoryProvider } = require('./providers/history.js');
 const { createProviderHistory } = require('./providers/provider-history.js');
 const { createProviderSessionLinker } = require('./providers/provider-session-link.js');
-const { mergeSidebarModel, sleptSince } = require('../shared/sidebar-model.cjs');
+const { mergeSidebarModel, sleptSince, paneStatusFields, cliStatusForPane } = require('../shared/sidebar-model.cjs');
 const { parseLocalDateTime } = require('../shared/date-roll.cjs');
 const { freshWorking } = require('../shared/claude-turn-state.cjs');
 const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, delegationSummaries, mergeDelegationLinks } = require('./providers/delegations.js');
@@ -29,6 +29,10 @@ function withLaunchedHomes(homes, launched) {
   }
   return merged || homes;
 }
+
+// The most a step-only status update (a new `working` msg) waits for its
+// sidebar patch; see scheduleStatusPublish.
+const STEP_PUBLISH_MS = 300;
 
 function extractLiveState(snapshot) {
   const snap = snapshot?.snapshot || snapshot || {};
@@ -95,8 +99,16 @@ function applyPaneEvent(state, event) {
       // bash (live-caught 2026-07-22).
       return { workspaces, panes: panes.filter((p) => p.pane_id !== paneId) };
     }
-    if (panes[idx].agent_status === agentStatus) return state;
-    panes[idx] = { ...panes[idx], agent_status: agentStatus };
+    // The CLI's own words ride along (OSC 7501 via the keeper): a new step
+    // inside `working`, or a new prompt with the same text (its seq), is a
+    // change the rail shows.
+    const kind = data.agent_status_kind ?? null;
+    const msg = data.agent_status_msg ?? null;
+    const seq = Number.isInteger(data.agent_status_seq) ? data.agent_status_seq : null;
+    const pane = panes[idx];
+    if (pane.agent_status === agentStatus && (pane.agent_status_kind ?? null) === kind
+      && (pane.agent_status_msg ?? null) === msg && (pane.agent_status_seq ?? null) === seq) return state;
+    panes[idx] = { ...pane, agent_status: agentStatus, agent_status_kind: kind, agent_status_msg: msg, agent_status_seq: seq };
     return { workspaces, panes };
   }
 
@@ -323,6 +335,8 @@ function createSidebarBridge(options = {}) {
     }
     if (changed && !closed) publish();
   };
+  // `claude agents --json` (providers/cli-agents.js), when main runs it.
+  const cliStatuses = () => options.cliAgents?.snapshot() || null;
   const publish = () => {
     if (closed) return;
     const ids = new Set(liveState.panes.map((p) => p.pane_id));
@@ -350,6 +364,9 @@ function createSidebarBridge(options = {}) {
       // because a session can be moved or reconfigured after it starts.
       homes: withLaunchedHomes(homes, launchedHomes),
       dormantSessions,
+      // `claude agents --json` (providers/cli-agents.js): status for the
+      // Claude sessions Harbor does not run.
+      cliStatuses: cliStatuses(),
     });
     const delta = publisher.publish({
       model,
@@ -365,14 +382,30 @@ function createSidebarBridge(options = {}) {
 
   // Agent status can chatter during tool transitions. Collapse a same-frame
   // burst into one sidebar render while still forwarding every raw event to
-  // the notification driver.
+  // the notification driver. The fast path patches ONLY the fields named
+  // here, so every row field a status event changes must be in this patch
+  // (paneStatusFields, which mergeSidebarModel uses for the same fields on a
+  // full publish). A step-only update (working -> working with a new msg,
+  // one per tool call) waits up to STEP_PUBLISH_MS; a real transition pulls a
+  // pending patch in.
   const pendingStatuses = new Map();
   let statusNeedsMerge = false;
-  const scheduleStatusPublish = (event) => {
-    const { pane_id: paneId, agent_status: status } = event.data;
-    if (status === 'unknown' || !paneRows.has(paneId)) statusNeedsMerge = true;
-    else pendingStatuses.set(paneRows.get(paneId), { agentStatus: status });
-    if (statusPublishTimer) return;
+  let statusPublishDue = 0;
+  const scheduleStatusPublish = (event, { stepOnly = false } = {}) => {
+    // No event: the CLI's own session list changed, which can touch any row.
+    const { pane_id: paneId, agent_status: status } = event?.data || {};
+    if (!event || status === 'unknown' || !paneRows.has(paneId)) statusNeedsMerge = true;
+    else {
+      const pane = liveState.panes.find((p) => p.pane_id === paneId);
+      pendingStatuses.set(paneRows.get(paneId), paneStatusFields(pane || { agent_status: status }, cliStatusForPane(pane, cliStatuses())));
+    }
+    const delay = stepOnly ? STEP_PUBLISH_MS : 16;
+    const due = Date.now() + delay;
+    if (statusPublishTimer) {
+      if (due >= statusPublishDue) return;
+      clearTimeout(statusPublishTimer);
+    }
+    statusPublishDue = due;
     statusPublishTimer = setTimeout(() => {
       statusPublishTimer = null;
       if (statusNeedsMerge) publish();
@@ -385,15 +418,21 @@ function createSidebarBridge(options = {}) {
       }
       pendingStatuses.clear();
       statusNeedsMerge = false;
-    }, 16);
+    }, delay);
     statusPublishTimer.unref?.();
   };
 
+  const onCliAgentsChange = () => { if (!closed) scheduleStatusPublish(null); };
+  options.cliAgents?.on('change', onCliAgentsChange);
+
   const onPaneAgentStatus = (event) => {
     const previousState = liveState;
+    const paneId = event?.data?.pane_id;
+    const before = previousState.panes.find((p) => p.pane_id === paneId)?.agent_status ?? null;
     liveState = applyPaneEvent(liveState, event);
     emitter.emit('pane-agent-status', event);
-    if (liveState !== previousState) scheduleStatusPublish(event);
+    if (liveState === previousState) return;
+    scheduleStatusPublish(event, { stepOnly: before === 'working' && event?.data?.agent_status === 'working' });
   };
 
   // Where the last refresh spent its time, for the lifecycle log's
@@ -609,6 +648,7 @@ function createSidebarBridge(options = {}) {
 
   const close = () => {
     closed = true;
+    options.cliAgents?.off('change', onCliAgentsChange);
     clearTimeout(refreshTimer);
     clearTimeout(statusPublishTimer);
     clearTimeout(reconnectTimer);
