@@ -378,8 +378,17 @@ function composerSendState(screen, { text = '', pasted = false, imageMarker = nu
 // a message that starts "1. " still sits over the footer. A paste over 1,000
 // characters is drawn as "[Pasted Content N chars]", N counting characters (an
 // Enter Codex swallowed into the paste adds one).
-const CODEX_PROMPT_RE = /^›(?:\s|$)/u;
-const CODEX_LIST_ROW_RE = /^›\s*\d+\.\s/u;
+//
+// ON ULTRA EFFORT THE BOX IS DRAWN WITH "»" (2026-11-05, Pat: "codex not working
+// on new session"). Codex 0.166.0 starts with "›" and, once startup ends,
+// redraws its box as "» Ask Codex to do anything" on ultra and on no other
+// effort (measured in a throwaway home on gpt-6-astra and gpt-6.1-sol at every
+// effort; a draft keeps "»"), while the transcript keeps "›" for earlier
+// prompts. Knowing only "›", Harbor saw no box in any Ultra pane and refused
+// every send with "Codex is not showing its prompt box". Either mark is the
+// box; it is still the LAST such line, and every other rule here is unchanged.
+const CODEX_PROMPT_RE = /^[›»](?:\s|$)/u;
+const CODEX_LIST_ROW_RE = /^[›»]\s*\d+\.\s/u;
 const CODEX_FOOTER_RE = /^\s+\S.*?\s·\s(?:~|[A-Za-z]:|\/)/u;
 const CODEX_PASTE_RE = /^\[PastedContent(\d+)chars\](?:#\d+)?$/;
 const CODEX_LARGE_PASTE_CHARS = 1000;
@@ -1599,6 +1608,7 @@ function createSessionSend(deps) {
   const CODEX_HOLD_POLLS = 60;
   const CODEX_ENTER_SETTLE_MS = 250;
   const CODEX_ENTER_POLLS = 8;
+  const CODEX_SLASH_SHOW_POLLS = 20;
   // Codex Desktop holds a thread it has open (thread-writer-locks), and a
   // resume of that thread lands on "This conversation is open in another app",
   // whose keys are r (retry), f (fork) and q (quit): the one recorded Codex
@@ -1690,6 +1700,33 @@ function createSessionSend(deps) {
       await typeInto(paneId, workspaceId, '\r');
       noteCodexEnter(paneId, sent);
     }
+  };
+  // After a slash command's Enter, only a box still showing EXACTLY the command
+  // gets one more Enter (the first was swallowed); an emptied box, a changed
+  // one, or a dialog the command opened (a bare /model picker) gets none, since
+  // an Enter there would choose its first row.
+  const codexSlashNotSubmittedError = () => {
+    const error = new Error('The command is in Codex\'s box, but Codex did not take the Enter (twice), so it has not run. Open the >_ terminal and press Enter there, or clear it and send again');
+    error.code = 'CODEX_NOT_SUBMITTED';
+    return error;
+  };
+  const watchCodexSlashEnter = async (paneId, workspaceId, text) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let screen = '';
+      for (let poll = 0; poll < CODEX_ENTER_POLLS; poll += 1) {
+        await sleep(CODEX_POLL_MS);
+        screen = await readScreen(paneId, CODEX_READ_LINES);
+        if (codexBoxState(screen, { text }) !== 'exact') return attempt ? 'taken-after-retry' : 'taken';
+      }
+      if (attempt > 0) {
+        logSend({ paneId, phase: 'codex-not-submitted' });
+        await captureSendScreen(paneId, 'codex-slash-not-submitted', screen);
+        throw codexSlashNotSubmittedError();
+      }
+      logSend({ paneId, phase: 'enter-retry', attempt: 1 });
+      await typeInto(paneId, workspaceId, '\r');
+    }
+    return 'unconfirmed';
   };
 
   // What Harbor typed into a pane whose prompt never showed it. It may still be
@@ -1882,6 +1919,8 @@ function createSessionSend(deps) {
       // its delivery is best-effort) presses Enter only once the prompt SHOWS
       // the text; see waitForPromptToHold.
       const gated = provider === 'claude' && !isSlashCommand(text);
+      const codexSlash = provider === 'codex' && Boolean(text) && isSlashCommand(text);
+      let codexSlashShown = false;
       const sent = { text, pasted: mayCollapseToPlaceholder(text), imageMarker: lastImageMarker };
       let alreadyInPrompt = false;
       let earlier = unshownTyped.get(paneId) || null;
@@ -2014,6 +2053,19 @@ function createSessionSend(deps) {
           throw codexBoxChangedError();
         }
         await sleep(CODEX_ENTER_SETTLE_MS);
+      } else if (codexSlash) {
+        // A CODEX SLASH COMMAND WAITS FOR ITS BOX TOO (2026-11-05). The effort
+        // menus send "/model --reasoning=<level>", typed as keystrokes, and a
+        // fixed 160 ms before Enter is the gap the paste-burst rule eats under
+        // load: the live drive left "/model --reasoning=high" sitting in an
+        // Ultra pane's box, effort unchanged, while Harbor said sent (1 of 4
+        // runs at 4 load workers). Enter now waits until the box shows the
+        // command, then the Enter window. A box that never shows it (a popup
+        // drawn over it) keeps the old timing, so no command is held back.
+        const shown = await waitForCodexBox(paneId, { text }, (state) => state === 'exact', CODEX_SLASH_SHOW_POLLS);
+        codexSlashShown = shown.state === 'exact';
+        if (!codexSlashShown) logSend({ paneId, phase: 'codex-slash-unshown', state: shown.state });
+        await sleep(codexSlashShown ? CODEX_ENTER_SETTLE_MS : 160);
       } else {
         await sleep(160);
       }
@@ -2031,6 +2083,9 @@ function createSessionSend(deps) {
         enterState = await watchCodexEnter(paneId, workspaceId, sent);
         logSend({ paneId, phase: 'enter-state', state: enterState });
         if (enterState === 'taken' || enterState === 'taken-after-retry') codexTyped.delete(paneId);
+      } else if (codexSlash && codexSlashShown) {
+        enterState = await watchCodexSlashEnter(paneId, workspaceId, text);
+        logSend({ paneId, phase: 'enter-state', state: enterState });
       }
       await resolveClaudeSwitchConfirm(paneId, workspaceId, text, provider);
       return enterState;

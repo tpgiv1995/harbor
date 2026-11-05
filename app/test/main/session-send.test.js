@@ -536,8 +536,10 @@ const typed = (h) => h.sent.map(({ text }) => text);
 // `screen` replaces the whole pane (a dialog instead of the box); `dropTyping`
 // loses what is typed; `reads` counts every read. A paste that is only an
 // image path becomes "[Image #N] " in the box, numbered per message, as Codex's
-// handle_paste_image_path draws it.
-function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTyping = false, title = 'proof', frames = false, failUntil = null, prefill = '', initialDraft = '', working = false, dropsSymbols = false } = {}) {
+// handle_paste_image_path draws it. `glyph` is the box's own prompt mark: "›",
+// or "»" for a Codex on ultra effort, whose transcript rows keep "›" (measured
+// on 0.166.0, 2026-11-05).
+function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTyping = false, title = 'proof', frames = false, failUntil = null, prefill = '', initialDraft = '', working = false, dropsSymbols = false, glyph = '›' } = {}) {
   let draft = initialDraft;
   let swallowed = 0;
   let hidden = 0;
@@ -565,7 +567,7 @@ function codexPane(h, { swallowEnters = 0, burstReads = 0, screen = null, dropTy
     const inBox = prefill + (shown ? box(shown) : '');
     const status = working ? `\n◦ Working (44s • esc to interrupt)\n` : busy;
     const footer = working ? `  tab to queue message${' '.repeat(80)}21% context left` : `  GPT-6.1-Sol low · ~\\dev\\proof · ${title}`;
-    return `  >_ OpenAI Codex (v0.165.0)\n\n${above}${status}\n› ${inBox || (echoed.length ? 'Ask a follow-up question' : 'Ask Codex to do anything')}\n\n${footer}`;
+    return `  >_ OpenAI Codex (v0.165.0)\n\n${above}${status}\n${glyph} ${inBox || (echoed.length ? 'Ask a follow-up question' : 'Ask Codex to do anything')}\n\n${footer}`;
   };
   const sendInput = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => {
@@ -1366,6 +1368,49 @@ test('codexBoxState reads the real Codex box: stuck, taken, placeholder, footer 
   assert.equal(codexBoxState(codexFixture('codex-0.165.0-update-screen-120.txt'), { text: 'x' }), 'noprompt');
 });
 
+// A CODEX ON ULTRA EFFORT DRAWS ITS BOX WITH "»" (2026-11-05, Pat: "codex not
+// working on new session"). Codex 0.166.0 starts with "›" and, once startup
+// ends, redraws the box as "» Ask Codex to do anything" on ultra and on no
+// other effort (measured on gpt-6-astra and gpt-6.1-sol, every effort, in a
+// throwaway home); the transcript keeps "›" for earlier prompts. Harbor knew
+// only "›", saw no box, and refused every send into an Ultra pane with "Codex
+// is not showing its prompt box". These are the real screens, captured from
+// Codex 0.166.0 on gpt-6.1-sol ultra at 120 columns.
+test('codexBoxState reads a real Ultra Codex box drawn with »: empty and holding a wrapped draft', () => {
+  const empty = codexFixture('codex-0.166.0-ultra-empty-120.txt');
+  assert.match(empty, /^» Ask Codex to do anything$/mu, 'the real Ultra box glyph');
+  assert.equal(codexBoxDraft(empty), '');
+  assert.equal(codexBoxState(empty, { text: 'hello' }), 'other');
+  const draft = codexFixture('codex-0.166.0-ultra-draft-120.txt');
+  const text = `Reply with just OK. ${proofWords.repeat(4)}codex-ultra-7f3a91c2`;
+  assert.equal(codexBoxState(draft, { text }), 'exact');
+  assert.equal(codexBoxState(draft, { text: 'Reply with just OK. codex-ultra-00000000' }), 'other');
+});
+
+test('a send into an Ultra Codex (box drawn with ») is typed, submitted and confirmed', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { glyph: '»' });
+  const send = createSessionSend(h.deps);
+
+  await send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'Fresh session, first message', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(pane.echoed, ['Fresh session, first message']);
+  assert.equal(pane.draft, '');
+  assert.equal(typed(h).filter((t) => t === '\r').length, 1, 'one Enter, taken');
+});
+
+test('an Ultra Codex box that already holds someone else\'s text is still refused as busy, not typed into', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { glyph: '»', prefill: 'a half-written note from someone else' });
+  const send = createSessionSend(h.deps);
+
+  await assert.rejects(
+    send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'my message', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_BOX_BUSY',
+  );
+  assert.deepEqual(typed(h), [], 'nothing typed into a busy Ultra box');
+});
+
 // A REAL SPLIT PASTE (Codex 0.166.0, 154 columns, 2026-11-01): the first
 // character reached Codex 40 ms before the rest, so it was typed and the other
 // 1,182 became the paste. Fable's 1,183-character message most likely sat in
@@ -1571,6 +1616,61 @@ test('an effort change into a codex pane goes in as /model --reasoning=<level>; 
   composerPane(c);
   await createSessionSend(c.deps).send({ sessionId: 's-claude-effort', text: '/effort high', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
   assert.equal(typed(c)[0], '/effort ');
+});
+
+// The effort menus' "/model --reasoning=<level>" reaches Codex as keystrokes,
+// and the live drive (2026-11-05, 4 load workers) left it sitting in the box,
+// effort unchanged, while Harbor said sent: the fixed 160 ms before Enter fell
+// inside Codex's paste-burst window. Enter now waits for the box to show the
+// command, and a swallowed Enter gets one more.
+test('a Codex slash command presses Enter only once its box shows it, and once more if Codex swallowed it', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = codexPane(h, { swallowEnters: 1, burstReads: 2 });
+  let lastRead = '';
+  const shownAtEnter = [];
+  const readPane = h.deps.readPane;
+  h.deps.readPane = async (...args) => (lastRead = await readPane(...args));
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r') shownAtEnter.push(/^› \/model --reasoning=high\s*$/mu.test(lastRead));
+    return sendInput(paneId, text);
+  };
+  const send = createSessionSend(h.deps);
+
+  await send.send({ sessionId: 'pane:codex-effort-burst', text: '/effort high', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(typed(h), ['/model ', '--reasoning=high', '\r', '\r']);
+  assert.deepEqual(shownAtEnter, [true, true], 'every Enter came after a read that showed the command in the box');
+  assert.deepEqual(pane.echoed, ['/model --reasoning=high']);
+});
+
+test('a Codex slash command that opens a dialog gets no spare Enter', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h);
+  const picker = '  Select Model and Effort\n\n› 1. gpt-6.1-sol\n  2. gpt-6-astra\n\n  Press enter to confirm or esc to go back';
+  let opened = false;
+  const readPane = h.deps.readPane;
+  h.deps.readPane = async (...args) => (opened ? picker : readPane(...args));
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (text === '\r') opened = true;
+    return sendInput(paneId, text);
+  };
+
+  await createSessionSend(h.deps).send({ sessionId: 'pane:codex-picker', text: '/model', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.deepEqual(typed(h), ['/model ', '\r'], 'one Enter: a second would pick the first row');
+});
+
+test('a Codex slash command still in the box after two Enters is reported, not called sent', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { swallowEnters: 99 });
+
+  await assert.rejects(
+    createSessionSend(h.deps).send({ sessionId: 'pane:codex-effort-stuck', text: '/effort high', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_NOT_SUBMITTED' && /has not run/.test(error.message),
+  );
+  assert.deepEqual(typed(h), ['/model ', '--reasoning=high', '\r', '\r']);
 });
 
 test('Codex safety rewrites and sibling dialogs refuse slash commands before typing', async () => {

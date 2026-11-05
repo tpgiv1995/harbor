@@ -32,6 +32,10 @@
 //   HARBOR_PROBE_CODEX_AUTH=<file>    auth.json to copy (default ~/.codex/auth.json)
 //   HARBOR_PROBE_LOAD=<n>             n busy-loop workers while sending (default 4)
 //   HARBOR_PROBE_CAPTURE=<dir>        save the screen after each send
+//   HARBOR_PROBE_MODEL=<model>        Codex model (default gpt-6.1-sol)
+//   HARBOR_PROBE_EFFORT=<effort>      reasoning effort (default low); ultra draws
+//                                     the box with "»" instead of "›" (2026-11-05)
+//   HARBOR_PROBE_SCENARIOS=<n>        run only the first n send scenarios
 // Costs one tiny gpt-6.1-sol turn (low effort) per scenario.
 
 const { execPath: guiNodeExec } = require('../test/support/gui-node.js');
@@ -55,6 +59,9 @@ const CODEX = process.env.HARBOR_PROBE_CODEX || 'codex';
 const AUTH = process.env.HARBOR_PROBE_CODEX_AUTH || path.join(os.homedir(), '.codex', 'auth.json');
 const LOAD = Number(process.env.HARBOR_PROBE_LOAD ?? 4);
 const CAPTURE = process.env.HARBOR_PROBE_CAPTURE || '';
+const MODEL = process.env.HARBOR_PROBE_MODEL || 'gpt-6.1-sol';
+const EFFORT = process.env.HARBOR_PROBE_EFFORT || 'low';
+const SCENARIO_LIMIT = Number(process.env.HARBOR_PROBE_SCENARIOS || 0);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const tmp = fs.realpathSync.native(os.tmpdir());
 const store = fs.mkdtempSync(path.join(tmp, 'harbor-codex-send-proof-'));
@@ -180,10 +187,10 @@ async function main() {
   const version = harborBin.codexCliVersion(CODEX, childEnv);
   const controls = harborBin.codexPaneControls({ version, codexHome });
   const argv = harborBin.resolveWindowsLaunch(harborBin.withCodexPaneControls(
-    [CODEX, '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-6.1-sol', '-c', 'model_reasoning_effort=low'],
+    [CODEX, '--dangerously-bypass-approvals-and-sandbox', '--model', MODEL, '-c', `model_reasoning_effort=${EFFORT}`],
     controls,
   ), { env: childEnv });
-  console.log(`codex ${version ? version.join('.') : 'unreadable'}; ${LOAD} load worker(s)`);
+  console.log(`codex ${version ? version.join('.') : 'unreadable'} on ${MODEL} ${EFFORT}; ${LOAD} load worker(s)`);
   const spawned = await client.request('spawn', { argv, cwd, env: childEnv, cols: 120, rows: 50 });
   const paneId = spawned.id;
   cleanup.paneId = paneId;
@@ -201,7 +208,12 @@ async function main() {
   };
   const idle = async () => until(async () => {
     const s = await readScreen(60, 'visible');
-    return /^› /mu.test(s) && !/esc to interrupt/iu.test(s) ? s : null;
+    // An ultra-effort box is drawn with "»" (the transcript keeps "›"), but only
+    // once startup ends, which is also when the model · folder footer appears:
+    // waiting for the footer is what makes the first send meet the box Pat's
+    // idle pane showed (2026-11-05; before it, the first send raced the "›" a
+    // starting Codex draws and passed on the broken code).
+    return /^[›»] /mu.test(s) && /^\s+GPT-\S+ \S+ · /mu.test(s) && !/esc to interrupt/iu.test(s) ? s : null;
   }, 90_000, 'codex never came up idle');
   await idle();
 
@@ -240,7 +252,7 @@ async function main() {
 
   const failures = [];
   let index = 0;
-  for (const scenario of SCENARIOS) {
+  for (const scenario of SCENARIO_LIMIT > 0 ? SCENARIOS.slice(0, SCENARIO_LIMIT) : SCENARIOS) {
     index += 1;
     const send = scenario.phone ? phone : desktop;
     const marker = `codex-proof-${randomUUID().slice(0, 8)}`;
@@ -297,6 +309,7 @@ async function main() {
     const changed = high.test(footer);
     console.log(`\n${name}: ${thrown ? `REFUSED: ${thrown.message}` : 'reported sent'}`);
     console.log(`  effort now high: ${changed}${/Unrecognized command/i.test(footer) ? ' (Codex: Unrecognized command)' : ''}`);
+    if (!changed) console.log(`  screen:\n${(await readScreen(30, 'visible')).split('\n').map((line) => `    | ${line}`).join('\n')}`);
     if (thrown || !changed) failures.push(`${name}: Codex's effort did not change`);
   }
   if (clipped.length) failures.push(`the clipboard was used for a Codex image (${clipped.length} time(s))`);
