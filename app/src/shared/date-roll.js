@@ -8,6 +8,15 @@ export function parseLocalDateTime(text) {
   return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), 0, 0);
 }
 
+// The inverse of parseLocalDateTime: the LOCAL "YYYY-MM-DD HH:MM" every
+// history row's lastActive carries. A row built from a clock (a live pane with
+// no history row yet) must use it too; an ISO "Z" string is read back as local
+// time and lands hours away from when the pane was really active.
+export function formatLocalDateTime(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function displayDayFor(date = new Date()) {
   const d = new Date(date);
   if (d.getHours() < DAY_ROLL_HOUR) d.setDate(d.getDate() - 1);

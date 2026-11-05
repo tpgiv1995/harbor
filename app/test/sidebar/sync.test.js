@@ -124,6 +124,18 @@ test('status-only bridge pushes stay below 10 KB with 10000 history rows', async
   } finally { bridge.close(); }
 });
 
+test('a rebuild with no change publishes nothing, even with an untitled live pane', () => {
+  // A live row with no history row was stamped with the render time, so it
+  // (and its project's metadata) differed on every rebuild and went out in
+  // every delta. It now carries the keeper's clock and is stable.
+  const publisher = createSidebarPublisher();
+  const overlay = { workspaces: [{ workspace_id: 'w', label: 'Project 0' }],
+    livePanes: [{ pane_id: 'untitled', workspace_id: 'w', agent: 'claude', created_at: '2026-10-11T12:30:00Z' }] };
+  const build = (now) => ({ model: mergeSidebarModel({ historySessions: rows(20), now, ...overlay }), historyCount: 20, indexerSessionCount: 20 });
+  assert.ok(publisher.publish(build(new Date('2026-10-11T13:00:00Z'))));
+  assert.equal(publisher.publish(build(new Date('2026-10-11T13:05:00Z'))), null);
+});
+
 test('machine sessions leave rail snapshots but live panes, Orch and restored windows still resolve', async () => {
   const data = rows(5);
   data[4].meta = { id: data[4].id, path: 'C:\\synthetic\\conversation.jsonl', firstPrompt: 'Full prompt', start: '2026-10-11T10:00:00Z' };
