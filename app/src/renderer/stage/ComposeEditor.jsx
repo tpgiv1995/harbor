@@ -813,6 +813,77 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
     get element() { return editorRef.current; },
   }), []);
 
+  // FOCUS A MOMENTARY LOCK TOOK COMES BACK (2026-11-04, Pat: "as i'll be
+  // typing in the text input box something will happen that will like 'click
+  // me out' of it and i cant type anymore. seems like its something loading or
+  // like a turn finishing"). The box is editable only while the command bar
+  // says it can type, and that flips off for an instant whenever the selected
+  // session is missing from one model publish (about two a second), the pane
+  // reads as controlled by another client, and so on. contentEditable=false on
+  // the FOCUSED box makes Chromium drop focus to <body>, and nothing gave it
+  // back: the command bar arms the box once per session id. So a blur that
+  // happens because the box stopped being editable keeps the caret, and when
+  // the box is editable again with nothing else focused, focus and caret come
+  // back. Every loss is logged (renderer-stalls.jsonl, kind
+  // composer-focus-lost) with what locked the box, so the trigger is named next
+  // time; a blur to nowhere with no click, key or lock is logged as
+  // "unexplained" and left alone.
+  const lockLossRef = useRef(null);
+  const placeholderRef = useRef(placeholder);
+  placeholderRef.current = placeholder;
+  useEffect(() => {
+    const root = editorRef.current;
+    if (!root) return undefined;
+    let lastUserAt = 0;
+    const noteUser = () => { lastUserAt = Date.now(); };
+    const report = (cause) => {
+      try {
+        window.harbor?.perf?.stall?.({
+          kind: 'composer-focus-lost', ms: 0, at: Date.now(),
+          context: { cause, reason: String(placeholderRef.current || ''), windowFocused: document.hasFocus() },
+        });
+      } catch { /* diagnostics never break typing */ }
+    };
+    const onFocusOut = (event) => {
+      if (event.relatedTarget) { lockLossRef.current = null; return; } // focus moved somewhere on purpose
+      if (!root.isContentEditable) {
+        const selection = window.getSelection();
+        const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+        lockLossRef.current = { range: range && root.contains(range.startContainer) ? range.cloneRange() : null };
+        report('lock');
+        return;
+      }
+      if (document.hasFocus() && Date.now() - lastUserAt > 400) report('unexplained');
+    };
+    root.addEventListener('focusout', onFocusOut);
+    document.addEventListener('pointerdown', noteUser, true);
+    document.addEventListener('keydown', noteUser, true);
+    return () => {
+      root.removeEventListener('focusout', onFocusOut);
+      document.removeEventListener('pointerdown', noteUser, true);
+      document.removeEventListener('keydown', noteUser, true);
+    };
+  }, []);
+  useLayoutEffect(() => {
+    if (disabled) return;
+    const lost = lockLossRef.current;
+    lockLossRef.current = null;
+    const root = editorRef.current;
+    if (!lost || !root) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== root) return; // something else has focus now
+    root.focus();
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = lost.range && root.contains(lost.range.startContainer) ? lost.range : null;
+    selection.removeAllRanges();
+    if (range) { selection.addRange(range); return; }
+    const end = document.createRange();
+    end.selectNodeContents(root);
+    end.collapse(false);
+    selection.addRange(end);
+  }, [disabled]);
+
   const emit = useCallback(() => {
     const root = editorRef.current;
     if (!root) return;
