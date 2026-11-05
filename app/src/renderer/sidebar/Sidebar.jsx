@@ -11,6 +11,7 @@ import { homeLabel, projectRowFill } from '../stage/project-colors.js';
 import { ProjectIcon } from '../stage/ProjectIcon.jsx';
 import { providerIdentity, ProfileBadge, useProfiles } from '../providers.js';
 import { resumeCommandForProfile, railLaunchPlan, railWidthForProfileCount, profileStyle } from '../profiles.cjs';
+import { appPreferences } from '../app-preferences.cjs';
 import { ViewSwitch } from '../ViewSwitch.jsx';
 import { resetBadge, resetTooltip } from './usage-reset.cjs';
 import { collapseForView, planCollapseAll } from './collapse-policy.cjs';
@@ -719,7 +720,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
     // CLAUDE_CONFIG_DIR rather than a per-account flag: it is what the account
     // actually IS, it works for any launcher, and it can express a profile
     // whose name no hardcoded flag has ever heard of.
-    const command = resumeCommandForProfile(profile, profiles, session.id);
+    const command = resumeCommandForProfile(profile, profiles, session.id, appPreferences());
     try {
       await navigator.clipboard.writeText(command);
       setCopiedSessionId(session.id);
