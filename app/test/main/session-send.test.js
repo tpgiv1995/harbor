@@ -459,7 +459,11 @@ const enterFixture = (name) => fs.readFileSync(
 // the keys does.
 const PASTE_SEGMENT_SPLIT = / (?=\/|[A-Za-z]:\\)/;
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp)$/i;
-function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0, drawAfter = null, dropTypings = 0 } = {}) {
+// `cutsLongTyping` models Claude CLI 2.1.316 on Windows (isolated probe,
+// 2026-11-04): a run typed without paste markers is read in 1,024-character
+// pieces and only the LAST piece reaches the prompt.
+const lastTypedPiece = (text) => (text.length > 1024 ? text.slice(-(text.length % 1024 || 1024)) : text);
+function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0, drawAfter = null, dropTypings = 0, cutsLongTyping = false } = {}) {
   let draft = initialDraft;
   let dropped = 0;
   const state = { reads: 0 };
@@ -513,7 +517,7 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
       draft += drawPaste(text.replace(/\x1b\[20[01]~/g, ''));
       hideReads = renderDelayReads;
     } else {
-      draft += text;
+      draft += cutsLongTyping ? lastTypedPiece(text) : text;
       hideReads = renderDelayReads;
     }
     return result;
@@ -1772,6 +1776,76 @@ for (const { name, text, expected } of [
     assert.deepEqual(h.focused, []);
   });
 }
+
+// 2026-11-04, Pat: "i keep having text get cut off in this chat". Every
+// one-line send over 1,024 characters since Oct 30 reached Claude as its last
+// piece only (1,611 sent, 587 arrived; 1,092 sent, 68 arrived), because it was
+// typed in one write and the CLI keeps only the last 1,024-character piece of a
+// typed run. A paste is one piece however it is read.
+const longLine = (n, tag = 'w') => {
+  let s = '';
+  for (let i = 0; s.length < n; i += 1) s += `${tag}${String(i).padStart(4, '0')} `;
+  return s.slice(0, n).trimEnd() + 'Z';
+};
+
+test('a long one-line message goes as one paste and arrives whole, never cut to its last 1,024-character piece', async () => {
+  for (const n of [700, 1092, 1611, 2600]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const pane = composerPane(h, { cutsLongTyping: true });
+    const send = createSessionSend(h.deps);
+    const text = longLine(n);
+    await send.send({ sessionId: `s-long-${n}`, text, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    assert.deepEqual(typed(h), [`\x1b[200~${text}\x1b[201~`, '\r'], `${text.length} characters`);
+    assert.deepEqual(pane.echoed, [text], `${text.length} characters arrive whole`);
+  }
+});
+
+test('a one-line message under the paste mark is still typed as keys', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { cutsLongTyping: true });
+  const send = createSessionSend(h.deps);
+  const text = longLine(698);
+  await send.send({ sessionId: 's-short', text, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), [text, '\r']);
+  assert.deepEqual(pane.echoed, [text]);
+});
+
+test('a slash command with long one-line arguments pastes them (the 2026-11-04 /acclimate lost its front)', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const send = createSessionSend(h.deps);
+  const args = longLine(1169);
+  await send.send({ sessionId: 's-slash-long', text: `/acclimate ${args}`, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), ['/acclimate ', `\x1b[200~${args}\x1b[201~`, '\r']);
+});
+
+test('a long typed answer in a question card goes into its text row as one paste', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let highlight = 1;
+  let field = null;
+  h.deps.readPane = async () => TEXT_MENU
+    .map((line, i) => {
+      if (i < 1 || i > 4) return line;
+      const body = i === 3 && field != null ? `  3. ${field.slice(-40)}` : line;
+      return `${highlight === i ? '❯' : ' '}${body.slice(1)}`;
+    })
+    .join('\n');
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    h.sent.push({ paneId, text });
+    if (text === '\x1b[B') highlight = Math.min(4, highlight + 1);
+    else if (text === '\x1b[A') highlight = Math.max(1, highlight - 1);
+    else if (text !== '\r' && text !== '\x1b' && highlight === 3) {
+      field = `${field || ''}${text.startsWith('\x1b[200~') ? text.replace(/\x1b\[20[01]~/g, '') : lastTypedPiece(text)}`;
+    }
+    return { ok: true };
+  };
+  closesOnEnter(h);
+  const send = createSessionSend(h.deps);
+  const answer = longLine(1611, 'a');
+  const res = await send.answerMenu({ pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, action: { type: 'text', index: 3, text: answer } });
+  assert.equal(res.ok, true);
+  assert.ok(h.sent.some((s) => s.text === `\x1b[200~${answer}\x1b[201~`), 'the answer is one paste');
+  assert.equal(field, answer, 'the whole answer reached the row');
+});
 
 test('dead session: resume, discover fresh pane, wait ready, deliver', async () => {
   const composer = '──────────────\n❯\n──────────────\n  haiku 4.5 xhigh │ you';

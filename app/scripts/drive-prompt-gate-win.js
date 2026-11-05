@@ -21,7 +21,9 @@
 //   show up in the prompt afterwards.
 //   control, a 1,600-character single line (drawn by the CLI as "[Pasted text
 //   #1]"), and a pasted multi-line body: each must land in the CLI's own
-//   transcript exactly once through the new check.
+//   transcript exactly once through the new check, WHOLE (2026-11-04: typed in
+//   one write, the long line reached Claude as its last 1,024-character piece,
+//   and the old marker-only count passed it; it now goes as a paste).
 //   a prompt that never takes the text: no Enter may reach the pane, the send
 //   must fail with the honest error, and nothing may reach the transcript.
 //   a short phone message with an image (2026-10-14): harbor-server has no
@@ -254,24 +256,37 @@ async function main() {
     dropText = Boolean(scenario.dropText);
     delayTextMs = scenario.delayTextMs || 0;
     let thrown = null;
+    const sentText = scenario.text(marker);
     try {
       await send.send({
         sessionId: claudeSession,
-        text: scenario.text(marker),
+        text: sentText,
         images: scenario.phoneImage ? [PHONE_IMAGE] : [],
         pane: { paneId, workspaceId: 'ws' },
       });
     } catch (error) { thrown = error; }
     dropText = false;
     delayTextMs = 0;
-    const copies = () => {
+    // The marker sits at the END of every message, which is the part that
+    // survives when the front is lost (2026-11-04: a long typed line reached
+    // Claude as its last 1,024-character piece, and this drive still counted
+    // it as landed). So a copy counts only when it holds the WHOLE message;
+    // one holding just the marker is reported as cut. The phone image's path
+    // becomes an attachment, so that one is still matched by its marker.
+    const userRecords = () => {
       try {
-        return fs.readFileSync(transcript, 'utf8').split('\n').filter((line) => {
-          if (!line.includes(marker)) return false;
-          try { const record = JSON.parse(line); return record.type === 'user' && !record.isMeta; } catch { return false; }
-        }).length;
-      } catch { return 0; }
+        return fs.readFileSync(transcript, 'utf8').split('\n').filter((line) => line.includes(marker)).map((line) => {
+          try { const record = JSON.parse(line); return record.type === 'user' && !record.isMeta ? record : null; } catch { return null; }
+        }).filter(Boolean);
+      } catch { return []; }
     };
+    const recordText = (record) => {
+      const raw = record.message?.content;
+      return Array.isArray(raw) ? raw.filter((block) => block.type === 'text').map((block) => block.text).join('\n') : String(raw || '');
+    };
+    const whole = (record) => scenario.phoneImage || recordText(record).includes(sentText);
+    const copies = () => userRecords().filter(whole).length;
+    const cutCopies = () => userRecords().filter((record) => !whole(record)).map((record) => recordText(record).length);
     let landed = 0;
     if (scenario.dropText) {
       await sleep(6000);
@@ -294,6 +309,11 @@ async function main() {
     console.log(`\n${scenario.name}: ${outcome}`);
     console.log(`  keystrokes: ${written.join(' ')}`);
     console.log(`  copies in the transcript: ${landed}`);
+    const cut = cutCopies();
+    if (cut.length) {
+      console.log(`  CUT copies (only part of the ${sentText.length} characters arrived): ${cut.join(', ')} characters`);
+      failures.push(`${scenario.name}: arrived cut, ${cut.join(', ')} of ${sentText.length} characters`);
+    }
     if (scenario.dropText) {
       if (enters > 0) failures.push(`${scenario.name}: Enter was pressed into a prompt that never showed the text`);
       if (!thrown || thrown.code !== 'PROMPT_NEVER_HELD') failures.push(`${scenario.name}: the send was not refused honestly`);

@@ -217,6 +217,21 @@ const PASTE_PLACEHOLDER_RE = /\[Pastedtext#\d+(?:\+\d+lines)?\]/;
 // literally matches on its tail first, so this only ever ADDS the placeholder.
 const PASTE_COLLAPSE_CHARS = 700;
 const mayCollapseToPlaceholder = (text) => /\n/.test(String(text || '')) || String(text || '').length >= PASTE_COLLAPSE_CHARS;
+// A LONG LINE TYPED IN ONE WRITE LOSES ALL BUT ITS LAST 1,024 CHARACTERS
+// (2026-11-04, Pat: "i keep having text get cut off in this chat"). Claude CLI
+// 2.1.316 on Windows reads typed input in 1,024-character pieces and keeps only
+// the LAST piece of a run that arrives without paste markers: a 1,611-character
+// line reached the prompt as its last 587 characters, a 2,600-character line as
+// its last 552 (isolated probe, no Harbor involved). The count is characters,
+// not bytes: 690 characters of accents or emoji (over 1,024 bytes) arrived
+// whole. Every one-line send over 1,024 since Oct 30 was cut this way (five, all
+// "could not confirm"), while every send with a line break went as a paste and
+// arrived whole up to 8,165 characters. A bracketed paste is one piece however
+// it is read (a 2,600-character one-line paste submitted whole, transcript
+// checked), so anything long enough to be at risk goes as a paste, the same
+// mark the gate already treats as possibly drawn as "[Pasted text #N]".
+const asPaste = (text) => `\x1b[200~${text}\x1b[201~`;
+const typedPayload = (text) => (mayCollapseToPlaceholder(text) ? asPaste(text) : text);
 const PROMPT_GLYPH_RE = /^\s*[❯!]/;
 // Dim text Claude draws in an EMPTY box that is an instruction, not a draft or
 // a prediction (the welcome hint is also dropped by the keeper's reader).
@@ -1938,18 +1953,13 @@ function createSessionSend(deps) {
           const token = trimmed.split(/\s+/, 1)[0];
           const remainder = trimmed.slice(token.length).trimStart();
           await typeInto(paneId, workspaceId, `${token} `);
-          if (remainder) {
-            const payload = remainder.includes('\n')
-              ? `\x1b[200~${remainder}\x1b[201~`
-              : remainder;
-            await typeInto(paneId, workspaceId, payload);
-          }
+          if (remainder) await typeInto(paneId, workspaceId, typedPayload(remainder));
         } else {
           // Codex always gets a paste: 0.159.3's security banner takes a bare
           // `1` keypress over an empty composer, and a paste is never a key.
-          const payload = text.includes('\n') || provider === 'codex'
-            ? `\x1b[200~${text}\x1b[201~`
-            : text;
+          // A long Claude message does too (typedPayload: a long typed line
+          // loses everything but its last 1,024 characters).
+          const payload = provider === 'codex' ? asPaste(text) : typedPayload(text);
           await typeInto(paneId, workspaceId, payload);
           if (codexGated) codexTyped.set(paneId, { key: text, at: clock(), enters: 0 });
         }
@@ -2354,8 +2364,7 @@ function createSessionSend(deps) {
         for (const ch of text) { await typeInto(paneId, workspaceId, ch); await sleep(40); }
         return { ok: true, action: 'raw' };
       }
-      const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
-      await typeInto(paneId, workspaceId, payload);
+      await typeInto(paneId, workspaceId, typedPayload(text));
       return { ok: true, action: 'raw' };
     }
 
@@ -2483,8 +2492,7 @@ function createSessionSend(deps) {
       await sleep(180);
       const text = String(action.text || '');
       if (text) {
-        const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
-        await typeInto(paneId, workspaceId, payload);
+        await typeInto(paneId, workspaceId, typedPayload(text));
         await sleep(120);
         await typeInto(paneId, workspaceId, MENU_KEYS.enter);
       }
@@ -2507,7 +2515,7 @@ function createSessionSend(deps) {
     if (action.type === 'text' && action.text) {
       const before = landed.options.find((o) => o.index === target)?.label ?? '';
       const text = String(action.text);
-      await typeInto(paneId, workspaceId, text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text);
+      await typeInto(paneId, workspaceId, typedPayload(text));
       await sleep(160);
       // CONFIRM the field took it before confirming, because the field's
       // contents ARE the row's label and therefore readable. This is the one
