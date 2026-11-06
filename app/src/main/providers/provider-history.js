@@ -62,6 +62,19 @@ function mungeCwd(cwd) {
   return String(cwd || '').replace(/^\/+/, '').replace(/[^a-zA-Z0-9]+/g, '-');
 }
 
+// Every rail refresh munges every cwd Harbor knows (thousands) to reverse
+// cursor's folder names; the answers never change, so they are remembered.
+const mungedCwds = new Map();
+function mungeCwdCached(cwd) {
+  let munged = mungedCwds.get(cwd);
+  if (munged === undefined) {
+    if (mungedCwds.size >= 50_000) mungedCwds.clear();
+    munged = mungeCwd(cwd);
+    mungedCwds.set(cwd, munged);
+  }
+  return munged;
+}
+
 function oneLine(text, max = TITLE_MAX) {
   const s = String(text || '').replace(/\s+/g, ' ').trim();
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
@@ -178,22 +191,81 @@ function createProviderHistory(options = {}) {
     } catch { /* first launch, or an unreadable cache: the scan rebuilds it */ }
     return storedFacts;
   };
+  // NOT REWRITTEN ON EVERY REFRESH (2026-11-06). Any live codex session grows
+  // its log, which changes its stored facts, so every rail refresh restringified
+  // and rewrote the whole 4 MB file, in the app and again in the phone server
+  // (about 34 MB a minute of allocations in the phone server alone). The file
+  // only spares a cold start its head reads, so it is written at most once per
+  // factsSaveIntervalMs (the newest facts, on a trailing timer, and on close).
+  const factsSaveIntervalMs = Math.max(0, Number(options.factsSaveIntervalMs ?? 120_000) || 0);
+  let lastFactsSaveAt = -Infinity;
+  let factsSaveTimer = null;
   const saveStoredFacts = async (seen) => {
     if (!storedFacts) return;
     for (const file of Object.keys(storedFacts)) {
       if (!seen.has(file)) { delete storedFacts[file]; storedFactsDirty = true; }
     }
     if (!storedFactsDirty) return;
+    const wait = lastFactsSaveAt + factsSaveIntervalMs - Date.now();
+    if (wait > 0) {
+      if (!factsSaveTimer) {
+        factsSaveTimer = setTimeout(() => { factsSaveTimer = null; writeStoredFacts().catch(() => {}); }, wait);
+        factsSaveTimer.unref?.();
+      }
+      return;
+    }
+    await writeStoredFacts();
+  };
+  // Writes the facts still waiting for their interval, synchronously (close).
+  // Each write takes a generation; an asynchronous write renames only if no
+  // newer write started since, so an older trailing write can never land over
+  // the close-time flush (Astra review round 2).
+  let factsWriteGen = 0;
+  const flushStoredFacts = () => {
+    const pendingTimer = Boolean(factsSaveTimer);
+    if (factsSaveTimer) { clearTimeout(factsSaveTimer); factsSaveTimer = null; }
+    if (!pendingTimer && !factsWriteInFlight) return;
+    factsWriteGen += 1;
+    if (!storedFacts || !storedFactsDirty && !factsWriteInFlight) return;
+    writeFactsSync();
+  };
+  const writeFactsSync = () => {
+    if (!storedFacts) return;
+    const temporary = `${factsCacheFile}.${process.pid}.${Date.now()}.sync.tmp`;
+    try {
+      fs.mkdirSync(path.dirname(factsCacheFile), { recursive: true });
+      fs.writeFileSync(temporary, JSON.stringify({ format: FACTS_FORMAT, files: storedFacts }));
+      fs.renameSync(temporary, factsCacheFile);
+      storedFactsDirty = false;
+    } catch {
+      try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
+    }
+  };
+  let factsWriteInFlight = false;
+  const writeStoredFacts = async () => {
+    if (!storedFacts || !storedFactsDirty) return;
     storedFactsDirty = false;
-    const temporary = `${factsCacheFile}.${process.pid}.${Date.now()}.tmp`;
+    lastFactsSaveAt = Date.now();
+    const gen = ++factsWriteGen;
+    factsWriteInFlight = true;
+    const temporary = `${factsCacheFile}.${process.pid}.${Date.now()}.${gen}.tmp`;
     try {
       await fsp.mkdir(path.dirname(factsCacheFile), { recursive: true });
       await fsp.writeFile(temporary, JSON.stringify({ format: FACTS_FORMAT, files: storedFacts }));
+      if (gen !== factsWriteGen) { await fsp.rm(temporary, { force: true }).catch(() => {}); return; }
       // Windows refuses a rename over a file another process has open for a
       // moment (the index.json lesson, 2026-09-04): retry briefly, and a cache
       // that still cannot be written just costs the next launch a rescan.
       for (let attempt = 0; ; attempt += 1) {
-        try { await fsp.rename(temporary, factsCacheFile); break; } catch (error) {
+        if (gen !== factsWriteGen) { await fsp.rm(temporary, { force: true }).catch(() => {}); return; }
+        try {
+          await fsp.rename(temporary, factsCacheFile);
+          // A close-time flush that ran while this rename was on its way may
+          // have landed first; the newest facts are written again so the older
+          // rename cannot be the last word.
+          if (gen !== factsWriteGen) writeFactsSync();
+          break;
+        } catch (error) {
           if (attempt >= 4 || !['EPERM', 'EACCES', 'EBUSY'].includes(error?.code)) throw error;
           await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
         }
@@ -201,6 +273,8 @@ function createProviderHistory(options = {}) {
     } catch {
       storedFactsDirty = true;
       await fsp.rm(temporary, { force: true }).catch(() => {});
+    } finally {
+      if (gen === factsWriteGen) factsWriteInFlight = false;
     }
   };
 
@@ -465,7 +539,7 @@ function createProviderHistory(options = {}) {
     // munged name, with cwd honestly null.
     const unmunge = new Map();
     for (const cwd of knownCwds || []) {
-      if (cwd) unmunge.set(mungeCwd(cwd), cwd);
+      if (cwd) unmunge.set(mungeCwdCached(cwd), cwd);
     }
     for (const [file, entry] of [...known].sort(listingOrder)) {
       let stat = fresh.get(file);
@@ -580,6 +654,7 @@ function createProviderHistory(options = {}) {
     migrationTimer = setTimeout(step, 0);
   };
   const close = () => {
+    flushStoredFacts();
     migrationClosed = true; clearTimeout(migrationTimer);
     clearTimeout(changedTimer);
     for (const watcher of watchers) watcher.close();

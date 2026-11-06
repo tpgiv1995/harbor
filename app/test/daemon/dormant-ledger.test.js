@@ -39,14 +39,18 @@ const exitState = (agentSession, at, extra = {}) => ({
 
 test('a dormancy sleep is recorded and a newer ordinary exit clears it', () => {
   const file = tempLedger();
+  // The ledger drops entries older than 30 days from "now", so the clock is
+  // pinned to the fixture's day: on the real clock this test broke by itself
+  // on 2026-11-06, 31 days after the dates below.
+  const now = Date.parse('2026-10-06T12:00:00.000Z');
   assert.deepEqual(readLedger(file), {}, 'a missing ledger reads as empty');
-  assert.equal(noteExit(file, exitState('s1', '2026-10-06T10:00:00.000Z', { dormant: true, reason: 'idle for 61m' })), true);
+  assert.equal(noteExit(file, exitState('s1', '2026-10-06T10:00:00.000Z', { dormant: true, reason: 'idle for 61m' }), now), true);
   assert.deepEqual(readLedger(file).s1, { at: '2026-10-06T10:00:00.000Z', agent: 'claude', reason: 'idle for 61m' });
   // An ordinary exit OLDER than the sleep (observed out of order) changes nothing.
-  assert.equal(noteExit(file, exitState('s1', '2026-10-06T09:00:00.000Z')), false);
+  assert.equal(noteExit(file, exitState('s1', '2026-10-06T09:00:00.000Z'), now), false);
   assert.ok(readLedger(file).s1);
   // A newer ordinary exit (resumed, then closed) is the newest ending: cleared.
-  assert.equal(noteExit(file, exitState('s1', '2026-10-06T11:00:00.000Z')), true);
+  assert.equal(noteExit(file, exitState('s1', '2026-10-06T11:00:00.000Z'), now), true);
   assert.equal(readLedger(file).s1, undefined);
 });
 

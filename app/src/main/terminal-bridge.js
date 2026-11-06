@@ -225,6 +225,10 @@ function createTerminalBridge(options = {}) {
   };
 
   const applyEvent = (event) => {
+    if (event?.event === 'pane.resized') {
+      noteDaemonPaneSize(event.data);
+      return;
+    }
     state = applyWorkspaceEvent(state, event);
     state = applyTabEvent(state, event);
     state = applyLayoutEvent(state, event);
@@ -358,6 +362,71 @@ function createTerminalBridge(options = {}) {
       resyncing.delete(paneId);
     }
   });
+
+  // AN OPEN >_ VIEW TAKES ITS SIZE BACK (2026-11-06, Pat: "look at the
+  // scrambled lettering"). The pty can be resized by another client while this
+  // view is open: the phone server's own bridge grew Pat's 154x35 pane to 120x60
+  // for dialogs. xterm stayed at 154 columns while Claude drew for 120, so its
+  // cursor moves landed on the wrong rows and the view filled with stray
+  // letters until he toggled >_. The daemon now refuses that dialog resize
+  // while a view is open (daemon.js), and this catches every other kind: when
+  // the daemon reports a size that is not this view's and it still is not
+  // HEAL_CONFIRM_MS later (this bridge's own resizes land within a poll), the
+  // view's size is put back and the view repainted from history, the same
+  // resync a dropped-frame warning takes. At most once per HEAL_MIN_GAP_MS per
+  // pane, so two views of one pane cannot flap it; the phone server turns this
+  // off (server/compose.js) and the desktop view wins.
+  const HEAL_CONFIRM_MS = options.healConfirmMs ?? 1500;
+  const HEAL_MIN_GAP_MS = options.healMinGapMs ?? 10_000;
+  const daemonPaneSize = new Map(); // paneId -> { cols, rows } last reported
+  const healTimers = new Map();
+  const lastHealAt = new Map();
+  const viewDisagrees = (paneId) => {
+    const view = visiblePanes.get(paneId);
+    const held = daemonPaneSize.get(paneId);
+    return Boolean(view && held && (view.cols !== held.cols || view.rows !== held.rows));
+  };
+  // A repair that has to wait (inside the per-pane gap, or while a resync or
+  // this view's own resize is in flight) is scheduled again for when it may
+  // run: the daemon reports a size only when it CHANGES, so a wrong size that
+  // stays put would otherwise never be repaired (Astra review 2026-11-06).
+  const scheduleHeal = (paneId, delay) => {
+    if (closed || healTimers.has(paneId)) return;
+    const timer = setTimeout(() => {
+      healTimers.delete(paneId);
+      healForeignResize(paneId).catch(() => {});
+    }, Math.max(0, delay));
+    timer.unref?.();
+    healTimers.set(paneId, timer);
+  };
+  const healForeignResize = async (paneId) => {
+    if (closed || !viewDisagrees(paneId)) return;
+    if (resyncing.has(paneId) || observerResizeTimers.has(paneId)) { scheduleHeal(paneId, HEAL_CONFIRM_MS); return; }
+    const last = lastHealAt.get(paneId);
+    if (last != null && Date.now() - last < HEAL_MIN_GAP_MS) { scheduleHeal(paneId, last + HEAL_MIN_GAP_MS - Date.now()); return; }
+    lastHealAt.set(paneId, Date.now());
+    const view = visiblePanes.get(paneId);
+    resyncing.add(paneId);
+    try {
+      holdFrames(paneId);
+      supervisor.resize(paneId, { cols: view.cols, rows: view.rows });
+      emitter.emit('reset', { paneId });
+      await backfillPane(paneId);
+      releaseFrames(paneId);
+      emitter.emit('view-resized-back', { paneId, cols: view.cols, rows: view.rows });
+    } catch (error) {
+      heldFrames.delete(paneId);
+      emitter.emit('error', error);
+    } finally {
+      resyncing.delete(paneId);
+    }
+  };
+  const noteDaemonPaneSize = ({ pane_id: paneId, cols, rows } = {}) => {
+    if (!paneId || !Number.isInteger(cols) || !Number.isInteger(rows)) return;
+    daemonPaneSize.set(paneId, { cols, rows });
+    if (options.healForeignResize === false || !viewDisagrees(paneId)) return;
+    scheduleHeal(paneId, HEAL_CONFIRM_MS);
+  };
 
   const backfillPane = async (paneId) => {
     if (!client) return;
@@ -1060,6 +1129,8 @@ function createTerminalBridge(options = {}) {
   const close = () => {
     closed = true;
     clearTimeout(reconnectTimer);
+    for (const timer of healTimers.values()) clearTimeout(timer);
+    healTimers.clear();
     stopPaneSizeSweep();
     supervisor.detach();
     subscription?.close?.();

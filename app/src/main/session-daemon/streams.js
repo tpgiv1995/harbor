@@ -76,8 +76,14 @@ class SessionStreamSupervisor extends EventEmitter {
   ensureDialogSize(paneId, size = {}) {
     const cols = size.cols || 120;
     const rows = size.rows || 60;
-    return this.client.request('resize', { id: paneId, cols, rows })
-      .then(() => ({ ok: true, via: 'sessiond', cols, rows }));
+    // `purpose: 'dialog'` lets the daemon refuse this while any client shows
+    // the pane raw (daemon.js, 2026-11-06); a refusal is not a success, so the
+    // bridge retries on its cooldown instead of marking the pane sized. An
+    // older daemon ignores the field and resizes as before.
+    return this.client.request('resize', { id: paneId, cols, rows, purpose: 'dialog' })
+      .then((result) => (result?.resized === false
+        ? { ok: false, reason: result.reason || 'refused by the daemon' }
+        : { ok: true, via: 'sessiond', cols, rows }));
   }
   sizingFor() { return null; }
   releaseControl(paneId) {

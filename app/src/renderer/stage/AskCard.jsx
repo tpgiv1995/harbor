@@ -219,6 +219,14 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
   // misses (~1.4s); a real answer clears it instantly through `run`, so this only
   // guards the transient miss, never a genuine dismissal (2026-09-04).
   const missRef = useRef(0);
+  // The poll reads the pane through a ref and restarts only when the pane's ID
+  // changes (2026-11-06). With `pane` itself in the deps, every sidebar model
+  // (about two a second) handed this card a new pane object for the same pane,
+  // which cancelled the 700 ms timer and polled again at once: measured live,
+  // each open Claude window drove ~24 screen reads a second through main, the
+  // daemon and its keeper instead of the ~3 the 700 ms cadence allows.
+  const paneRef = useRef(pane);
+  paneRef.current = pane;
   useEffect(() => {
     if (!paneId) { setMenu(null); return undefined; }
     let alive = true;
@@ -229,7 +237,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
       if (!alive) return;
       if (!busyRef.current) {
         try {
-          const next = await window.harbor.session.menuState({ pane, sessionId, blockedHint: blockedRef.current, observe: watchOnly });
+          const next = await window.harbor.session.menuState({ pane: paneRef.current, sessionId, blockedHint: blockedRef.current, observe: watchOnly });
           if (alive && !busyRef.current) {
             const shown = live(next);
             if (shown) { missRef.current = 0; setMenu(shown); }
@@ -241,7 +249,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
     };
     tick();
     return () => { alive = false; if (timer) clearTimeout(timer); };
-  }, [paneId, sessionId, pane, blockedHint, watchOnly]);
+  }, [paneId, sessionId, blockedHint, watchOnly]);
 
   const sheet = useMemo(() => menu?.kind === 'model-switch' ? null : buildSheet(menu), [menu]);
   const sheetRef = useRef(sheet);

@@ -9,6 +9,9 @@ const { EventEmitter } = require('node:events');
 
 const { createTerminalBridge } = require('../../src/main/terminal-bridge.js');
 const { SessionStreamSupervisor } = require('../../src/main/session-daemon/streams.js');
+const { SessionSubscription, snapshotFromSessions } = require('../../src/main/session-daemon/client.js');
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function subscription() {
   const sub = new EventEmitter();
@@ -16,7 +19,7 @@ function subscription() {
   return sub;
 }
 
-function bridgeWith(panes) {
+function bridgeWith(panes, extra = {}) {
   class FakeSessionDaemon {
     async bootstrap() { return { snapshot: { panes, tabs: [], layouts: [] }, subscription: subscription() }; }
     async snapshot() { return { snapshot: { panes } }; }
@@ -33,6 +36,7 @@ function bridgeWith(panes) {
     createStreamSupervisor: () => supervisor,
     env: { ...process.env, HARBOR_SESSION_BACKEND: 'sessiond' },
     sessionStorePolicy: { allowed: true },
+    ...extra,
   });
 }
 
@@ -47,7 +51,7 @@ test('the sessiond supervisor resizes a pane to dialog geometry', async () => {
   assert.deepEqual(await supervisor.ensureDialogSize('p1', { cols: 120, rows: 60 }), {
     ok: true, via: 'sessiond', cols: 120, rows: 60,
   });
-  assert.deepEqual(calls, [['resize', { id: 'p1', cols: 120, rows: 60 }]]);
+  assert.deepEqual(calls, [['resize', { id: 'p1', cols: 120, rows: 60, purpose: 'dialog' }]]);
   supervisor.detach();
 });
 
@@ -226,4 +230,99 @@ test('the sweep leaves a pane with the raw terminal open alone', async () => {
   await bridge.setVisiblePanes([{ paneId: 'p1', cols: 94, rows: 31 }]);
   await bridge.sizeAllPanes();
   assert.deepEqual(sized, []);
+});
+
+// A RAW VIEW OWNS ITS PANE'S SIZE ACROSS CLIENTS (2026-11-06, Pat: "look at the
+// scrambled lettering"). The phone server's bridge grew a pane Pat was watching
+// raw on the desktop to 120x60 and the desktop view scrambled.
+test('a dialog resize the daemon refuses is a failure the bridge retries, not a success', async () => {
+  const client = {
+    onEvent: () => () => {},
+    request: async () => ({ resized: false, reason: 'a raw terminal view owns this pane size' }),
+    close() {},
+  };
+  const supervisor = new SessionStreamSupervisor({ client });
+  assert.deepEqual(await supervisor.ensureDialogSize('p1'), { ok: false, reason: 'a raw terminal view owns this pane size' });
+  supervisor.detach();
+});
+
+test('the daemon poll reports a pane another client resized', async () => {
+  let sessions = [{ id: 'p1', cwd: 'C:\\dev\\x', cols: 154, rows: 35 }];
+  const owner = { snapshot: async () => ({ snapshot: snapshotFromSessions(sessions, 'C:\\Users\\x') }) };
+  const sub = new SessionSubscription(owner, { pollIntervalMs: 60_000 });
+  const events = [];
+  sub.on('event', (event) => events.push(event));
+  await sub._poll();
+  await sub._poll();
+  assert.equal(events.filter((e) => e.event === 'pane.resized').length, 0, 'an unchanged size says nothing');
+  sessions = [{ ...sessions[0], cols: 120, rows: 60 }];
+  await sub._poll();
+  assert.deepEqual(events.filter((e) => e.event === 'pane.resized').map((e) => e.data), [{ pane_id: 'p1', cols: 120, rows: 60 }]);
+  sub.close();
+});
+
+async function viewing(extra = {}) {
+  const bridge = bridgeWith([{ pane_id: 'p1', tab_id: 't1' }], { healConfirmMs: 20, healMinGapMs: 300, ...extra });
+  await bridge.start();
+  const resizes = [];
+  const resets = [];
+  bridge.supervisor.attachObserver = () => ({});
+  bridge.supervisor.resize = (paneId, size) => resizes.push({ paneId, ...size });
+  bridge.emitter.on('reset', ({ paneId }) => resets.push(paneId));
+  await bridge.setVisiblePanes([{ paneId: 'p1', cols: 154, rows: 35 }]);
+  resizes.length = 0;
+  resets.length = 0;
+  return { bridge, resizes, resets };
+}
+const daemonSays = (bridge, cols, rows, paneId = 'p1') => bridge.applyEvent({ event: 'pane.resized', data: { pane_id: paneId, cols, rows } });
+
+test('an open >_ view takes its size back when another client resizes its pane, and repaints', async () => {
+  const { bridge, resizes, resets } = await viewing();
+  daemonSays(bridge, 120, 60);
+  await sleep(100);
+  assert.deepEqual(resizes, [{ paneId: 'p1', cols: 154, rows: 35 }], 'the view\'s own size goes back to the pty');
+  assert.deepEqual(resets, ['p1'], 'and the view is cleared and refilled at that size');
+  daemonSays(bridge, 154, 35);
+  await sleep(100);
+  assert.equal(resizes.length, 1, 'once the daemon agrees, nothing more happens');
+  bridge.close();
+});
+
+test('a size that agrees with the view again within the confirm delay is left alone (the bridge\'s own resize landing)', async () => {
+  const { bridge, resizes, resets } = await viewing({ healConfirmMs: 80 });
+  daemonSays(bridge, 150, 34);
+  daemonSays(bridge, 154, 35);
+  await sleep(200);
+  assert.deepEqual(resizes, []);
+  assert.deepEqual(resets, []);
+  bridge.close();
+});
+
+test('two viewers cannot flap a pane: one heal per gap', async () => {
+  const { bridge, resizes } = await viewing();
+  daemonSays(bridge, 120, 60);
+  await sleep(100);
+  daemonSays(bridge, 154, 35);
+  daemonSays(bridge, 70, 40);
+  await sleep(100);
+  assert.equal(resizes.length, 1, 'a second foreign size inside the gap waits');
+  // Astra review 2026-11-06, finding 6: the daemon reports a size only when it
+  // changes, so a wrong size that stays put must be repaired once the gap ends.
+  await sleep(400);
+  assert.equal(resizes.length, 2, 'and is repaired when the gap is over');
+  assert.deepEqual(resizes[1], { paneId: 'p1', cols: 154, rows: 35 });
+  bridge.close();
+});
+
+test('a pane with no open >_ view is never resized by the heal, and the phone server does not heal', async () => {
+  const quiet = await viewing();
+  daemonSays(quiet.bridge, 120, 60, 'p2');
+  await sleep(100);
+  assert.deepEqual(quiet.resizes, []);
+  quiet.bridge.close();
+  const phone = await viewing({ healForeignResize: false });
+  daemonSays(phone.bridge, 120, 60);
+  await sleep(100);
+  assert.deepEqual(phone.resizes, []);
+  phone.bridge.close();
 });

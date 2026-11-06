@@ -20,9 +20,22 @@ const crypto = require('node:crypto');
 // /transcript-images/<id>, only when an image actually scrolls into view, and
 // Chromium owns the decoded pixels. Bounded by bytes, least recently used out
 // first; an evicted image that is still on screen answers 404 and the window
-// says so instead of showing nothing.
+// says so instead of showing nothing ("Reopen this window to see it": nothing
+// re-resolves it on its own, which is why the cap below is not set lower).
+//
+// THE CAP IS 128 MB, NOT 384 (2026-11-06, perf lane B1). The store is filled by
+// every parsed image line of every process, and a Buffer here stays resident
+// until evicted. Measured that day over the 14 most recently written
+// transcripts above 8 MB (read-only replay): a window retains its newest 64
+// prefix images plus the images in its 1 MB tail, 0 to 23 MB per window (median
+// image 95 to 275 KB, largest 1.6 MB), 104 MB for all 14 together. 128 MB holds
+// that whole working set with margin for the sixteen windows the stage allows;
+// 96 MB would already evict the least recently used window's pictures. 384 MB
+// let skipped-prefix scans, paging chunks and live appends pile up bytes
+// nothing on screen needed, in the desktop main process and again in the phone
+// server's own store.
 
-const DEFAULT_MAX_BYTES = 384 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = 128 * 1024 * 1024;
 const IMAGE_ID_RE = /^[0-9a-f]{32}$/;
 
 function imageIdFor(base64) {
@@ -62,7 +75,18 @@ function createImageStore({ maxBytes = DEFAULT_MAX_BYTES } = {}) {
     return hit;
   }
 
-  return { put, get, stats: () => ({ images: entries.size, bytes: total }) };
+  // Is this image still held? A hit counts as a use, so a cached window seed
+  // that checks its pictures keeps them from being the next to go.
+  function has(id) {
+    const key = String(id || '');
+    if (!IMAGE_ID_RE.test(key)) return false;
+    const hit = entries.get(key);
+    if (!hit) return false;
+    touch(key, hit);
+    return true;
+  }
+
+  return { put, get, has, stats: () => ({ images: entries.size, bytes: total }) };
 }
 
 // One store per process: main's transcript provider and the harbor-image://

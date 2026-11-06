@@ -291,6 +291,12 @@ test('byte bridge observes real frames, sends bytes, resizes, sizes dialogs, and
   assert.equal(resized.screen.cols, 91);
   assert.equal(resized.screen.rows, 37);
 
+  // A pane someone shows raw keeps that view's size: the daemon refuses dialog
+  // sizing while any connection observes it (2026-11-06), and the same request
+  // lands once the raw view is gone.
+  assert.deepEqual(await streams.ensureDialogSize(paneId, { cols: 123, rows: 57 }),
+    { ok: false, reason: 'a raw terminal view owns this pane size' });
+  await streams.client.request('unobserve', { id: paneId });
   assert.deepEqual(await streams.ensureDialogSize(paneId, { cols: 123, rows: 57 }),
     { ok: true, via: 'sessiond', cols: 123, rows: 57 });
   streams.sendInput(paneId, line(IS_WIN32 ? 'echo DIALOG_SIZE_VISIBLE' : "stty size; printf 'DIALOG_SIZE_VISIBLE\\n'"));

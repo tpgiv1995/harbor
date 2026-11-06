@@ -8,6 +8,7 @@
 // unforgivable failure mode here).
 
 const { EventEmitter } = require('node:events');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -758,7 +759,7 @@ const isWorkingTurn = (text) => {
 function createSessionSend(deps) {
   const {
     snapshot, // async () => normalized { panes: [], workspaces: [] }
-    readPane, // async (paneId) => text
+    readPane: rawReadPane, // async (paneId, lines, source) => text
     // async (paneId) => Claude's dim composer suggestion, or null. Read from the
     // keeper's modeled cells (src/daemon/screen.js); a stripped scrape cannot
     // tell it from a typed draft.
@@ -788,6 +789,51 @@ function createSessionSend(deps) {
   const captureDir = process.env.HARBOR_UNRECOGNIZED_DIR
     || suppliedCaptureDir
     || path.join(os.homedir(), '.cache/harbor/unrecognized-dialogs');
+  // ONE SCREEN READ PER ASK, NOT SIX, INSIDE A MENU POLL (2026-11-06). A window's
+  // menu poll walks readMenu (recent, then visible), readFallback (recent again)
+  // and readList (visible, recent): five or six daemon round trips for one
+  // question, each a fresh pipe to the session's keeper, which renders 90 lines
+  // of scrollback to JSON for every one of them. Measured live with six Claude
+  // windows open: 7,434 screen reads a minute from Harbor main, 719 MB a minute
+  // of allocations in the daemon, keepers behind open windows at 6x the CPU and
+  // 2-3x the commit of the rest. Within one getMenu call the same read is asked
+  // once and shared; any input this module sends to a pane drops what was read
+  // (sendPaneInput), so a walk that types and re-reads still sees the new
+  // screen. Outside a menu poll nothing is shared: the send and settle loops
+  // poll every 40-160 ms and must see every change. And once a poll ACTS on a
+  // pane (a first-run Enter, a batch walk's arrow keys) sharing stops for the
+  // rest of that poll: its waits re-read every 60 ms for the redraw, and a
+  // shared copy would hide it from them.
+  //
+  // Input from ANY caller ends the sharing too (Astra review 2026-11-06): two
+  // polls of one pane can await the same discovery walk, and the walk's keys
+  // are sent from the first poll's context, so the second poll's cached
+  // pre-walk screen would survive the walk. Every input bumps the pane's
+  // generation; a poll that sees a pane's generation move since it first read
+  // that pane stops sharing for the rest of its run, exactly like a poll that
+  // typed itself.
+  const pollReads = new AsyncLocalStorage();
+  const paneInputGen = new Map(); // paneId -> inputs sent through this module, any caller
+  const readPane = (paneId, lines, source) => {
+    const poll = pollReads.getStore();
+    if (!poll?.sharing) return rawReadPane(paneId, lines, source);
+    const gen = paneInputGen.get(paneId) || 0;
+    if (poll.gens.has(paneId) && poll.gens.get(paneId) !== gen) {
+      poll.sharing = false;
+      poll.reads.clear();
+      return rawReadPane(paneId, lines, source);
+    }
+    poll.gens.set(paneId, gen);
+    const key = `${paneId}\u0000${lines}\u0000${source}`;
+    if (!poll.reads.has(key)) poll.reads.set(key, rawReadPane(paneId, lines, source));
+    return poll.reads.get(key);
+  };
+  const sendPaneInput = (paneId, payload) => {
+    paneInputGen.set(paneId, (paneInputGen.get(paneId) || 0) + 1);
+    const poll = pollReads.getStore();
+    if (poll) { poll.sharing = false; poll.reads.clear(); }
+    return terminalBridge.sendInput(paneId, payload);
+  };
   const emitter = new EventEmitter();
   const inFlight = new Set(); // session ids currently draining one item
   const queues = new Map(); // sessionId -> FIFO send items
@@ -1329,10 +1375,10 @@ function createSessionSend(deps) {
   };
 
   const typeInto = async (paneId, workspaceId, payload) => {
-    let result = terminalBridge.sendInput(paneId, payload);
+    let result = sendPaneInput(paneId, payload);
     if (result?.ok === false) {
       await acquireControl(paneId, workspaceId);
-      result = terminalBridge.sendInput(paneId, payload);
+      result = sendPaneInput(paneId, payload);
     }
     if (result?.ok === false) throw new Error(result.reason || 'input refused');
   };
@@ -2960,7 +3006,7 @@ function createSessionSend(deps) {
     if (state.controlledPaneId !== paneId) {
       await terminalBridge.requestFocusPane({ paneId, workspaceId }).catch(() => {});
     }
-    const result = terminalBridge.sendInput(paneId, '\x1b[Z');
+    const result = sendPaneInput(paneId, '\x1b[Z');
     if (result?.ok === false) throw new Error(result.reason || 'input refused');
     await sleep(400);
     return readPermissionMode(paneId);
@@ -3474,7 +3520,8 @@ function createSessionSend(deps) {
   // 24 minutes under a blue badge). The human is looking at the real terminal
   // there and may be typing into it, so an observing poll never sends a key or
   // resizes: no batch walk, no first-run Enter, no dialog sizing.
-  const getMenu = async ({ pane, blockedHint, ask, observe = false } = {}) => {
+  const getMenu = (args) => pollReads.run({ reads: new Map(), gens: new Map(), sharing: true }, () => getMenuOnce(args));
+  const getMenuOnce = async ({ pane, blockedHint, ask, observe = false } = {}) => {
     if (!pane?.paneId) return null;
     // Size the pane for dialogs the first time a window polls it, which is
     // within a second of the window opening and long before Claude asks

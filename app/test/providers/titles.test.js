@@ -328,3 +328,52 @@ test('an untitled session still gets its first name, and later prompts are dedup
   assert.equal(context.match(/set up the legion/giu).length, 1, 'the opener must not be repeated back as a later prompt');
   assert.equal(JSON.parse(fs.readFileSync(files.titlesFile, 'utf8')).depths.sid, 2);
 });
+
+// The app queues a titler pass after every history refresh (every 15 to 30 s
+// while any session works), and each pass parsed the whole index cache
+// (17 MB on Pat's machine) on the main thread before learning that nothing
+// needed a name. A pass whose index and titles files are unchanged since a
+// pass with no candidates is skipped; a change to either runs a real pass.
+test('a titler pass with nothing to name is not repeated until the index or titles change', async (t) => {
+  const files = fixture(t);
+  fs.writeFileSync(files.indexFile, JSON.stringify({
+    v: 2,
+    files: { named: { id: 'named-id', mt: 1, last: '2026-08-04T11:00:00Z', native_title: 'Already named', first_prompt: 'x', recent: [] } },
+  }));
+  let indexReads = 0;
+  const countingFs = {
+    ...fs,
+    readFileSync: (target, ...rest) => {
+      if (path.resolve(String(target)) === path.resolve(files.indexFile)) indexReads += 1;
+      return fs.readFileSync(target, ...rest);
+    },
+  };
+  const prompts = [];
+  const make = () => createTitlesProvider({
+    fs: countingFs,
+    cacheDir: files.cacheDir,
+    titlesFile: files.titlesFile,
+    claudeBin: 'stub-claude',
+    now: () => new Date('2026-08-04T13:00:00Z'),
+    runTitle: async (_bin, _mcp, prompt) => { prompts.push(prompt); return { text: 'Fresh Session Name' }; },
+  });
+
+  await make().run({ all: true });
+  assert.equal(indexReads, 1);
+  const second = await make().run({ all: true });
+  assert.equal(second.skipped, 'unchanged');
+  assert.equal(indexReads, 1, 'an idle pass over unchanged inputs does not read the index again');
+
+  // A new session lands in the index: the next pass reads it and names it.
+  fs.writeFileSync(files.indexFile, JSON.stringify({
+    v: 2,
+    files: {
+      named: { id: 'named-id', mt: 1, last: '2026-08-04T11:00:00Z', native_title: 'Already named', first_prompt: 'x', recent: [] },
+      fresh: { id: 'fresh-id', mt: 2, last: '2026-08-04T12:00:00Z', first_prompt: 'Name this new session please', recent: [] },
+    },
+  }));
+  const third = await make().run({ all: true });
+  assert.equal(indexReads, 2);
+  assert.equal(third.titled, 1, 'the new session is named');
+  assert.equal(prompts.length, 1);
+});

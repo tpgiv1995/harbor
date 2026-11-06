@@ -63,6 +63,34 @@ test('codex/cursor rows come from the saved head facts when the file is unchange
   assert.equal((await launch()).title, 'Fix the flaky gadget test.', 'a cache written by different code is ignored');
 });
 
+// 2026-11-06: a live codex session grows its log on every turn, and every
+// rail refresh rewrote the whole facts file (4 MB on Pat's machine) in the app
+// and again in the phone server. One instance writes at most once per
+// interval; what changed meanwhile is written on close.
+test('the facts file is written at most once per interval, and the newest facts land on close', async (t) => {
+  const dir = tmp(t, 'harbor-facts-interval-');
+  const codexRoot = path.join(dir, 'codex-sessions');
+  const day = path.join(codexRoot, '2026', '07', '21');
+  fs.mkdirSync(day, { recursive: true });
+  const rollout = path.join(day, `rollout-2026-07-21T01-35-28-${CODEX_ID}.jsonl`);
+  const factsCacheFile = path.join(dir, 'provider-row-facts.json');
+  const history = createProviderHistory({ codexRoot, cursorRoot: path.join(dir, 'none'), metadataFile: path.join(dir, 'meta.json'), factsCacheFile, factsSaveIntervalMs: 60_000 });
+  const savedPrompt = () => JSON.parse(fs.readFileSync(factsCacheFile, 'utf8')).files[rollout].facts.firstUser;
+
+  writeRollout(rollout, 'First prompt of the session.');
+  await history.listSessions();
+  assert.equal(savedPrompt(), 'First prompt of the session.', 'the first refresh writes the file');
+
+  writeRollout(rollout, 'A different opening prompt now.');
+  fs.utimesSync(rollout, STAMP_S + 60, STAMP_S + 60);
+  const rows = await history.listSessions();
+  assert.equal(rows.find((row) => row.id === CODEX_ID).title, 'A different opening prompt now.', 'the rail sees the change at once');
+  assert.equal(savedPrompt(), 'First prompt of the session.', 'but the file is not rewritten inside the interval');
+
+  history.close();
+  assert.equal(savedPrompt(), 'A different opening prompt now.', 'close writes the newest facts');
+});
+
 const stamp = (n) => new Date(100000 + n * 1000).toISOString();
 const launchLines = () => [
   { type: 'assistant', timestamp: stamp(0), message: { content: [{ type: 'tool_use', id: 'tool', name: 'Bash', input: { description: 'Long build', command: 'npm run build' } }] } },
@@ -161,4 +189,34 @@ test('through the real worker: a second index with the same cache file resumes w
     second.close();
   }
   assert.equal(tasks.find((task) => task.id === 'old')?.status, 'completed', 'the new worker resumed from the saved offset');
+});
+
+// Astra review round 2, N7: an older trailing write paused at its rename could
+// land after the close-time flush and leave older facts on disk.
+test('an older facts write that lands late never leaves older facts on disk', async (t) => {
+  const fsp = require('node:fs/promises');
+  const dir = tmp(t, 'harbor-facts-race-');
+  const codexRoot = path.join(dir, 'codex-sessions');
+  const day = path.join(codexRoot, '2026', '07', '21');
+  fs.mkdirSync(day, { recursive: true });
+  const rollout = path.join(day, `rollout-2026-07-21T01-35-28-${CODEX_ID}.jsonl`);
+  const factsCacheFile = path.join(dir, 'provider-row-facts.json');
+  const history = createProviderHistory({ codexRoot, cursorRoot: path.join(dir, 'none'), metadataFile: path.join(dir, 'meta.json'), factsCacheFile, factsSaveIntervalMs: 0 });
+  const savedPrompt = () => JSON.parse(fs.readFileSync(factsCacheFile, 'utf8')).files[rollout].facts.firstUser;
+  writeRollout(rollout, 'Version A of the prompt.');
+  await history.listSessions();
+  const realRename = fsp.rename;
+  let release; const gate = new Promise((resolve) => { release = resolve; });
+  let paused = 0;
+  fsp.rename = async (...args) => { if (String(args[1]) === factsCacheFile && paused++ === 0) await gate; return realRename(...args); };
+  t.after(() => { fsp.rename = realRename; });
+  writeRollout(rollout, 'Version B of the prompt.'); fs.utimesSync(rollout, STAMP_S + 60, STAMP_S + 60);
+  const writingB = history.listSessions(); // pauses at B's rename
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  writeRollout(rollout, 'Version C of the prompt.'); fs.utimesSync(rollout, STAMP_S + 120, STAMP_S + 120);
+  await history.listSessions();
+  history.close();
+  assert.equal(savedPrompt(), 'Version C of the prompt.', 'close leaves the newest facts');
+  release(); await writingB;
+  assert.equal(savedPrompt(), 'Version C of the prompt.', 'and the older write that landed late does not replace them');
 });

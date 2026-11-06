@@ -169,6 +169,8 @@ function persist(extra = {}) {
 }
 
 function event(payload) {
+  // No observer, nothing to build: an event is only ever written to observers.
+  if (!observers.size) return;
   const value = { id: config.id, ...payload };
   for (const writer of observers.values()) {
     if (payload.type === 'frame') writer.send(value);
@@ -230,7 +232,10 @@ function startSession() {
   terminal.onData((data) => {
     noteActivity();
     screen.write(data);
-    event({ type: 'frame', text: data, bytes: Buffer.from(data).toString('base64') });
+    // The base64 copy and the event object cost an allocation per pty chunk, and
+    // a session nobody is watching raw (almost all of them, almost always) has
+    // no observer to send them to. The wire format is unchanged: text plus bytes.
+    if (observers.size) event({ type: 'frame', text: data, bytes: Buffer.from(data).toString('base64') });
   });
   // The test seam exists because the failure it reproduces cannot be forced:
   // ConPTY sometimes never delivers onExit for a child that dies instantly

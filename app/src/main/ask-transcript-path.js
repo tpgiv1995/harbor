@@ -24,7 +24,16 @@
 //     writes its transcript on its first message and the next poll is 700ms
 //     away, so "not yet" must stay retryable.
 
-function createAskTranscriptResolver({ getSessionMeta, findTranscript, cache = new Map() } = {}) {
+//  3. A MISS RETRIES CHEAPLY (2026-11-06, Astra review). The derived-path and
+//     cwd-ancestor checks run on every poll, but the whole-store scan (every
+//     project folder, 4,486 on Pat's machine) runs at most once per
+//     STORE_SCAN_INTERVAL_MS per session: three polls of one missing session
+//     made 13,458 access attempts, sixteen of them about 72,000 per round.
+//     Same rule and interval as the conversation view (transcript.js).
+const STORE_SCAN_INTERVAL_MS = 30_000;
+
+function createAskTranscriptResolver({ getSessionMeta, findTranscript, cache = new Map(), now = Date.now } = {}) {
+  const scannedAt = new Map(); // session id -> when its last whole-store scan ran
   const resolve = async (sessionId) => {
     // A provisional id names a pane, not a session, and has no transcript.
     if (!sessionId) return null;
@@ -39,16 +48,23 @@ function createAskTranscriptResolver({ getSessionMeta, findTranscript, cache = n
 
     let transcriptPath = meta?.path || null;
     if (!transcriptPath) {
+      const last = scannedAt.get(id);
+      const scanStore = last == null || now() - last >= STORE_SCAN_INTERVAL_MS;
+      if (scanStore) {
+        if (scannedAt.size > 2000) scannedAt.clear();
+        scannedAt.set(id, now());
+      }
       try {
         transcriptPath = await findTranscript?.({
           provider: meta?.provider || 'claude',
           sessionId: id,
           cwd: meta?.cwd || null,
+          scanStore,
         });
       } catch { transcriptPath = null; }
     }
 
-    if (transcriptPath) cache.set(id, transcriptPath);
+    if (transcriptPath) { cache.set(id, transcriptPath); scannedAt.delete(id); }
     return transcriptPath || null;
   };
 
@@ -62,4 +78,4 @@ function createAskTranscriptResolver({ getSessionMeta, findTranscript, cache = n
   };
 }
 
-module.exports = { createAskTranscriptResolver };
+module.exports = { createAskTranscriptResolver, STORE_SCAN_INTERVAL_MS };

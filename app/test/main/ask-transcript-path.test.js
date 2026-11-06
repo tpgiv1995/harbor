@@ -33,7 +33,7 @@ test('a session the index has not caught up to is still found on disk', async ()
   });
 
   assert.equal(await resolver.resolve('sess'), '/store/-home-dev-harbor/sess.jsonl');
-  assert.deepEqual(scanned, { provider: 'claude', sessionId: 'sess', cwd: '/home/dev/harbor' });
+  assert.deepEqual(scanned, { provider: 'claude', sessionId: 'sess', cwd: '/home/dev/harbor', scanStore: true });
 });
 
 // Not even a meta record: findProviderTranscript scans the project dirs for
@@ -111,4 +111,26 @@ test('an explicitly set path is used verbatim', async () => {
   assert.equal(await resolver.resolve('sess'), '/fixtures/pinned.jsonl');
   resolver.forget('sess');
   assert.equal(await resolver.resolve('sess'), '/store/wrong.jsonl');
+});
+
+// 2026-11-06 (Astra review): a session with no transcript yet was looked up on
+// every 700 ms poll with a scan of every project folder in the store. The cheap
+// checks still run every poll; the whole-store scan at most once per interval.
+test('a missing transcript scans the whole store at most once per interval, and is still found the moment it appears', async () => {
+  const { createAskTranscriptResolver, STORE_SCAN_INTERVAL_MS } = require('../../src/main/ask-transcript-path.js');
+  let clock = 1_000_000;
+  const calls = [];
+  let exists = false;
+  const resolver = createAskTranscriptResolver({
+    getSessionMeta: async () => ({ cwd: 'C:\\dev\\thing' }),
+    findTranscript: async (args) => { calls.push(args.scanStore); return exists ? 'C:\\t\\s.jsonl' : null; },
+    now: () => clock,
+  });
+  for (let i = 0; i < 5; i += 1) { assert.equal(await resolver.resolve('11111111-2222-3333-4444-555555555555'), null); clock += 700; }
+  assert.deepEqual(calls, [true, false, false, false, false], 'one whole-store scan, then cheap checks');
+  clock += STORE_SCAN_INTERVAL_MS;
+  await resolver.resolve('11111111-2222-3333-4444-555555555555');
+  assert.equal(calls.at(-1), true, 'the scan comes back after the interval');
+  exists = true;
+  assert.equal(await resolver.resolve('11111111-2222-3333-4444-555555555555'), 'C:\\t\\s.jsonl', 'a cheap check finds it as soon as it exists');
 });

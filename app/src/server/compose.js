@@ -210,6 +210,9 @@ async function composeServer(options = {}) {
       projectsPath: config.paths.projectsDir,
       cacheDir: config.paths.cacheDir,
       profiles: config.profiles,
+      // The app owns the 17 MB index cache; this process reads it once and
+      // keeps its own passes in memory (history-index.js, "ONE WRITER").
+      indexReadOnly: true,
     }),
     // THE PROVIDER HALF OF THE BRIDGE'S OPTIONS, THE SAME FOUR main/index.js
     // PASSES (2026-10-31, Pat: "Codex sessions don't show up in mobile but I
@@ -245,7 +248,10 @@ async function composeServer(options = {}) {
   const tasks = options.tasks || createTaskStore({ app, env, configuredFile: config.paths.tasksFile });
   const notes = options.notes || createNoteStore({ app, env, configuredFile: config.paths.notesFile });
   const whiteboard = options.whiteboard || createWhiteboardStore({ app, env, configuredDir: config.paths.boardsDir });
-  const terminalBridge = options.terminalBridge || createTerminalBridge({ env, sessionStorePolicy, processKill: guardedKill });
+  // healForeignResize off: the desktop app's open >_ view takes its size back
+  // when another client changes it (terminal-bridge, 2026-11-06); a second
+  // process doing the same for its own views would flap a pane both show.
+  const terminalBridge = options.terminalBridge || createTerminalBridge({ env, sessionStorePolicy, processKill: guardedKill, healForeignResize: false });
   const transcript = options.transcript || createTranscriptProvider({
     getSessionMeta: (id) => sidebar.getSessionMeta(id),
     contextCacheDir: contextDir,

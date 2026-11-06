@@ -314,6 +314,13 @@ function relaysOf(socket) {
   return relays;
 }
 
+// Whether any client is showing this pane raw (see the dialog-resize rule in
+// the request handler).
+function paneObserved(id) {
+  for (const relays of relaysBySocket.values()) if (relays.has(id)) return true;
+  return false;
+}
+
 function relayCount() {
   let count = 0;
   for (const relays of relaysBySocket.values()) count += relays.size;
@@ -654,6 +661,20 @@ async function dispatch(socket, record) {
   if (typeof id !== 'string' || !id) throw new Error(`${record.verb} requires id`);
   if (record.verb === 'observe') return startRelay(socket, id, params);
   if (record.verb === 'unobserve') return stopRelay(socket, id);
+  // A RAW VIEW OWNS ITS PANE'S SIZE, WHOEVER ELSE IS CONNECTED (2026-11-06,
+  // Pat's >_ view of a working session scrambled: stray letters, later lines
+  // written over earlier ones). Harbor grows every pane it is not showing raw to
+  // 120x60 so Claude's dialogs fit (terminal-bridge ensureDialogSize), and skips
+  // a pane whose >_ view is open, because that xterm's fit is the size the
+  // human chose. But that rule lived in ONE process: the phone server runs its
+  // own bridge, saw no view, and resized the pane Pat was watching on the
+  // desktop (154x35) to 120x60. Claude then drew for 120 columns into a
+  // 154-column view and its cursor moves landed on the wrong rows. An observer
+  // relay exists exactly while some client shows the pane raw, so a dialog
+  // resize is refused here while any client observes it, and lands later.
+  if (record.verb === 'resize' && params.purpose === 'dialog' && paneObserved(id)) {
+    return { resized: false, reason: 'a raw terminal view owns this pane size' };
+  }
   try {
     const forwarded = await keeperRequest(id, record.verb, params, (event) => writeRecord(socket, { type: 'event', event }));
     forwarded.socket.destroy();

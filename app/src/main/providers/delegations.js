@@ -258,7 +258,12 @@ function delegationSummaries(groups, now = Date.now(), liveIds = null) {
 // watchers. No new polling, no process-table reads, no per-row meta requests.
 function createDelegationIndex(ownerOptions = {}, { cacheFile = null, WorkerClass = Worker } = {}) {
   let worker = null; let pending = null; let closed = false;
-  let sentRows = null; let linkUpdates = {};
+  let sentRows = null; let linkUpdates = {}; let sentIds = new Set();
+  let rowsFor = null; let rowsById = new Map();
+  const rowsOf = (rows) => {
+    if (rowsFor !== rows) { rowsFor = rows; rowsById = new Map(rows.map((row) => [row.id, row])); }
+    return rowsById;
+  };
   const scan = createSingleFlight((rows, liveIds) => new Promise((resolve, reject) => {
     if (closed) return resolve({ parents: [], providers: [] });
     if (!worker) {
@@ -271,7 +276,32 @@ function createDelegationIndex(ownerOptions = {}, { cacheFile = null, WorkerClas
     pending = { resolve, reject };
     // History changes on a history refresh, not on an agent going idle. Keep
     // its metadata in the worker and send only live ids and new exact links.
-    const rows = sentRows === latestRows ? undefined : latestRows.map(({ meta, background, ownerEvidence, delegationSummary, ...row }) => row);
+    // Only rows the worker can use cross (2026-11-06): it reads codex rows (any
+    // age, a descendant links to its parent however old) and Claude rows that
+    // are live or active inside RECENT_WINDOW_MS, and skips the rest on every
+    // pass. Copying all ~14,000 rail rows on every refresh to scan a few hundred
+    // was about 30 MB a minute of structured clones per process. A Claude row
+    // that comes back to life writes its transcript, which refreshes history and
+    // sends the rows again.
+    // A row also becomes usable when its session goes live with the history
+    // unchanged (a resume between refreshes), so a live id the worker was not
+    // sent re-sends the rows (Astra review round 2).
+    const now = Date.now(); const live = new Set(latestLiveIds);
+    const usable = (row) => row.path && (row.provider === 'codex'
+      || ((!row.provider || row.provider === 'claude') && (live.has(row.id) || !(Date.parse(row.lastActive) < now - RECENT_WINDOW_MS))));
+    // Only a row the worker could receive counts: a live cursor or pathless row
+    // is never sent, so it must not force a re-send on every scan (Astra
+    // review round 3).
+    if (sentRows === latestRows && latestLiveIds.some((id) => {
+      if (sentIds.has(id)) return false;
+      const row = rowsOf(latestRows).get(id);
+      return Boolean(row && usable(row));
+    })) sentRows = null;
+    let rows;
+    if (sentRows !== latestRows) {
+      rows = latestRows.filter(usable).map(({ meta, background, ownerEvidence, delegationSummary, ...row }) => row);
+      sentIds = new Set(rows.map((row) => row.id));
+    }
     worker.postMessage({ rows, linkUpdates, liveIds: latestLiveIds, ownerOptions, cacheFile });
     sentRows = latestRows; linkUpdates = {};
   }));

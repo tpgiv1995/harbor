@@ -4,29 +4,34 @@ const { watchPath } = require('../watch-path.js');
 
 const { EventEmitter } = require('node:events');
 const { deriveDefaults } = require('../config/defaults.js');
-const { createHistoryIndexWorker } = require('./history-index.js');
+const { codePointSlice, createHistoryIndexWorker } = require('./history-index.js');
 
 const defaultIndex = createHistoryIndexWorker();
 async function runIndexer(args) { return defaultIndex.run(args); }
 
+const UNESCAPE = { t: '\t', n: '\n', r: '\r', '\\': '\\' };
+const unescapeColumn = (value) => (value.includes('\\') ? value.replace(/\\([\\tnr])/g, (_, char) => UNESCAPE[char]) : value);
+
 function parseEmitTsv(text) {
-  return String(text).split(/\r?\n/).filter(Boolean).map((line) => {
-    const columns = line.split('\t');
-    const parts = columns.length < 11 ? columns : columns.map((value) => value.replace(/\\([\\tnr])/g, (_, char) => ({ t: '\t', n: '\n', r: '\r', '\\': '\\' })[char]));
-    const [id, lastActive, project, title, firstPrompt, cwd, file, entrypoint, start, mt, hasTitle] = parts;
-    return {
-      id,
-      lastActive,
-      project: (project || '').trim(),
-      title: title || (parts.length >= 11 ? '(no user messages)' : ''),
-      firstPrompt: firstPrompt ? [...firstPrompt.replace(/[\t\n]/g, ' ')].slice(0, 300).join('') : null,
-      cwd: cwd || null,
-      ...(file ? { path: file } : {}),
-      ...(entrypoint ? { entrypoint } : {}),
-      ...(parts.length >= 11 ? { meta: { id, cwd: cwd || null, project: (project || '').trim(), title: hasTitle === '0' ? null : title,
-        firstPrompt: firstPrompt || null, path: file, entrypoint: entrypoint || null, start: start || null, mt: Number(mt) || null } } : {}),
-    };
-  });
+  return String(text).split(/\r?\n/).filter(Boolean).map(parseEmitLine);
+}
+
+function parseEmitLine(line) {
+  const columns = line.split('\t');
+  const parts = columns.length < 11 ? columns : columns.map(unescapeColumn);
+  const [id, lastActive, project, title, firstPrompt, cwd, file, entrypoint, start, mt, hasTitle] = parts;
+  return {
+    id,
+    lastActive,
+    project: (project || '').trim(),
+    title: title || (parts.length >= 11 ? '(no user messages)' : ''),
+    firstPrompt: firstPrompt ? codePointSlice(firstPrompt, 300).replace(/[\t\n]/g, ' ') : null,
+    cwd: cwd || null,
+    ...(file ? { path: file } : {}),
+    ...(entrypoint ? { entrypoint } : {}),
+    ...(parts.length >= 11 ? { meta: { id, cwd: cwd || null, project: (project || '').trim(), title: hasTitle === '0' ? null : title,
+      firstPrompt: firstPrompt || null, path: file, entrypoint: entrypoint || null, start: start || null, mt: Number(mt) || null } } : {}),
+  };
 }
 
 const TREE_TYPES = { P: 'project', S: 'session', N: 'new-session', M: 'more', F: 'folder' };
@@ -51,9 +56,17 @@ function createHistoryProvider(options = {}) {
     projectsDir: options.projectsPath || defaults.paths.projectsDir,
     cacheDir: options.cacheDir || defaults.paths.cacheDir,
     profiles: options.profiles,
+    // A long-lived app keeps its passes in memory and rewrites the 17 MB cache
+    // at most every 2 minutes; the phone server passes indexReadOnly and never
+    // writes it (see history-index.js, "ONE WRITER").
+    saveIntervalMs: options.indexSaveIntervalMs ?? 120_000,
+    readOnly: options.indexReadOnly === true,
     // The worker's own warnings (a cache write that would not land) surface
     // as 'log' events so the app can put them in its durable lifecycle log.
     onLog: (line) => provider.emit('log', line),
+    // A pass written late (the save interval) is news for whoever reads the
+    // cache file from disk, the titler above all: refresh once more.
+    onPersisted: () => provider.emit('history-changed'),
   });
   const execute = options.runIndexer || ((args) => historyIndex.run(args));
   const watchFactory = options.watchFactory || ((target, cb) => watchPath(target, { recursive: true }, cb));
@@ -138,11 +151,41 @@ function createHistoryProvider(options = {}) {
     setImmediate(() => provider.emit('watch-error', error));
   }
 
+  // The rail's plain "every session" call takes the indexer's delta answer:
+  // the id order plus only the lines that changed since this provider's last
+  // answer, parsed one line at a time (history-index.js, "ONLY THE ROWS THAT
+  // CHANGED"). Each row is parsed from its own small string, so no row keeps a
+  // 15 MB list string alive. Filtered calls, an injected runner and an
+  // injected index without emitDelta keep the full answer.
+  const LIST_FLAGS = ['--all', '--with-first-prompt', '--with-cwd', '--with-path', '--with-entrypoint', '--with-meta'];
+  let listCursor = null;
+  let listRows = new Map();
+  const listAllSessions = async () => {
+    const delta = await historyIndex.emitDelta(LIST_FLAGS, listCursor);
+    const next = delta.full ? new Map() : new Map(listRows);
+    for (const line of delta.changed) {
+      if (!line) continue;
+      const row = parseEmitLine(line);
+      next.set(row.id, row);
+    }
+    const rows = [];
+    const kept = new Map();
+    for (const id of delta.ids) {
+      const row = next.get(id);
+      if (!row) continue;
+      rows.push(row);
+      kept.set(id, row);
+    }
+    listRows = kept;
+    listCursor = delta.cursor;
+    return rows;
+  };
   provider.listSessions = async ({ since, project, query } = {}) => {
-    const args = ['emit', '--all', '--with-first-prompt', '--with-cwd', '--with-path', '--with-entrypoint', '--with-meta'];
+    const args = ['emit', ...LIST_FLAGS];
     if (since) args.push('--since', String(since));
     if (project) args.push('--project', String(project));
-    const sessions = parseEmitTsv(await execute(args));
+    const plain = !since && !project && !options.runIndexer && typeof historyIndex.emitDelta === 'function';
+    const sessions = plain ? await listAllSessions() : parseEmitTsv(await execute(args));
     if (!query) return sessions;
     const needle = String(query).toLowerCase();
     return sessions.filter((row) => `${row.project}\n${row.title}\n${row.firstPrompt || ''}`.toLowerCase().includes(needle));
@@ -165,6 +208,7 @@ function createHistoryProvider(options = {}) {
 
 module.exports = {
   createHistoryProvider,
+  parseEmitLine,
   parseEmitTsv,
   parseTreeTsv,
   runIndexer,

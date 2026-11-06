@@ -236,6 +236,27 @@ function atomicSave(fsImpl, titlesFile, titles, depths) {
   fsImpl.renameSync(temporary, titlesFile);
 }
 
+// A PASS THAT FOUND NOTHING IS NOT REPEATED UNTIL ITS INPUTS CHANGE
+// (2026-11-06). The app queues a pass after every history refresh, about every
+// 15 to 30 seconds while any session works, and each pass read and parsed the
+// whole index cache (17 MB, 12,000 entries) on the main thread before it knew
+// whether any session needed a name; almost every pass found none. Keyed at
+// module level because the app builds a fresh provider for each pass. The
+// stamps are the index and titles files' size and mtime; a pass whose inputs
+// are unchanged since a pass with no candidates is skipped, for at most
+// IDLE_PASS_TTL_MS so a session whose delegation flag cleared is still named.
+const IDLE_PASS_TTL_MS = 10 * 60_000;
+const idlePasses = new Map(); // indexFile|titlesFile -> { stamp, at }
+
+function fileStamp(fsImpl, file) {
+  try {
+    const info = fsImpl.statSync(file);
+    return `${info.mtimeMs}:${info.size}`;
+  } catch {
+    return null;
+  }
+}
+
 function createTitlesProvider(options = {}) {
   const fsImpl = options.fs || fs;
   const env = options.env || process.env;
@@ -284,6 +305,13 @@ function createTitlesProvider(options = {}) {
       fsImpl.mkdirSync(cacheDir, { recursive: true });
       fsImpl.writeFileSync(mcpConfig, '{"mcpServers":{}}');
     } catch { return { titled: 0, failed: 0, cached: 0, skipped: 'cannot-isolate-mcp' }; }
+    const idleKey = `${indexFile}|${titlesFile}`;
+    const indexStamp = fileStamp(fsImpl, indexFile);
+    const stamp = indexStamp && `${indexStamp}|${fileStamp(fsImpl, titlesFile)}|${runOptions.all ? 'all' : Number(runOptions.days ?? 30)}|${runOptions.limit ?? ''}`;
+    const idle = idlePasses.get(idleKey);
+    if (stamp && !runOptions.dryRun && idle && idle.stamp === stamp && now().getTime() - idle.at < IDLE_PASS_TTL_MS) {
+      return { titled: 0, failed: 0, cached: 0, skipped: 'unchanged' };
+    }
     const index = loadJson(fsImpl, indexFile);
     const files = index && typeof index.files === 'object' ? index.files : {};
     if (!Object.keys(files).length) return { titled: 0, failed: 0, cached: 0, skipped: 'no-index' };
@@ -328,6 +356,8 @@ function createTitlesProvider(options = {}) {
     }
     candidates.sort((a, b) => b.last - a.last);
     candidates.splice(Number(runOptions.limit ?? 400));
+    if (!candidates.length && stamp && !runOptions.dryRun) idlePasses.set(idleKey, { stamp, at: now().getTime() });
+    else idlePasses.delete(idleKey);
     if (runOptions.dryRun || !candidates.length) return { titled: 0, failed: 0, cached: Object.keys(titles).length, candidates: candidates.length };
 
     const depthById = new Map(candidates.map((item) => [item.id, item.depth]));

@@ -10,6 +10,7 @@ const { turnSignal } = require('../../shared/claude-turn-state.cjs');
 // update for every session Claude Code writes, including sessions running
 // outside Harbor, so every tile renders live regardless of where the agent runs.
 
+const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -940,12 +941,67 @@ function isCompactContinuation(obj, text) {
 
 // A base64 image part becomes a reference to the shared image store (see
 // image-store.js): { mediaType, id, size }. Windows load the bytes on demand.
+//
+// IMAGES OF BLOCKS THAT ARE TRIMMED RIGHT AWAY ARE NEVER STORED (2026-11-06,
+// perf lane B1). The skipped-prefix scan, the paging chunks (up to 64 MB) and
+// their throwaway parsers parse every image line of a file, and only the newest
+// few survive the trim that follows. Parsing inside `withDeferredImages` makes
+// imageFromPart answer a reference with no id yet and keep the base64 on the
+// reference itself (a non-enumerable symbol, invisible to spread, JSON and
+// structured clone); the caller then commitImageRef()s exactly the references
+// of the blocks it keeps. A reference that is never committed is garbage with
+// its block, and its bytes were never hashed, decoded or put in the store.
+// Live parsing (readNew, the opening block) stays eager: nearly everything it
+// parses survives, and a yield between parse and emit must never expose an id
+// the store cannot serve.
+const PENDING_IMAGE = Symbol('pending-image');
+let deferImages = false;
+
 function imageFromPart(part) {
   if (!part || part.type !== 'image') return null;
   const src = part.source;
   if (!src || src.type !== 'base64' || !src.media_type || !src.data) return null;
+  if (deferImages) {
+    const data = String(src.data);
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    const ref = { mediaType: src.media_type, id: null, size: Math.max(0, Math.floor(data.length * 3 / 4) - padding) };
+    Object.defineProperty(ref, PENDING_IMAGE, { value: { mediaType: src.media_type, data }, writable: true, configurable: true });
+    return ref;
+  }
   const { id, size } = imageStore.put(src.media_type, src.data);
   return { mediaType: src.media_type, id, size };
+}
+
+// applyLine with image storing deferred. applyLine is synchronous, so a flag
+// around the call cannot leak into any other parse.
+function applyLineDeferred(parser, obj) {
+  const previous = deferImages;
+  deferImages = true;
+  try { return parser.applyLine(obj); } finally { deferImages = previous; }
+}
+
+// Put a deferred reference's bytes in the store and give it its real id and
+// size. True when the reference is now servable.
+function commitImageRef(ref) {
+  if (!ref) return false;
+  if (ref.id) return true;
+  const pending = ref[PENDING_IMAGE];
+  if (!pending) return false;
+  const { id, size } = imageStore.put(pending.mediaType, pending.data);
+  ref.id = id;
+  ref.size = size;
+  ref[PENDING_IMAGE] = null;
+  return true;
+}
+
+function commitBlockImages(block) {
+  if (block?.images?.length) for (const ref of block.images) commitImageRef(ref);
+}
+
+// Drop a deferred reference's bytes without storing them (its block fell out of
+// what a seed can use). It stays id-less, which readers treat as "not servable".
+function releaseImageRef(ref) {
+  if (ref && !ref.id) ref[PENDING_IMAGE] = null;
 }
 
 function imagesFromContent(content) {
@@ -1816,22 +1872,71 @@ const PREFIX_QUEUE_LINE = /"type"\s*:\s*"queue-operation"|"queued_command"/;
 const PREFIX_IMAGE_LINE = /"type"\s*:\s*"image"/;
 const SOURCE_RECORD = Symbol('source-record');
 
-async function readPrefixBlocks(filePath, endOffset, provider = 'claude', { maxUserBlocks = MAX_PREFIX_USER_BLOCKS } = {}) {
-  return (await readPrefixState(filePath, endOffset, provider, maxUserBlocks)).blocks;
+// THE SKIPPED PREFIX IS SCANNED ONCE PER FILE, NOT ONCE PER WINDOW OPEN
+// (2026-11-06, perf lane B3). Every entry creation (a window open, and every
+// renderer reload, which opens them all again) streamed bytes 0..tailStart of
+// the file through readline and JSON-parsed each user, queue and image line:
+// 343 MB for the biggest session, to rebuild the same 40 prompts and 64 images
+// as last time. The scan is now a resumable state (the real parser, the line
+// counter, the image list, the opening prompt) kept per (provider, path) in a
+// small bounded cache:
+// - same file, same end offset: nothing is read from the prefix;
+// - the file only grew (tailStart moves forward as the transcript does): only
+//   the bytes between the old and new end are streamed, into the SAME parser,
+//   which is exactly what one longer scan would have done (the old end is a
+//   record boundary, so the parser, the line numbers and the pending queue
+//   carry over unchanged);
+// - anything else (another file, a rewrite, a shorter offset, an end that is
+//   not a record boundary, an image the store has since evicted) scans from
+//   byte 0 like before.
+// "Same file" is the device and inode plus a hash of the first and of the last
+// 4 KB before the cached end, so a rewritten transcript cannot be mistaken for
+// the one that was scanned. Each caller gets its own deep copy of the blocks:
+// the live parser mutates the blocks it is handed.
+// Sixteen entries because the stage restores up to sixteen windows, and a
+// restore (or a renderer reload) reopens them all: with four, a fifth window
+// evicted the first and every reload rescanned from byte 0 (Astra review
+// 2026-11-06). Bounded by bytes as well.
+const PREFIX_CACHE_MAX_ENTRIES = 16;
+const PREFIX_CACHE_MAX_BYTES = 24 * 1024 * 1024;
+// Interior 4 KB samples hashed besides the first and last 4 KB of the covered
+// range. Transcripts are append-only JSONL, and that contract is what makes a
+// cached scan reusable; these samples (and a same-size file whose mtime moved)
+// catch an in-place rewrite of the middle in practice, without reading the
+// prefix again. They are a check, not a proof: a rewrite that leaves every
+// sampled range byte-identical is not detected.
+const PREFIX_INTERIOR_SAMPLES = 6;
+const PREFIX_FINGERPRINT_BYTES = 4096;
+const prefixCache = new Map(); // `${provider}\0${path}` -> { state, endOffset, fp, identity, bytes }; Map order is the LRU order
+const prefixLocks = new Map(); // same key -> promise of the work in flight (one scan per file at a time)
+const prefixScanStats = { scans: 0, bytesStreamed: 0, hits: 0, extended: 0, misses: 0 };
+
+function newPrefixScan(provider) {
+  return {
+    provider,
+    conversation: new TranscriptParser(provider),
+    order: new WeakMap(), // block -> the line number that created it
+    source: new WeakMap(), // conversation block -> `${line}:${index}` (the opening-prompt match key)
+    images: [], // image blocks outside a prompt, newest last, at most MAX_PREFIX_IMAGE_BLOCKS
+    lineNo: 0,
+    opening: null,
+  };
 }
 
-async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MAX_PREFIX_USER_BLOCKS) {
-  const conversation = new TranscriptParser(provider);
-  if (endOffset <= 0) return { blocks: [], conversation, retained: new Map() };
-  const stream = fs.createReadStream(filePath, { start: 0, end: endOffset - 1, encoding: 'utf8' });
+// Stream bytes [from, to) of the file into the scan. `from` is 0 or a record
+// boundary; `to` ends on whatever the caller asked for (a record boundary for
+// every real caller; the line a tail start cut in half fails JSON.parse and is
+// skipped, as it always was).
+async function advancePrefixScan(state, filePath, from, to) {
+  if (!(to > from)) return;
+  prefixScanStats.scans += 1;
+  prefixScanStats.bytesStreamed += to - from;
+  const { provider, conversation, order, source, images } = state;
+  const stream = fs.createReadStream(filePath, { start: from, end: to - 1, encoding: 'utf8' });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  const order = new WeakMap();
-  const source = new WeakMap();
-  const images = [];
-  let lineNo = 0;
-  let opening = null;
   for await (const line of lines) {
-    lineNo += 1;
+    state.lineNo += 1;
+    const lineNo = state.lineNo;
     const prompt = PREFIX_USER_LINE.test(line) && !line.includes('"tool_result"');
     const queued = !prompt && PREFIX_QUEUE_LINE.test(line);
     const image = !prompt && !queued && PREFIX_IMAGE_LINE.test(line);
@@ -1841,7 +1946,7 @@ async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MA
     if (image) {
       // Images outside a prompt (a tool's screenshot): per line, as before.
       const parser = new TranscriptParser(provider);
-      parser.applyLine(obj);
+      applyLineDeferred(parser, obj);
       for (const block of parser.blocks) {
         if (!block.images?.length) continue;
         const { key: _key, ...retained } = block;
@@ -1853,15 +1958,49 @@ async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MA
     }
     const before = new Set(conversation.blocks);
     const beforeSeq = conversation.seq;
-    conversation.applyLine(obj);
-    if (!opening) opening = conversation.blocks.find(block => block.kind === 'user') || null;
+    applyLineDeferred(conversation, obj);
+    if (!state.opening) state.opening = conversation.blocks.find(block => block.kind === 'user') || null;
     for (const block of conversation.blocks) if (!before.has(block)) {
       order.set(block, lineNo);
       source.set(block, `${lineNo}:${Number(block.key.slice(1)) - beforeSeq}`);
     }
   }
-  const kept = [];
-  const retained = new Map();
+  settlePrefixImages(state);
+}
+
+// Decide, per image-bearing block, whether a seed can still use its pictures:
+// the newest MAX_PREFIX_IMAGE_BLOCKS (the opening prompt is outside that count)
+// go to the store now, the rest are released unstored. A block is released only
+// when MAX_PREFIX_IMAGE_BLOCKS blocks are strictly newer, so a tie never costs
+// a picture the snapshot below will keep.
+function settlePrefixImages(state) {
+  const { conversation, order, images, opening } = state;
+  const candidates = [];
+  for (const block of conversation.blocks) if (block.images?.length) candidates.push(block);
+  for (const block of images) candidates.push(block);
+  // The opening is kept apart from the parser's retained window: on a long
+  // session the parser has trimmed it away, and its pictures were then never
+  // stored, so the seed carried id-less references that replaced the opening
+  // window's real ones (Astra review 2026-11-06).
+  if (opening?.images?.length && !candidates.includes(opening)) candidates.push(opening);
+  const stamps = candidates.filter((block) => block !== opening).map((block) => order.get(block) || 0).sort((a, b) => b - a);
+  const cutoff = stamps.length >= MAX_PREFIX_IMAGE_BLOCKS ? stamps[MAX_PREFIX_IMAGE_BLOCKS - 1] : -Infinity;
+  for (const block of candidates) {
+    const keep = block === opening || (order.get(block) || 0) >= cutoff;
+    for (const ref of block.images) {
+      if (keep) commitImageRef(ref); else releaseImageRef(ref);
+    }
+  }
+}
+
+// What a window seeds from the scan: the newest `maxUserBlocks` prompts, the
+// opening, every image-bearing block (bounded by MAX_PREFIX_IMAGE_BLOCKS), in
+// file order, as deep copies the caller owns; plus the Claude queue state the
+// parser carried, with its block references pointing at those copies (null when
+// the block is not seeded). `stale` says a seeded picture cannot be served
+// (released unstored, or evicted from the store since): the caller must rescan.
+function snapshotPrefixScan(state, maxUserBlocks) {
+  const { conversation, order, source, images, opening } = state;
   const selected = new Set(conversation.blocks.filter((item) => item.kind === 'user' && !item.peer).slice(-maxUserBlocks));
   // The separately seeded opening needs its final delivery state even when
   // it predates the recent forty prompts or the parser's retained window.
@@ -1869,19 +2008,27 @@ async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MA
   // Prompt images share the image allowance, not the forty human-text slots.
   // Peer traffic must never spend those slots either.
   for (const block of conversation.blocks) if (block.images?.length) selected.add(block);
+  const copyOf = new Map();
+  const copyOrder = new Map();
+  const kept = [];
+  const copyBlock = (block, record) => {
+    const { key: _key, ...rest } = block;
+    const copy = structuredClone(rest);
+    if (record !== undefined) Object.defineProperty(copy, SOURCE_RECORD, { value: record });
+    copyOrder.set(copy, order.get(block) || 0);
+    return copy;
+  };
   for (const block of selected) {
-    const { key: _key, ...copy } = block;
-    Object.defineProperty(copy, SOURCE_RECORD, { value: source.get(block) });
-    order.set(copy, order.get(block) || 0);
-    retained.set(block, copy);
+    const copy = copyBlock(block, source.get(block));
+    copyOf.set(block, copy);
     kept.push(copy);
   }
-  kept.push(...images);
-  const ordered = kept.sort((a, b) => (order.get(a) || 0) - (order.get(b) || 0));
+  for (const block of images) kept.push(copyBlock(block));
+  const ordered = kept.sort((a, b) => copyOrder.get(a) - copyOrder.get(b));
   // Seed at most MAX_PREFIX_IMAGE_BLOCKS image blocks, the most recent. An older
   // prompt keeps its words (the image goes, its text never does); an older
   // image-only block is not seeded. The opening keeps whatever it carries.
-  const openingCopy = opening ? retained.get(opening) : null;
+  const openingCopy = opening ? copyOf.get(opening) : null;
   let seenImages = 0;
   for (let i = ordered.length - 1; i >= 0; i -= 1) {
     const block = ordered[i];
@@ -1891,7 +2038,154 @@ async function readPrefixState(filePath, endOffset, provider, maxUserBlocks = MA
     if (block.kind === 'user' && !block.peer && block.text) block.images = [];
     else ordered[i] = null;
   }
-  return { blocks: ordered.filter(Boolean), conversation, retained };
+  const blocks = ordered.filter(Boolean);
+  const seeded = new Set(blocks);
+  const refOf = (block) => {
+    const copy = block ? copyOf.get(block) : null;
+    return copy && seeded.has(copy) ? copy : null;
+  };
+  const queue = {
+    pending: conversation.queuePending.map((item) => ({ ...item, block: refOf(item.block) })),
+    byText: [...conversation.queuedByText].map(([key, block]) => [key, refOf(block)]),
+    dequeued: conversation.dequeuedUser ? { ...conversation.dequeuedUser, block: refOf(conversation.dequeuedUser.block) } : null,
+  };
+  const stale = blocks.some((block) => block.images?.some((ref) => !ref.id || !imageStore.has(ref.id)));
+  return { blocks, queue, stale };
+}
+
+function prefixScanBytes(state) {
+  try { return JSON.stringify(state.conversation.blocks).length + JSON.stringify(state.images).length; } catch { return PREFIX_CACHE_MAX_BYTES; }
+}
+
+function trimPrefixCache() {
+  let total = 0;
+  for (const entry of prefixCache.values()) total += entry.bytes;
+  for (const [key, entry] of prefixCache) {
+    if (prefixCache.size <= PREFIX_CACHE_MAX_ENTRIES && total <= PREFIX_CACHE_MAX_BYTES) break;
+    prefixCache.delete(key);
+    total -= entry.bytes;
+  }
+}
+
+// First/last 4 KB hashes of the file up to `end`, and whether `end` follows a
+// newline (the only offsets a scan may be resumed from). null when the file is
+// shorter than `end`.
+async function prefixFingerprint(handle, end) {
+  const length = Math.min(PREFIX_FINGERPRINT_BYTES, end);
+  const head = Buffer.alloc(length);
+  const tail = Buffer.alloc(length);
+  const first = await handle.read(head, 0, length, 0);
+  const last = await handle.read(tail, 0, length, end - length);
+  if (first.bytesRead !== length || last.bytesRead !== length) return null;
+  const hash = (buffer) => crypto.createHash('sha1').update(buffer).digest('hex');
+  const mid = crypto.createHash('sha1');
+  if (end > 2 * length) {
+    const sample = Buffer.alloc(length);
+    for (let k = 1; k <= PREFIX_INTERIOR_SAMPLES; k += 1) {
+      const at = Math.min(end - length, Math.floor((end * k) / (PREFIX_INTERIOR_SAMPLES + 1)));
+      const got = await handle.read(sample, 0, length, at);
+      if (got.bytesRead !== length) return null;
+      mid.update(sample);
+    }
+  }
+  return { head: hash(head), tail: hash(tail), mid: mid.digest('hex'), newline: tail[length - 1] === 0x0a };
+}
+
+async function buildPrefixSeed(key, filePath, endOffset, provider, maxUserBlocks, useCache) {
+  let handle = null;
+  let fp = null;
+  let identity = '';
+  let fileSize = -1;
+  let fileMtimeMs = -1;
+  if (useCache) {
+    try {
+      handle = await fsp.open(filePath, 'r');
+      const stat = await handle.stat();
+      identity = stat.ino ? `${stat.dev}:${stat.ino}` : '';
+      fileSize = stat.size;
+      fileMtimeMs = stat.mtimeMs;
+      if (stat.size >= endOffset) fp = await prefixFingerprint(handle, endOffset);
+    } catch { fp = null; }
+  }
+  try {
+    const cacheable = Boolean(useCache && fp && fp.newline);
+    let cached = cacheable ? prefixCache.get(key) : null;
+    if (cached && cached.endOffset <= endOffset) {
+      // A file the same size as when it was scanned, with a different mtime,
+      // was rewritten, not appended to.
+      let matches = cached.identity === identity && !(fileSize === cached.fileSize && fileMtimeMs !== cached.fileMtimeMs);
+      if (matches) {
+        const old = cached.endOffset === endOffset ? fp : await prefixFingerprint(handle, cached.endOffset).catch(() => null);
+        matches = Boolean(old) && old.head === cached.fp.head && old.tail === cached.fp.tail && old.mid === cached.fp.mid;
+      }
+      if (matches) {
+        const mode = cached.endOffset === endOffset ? 'hit' : 'extended';
+        try {
+          if (mode === 'extended') {
+            await advancePrefixScan(cached.state, filePath, cached.endOffset, endOffset);
+            cached.endOffset = endOffset;
+            cached.fp = fp;
+            cached.fileSize = fileSize;
+            cached.fileMtimeMs = fileMtimeMs;
+            cached.bytes = prefixScanBytes(cached.state);
+          }
+        } catch (error) {
+          prefixCache.delete(key);
+          throw error;
+        }
+        // Every validated reuse moves the whole-file stamp forward, so the
+        // same-size-rewrite check compares against the file as last seen, not
+        // as first scanned (Astra review round 2: a grown file whose tail start
+        // stayed put kept a stale stamp, and a later same-size rewrite hit).
+        cached.fileSize = fileSize;
+        cached.fileMtimeMs = fileMtimeMs;
+        const snapshot = snapshotPrefixScan(cached.state, maxUserBlocks);
+        if (!snapshot.stale) {
+          prefixCache.delete(key);
+          prefixCache.set(key, cached);
+          trimPrefixCache();
+          prefixScanStats[mode === 'hit' ? 'hits' : 'extended'] += 1;
+          return { blocks: snapshot.blocks, queue: snapshot.queue, mode };
+        }
+      }
+      prefixCache.delete(key); // another file, a rewrite, or pictures the store no longer holds
+    }
+    // From byte 0. A cached scan that reaches FURTHER than this caller keeps its place.
+    const state = newPrefixScan(provider);
+    await advancePrefixScan(state, filePath, 0, endOffset);
+    const snapshot = snapshotPrefixScan(state, maxUserBlocks);
+    prefixScanStats.misses += 1;
+    const resident = prefixCache.get(key);
+    if (cacheable && (!resident || resident.endOffset <= endOffset)) {
+      prefixCache.delete(key);
+      prefixCache.set(key, { state, endOffset, fp, identity, fileSize, fileMtimeMs, bytes: prefixScanBytes(state) });
+      trimPrefixCache();
+    }
+    return { blocks: snapshot.blocks, queue: snapshot.queue, mode: 'miss' };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function getPrefixSeed(filePath, endOffset, provider = 'claude', maxUserBlocks = MAX_PREFIX_USER_BLOCKS, { cache = true } = {}) {
+  if (!(endOffset > 0)) return { blocks: [], queue: { pending: [], byText: [], dequeued: null }, mode: 'empty' };
+  const key = `${provider}\0${filePath}`;
+  const previous = prefixLocks.get(key) || Promise.resolve();
+  const run = previous.then(() => buildPrefixSeed(key, filePath, endOffset, provider, maxUserBlocks, cache));
+  const settled = run.then(() => {}, () => {});
+  prefixLocks.set(key, settled);
+  try { return await run; } finally { if (prefixLocks.get(key) === settled) prefixLocks.delete(key); }
+}
+
+function prefixCacheEntries() { return prefixCache.size; }
+
+function clearPrefixSeedCache() {
+  prefixCache.clear();
+  for (const k of Object.keys(prefixScanStats)) prefixScanStats[k] = 0;
+}
+
+async function readPrefixBlocks(filePath, endOffset, provider = 'claude', { maxUserBlocks = MAX_PREFIX_USER_BLOCKS } = {}) {
+  return (await getPrefixSeed(filePath, endOffset, provider, maxUserBlocks)).blocks;
 }
 
 // THE SESSION'S OPENING PROMPT IS NEVER OUT OF REACH (2026-08-13). A large
@@ -2023,7 +2317,10 @@ async function readChunkEndingAt(filePath, provider, endOffset, chunkSize) {
     if (!text) continue;
     let obj;
     try { obj = JSON.parse(text); } catch { continue; }
-    parser.applyLine(obj);
+    // Up to 64 MB of lines pass through here and only the newest few blocks
+    // are returned: store the pictures of the returned blocks only (see
+    // readArchiveBlocksBeforeOffset), never those of the many that are dropped.
+    applyLineDeferred(parser, obj);
     const newSeq = parser.seq;
     if (newSeq > prevSeq) {
       const offset = start + lineStart;
@@ -2058,6 +2355,7 @@ async function readArchiveBlocksBeforeOffset(filePath, provider, endOffset, minC
   for (const block of trimmed) {
     block.key = `a${block._pageOffset}`;
     delete block._pageOffset;
+    commitBlockImages(block);
   }
   return { blocks: trimmed, hasMore };
 }
@@ -2197,6 +2495,14 @@ function createTranscriptProvider(options = {}) {
   // (which is the exact "Resume offered on an alive session" two-writer trap
   // the beacon comment below warns about). Without an injected reader there,
   // liveness falls through to the statusline beacon instead of lying.
+  // THE LIVENESS BEACON IS REREAD AT MOST EVERY 30 SECONDS PER WINDOW (2026-11-06,
+  // perf lane B2). Each 5-second poll statted the beacon in every config home
+  // (about seven stats per window per poll, two processes). The statusline
+  // repaints it every ~3 minutes while a composer is open and the owner check
+  // already treats a beacon as minutes-grained evidence, so a reading half a
+  // minute old decides nothing differently. A read the file watcher triggers
+  // inside that window reuses it too; the first read of an entry never does.
+  const beaconCacheMs = Number.isFinite(options.beaconCacheMs) ? options.beaconCacheMs : 30_000;
   const yieldToEventLoop = options.yieldToEventLoop
     || (() => new Promise((resolve) => setImmediate(resolve)));
   const emitter = new EventEmitter();
@@ -2230,11 +2536,19 @@ function createTranscriptProvider(options = {}) {
     // there, images included, with full fidelity. Unwindowed desktop opens
     // are untouched, so the measured-and-cleared cost stays exactly as is.
     if (entry.windowBlocks) return;
-    const { blocks, conversation, retained } = await readPrefixState(entry.path, entry.offset, entry.provider);
+    // The scan itself is cached per file (getPrefixSeed): a reopen costs no
+    // prefix bytes and a grown file only its new range. The blocks and queue
+    // state come back as copies this entry owns.
+    const { blocks, queue } = await getPrefixSeed(entry.path, entry.offset, entry.provider);
     const seededBlocks = new Map();
     for (const block of blocks) {
       if (seeded && block[SOURCE_RECORD] !== undefined && block[SOURCE_RECORD] === seeded[SOURCE_RECORD]) {
-        Object.assign(seeded, block); // Keep delivery state learned after the opening enqueue.
+        // Keep delivery state learned after the opening enqueue, but never
+        // trade the opening's servable pictures for references that are not.
+        const servable = (block.images || []).every((ref) => ref?.id && imageStore.has(ref.id));
+        const keepImages = !servable && seeded.images?.length ? seeded.images : null;
+        Object.assign(seeded, block);
+        if (keepImages) seeded.images = keepImages;
         seededBlocks.set(block, seeded);
       } else {
         entry.parser.push(block);
@@ -2242,17 +2556,17 @@ function createTranscriptProvider(options = {}) {
       }
     }
     const liveBlock = block => {
-      const live = seededBlocks.get(retained.get(block));
+      const live = block ? seededBlocks.get(block) : null;
       return live && entry.parser.blocks.includes(live) ? live : null;
     };
     // A prefix is part of this parser's history. Its pending queue must travel
     // with the bubbles, or a tail remove/dequeue cannot settle them.
-    entry.parser.queuePending = conversation.queuePending.map(item => ({ ...item, block: liveBlock(item.block) }));
-    for (const [key, block] of conversation.queuedByText) {
+    entry.parser.queuePending = queue.pending.map(item => ({ ...item, block: liveBlock(item.block) }));
+    for (const [key, block] of queue.byText) {
       const live = liveBlock(block);
       if (live) entry.parser.queuedByText.set(key, live);
     }
-    if (conversation.dequeuedUser) entry.parser.dequeuedUser = { ...conversation.dequeuedUser, block: liveBlock(conversation.dequeuedUser.block) };
+    if (queue.dequeued) entry.parser.dequeuedUser = { ...queue.dequeued, block: liveBlock(queue.dequeued.block) };
     entry.parser.noteQueue();
   };
 
@@ -2273,7 +2587,21 @@ function createTranscriptProvider(options = {}) {
     }
   };
 
-  const emitUpdate = (entry, payload) => {
+  // Does this payload carry nothing a window would draw?
+  const payloadIsEmpty = (payload) => !Array.isArray(payload.replace)
+    && !payload.append?.length && !payload.changed?.length
+    && !payload.patched?.length && !payload.removed?.length;
+
+  // `onlyIfChanged` is for reads nobody asked for (the 5-second poll, the file
+  // watcher): such a read that found no new, changed or removed block and a
+  // header identical to the last one sent says nothing new, so it sends
+  // nothing (2026-11-06, perf lane B2: every poll of every open window used to
+  // push an IPC message to the renderer and a JSON.stringify per phone client
+  // to repeat what they already held). The header is still rebuilt on every
+  // read, from the clock too, so a value that changes only because time passed
+  // (the 180-second freshness limit of the working shimmer, a beacon aging out)
+  // differs from the last one sent and goes out the moment it changes.
+  const emitUpdate = (entry, payload, { onlyIfChanged = false } = {}) => {
     if (closed) return;
     const stat = entry.lastMtimeMs;
     // Exact owner liveness: the teed pid is checked against the process
@@ -2303,6 +2631,9 @@ function createTranscriptProvider(options = {}) {
     };
     // L1 ground truth: prefer the tee-file percentage over the ratchet estimate.
     if (entry.teedContextPct !== null) header.contextPct = entry.teedContextPct;
+    const headerSig = JSON.stringify(header);
+    if (onlyIfChanged && payloadIsEmpty(payload) && headerSig === entry.lastHeaderSig) return;
+    entry.lastHeaderSig = headerSig;
     // Windowed sessions (MOBILE-3) trim ONLY the emitted `replace` payload to
     // the most recent N blocks; `header` above is always priced off the full
     // live parser state, never off this trimmed list, so a windowed payload
@@ -2355,7 +2686,15 @@ function createTranscriptProvider(options = {}) {
         const teeStat = await fsp.stat(teeFile);
         const teeRecentlyRendered = (Date.now() - teeStat.mtimeMs) < TEE_RECENT_MS;
         const transcriptHasGrownPastTee = stat.mtimeMs > (teeStat.mtimeMs + TEE_TRANSCRIPT_SKEW_MS);
-        const raw = JSON.parse(await fsp.readFile(teeFile, 'utf8'));
+        // The tee is parsed again only when its file changed (mtime and size);
+        // the freshness verdicts below still use the clock on every read.
+        let raw;
+        if (entry.teeCache && entry.teeCache.mtimeMs === teeStat.mtimeMs && entry.teeCache.size === teeStat.size) {
+          raw = entry.teeCache.raw;
+        } else {
+          raw = JSON.parse(await fsp.readFile(teeFile, 'utf8'));
+          entry.teeCache = { mtimeMs: teeStat.mtimeMs, size: teeStat.size, raw };
+        }
         if (teeRecentlyRendered || !transcriptHasGrownPastTee) {
           const pct = raw?.used_percentage;
           entry.teedContextPct = (typeof pct === 'number' && pct >= 1 && pct <= 99)
@@ -2389,7 +2728,7 @@ function createTranscriptProvider(options = {}) {
         // Owner pid (statusline runs as the claude process's child and tees
         // $PPID): the EXACT liveness signal, regardless of tee freshness.
         entry.ownerPid = Number.isInteger(raw?.pid) && raw.pid > 1 ? raw.pid : null;
-      } catch { entry.teedContextPct = null; entry.ownerPid = null; }
+      } catch { entry.teedContextPct = null; entry.ownerPid = null; entry.teeCache = null; }
       // Liveness beacon: Claude Code re-renders the statusline every ~3 min
       // while a session's composer is OPEN, stamping statusline-state/<id>.json
       // in its config home. A fresh beacon = another writer is alive in some
@@ -2405,13 +2744,16 @@ function createTranscriptProvider(options = {}) {
       // process is gone", which is the input to adopt-on-send deciding a session
       // is adoptable, and adopting kills the owner. The homes come from the same
       // discovery the config and the wizard use, so the three cannot disagree.
-      entry.beaconMs = await readSessionBeacon(entry.sessionId);
+      if (!entry.beaconAt || Date.now() - entry.beaconAt >= beaconCacheMs) {
+        entry.beaconMs = await readSessionBeacon(entry.sessionId);
+        entry.beaconAt = Date.now();
+      }
       if (stat.size === entry.offset) {
         await handle.close();
         // mtime moved with no new bytes still refreshes the working clock,
         // and a running sub-agent writes its own file, not this one.
         const subKeys = new Set(entry.provider === 'claude' ? await readSubagentProgress(entry).catch(() => []) : []);
-        emitUpdate(entry, { append: [], changed: entry.parser.blocks.filter((block) => subKeys.has(block.key)) });
+        emitUpdate(entry, { append: [], changed: entry.parser.blocks.filter((block) => subKeys.has(block.key)) }, { onlyIfChanged: true });
         return;
       }
       const length = stat.size - entry.offset;
@@ -2508,7 +2850,7 @@ function createTranscriptProvider(options = {}) {
           changed,
           ...(patched.length ? { patched } : {}),
           ...(removed.length ? { removed } : {}),
-        });
+        }, { onlyIfChanged: true });
       }
     } catch (error) {
       try { await handle?.close(); } catch { /* already closed */ }
@@ -2706,6 +3048,9 @@ function createTranscriptProvider(options = {}) {
       // when `hints.window` was requested (MOBILE-3).
       windowBlocks: hints.window ? normalizeWindowBlocks(hints.window) : null,
       sentImages: new Map(), // block key -> images array last sent (see noteSentImages)
+      lastHeaderSig: null, // JSON of the header last sent; a read with nothing new and the same header sends nothing
+      teeCache: null, // { mtimeMs, size, raw } of the statusline tee last parsed
+      beaconAt: 0, // when the liveness beacon was last read (see beaconCacheMs)
     };
     open.set(sessionId, entry);
     // The learned window survives restarts: load it before the first read so
@@ -2867,6 +3212,11 @@ module.exports = {
   waitForHandoffPath,
   readArchiveBlocksBeforeOffset,
   readPrefixBlocks,
+  getPrefixSeed,
+  clearPrefixSeedCache,
+  prefixCacheEntries,
+  prefixScanStats,
+  SOURCE_RECORD,
   DEFAULT_WINDOW_BLOCKS,
   MAX_BLOCKS,
   MAX_IMAGE_BLOCKS,

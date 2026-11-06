@@ -78,6 +78,8 @@ The canary makes sends into Pat's real sessions unnecessary by default; whether
 to also send into one of his real idle sessions is the operator's judgment
 call at execution time, stated in the record either way.
 
+**Idle sleeps are not drops (2026-11-06).** Dormancy keeps running across the swap: a session idle for 60 minutes with no CPU is ended cleanly and resumes from the rail. On 2026-11-06 two such sessions slept five minutes after a clean handover, and a keeper comparison counted them as missing. Before promising Pat that no session ends, list the sessions whose `last_activity_at` is near the 60-minute line and say they may sleep on schedule; afterwards, check the daemon log's `dormant <id>` lines before calling any missing keeper a drop. A fresh daemon needs two sweeps before it can sleep anything, so a handover delays a sleep, never brings it forward.
+
 **App check:** the Harbor banner may flash "connection lost" and must return
 to ok within ~30s with NO app relaunch (the terminal bridge reconnects on
 close; the watchdog's wedge path no longer relaunches).

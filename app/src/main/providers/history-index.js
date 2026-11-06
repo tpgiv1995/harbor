@@ -32,13 +32,30 @@ const TITLE_MAX = 110;
 // whose on-disk stamp invalidates its memo.
 const HOME_MAP_INPUTS = ['history.jsonl', 'session-env', 'file-history'];
 
+// The first `limit` code points, counted the way Array.from counts them (a
+// surrogate pair is one, a lone surrogate is one), without building an array
+// of one-character strings: the rail parses about 12,000 prompts of up to
+// 1,200 characters on every history refresh, in two processes (2026-11-06).
 function codePointSlice(value, limit) {
-  const points = Array.from(value);
-  return points.length <= limit ? value : points.slice(0, limit).join('');
+  if (value.length <= limit) return value;
+  let end = 0;
+  for (let count = 0; count < limit && end < value.length; count += 1) {
+    const unit = value.charCodeAt(end);
+    if (unit >= 0xd800 && unit <= 0xdbff && end + 1 < value.length) {
+      const next = value.charCodeAt(end + 1);
+      end += next >= 0xdc00 && next <= 0xdfff ? 2 : 1;
+    } else {
+      end += 1;
+    }
+  }
+  return value.slice(0, end);
 }
 
 function codePointLength(value) {
-  if (!/[\uD800-\uDBFF]/u.test(value)) return value.length;
+  // No u flag: in unicode mode a surrogate PAIR is one code point and never
+  // matches a lone-surrogate class, so every emoji took the fast path and
+  // counted as two.
+  if (!/[\uD800-\uDBFF]/.test(value)) return value.length;
   let length = 0;
   for (const unused of value) length += 1;
   return length;
@@ -51,7 +68,7 @@ function padCodePoints(value, width) {
 
 function cleanText(value, limit) {
   let text = String(value).replace(/\s+/gu, ' ').trim();
-  if (Array.from(text).length > limit) text = `${codePointSlice(text, limit - 1)}…`;
+  if (codePointLength(text) > limit) text = `${codePointSlice(text, limit - 1)}…`;
   return text;
 }
 
@@ -255,6 +272,19 @@ function createHistoryIndex(options = {}) {
   let lastResult = null;
   let lastRefreshAt = -Infinity;
   let lastSaveFailure = null;
+  // ONE WRITER, AND NOT ON EVERY PASS (2026-11-06). The cache is about 17 MB
+  // for 12,000 transcripts, and it was stringified and rewritten whole on
+  // every pass that saw one transcript grow: every 10 to 30 seconds while any
+  // session worked, in the app AND again in the phone server, which also
+  // re-parsed the other's write. The cache only saves re-parsing on a cold
+  // start (every entry is re-checked against its file's size and mtime), so a
+  // long-lived process keeps its passes in memory and writes at most once per
+  // `saveIntervalMs` (the app passes 2 minutes; a one-shot CLI keeps 0, save
+  // every pass), and a `readOnly` process never writes it.
+  const readOnly = options.readOnly === true;
+  const saveIntervalMs = Math.max(0, Number(options.saveIntervalMs) || 0);
+  let lastSavedAt = -Infinity;
+  let saveTimer = null;
 
   // Delegates to the ONE label rule (shared/project-label.cjs). This function
   // kept its own hand-copy for months, which is exactly the drift class the
@@ -276,8 +306,10 @@ function createHistoryIndex(options = {}) {
   // mtime, a directory's mtime (NTFS and POSIX both bump it on create/delete).
   function inputStamp(target) {
     try {
-      const stat = fsImpl.statSync(target);
-      return `${stat.mtimeMs}:${stat.size}`;
+      // Identity too (bigint, exact): a file swapped in with the same size and
+      // mtime is another input (Astra review round 3).
+      const stat = fsImpl.statSync(target, { bigint: true });
+      return `${stat.mtimeNs ?? stat.mtimeMs}:${stat.size}:${stat.dev}:${stat.ino}`;
     } catch {
       return '-';
     }
@@ -285,6 +317,96 @@ function createHistoryIndex(options = {}) {
 
   let titlesMemo = null;
   let homeMapMemo = null;
+  // EACH HOME'S INPUTS ARE READ ONLY AS FAR AS THEY CHANGED (2026-11-06). Any
+  // prompt in any session appends to its home's history.jsonl, which changed
+  // the memo stamp below, and the rebuild re-parsed every home's history.jsonl
+  // (4.2 MB across seven homes on Pat's machine) and re-listed every
+  // session-env and file-history folder (about 19,000 names) on almost every
+  // rail refresh, in the app and in the phone server. Per home now: the
+  // history file's complete lines are counted once and a grown file is read
+  // from where the last read stopped (the bytes after its last newline are
+  // re-read each time, exactly as a full read sees them); a folder is listed
+  // again only when its own stamp changed. Anything else (a shorter file, a
+  // changed first line, a read error) reads that input whole, as before.
+  const homeInputs = new Map(); // `${root}\n${name}` -> cached contribution
+  let homeMapRetry = false; // an input failed to read: the built map must not be memoized
+  function historyCounts(root) {
+    const file = path.join(root, 'history.jsonl');
+    const key = `${root}\nhistory.jsonl`;
+    const countLines = (text, into) => {
+      for (const line of splitLines(text)) {
+        const obj = jsonObject(line);
+        if (obj && obj.sessionId) into.set(obj.sessionId, (into.get(obj.sessionId) || 0) + 1);
+      }
+    };
+    let fd = null;
+    try {
+      fd = fsImpl.openSync(file, 'r');
+      const info = fsImpl.fstatSync(fd, { bigint: true });
+      const size = Number(info.size);
+      const identity = `${info.dev}:${info.ino}`; // exact: bigint (Astra review round 3)
+      const mtime = String(info.mtimeNs ?? info.mtimeMs);
+      let cached = homeInputs.get(key);
+      const headLength = Math.min(256, size);
+      const head = Buffer.alloc(headLength);
+      fsImpl.readSync(fd, head, 0, headLength, 0);
+      const headText = head.toString('latin1');
+      // The same file, grown: no shorter than what was counted, and its first
+      // bytes unchanged. Anything else is a new file and is read whole.
+      // Also a new file: another identity, or the same size as last read with a
+      // different mtime (rewritten in place; Astra review round 2).
+      if (!cached || size < cached.completeTo || headText.length < cached.head.length || !headText.startsWith(cached.head)
+        || cached.identity !== identity || (size === cached.size && mtime !== cached.mtime)) {
+        cached = { head: headText, completeTo: 0, counts: new Map() };
+      }
+      const length = size - cached.completeTo;
+      const buffer = Buffer.alloc(Math.max(0, length));
+      if (length > 0) fsImpl.readSync(fd, buffer, 0, length, cached.completeTo);
+      const lastNewline = buffer.lastIndexOf(0x0a);
+      const complete = lastNewline >= 0 ? buffer.subarray(0, lastNewline + 1) : buffer.subarray(0, 0);
+      const counts = new Map(cached.counts);
+      if (complete.length) countLines(complete.toString('utf8'), counts);
+      const next = { head: headText, completeTo: cached.completeTo + complete.length, counts, identity, size, mtime };
+      homeInputs.set(key, next);
+      // The unfinished last line counts exactly as a whole-file read counts it.
+      const tail = buffer.subarray(complete.length);
+      if (!tail.length) return counts;
+      const withTail = new Map(counts);
+      countLines(tail.toString('utf8'), withTail);
+      return withTail;
+    } catch (error) {
+      // No history file is an empty contribution (a profile need not have
+      // one). A file that would not read right now is not: keep the last good
+      // counts and leave the map unmemoized so the next call reads it again
+      // (Astra review round 3).
+      if (error?.code === 'ENOENT') { homeInputs.delete(key); return new Map(); }
+      homeMapRetry = true;
+      return homeInputs.get(key)?.counts || new Map();
+    } finally {
+      if (fd !== null) try { fsImpl.closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+  function folderIds(root, directory) {
+    const target = path.join(root, directory);
+    const key = `${root}\n${directory}`;
+    const stamp = inputStamp(target);
+    const cached = homeInputs.get(key);
+    if (cached && cached.stamp === stamp && stamp !== '-') return cached.ids;
+    let ids = [];
+    try {
+      ids = fsImpl.readdirSync(target).filter((name) => UUID_BARE_RE.test(name)).map((name) => name.slice(0, 36));
+    } catch (error) {
+      // A folder that is not there is an empty contribution. One that would not
+      // list right now is not: keep the last good answer and ask again next
+      // time, never cache the failure as "empty" (Astra review round 2).
+      if (error?.code !== 'ENOENT') {
+        homeMapRetry = true;
+        return cached ? cached.ids : [];
+      }
+    }
+    homeInputs.set(key, { stamp, ids });
+    return ids;
+  }
   let titlesCheckedAt = -Infinity;
   let homesCheckedAt = -Infinity;
   function loadGeneratedTitles() {
@@ -351,6 +473,33 @@ function createHistoryIndex(options = {}) {
         sleepSync(RENAME_RETRY_MS[attempt]);
       }
     }
+  }
+
+  // The pass is complete whether or not the cache lands. A write that fails
+  // costs the NEXT pass a re-parse of what changed; it must never cost this
+  // caller its rows (before: it threw here, after every transcript had
+  // already been read, and at boot that rejection exited Harbor).
+  function persist(files) {
+    try {
+      saveCache(files);
+      lastSaveFailure = null;
+      lastSavedAt = nowMs();
+      return true;
+    } catch (error) {
+      const message = `harbor-index: could not write the cache ${cacheFile} (${error?.code || 'error'}: ${error?.message || error}); serving the pass from memory`;
+      if (message !== lastSaveFailure) log(message);
+      lastSaveFailure = message;
+      return false;
+    }
+  }
+
+  // Writes a pass that is still waiting for its interval (on close).
+  function flush() {
+    if (!saveTimer) return false;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (memFiles && !readOnly) persist(memFiles);
+    return true;
   }
 
   function saveCache(files) {
@@ -491,18 +640,21 @@ function createHistoryIndex(options = {}) {
     for (const [id, file, mt, sz] of pending) {
       try { fresh[file] = { ...parseTranscript(file, cache[file] && sz > cache[file].sz ? cache[file] : undefined), id, mt, sz }; } catch { /* unreadable transcripts are skipped */ }
     }
-    if ((pending.length || Object.keys(fresh).length !== Object.keys(cache).length) && env.HARBOR_INDEX_READ_ONLY !== '1') {
-      // The pass is complete whether or not the cache lands. A write that fails
-      // costs the NEXT pass a re-parse of what changed; it must never cost
-      // this caller its rows (before: it threw here, after every transcript
-      // had already been read, and at boot that rejection exited Harbor).
-      try {
-        saveCache(fresh);
-        lastSaveFailure = null;
-      } catch (error) {
-        const message = `harbor-index: could not write the cache ${cacheFile} (${error?.code || 'error'}: ${error?.message || error}); serving the pass from memory`;
-        if (message !== lastSaveFailure) log(message);
-        lastSaveFailure = message;
+    if ((pending.length || Object.keys(fresh).length !== Object.keys(cache).length) && !readOnly && env.HARBOR_INDEX_READ_ONLY !== '1') {
+      const wait = lastSavedAt + saveIntervalMs - nowMs();
+      if (wait <= 0) {
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        persist(fresh);
+      } else if (!saveTimer) {
+        // The newest pass lands when the interval is up, even if no pass runs
+        // then, and says so: the titler reads this file from disk, and a session
+        // that first appeared in memory must not wait for some later refresh to
+        // be named (Astra review 2026-11-06).
+        saveTimer = setTimeout(() => {
+          saveTimer = null;
+          if (memFiles && persist(memFiles)) options.onPersisted?.();
+        }, wait);
+        saveTimer.unref?.();
       }
     }
     memFiles = fresh;
@@ -531,7 +683,7 @@ function createHistoryIndex(options = {}) {
         entry.entrypoint = entrypoint; changed++;
       } catch { entry.entrypoint = null; changed++; }
     }
-    if (changed && !remaining) { try { saveCache(files); } catch (error) { log(String(error)); } }
+    if (changed && !remaining && !readOnly) { try { saveCache(files); } catch (error) { log(String(error)); } }
     return { changed, remaining };
   }
 
@@ -571,7 +723,7 @@ function createHistoryIndex(options = {}) {
     return [...best.values()];
   }
 
-  function emit(args, env) {
+  function emitRows(args, env) {
     const index = refreshIndex(args.includes('--rebuild'), env);
     const since = args.includes('--since') ? parseSince(flagValue(args, '--since')) : null;
     const projectFilter = args.includes('--project') ? flagValue(args, '--project').toLowerCase() : null;
@@ -606,7 +758,40 @@ function createHistoryIndex(options = {}) {
       if (args.includes('--with-entrypoint')) line += `\t${entrypoint || ''}`;
       return line;
     });
-    return out.length ? `${out.join('\n')}\n` : '';
+    return { ids: rows.map((row) => row[1]), lines: out };
+  }
+
+  function emit(args, env) {
+    const { lines } = emitRows(args, env);
+    return lines.length ? `${lines.join('\n')}\n` : '';
+  }
+
+  // ONLY THE ROWS THAT CHANGED (2026-11-06). The rail asks for every session on
+  // every history refresh: 12,000 rows, a 14.8 MB string copied across the
+  // thread boundary and parsed on the main thread of the app and of the phone
+  // server, about three times a minute while sessions work (measured: 61% of
+  // the phone server's allocations). Between two refreshes a handful of rows
+  // change. A caller that passes back the cursor of its last answer gets the
+  // order of ids plus only the lines that differ from that answer; any other
+  // cursor (first call, another caller, a restarted worker) gets every line.
+  const deltaEpoch = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  let deltaSeq = 0;
+  let deltaKey = null;
+  let deltaLines = new Map();
+  function emitDelta(args, cursor = null, env = process.env) {
+    const { ids, lines } = emitRows(args, env);
+    const key = args.join('\u0000');
+    const full = !cursor || cursor.epoch !== deltaEpoch || cursor.seq !== deltaSeq || cursor.key !== key || deltaKey !== key;
+    const next = new Map();
+    const changed = [];
+    for (let i = 0; i < ids.length; i += 1) {
+      next.set(ids[i], lines[i]);
+      if (full || deltaLines.get(ids[i]) !== lines[i]) changed.push(lines[i]);
+    }
+    deltaLines = next;
+    deltaKey = key;
+    deltaSeq += 1;
+    return { cursor: { epoch: deltaEpoch, seq: deltaSeq, key }, full, ids, changed };
   }
 
   function tree(args, env) {
@@ -657,22 +842,16 @@ function createHistoryIndex(options = {}) {
     // file-history entry each invalidate it, and nothing else does.
     const stamp = homes.map(([, root, id]) => [id, root, ...HOME_MAP_INPUTS.map((name) => inputStamp(path.join(root, name)))].join('|')).join('\n');
     if (homeMapMemo && homeMapMemo.stamp === stamp) return homeMapMemo.map;
+    homeMapRetry = false;
     const scores = new Map();
     const score = (id, index, amount) => {
       if (!scores.has(id)) scores.set(id, Array(homes.length).fill(0));
       scores.get(id)[index] += amount;
     };
     for (const [index, root] of homes) {
-      try {
-        for (const line of splitLines(fsImpl.readFileSync(path.join(root, 'history.jsonl'), 'utf8'))) {
-          const obj = jsonObject(line);
-          if (obj && obj.sessionId) score(obj.sessionId, index, 2);
-        }
-      } catch { /* a profile need not have history */ }
+      for (const [id, count] of historyCounts(root)) score(id, index, 2 * count);
       for (const directory of ['session-env', 'file-history']) {
-        try {
-          for (const name of fsImpl.readdirSync(path.join(root, directory))) if (UUID_BARE_RE.test(name)) score(name.slice(0, 36), index, 1);
-        } catch { /* a profile need not have artifacts */ }
+        for (const id of folderIds(root, directory)) score(id, index, 1);
       }
     }
     const result = {};
@@ -680,7 +859,9 @@ function createHistoryIndex(options = {}) {
       const top = Math.max(...values);
       if (top > 0 && values.filter((value) => value === top).length === 1) result[id] = homes[values.indexOf(top)][2];
     }
-    homeMapMemo = { stamp, map: result };
+    // A map built while an input would not read is served, but not memoized:
+    // the next call reads that input again.
+    homeMapMemo = homeMapRetry ? null : { stamp, map: result };
     return result;
   }
 
@@ -777,7 +958,7 @@ function createHistoryIndex(options = {}) {
     throw new Error('harbor-index: invalid command');
   }
 
-  return { run, refreshIndex, buildHomeMap, parseTranscript, projectLabel, migrateEntries, noteChanged };
+  return { run, emitDelta, refreshIndex, buildHomeMap, parseTranscript, projectLabel, migrateEntries, noteChanged, flush };
 }
 
 function createHistoryIndexWorker(options = {}) {
@@ -807,6 +988,10 @@ function createHistoryIndexWorker(options = {}) {
       // A log line from the worker (a cache write that would not land, say)
       // is forwarded to whoever owns this process's durable log; the worker's
       // own console is stderr, which a shortcut-launched app discards.
+      if (message && message.persisted === true) {
+        if (typeof options.onPersisted === 'function') options.onPersisted();
+        return;
+      }
       if (message && typeof message.log === 'string') {
         if (typeof options.onLog === 'function') options.onLog(message.log);
         else console.warn(message.log);
@@ -850,8 +1035,18 @@ function createHistoryIndexWorker(options = {}) {
     buildHomeMap: () => request('buildHomeMap'),
     migrateEntries: (limit) => request('migrateEntries', [limit]),
     noteChanged: (names) => request('noteChanged', [names]),
+    emitDelta: (argv, cursor, env = {}) => request('emitDelta', [argv, env, cursor]),
+    flush: () => (worker && !closed ? request('flush') : Promise.resolve(false)),
     close: async () => {
       if (closed) return;
+      // A pass still waiting for its save interval is written before the
+      // thread goes; bounded so a stuck worker cannot hold up a quit.
+      if (worker) {
+        await Promise.race([
+          request('flush').catch(() => false),
+          new Promise((resolve) => { const t = setTimeout(resolve, 2000); t.unref?.(); }),
+        ]);
+      }
       closed = true;
       rejectPending(new Error('history index worker closed'));
       const target = worker;
@@ -861,7 +1056,7 @@ function createHistoryIndexWorker(options = {}) {
   };
 }
 
-module.exports = { CACHE_VERSION, createHistoryIndex, createHistoryIndexWorker, parseTranscript };
+module.exports = { CACHE_VERSION, codePointSlice, createHistoryIndex, createHistoryIndexWorker, parseTranscript };
 
 if (!isMainThread && workerData && workerData.historyIndexWorker) {
   // Functions do not cross the worker boundary (workerData is structured
@@ -869,6 +1064,7 @@ if (!isMainThread && workerData && workerData.historyIndexWorker) {
   const index = createHistoryIndex({
     ...(workerData.options || {}),
     log: (line) => parentPort.postMessage({ log: String(line) }),
+    onPersisted: () => parentPort.postMessage({ persisted: true }),
   });
   parentPort.on('message', (message) => {
     try {
@@ -882,6 +1078,11 @@ if (!isMainThread && workerData && workerData.historyIndexWorker) {
         result = index.migrateEntries(...message.args);
       } else if (message.method === 'noteChanged') {
         result = index.noteChanged(...message.args);
+      } else if (message.method === 'emitDelta') {
+        const [argv, env, cursor] = message.args;
+        result = index.emitDelta(argv, cursor, { ...process.env, ...env });
+      } else if (message.method === 'flush') {
+        result = index.flush();
       } else {
         throw new Error(`unknown history index worker method: ${message.method}`);
       }

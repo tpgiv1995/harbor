@@ -189,7 +189,8 @@ test('idle evidence scans retain history in the worker and push only changed lin
     postMessage(message) { sent.push(structuredClone(message)); setImmediate(() => this.emit('message', { parents: [], built: {} })); }
   }
   const index = createDelegationIndex({}, { WorkerClass: FakeWorker }); t.after(() => index.close());
-  const rows = Array.from({ length: 10000 }, (_, i) => ({ id: `sample-${i}`, title: 'Synthetic session', meta: { firstPrompt: 'x'.repeat(1200) } }));
+  const recent = new Date().toISOString();
+  const rows = Array.from({ length: 10000 }, (_, i) => ({ id: `sample-${i}`, title: 'Synthetic session', path: `/t/sample-${i}.jsonl`, lastActive: recent, meta: { firstPrompt: 'x'.repeat(1200) } }));
   await index.scan(rows, ['sample-1']);
   assert.equal(sent[0].rows.length, 10000); assert.equal(sent[0].rows[0].meta, undefined);
   index.updateLinks({ 'sample-2': 'sample-1' });
@@ -198,6 +199,30 @@ test('idle evidence scans retain history in the worker and push only changed lin
   assert.ok(Buffer.byteLength(JSON.stringify(sent[1])) < 1000);
   await index.scan(rows, []); assert.deepEqual(sent[2].linkUpdates, {});
   await index.scan([...rows], []); assert.equal(sent[3].rows.length, 10000, 'a history refresh replaces the worker snapshot');
+});
+
+// 2026-11-06: the worker reads codex rows of any age and Claude rows that are
+// live or active in the last 48 h, and skips everything else on every pass, so
+// only those cross (all ~14,000 rail rows were copied on every refresh).
+test('only rows the scan can use are copied to the delegation worker', async (t) => {
+  const { EventEmitter } = require('node:events'); const sent = [];
+  class FakeWorker extends EventEmitter {
+    unref() {} terminate() {}
+    postMessage(message) { sent.push(structuredClone(message)); setImmediate(() => this.emit('message', { parents: [], built: {} })); }
+  }
+  const index = createDelegationIndex({}, { WorkerClass: FakeWorker }); t.after(() => index.close());
+  const recent = new Date().toISOString();
+  const old = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
+  const rows = [
+    { id: 'claude-recent', path: '/t/a.jsonl', lastActive: recent },
+    { id: 'claude-old', path: '/t/b.jsonl', lastActive: old },
+    { id: 'claude-old-live', path: '/t/c.jsonl', lastActive: old },
+    { id: 'claude-no-path', lastActive: recent },
+    { id: 'codex-old', provider: 'codex', path: '/t/d.jsonl', lastActive: old },
+    { id: 'cursor-recent', provider: 'cursor', path: '/t/e.jsonl', lastActive: recent },
+  ];
+  await index.scan(rows, ['claude-old-live']);
+  assert.deepEqual(sent[0].rows.map((row) => row.id), ['claude-recent', 'claude-old-live', 'codex-old']);
 });
 
 test('run states and attention agree on blocked, working, background, ready and dead', () => {
@@ -554,4 +579,39 @@ test('the header agents chip follows the overview: running or recently done, the
   const working = parent('codex exec "Review"');
   const live = buildDelegationGroups([working], [{ ...root(), signal: { working: true, lastSignalMs: 5000 } }], 7000).groups;
   assert.deepEqual(delegationSummaries(live, 7000, ['parent']).get('parent'), { total: 1, running: 1 }, 'a running agent is counted');
+});
+
+// Astra review round 2: an old Claude row filtered out of the handoff must be
+// sent once its session goes live, even when the history rows are unchanged.
+test('a session that goes live between history refreshes is sent to the worker', async (t) => {
+  const { EventEmitter } = require('node:events'); const sent = [];
+  class FakeWorker extends EventEmitter {
+    unref() {} terminate() {}
+    postMessage(message) { sent.push(structuredClone(message)); setImmediate(() => this.emit('message', { parents: [], built: {} })); }
+  }
+  const index = createDelegationIndex({}, { WorkerClass: FakeWorker }); t.after(() => index.close());
+  const old = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
+  const rows = [{ id: 'resumed', path: '/t/r.jsonl', lastActive: old }, { id: 'other', path: '/t/o.jsonl', lastActive: old }];
+  await index.scan(rows, []);
+  assert.deepEqual(sent[0].rows, [], 'nothing usable at first');
+  await index.scan(rows, ['resumed']);
+  assert.deepEqual(sent[1].rows.map((row) => row.id), ['resumed'], 'the same rows array, re-sent because a session went live');
+  await index.scan(rows, ['resumed']);
+  assert.equal(sent[2].rows, undefined, 'and not again while nothing changes');
+});
+
+// Astra review round 3: a live row the worker can never receive (cursor, or no
+// path) must not force a re-send on every scan.
+test('a live cursor row does not re-send the rows on every scan', async (t) => {
+  const { EventEmitter } = require('node:events'); const sent = [];
+  class FakeWorker extends EventEmitter {
+    unref() {} terminate() {}
+    postMessage(message) { sent.push(structuredClone(message)); setImmediate(() => this.emit('message', { parents: [], built: {} })); }
+  }
+  const index = createDelegationIndex({}, { WorkerClass: FakeWorker }); t.after(() => index.close());
+  const recent = new Date().toISOString();
+  const rows = Array.from({ length: 100 }, (_, i) => ({ id: `c${i}`, path: `/t/c${i}.jsonl`, lastActive: recent }));
+  rows.push({ id: 'cursor-live', provider: 'cursor', path: '/t/cur.jsonl', lastActive: recent });
+  for (let i = 0; i < 3; i += 1) await index.scan(rows, ['cursor-live']);
+  assert.deepEqual(sent.map((m) => m.rows?.length ?? 0), [100, 0, 0]);
 });

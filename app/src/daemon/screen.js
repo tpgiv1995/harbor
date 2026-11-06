@@ -66,8 +66,19 @@ function composerSuggestion(terminal) {
   return null;
 }
 
+// HOW MANY LINES ABOVE THE VISIBLE SCREEN THE MODEL KEEPS (2026-11-06). It was
+// 10,000 per session while the largest read anywhere asks for 200 (the raw
+// view's backfill, terminal-bridge BACKFILL_LINES; readPane's own default is
+// 200 too; session-send reads 90 or fewer), so sixteen keepers each carried a
+// buffer nobody could ask for: measured live, 53-194 MB committed per keeper
+// against about 46 MB for a bare node + ConPTY + empty model. 2,000 is ten times
+// the largest request, so a reader can grow severalfold before this matters;
+// raise it only together with a reader that really asks for more. Applies to
+// keepers spawned after the change; a running keeper keeps the buffer it has.
+const MODELED_SCROLLBACK_LINES = 2000;
+
 class ScreenModel {
-  constructor({ cols, rows, scrollback = 10000 }) {
+  constructor({ cols, rows, scrollback = MODELED_SCROLLBACK_LINES }) {
     this.terminal = new Terminal({ cols, rows, scrollback, allowProposedApi: true, windowsPty: windowsPtyCompat() });
     this.terminal.loadAddon(new Unicode11Addon());
     this.terminal.unicode.activeVersion = '11';
@@ -147,4 +158,4 @@ function inputModes(terminal) {
   }
 }
 
-module.exports = { ScreenModel, windowsPtyCompat, composerSuggestion, inputModes };
+module.exports = { ScreenModel, MODELED_SCROLLBACK_LINES, windowsPtyCompat, composerSuggestion, inputModes };

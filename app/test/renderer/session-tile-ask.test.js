@@ -15,8 +15,19 @@ const sessionTileSource = fs.readFileSync(
 );
 
 test('Ask card poll re-arms when sessionId changes after a provisional upgrade', () => {
-  assert.match(askCardSource, /}, \[paneId, sessionId, pane, blockedHint, watchOnly\]\)/);
+  assert.match(askCardSource, /}, \[paneId, sessionId, blockedHint, watchOnly\]\)/);
   assert.doesNotMatch(askCardSource, /eslint-disable-line react-hooks\/exhaustive-deps/);
+});
+
+// 2026-11-06: with the pane OBJECT in the poll's deps, every sidebar model
+// (about two a second) handed the card a new object for the same pane, which
+// cancelled the 700 ms timer and polled again at once: each open Claude window
+// drove about 24 screen reads a second through main, the daemon and its
+// keeper. The poll reads the pane through a ref and re-arms on its ID only.
+test('the Ask card poll does not restart when only the pane object changes', () => {
+  assert.doesNotMatch(askCardSource, /}, \[[^\]]*\bpane\b[^\]]*blockedHint, watchOnly\]\)/, 'pane itself is not a dependency of the poll');
+  assert.match(askCardSource, /paneRef\.current = pane;/);
+  assert.match(askCardSource, /menuState\(\{ pane: paneRef\.current,/);
 });
 
 // 2026-10-14: a window left on its raw terminal must still mark its session

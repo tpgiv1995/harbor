@@ -144,6 +144,45 @@ test('a repeat observe joins the relay, unobserve ends it, and observe brings it
   assert.equal(count(mine, 'OBSERVED_AGAIN'), count(theirs, 'OBSERVED_AGAIN'), 'a fresh observe streams again, once');
 });
 
+// A RAW VIEW OWNS ITS PANE'S SIZE ACROSS CLIENTS (2026-11-06). The phone
+// server's bridge grew a pane to 120x60 for dialogs while the desktop showed it
+// raw at 154x35, and the desktop's view scrambled. Two-sided: before the fix the
+// first dialog resize landed under the open view.
+test('a dialog resize waits while another client shows the pane raw, then lands', async () => {
+  const h = await harness();
+  const spawned = await h.client.request('spawn', {
+    argv: SHELL_ARGV, cwd: h.dir, env: { PS1: 'HARBOR_TEST> ' }, cols: 154, rows: 35,
+  });
+  const viewer = new SessionClient({ socketPath: h.socketPath });
+  cleanups.push(async () => viewer.close());
+  const sizeOf = async () => {
+    const listed = await h.client.request('list');
+    const session = (listed.sessions || listed).find((item) => item.id === spawned.id);
+    return `${session.cols}x${session.rows}`;
+  };
+
+  await viewer.request('observe', { id: spawned.id });
+  const refused = await h.client.request('resize', { id: spawned.id, cols: 120, rows: 60, purpose: 'dialog' });
+  assert.equal(refused.resized, false, 'a dialog resize is refused while a raw view is open');
+  assert.equal(await sizeOf(), '154x35', 'and the view keeps the size it chose');
+
+  // The view's own fit is not a dialog resize and always applies.
+  await viewer.request('resize', { id: spawned.id, cols: 150, rows: 34 });
+  await waitUntil(async () => (await sizeOf()) === '150x34', 'the viewer\'s own resize must apply');
+
+  await viewer.request('unobserve', { id: spawned.id });
+  const landed = await h.client.request('resize', { id: spawned.id, cols: 120, rows: 60, purpose: 'dialog' });
+  assert.notEqual(landed?.resized, false, 'with no raw view the dialog resize applies');
+  await waitUntil(async () => (await sizeOf()) === '120x60', 'the pane grows to the dialog size once no one watches it raw');
+
+  // A viewer whose connection drops releases the pane too.
+  await viewer.request('observe', { id: spawned.id });
+  assert.equal((await h.client.request('resize', { id: spawned.id, cols: 130, rows: 50, purpose: 'dialog' })).resized, false);
+  viewer.close();
+  await waitUntil(async () => (await h.client.request('resize', { id: spawned.id, cols: 130, rows: 50, purpose: 'dialog' }))?.resized !== false,
+    'a closed connection stops owning the pane size');
+});
+
 test('seven session verbs drive a real pty and preserve its screen across resize', async () => {
   const h = await harness();
   const spawned = await h.client.request('spawn', {

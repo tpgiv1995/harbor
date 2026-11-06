@@ -1464,9 +1464,12 @@ test('a turn-token update on an image prompt is a small patch, and the held imag
   await provider.refresh('image-prompt');
   writeLines(file, [repeat]);
   await provider.refresh('image-prompt');
-  assert.equal(updates.length, 2);
+  // The second read changed no block. Whether it sends anything depends only on
+  // the header (emit-only-on-change, 2026-11-06): the file's mtime can move the
+  // working clock or not, by filesystem timing. Either way no patch travels.
+  assert.ok(updates.length === 1 || updates.length === 2, `one or two updates, got ${updates.length}`);
   assert.equal(updates[0].patched[0].turnMeta.outputTokens, 130, 'control: a real change still patches');
-  assert.equal(updates[1].patched, undefined, 'an unchanged total re-sends nothing');
+  assert.equal(updates[1]?.patched, undefined, 'an unchanged total re-sends nothing');
 
   provider.closeAll();
   await fsp.rm(dir, { recursive: true, force: true });
@@ -2093,9 +2096,11 @@ test('a Delegated row follows its sub-agent transcript: tools so far, what it is
   await provider.refresh(sessionId);
   changed = updates.at(-1).changed.find((b) => b.toolId === 'toolu_live');
   assert.deepEqual(changed.sub, { running: false, quiet: false, finished: true, tools: 3, now: null, partial: false });
-  // Settled: a later refresh sends nothing for it.
+  // Settled: a later refresh sends nothing for it (and, since 2026-11-06, nothing
+  // at all: no block changed and the header is the one already sent).
+  const sentSoFar = updates.length;
   await provider.refresh(sessionId);
-  assert.equal(updates.at(-1).changed.some((b) => b.toolId === 'toolu_live'), false);
+  assert.equal(updates.length, sentSoFar);
 });
 
 // Astra's round 3 (2026-11-01): silence is not death, a shrunk child file is

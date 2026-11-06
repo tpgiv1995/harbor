@@ -160,3 +160,138 @@ test('a stored request copy of a question is never the live one', () => {
   ]);
   assert.equal(createPendingAskReader().read(realAfterCopy)?.toolId, 'toolu_live');
 });
+
+// A busy session appends every second or so and each open window polls about
+// once a second, so a changed file is the normal case. Re-reading the whole
+// megabyte tail on every change cost a megabyte read and about three megabytes
+// of garbage per window per poll on Harbor's main thread (measured 2026-11-06).
+// With no question open, only an appended line naming AskUserQuestion can
+// change the answer, so only the appended bytes are read. Counted at fs.readSync
+// so the assertion holds whatever the reader's internals look like.
+function countReadBytes(fn) {
+  const real = fs.readSync;
+  let bytes = 0;
+  fs.readSync = (fd, buffer, offset, length, position) => {
+    const got = real(fd, buffer, offset, length, position);
+    bytes += got;
+    return got;
+  };
+  try { fn(); } finally { fs.readSync = real; }
+  return bytes;
+}
+
+const chatter = (i) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: `step ${i} ${'y'.repeat(200)}` }] } });
+
+test('a busy session with no question reads only what was appended', () => {
+  const big = { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: 'z'.repeat(200_000) }] } };
+  const file = writeTranscript([big, big]);
+  const reader = createPendingAskReader();
+  assert.equal(reader.read(file), null);
+  const appendedBytes = [];
+  const readBytes = countReadBytes(() => {
+    for (let i = 0; i < 20; i += 1) {
+      const line = JSON.stringify(chatter(i)) + '\n';
+      appendedBytes.push(Buffer.byteLength(line));
+      fs.appendFileSync(file, line);
+      assert.equal(reader.read(file), null);
+    }
+  });
+  const total = appendedBytes.reduce((a, b) => a + b, 0);
+  // Each poll also re-reads two 256-byte continuity marks (head, and the bytes
+  // before where it stopped) before and after: at most 1 KB per poll.
+  const allowance = total + 20 * 1024;
+  assert.ok(readBytes <= allowance, `read ${readBytes} bytes for ${total} appended over 20 polls (a full tail re-read is ${fs.statSync(file).size} per poll)`);
+});
+
+test('a question appended to a busy session is found', () => {
+  const file = writeTranscript([chatter(0)]);
+  const reader = createPendingAskReader();
+  assert.equal(reader.read(file), null);
+  fs.appendFileSync(file, JSON.stringify(chatter(1)) + '\n');
+  assert.equal(reader.read(file), null);
+  fs.appendFileSync(file, JSON.stringify(assistantAsk('toolu_late', QUESTIONS)) + '\n');
+  assert.equal(reader.read(file)?.toolId, 'toolu_late');
+  fs.appendFileSync(file, JSON.stringify(toolResult('toolu_late')) + '\n');
+  assert.equal(reader.read(file), null, 'and cleared by its answer');
+});
+
+test('a question caught half-written is found once its line completes', () => {
+  const file = writeTranscript([chatter(0)]);
+  const reader = createPendingAskReader();
+  assert.equal(reader.read(file), null);
+  const line = JSON.stringify(assistantAsk('toolu_split', QUESTIONS)) + '\n';
+  const cut = line.indexOf('AskUserQuestion') + 4; // the name itself is cut in half
+  fs.appendFileSync(file, line.slice(0, cut));
+  assert.equal(reader.read(file), null, 'a half-written record is not a question yet');
+  fs.appendFileSync(file, line.slice(cut));
+  assert.equal(reader.read(file)?.toolId, 'toolu_split');
+});
+
+test('a rewritten transcript is read again from scratch', async () => {
+  const file = writeTranscript([chatter(0), chatter(1)]);
+  const reader = createPendingAskReader();
+  assert.equal(reader.read(file), null);
+  await new Promise((r) => setTimeout(r, 12));
+  fs.writeFileSync(file, JSON.stringify(assistantAsk('toolu_new_file', QUESTIONS)) + '\n');
+  assert.equal(reader.read(file)?.toolId, 'toolu_new_file', 'a shorter file is a new file');
+});
+
+// Astra review 2026-11-06, finding 3: growth alone is not proof of an append.
+// A transcript replaced by a different, LARGER file whose open question sits
+// above the old read offset was read from that offset and the question hidden.
+test('a transcript replaced by a larger file is read again, not continued', async () => {
+  const file = writeTranscript([chatter(0), chatter(1), chatter(2)]);
+  const reader = createPendingAskReader();
+  assert.equal(reader.read(file), null);
+  await new Promise((r) => setTimeout(r, 12));
+  const replacement = [
+    { type: 'user', message: { role: 'user', content: 'a different session' } },
+    assistantAsk('ask-1', QUESTIONS),
+    chatter(10), chatter(11), chatter(12), chatter(13),
+  ];
+  fs.writeFileSync(file, replacement.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  assert.equal(reader.read(file)?.toolId, 'ask-1', 'the open question in the replacement is found');
+});
+
+// Astra review round 2, N2: a replacement file (written aside and renamed in)
+// can keep both continuity marks while a question sits between them. A new
+// file identity means a full read.
+test('a renamed-in replacement that keeps both marks is still read whole', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-pending-ask-'));
+  const file = path.join(dir, 'session.jsonl');
+  const askLine = JSON.stringify(assistantAsk('ask-mid', QUESTIONS));
+  const base = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '' }] } };
+  base.message.content[0].text = 'z'.repeat(Math.max(0, askLine.length - JSON.stringify(base).length));
+  const filler = JSON.stringify(base);
+  assert.equal(Buffer.byteLength(filler), Buffer.byteLength(askLine), 'the question takes exactly the filler\'s bytes');
+  const head = JSON.stringify(chatter(0));
+  const tail = [JSON.stringify(chatter(1)), JSON.stringify(chatter(2))].join('\n');
+  fs.writeFileSync(file, `${head}\n${filler}\n${tail}\n`);
+  const reader = createPendingAskReader();
+  assert.equal(reader.read(file), null);
+  await new Promise((r) => setTimeout(r, 12));
+  const aside = path.join(dir, 'replacement.jsonl');
+  fs.writeFileSync(aside, `${head}\n${askLine}\n${tail}\n${JSON.stringify(chatter(3))}\n`);
+  fs.renameSync(aside, file);
+  assert.equal(reader.read(file)?.toolId, 'ask-mid');
+});
+
+// Astra review round 3: a file swapped in with the same size and mtime is
+// another file; the fast path must not return the old answer.
+test('a same-size, same-mtime file swapped in is read again', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-pending-ask-'));
+  const file = path.join(dir, 'session.jsonl');
+  const askLine = JSON.stringify(assistantAsk('same-stamp', QUESTIONS));
+  const base = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '' }] } };
+  base.message.content[0].text = 'z'.repeat(Math.max(0, askLine.length - JSON.stringify(base).length));
+  const filler = JSON.stringify(base);
+  const when = new Date('2026-11-06T08:00:00Z');
+  fs.writeFileSync(file, `${filler}\n`); fs.utimesSync(file, when, when);
+  const reader = createPendingAskReader();
+  assert.equal(reader.read(file), null);
+  const aside = path.join(dir, 'aside.jsonl');
+  fs.writeFileSync(aside, `${askLine}\n`); fs.utimesSync(aside, when, when);
+  fs.renameSync(aside, file);
+  assert.equal(fs.statSync(file).size, Buffer.byteLength(`${filler}\n`));
+  assert.equal(reader.read(file)?.toolId, 'same-stamp');
+});
