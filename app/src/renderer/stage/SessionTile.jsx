@@ -226,7 +226,19 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   const awaitingAnswer = pendingAsk && !pendingAsk.answered || terminalDialogs.has(session.id);
   const runState = runStateCue(session, pane, awaitingAnswer ? { ...header, blocked: true } : header);
   const lastPrompt = useMemo(() => { for (let i = blocks.length - 1; i >= 0; i -= 1) if (blocks[i].kind === 'user' && !blocks[i].queued) return blocks[i]; return null; }, [blocks]);
-  const workMeter = useWorkMeter(session, pane, Boolean(header?.working) && !awaitingAnswer, lastPrompt);
+  // The live clock and token count belong to the task in flight (the header's
+  // `turn`, which also starts on a turn another session's message or a
+  // background result opened), not to the last prompt Pat typed: in a
+  // dispatcher driven by other sessions that prompt was 28 minutes back while
+  // the step was 10 seconds old (2026-11-06). The prompt is the fallback when
+  // the transcript has not shown where the task began.
+  const turnStartTs = header?.turn?.startTs || null;
+  const turnTokens = header?.turn?.outputTokens ?? null;
+  const meterPrompt = useMemo(
+    () => (turnStartTs ? { key: `turn:${turnStartTs}`, ts: turnStartTs, turnMeta: { outputTokens: turnTokens } } : lastPrompt),
+    [turnStartTs, turnTokens, lastPrompt],
+  );
+  const workMeter = useWorkMeter(session, pane, Boolean(header?.working) && !awaitingAnswer, meterPrompt);
   const queueInfo = useMemo(() => queueChip(header?.queue), [header?.queue]);
   const title = session.isChildTask && session.childTitle ? session.childTitle : session.title;
   const projectLabel = !session.project || session.project === '~' ? 'home' : session.project;

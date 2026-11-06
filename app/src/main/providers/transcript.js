@@ -852,8 +852,38 @@ function buildDiffPreview(oldString, newString) {
 // harness-injected rendering as "you said this" is a lie (live-caught).
 // Normalize a queued message's text so an enqueue and its paired queued_command
 // (which carry the same text) match despite whitespace differences.
+//
+// A message from another session is keyed WITHOUT the attributes of its opening
+// tag (2026-11-06, Pat: "20 queued? no way thats right?"). Claude 2.1.316 writes
+// the enqueue of a relayed message with a `hop-chain="..."` attribute and the
+// `remove` that takes it mid-turn without one (154 such enqueues in three days,
+// no remove carrying it), so the exact key never paired them and every message
+// another session sent while Claude worked stayed "waiting" for good: 121
+// phantom entries across 40 sessions, 20 in Pat's dispatcher window. Two equal
+// bodies from different senders sharing a key is harmless: either one settles.
+const PEER_OPEN_TAG = /<cross-session-message\b[^>]*>/g;
 function normalizeQueuedKey(text) {
-  return String(text ?? '').replace(/\s+/g, ' ').trim();
+  return String(text ?? '').replace(/\s+/g, ' ').trim().replace(/^<cross-session-message\b[^>]*>/, '<cross-session-message>');
+}
+// The same normalization over a whole record that may wrap the message
+// ("Another Claude session sent a message:\n<cross-session-message ...>...").
+function queueHaystack(text) {
+  return String(text ?? '').replace(/\s+/g, ' ').trim().replace(PEER_OPEN_TAG, '<cross-session-message>');
+}
+// Claude takes its queue by priority, then age (the CLI's dequeue walks the
+// queue for the lowest of now/next/later, oldest first within it). A typed or
+// relayed message is `next`; a background-task notification is `later` unless
+// its sender says otherwise, which the record does not show, so a notification
+// is ranked `later` here and a wrong guess is corrected from the record Claude
+// writes next (reconcileDequeues).
+const QUEUE_RANK = { now: 0, next: 1, later: 2 };
+const RECENT_DEQUEUE_MS = 60_000;
+function queuePriority(content) {
+  return /^\s*<task-notification>/.test(String(content ?? '')) ? 'later' : 'next';
+}
+function turnIndexOf(obj) {
+  const index = obj?.turnPosition?.turnIndex;
+  return Number.isInteger(index) ? index : null;
 }
 
 // A message another Claude session sent (cross-session messaging) is written
@@ -1088,8 +1118,12 @@ class TranscriptParser {
     this.dequeuedUser = null;
     this.imageChanges = new Set();
     // Messages waiting in Claude's own queue (see the queue-operation branch of
-    // applyLine): { key, ts, from: 'you' | 'peer' | 'task', block }, oldest first.
+    // applyLine): { key, ts, from: 'you' | 'peer' | 'task', priority, block },
+    // oldest first.
     this.queuePending = [];
+    // Entries the last content-less dequeues were credited with, until the
+    // record that opens the next turn says which messages Claude really took.
+    this.recentDequeues = [];
     this.header = {
       model: seedModel && seedModel !== 'default' ? modelDisplay(seedModel) : null,
       effort: null,
@@ -1124,6 +1158,127 @@ class TranscriptParser {
     const from = { you: 0, peer: 0, task: 0 };
     for (const item of waiting) from[item.from] += 1;
     this.header.queue = { waiting: waiting.length, from, oldestTs: waiting[0].ts || null };
+  }
+
+  // Which waiting entry a content-less `dequeue` took: the one Claude's own
+  // dequeue would pick (best priority, then oldest). "The oldest" alone credited
+  // a stale background result with every pick-up of a newer relayed message.
+  nextDequeueIndex() {
+    let index = -1;
+    let best = Infinity;
+    this.queuePending.forEach((item, i) => {
+      const rank = QUEUE_RANK[item.priority] ?? QUEUE_RANK.next;
+      if (rank < best) { best = rank; index = i; }
+    });
+    return index;
+  }
+
+  // The record that opens a turn from the queue carries the message Claude
+  // took (a task notification verbatim, a relayed message inside "Another
+  // Claude session sent a message:", a queued prompt as its text). When it
+  // names a different waiting entry than the one a dequeue was credited with,
+  // the credit moves: the named entry is delivered and the other waits again.
+  // The other is put back, never dropped: a background result can sit queued
+  // while a newer one is taken first (measured 2026-11-04, a bash task's notice
+  // waited through an idle gap and was folded into the next turn), so being
+  // passed over proves nothing about it. An entry the record confirms needs
+  // nothing. Credits this record does not settle wait for the next opener.
+  reconcileDequeues(text, ts, changed) {
+    // The opening record follows its dequeue within milliseconds; a credit no
+    // record settled within a minute is left as it is. (The skipped-prefix scan
+    // never sees Claude's replies, which clear credits in a live read.)
+    const now = Date.parse(ts);
+    if (Number.isFinite(now)) {
+      this.recentDequeues = this.recentDequeues.filter((item) => {
+        const at = Date.parse(item.ts);
+        return !Number.isFinite(at) || now - at <= RECENT_DEQUEUE_MS;
+      });
+    }
+    const hay = queueHaystack(text);
+    if (!hay || !this.recentDequeues.length) return [];
+    const named = (entry) => Boolean(entry.key) && hay.includes(entry.key);
+    const confirmed = this.recentDequeues.filter(({ entry }) => named(entry)).map(({ entry }) => entry);
+    // Newest credits first: a record answers the pick-ups just before it.
+    const unconfirmed = this.recentDequeues.filter(({ entry }) => !named(entry)).reverse();
+    const instead = this.queuePending.filter(named);
+    const swaps = Math.min(unconfirmed.length, instead.length);
+    for (let i = 0; i < swaps; i += 1) {
+      const { entry: back, ts: takenTs } = unconfirmed[i];
+      const actual = instead[i];
+      this.queuePending.splice(this.queuePending.indexOf(actual), 1);
+      const at = this.queuePending.findIndex((item) => String(item.ts || '') > String(back.ts || ''));
+      this.queuePending.splice(at < 0 ? this.queuePending.length : at, 0, back);
+      if (back.block) {
+        back.block.queueState = 'waiting';
+        delete back.block.deliveredTs;
+        if (this.blocks.includes(back.block) && !changed.includes(back.block.key)) changed.push(back.block.key);
+      }
+      if (actual.block) {
+        actual.block.queueState = 'delivered';
+        actual.block.deliveredTs = takenTs;
+        if (this.blocks.includes(actual.block) && !changed.includes(actual.block.key)) changed.push(actual.block.key);
+      }
+      if (this.dequeuedUser === back) this.dequeuedUser = actual;
+      confirmed.push(actual);
+    }
+    this.recentDequeues = unconfirmed.slice(swaps).reverse();
+    if (swaps) this.noteQueue();
+    return confirmed;
+  }
+
+  // A prompt Pat typed (`promptSource: "typed"`) reaches Claude only when it is
+  // idle, and an idle Claude has taken everything that could wake it, so an
+  // entry still listed from BEFORE that prompt was never going to be taken:
+  // its pick-up record was never written (a process that died with a queue,
+  // as the 2026-11-06 12:13Z restart did with three background results, which
+  // the resumed process re-sent as one combined notice). Compared by timestamp,
+  // not file order: a message can be written just after a prompt that was
+  // typed 72 ms before it arrived (measured). Such an entry stops waiting
+  // without claiming a delivery that cannot be shown.
+  settleQueuedBefore(ts, changed) {
+    const cutoff = Date.parse(ts);
+    if (!Number.isFinite(cutoff) || !this.queuePending.length) return;
+    const keep = [];
+    for (const entry of this.queuePending) {
+      const at = Date.parse(entry.ts);
+      if (!(Number.isFinite(at) && at < cutoff)) { keep.push(entry); continue; }
+      if (entry.block?.queueState === 'waiting') {
+        entry.block.queueState = 'settled';
+        if (this.blocks.includes(entry.block) && !changed.includes(entry.block.key)) changed.push(entry.block.key);
+      }
+    }
+    if (keep.length === this.queuePending.length) return;
+    this.queuePending = keep;
+    this.recentDequeues = this.recentDequeues.filter(({ entry }) => keep.includes(entry));
+    this.noteQueue();
+  }
+
+  // Queue and turn bookkeeping for a user-role record, before the transcript
+  // decides whether it draws anything (a relayed message's record is isMeta and
+  // draws nothing; its bubble came from the enqueue). Tool results are mid-turn
+  // and settle nothing.
+  noteUserRecord(obj, ts, changed) {
+    const content = obj.message?.content;
+    const parts = Array.isArray(content) ? content : null;
+    if (parts?.some((part) => part?.type === 'tool_result')) return;
+    const text = typeof content === 'string'
+      ? content
+      : parts ? parts.filter((part) => part?.type === 'text').map((part) => part.text || '').join('\n') : '';
+    if (obj.promptSource === 'typed') this.settleQueuedBefore(ts, changed);
+    const taken = this.reconcileDequeues(text, ts, changed);
+    // A turn opened by another session's message or a background result is a
+    // task like any other: the header's clock and token count belong to it, not
+    // to the last prompt Pat typed (2026-11-06: "Thinking... 28m 39s · ↓ 84k" on
+    // a step 10 seconds old, in a dispatcher whose turns all start this way).
+    // Typed and queued prompts start their turn where their bubble is drawn.
+    const origin = obj.origin?.kind;
+    const fromQueue = origin === 'peer' || origin === 'task-notification'
+      || (!origin && /^\s*<task-notification>/.test(text));
+    if (!fromQueue) return;
+    const turnIndex = turnIndexOf(obj);
+    if (turnIndex !== null && this.turn?.turnIndex === turnIndex) return;
+    const block = taken.find((entry) => entry.block && this.blocks.includes(entry.block))?.block || null;
+    this.startTurn(block, ts, turnIndex);
   }
 
   // Set the learned window (from the tee's math or its persisted file) and
@@ -1250,10 +1405,28 @@ class TranscriptParser {
   // ride on the prompt block as `turnMeta`, re-rendered in place as they grow.
   // Sidechain (subagent) lines are skipped upstream, so this is the main
   // conversation's own spend.
-  startTurn(block, ts) {
+  // `block` is null for a turn a background result opened (it draws no bubble);
+  // the header's `turn` ({ startTs, outputTokens }) carries the task in flight
+  // either way, and the window's live clock and token count read it.
+  startTurn(block, ts, turnIndex = null) {
     const startMs = Date.parse(ts);
     // outputBase is Codex only: the thread's output total when this prompt arrived.
-    this.turn = { block, startMs: Number.isFinite(startMs) ? startMs : null, outputs: new Map(), outputBase: this.codexTotalOutput };
+    this.turn = { block, startTs: ts || null, startMs: Number.isFinite(startMs) ? startMs : null, turnIndex, outputs: new Map(), outputBase: this.codexTotalOutput, meta: null };
+    this.header.turn = { startTs: ts || null, outputTokens: null };
+  }
+
+  // The task's spend so far, on its prompt bubble (when it has one) and in the
+  // header. Returns false when neither number moved.
+  setTurnMeta(turn, outputTokens, durationMs, changed) {
+    const prior = turn.meta;
+    if (prior && prior.outputTokens === outputTokens && prior.durationMs === durationMs) return false;
+    turn.meta = { outputTokens, durationMs };
+    this.header.turn = { startTs: turn.startTs, outputTokens };
+    if (turn.block) {
+      turn.block.turnMeta = { outputTokens, durationMs };
+      if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+    }
+    return true;
   }
 
   noteTurnUsage(message, ts, changed) {
@@ -1268,10 +1441,7 @@ class TranscriptParser {
     const durationMs = turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null;
     // A usage record that moves neither number changes nothing on screen, so
     // it re-renders nothing and sends nothing.
-    const prior = turn.block.turnMeta;
-    if (prior && prior.outputTokens === outputTokens && prior.durationMs === durationMs) return;
-    turn.block.turnMeta = { outputTokens, durationMs };
-    if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+    this.setTurnMeta(turn, outputTokens, durationMs, changed);
   }
 
   // CODEX CONTEXT AND TASK TOKENS (2026-10-31, Pat: a Codex window "missing a
@@ -1327,15 +1497,12 @@ class TranscriptParser {
     if (!turn) return;
     const endMs = Date.parse(ts);
     const durationMs = turn.startMs !== null && Number.isFinite(endMs) ? Math.max(0, endMs - turn.startMs) : null;
-    const prior = turn.block.turnMeta;
-    if (prior && prior.outputTokens === outputTokens && prior.durationMs === durationMs) return;
-    turn.block.turnMeta = { outputTokens, durationMs };
-    if (this.blocks.includes(turn.block)) changed.push(turn.block.key);
+    this.setTurnMeta(turn, outputTokens, durationMs, changed);
   }
 
   // A task ended (completed or interrupted): the time it took is now final.
   settleCodexTurn(ts, changed) {
-    const prior = this.turn?.block?.turnMeta;
+    const prior = this.turn?.meta;
     if (prior) this.noteCodexTurnMeta(prior.outputTokens, ts, changed);
   }
 
@@ -1376,6 +1543,7 @@ class TranscriptParser {
     }
 
     if (obj.type === 'user') {
+      this.noteUserRecord(obj, ts, changed);
       const content = obj.message?.content;
       if (typeof content === 'string') {
         if (obj.isMeta) return changed;
@@ -1398,7 +1566,7 @@ class TranscriptParser {
         }
         const user = userTextFor(content);
         if (user) {
-          this.startTurn(this.userBlock(content, user, ts, changed), ts);
+          this.startTurn(this.userBlock(content, user, ts, changed), ts, turnIndexOf(obj));
           this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
         }
         return changed;
@@ -1417,7 +1585,7 @@ class TranscriptParser {
             const user = userTextFor(part.text);
             if (user) {
               lastUserInLine = this.userBlock(part.text, user, ts, changed);
-              this.startTurn(lastUserInLine, ts);
+              this.startTurn(lastUserInLine, ts, turnIndexOf(obj));
               this.header.lastSignal = turnSignal(obj) === 'idle' ? 'idle' : 'user-turn';
             }
           } else if (part.type === 'image') {
@@ -1477,7 +1645,7 @@ class TranscriptParser {
         this.dequeuedUser = null;
         const user = userTextFor(obj.content);
         const peer = isPeerMessage(obj.content);
-        const entry = { key: normalizeQueuedKey(obj.content), ts, from: user ? (peer ? 'peer' : 'you') : 'task', block: null };
+        const entry = { key: normalizeQueuedKey(obj.content), ts, from: user ? (peer ? 'peer' : 'you') : 'task', priority: queuePriority(obj.content), block: null };
         if (user) {
           entry.block = this.push({ kind: 'user', text: user.text, command: user.command, ts, queued: true, queueState: 'waiting', ...(peer ? { peer: true, peerFrom: user.peerFrom || null } : {}) });
           if (this.blocks.includes(entry.block)) this.queuedByText.set(normalizeQueuedKey(user.text), entry.block);
@@ -1489,19 +1657,23 @@ class TranscriptParser {
         return changed;
       }
       if (obj.operation === 'dequeue' || obj.operation === 'remove') {
-        // `remove` names its message; `dequeue` takes the oldest. A `remove`
-        // whose text matches nothing waiting (its enqueue was before this read
-        // began) changes nothing.
+        // `remove` names its message; `dequeue` names none and is credited to
+        // the entry Claude's own dequeue would pick (nextDequeueIndex), then
+        // checked against the record that opens the turn (reconcileDequeues).
+        // A `remove` whose text matches nothing waiting (its enqueue was before
+        // this read began, or was settled) changes nothing.
         let index = -1;
         if (typeof obj.content === 'string' && obj.content.trim()) {
           const key = normalizeQueuedKey(obj.content);
           index = this.queuePending.findIndex((item) => item.key === key);
         } else if (this.queuePending.length) {
-          index = 0;
+          index = this.nextDequeueIndex();
         }
         if (index >= 0) {
           const [entry] = this.queuePending.splice(index, 1);
           this.dequeuedUser = obj.operation === 'dequeue' ? entry : null;
+          if (obj.operation === 'dequeue') this.recentDequeues.push({ entry, ts });
+          else this.recentDequeues = this.recentDequeues.filter((item) => item.entry !== entry);
           if (entry.block) {
             entry.block.queueState = 'delivered';
             entry.block.deliveredTs = ts;
@@ -1546,6 +1718,7 @@ class TranscriptParser {
 
     if (obj.type === 'assistant') {
       this.dequeuedUser = null;
+      this.recentDequeues = [];
       const message = obj.message || {};
       // "<synthetic>" stamps system-generated messages ("No response
       // requested."), not a real model; never let it take the chip.
@@ -2048,6 +2221,9 @@ function snapshotPrefixScan(state, maxUserBlocks) {
     pending: conversation.queuePending.map((item) => ({ ...item, block: refOf(item.block) })),
     byText: [...conversation.queuedByText].map(([key, block]) => [key, refOf(block)]),
     dequeued: conversation.dequeuedUser ? { ...conversation.dequeuedUser, block: refOf(conversation.dequeuedUser.block) } : null,
+    // The task in flight when the prefix ends, so a turn that began before the
+    // tail still clocks from its own start (its tokens are counted from the tail).
+    turn: conversation.turn ? { startTs: conversation.turn.startTs, turnIndex: conversation.turn.turnIndex, block: refOf(conversation.turn.block) } : null,
   };
   const stale = blocks.some((block) => block.images?.some((ref) => !ref.id || !imageStore.has(ref.id)));
   return { blocks, queue, stale };
@@ -2568,6 +2744,7 @@ function createTranscriptProvider(options = {}) {
     }
     if (queue.dequeued) entry.parser.dequeuedUser = { ...queue.dequeued, block: liveBlock(queue.dequeued.block) };
     entry.parser.noteQueue();
+    if (queue.turn && !entry.parser.turn) entry.parser.startTurn(liveBlock(queue.turn.block), queue.turn.startTs, queue.turn.turnIndex);
   };
 
   // Which images each block carried when it was last SENT (by reference: the
