@@ -665,6 +665,36 @@ test('peer messages past the cap never evict every agent row (2026-10-22 lead wi
   assert.ok(p.blocks.some((b) => b.kind === 'user' && !b.peer && b.text === 'run the window'), 'Pat\'s own turn is still protected');
 });
 
+test('a window full of Pat\'s prompts and tool pictures still shows every new reply (2026-11-06 frozen window)', () => {
+  // The live shape: a cdt-app lead that read PDF page renders and took Pat's
+  // prompts all night. Prompts and pictures are both protected tiers; once they
+  // held all 240 slots, each new agent row was evicted by its own push and the
+  // window froze on an old picture while the terminal kept going.
+  const p = new TranscriptParser();
+  for (let i = 0; i < 180; i += 1) p.applyLine(userLine(`my prompt ${i}`));
+  for (let i = 0; i < 70; i += 1) p.push({ kind: 'assistant', text: `page render ${i}`, ts: TS, images: [TINY_PNG_REF] });
+  assert.equal(p.blocks.filter((b) => b.kind === 'assistant' && !b.images?.length).length, 0);
+  for (let i = 0; i < 30; i += 1) {
+    p.applyLine(assistantLine([{ type: 'text', text: `reply ${i}` }]));
+    assert.equal(p.blocks.at(-1).text, `reply ${i}`, `reply ${i} is on screen the moment it lands`);
+  }
+  assert.equal(p.blocks.length, MAX_BLOCKS);
+  const replies = p.blocks.filter((b) => b.kind === 'assistant' && /^reply /.test(b.text));
+  assert.equal(replies.length, 30, 'every reply since the window filled is still there');
+  assert.ok(p.blocks.some((b) => b.text === 'my prompt 179'), 'the newest prompt is still there');
+  assert.ok(p.blocks.some((b) => b.text === 'page render 69'), 'the newest picture is still there');
+});
+
+test('the newest half of the window is a plain time slice, whatever the older half protects', () => {
+  const p = new TranscriptParser();
+  for (let i = 0; i < MAX_BLOCKS; i += 1) p.applyLine(userLine(`my prompt ${i}`));
+  for (let i = 0; i < MAX_BLOCKS; i += 1) p.applyLine(assistantLine([{ type: 'text', text: `reply ${i}` }]));
+  const recent = p.blocks.slice(-MAX_BLOCKS / 2).map((b) => b.text);
+  const expected = Array.from({ length: MAX_BLOCKS / 2 }, (_, i) => `reply ${MAX_BLOCKS / 2 + i}`);
+  assert.deepEqual(recent, expected, 'the newest 120 rows are exactly the newest 120 replies');
+  assert.ok(p.blocks.slice(0, MAX_BLOCKS / 2).every((b) => b.kind === 'user'), 'the older half kept Pat\'s prompts');
+});
+
 test('images stay as long as the conversation around them: no separate 32-image cap (2026-11-05)', () => {
   const p = new TranscriptParser();
   // Before 2026-11-05 a window kept only its 32 newest image blocks, so older
@@ -2153,6 +2183,63 @@ test('a claude open with a cwd hint finds its file without the history lookup', 
     assert.equal(res.ok, true);
     assert.equal(lookups, 0, 'the history worker is not asked when the derived path exists');
   } finally {
+    provider.closeAll();
+    await fsp.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a session that cd\'d into a subfolder is found under the folder it started in, without the store search', async () => {
+  // The CLI follows the agent's cd, so the cwd a window knows can be deeper
+  // than the launch cwd that names the project dir.
+  const home = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-home-'));
+  const id = '3c1f0d2e-3333-4222-8333-444455556666';
+  const dir = path.join(home, '.claude', 'projects', 'C--dev-probe-cd');
+  await fsp.mkdir(dir, { recursive: true });
+  writeLines(path.join(dir, `${id}.jsonl`), [userLine('hello')], 'w');
+  try {
+    assert.equal(
+      await findProviderTranscript({ provider: 'claude', sessionId: id, cwd: 'C:\\dev\\probe-cd\\app\\src\\main', home, scanStore: false }),
+      path.join(dir, `${id}.jsonl`),
+    );
+    assert.equal(
+      await findProviderTranscript({ provider: 'claude', sessionId: id, cwd: '/home/you/elsewhere', home, scanStore: false }),
+      null,
+      'an unrelated cwd is not guessed at when the store search is off',
+    );
+    assert.equal(
+      await findProviderTranscript({ provider: 'claude', sessionId: id, cwd: '/home/you/elsewhere', home }),
+      path.join(dir, `${id}.jsonl`),
+      'the store search still finds it from anywhere',
+    );
+  } finally {
+    await fsp.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a window waiting on a new session searches the whole store once per interval and binds as soon as its file appears (2026-11-06)', async () => {
+  const home = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-transcript-home-'));
+  const root = path.join(home, '.claude', 'projects');
+  for (let i = 0; i < 50; i += 1) await fsp.mkdir(path.join(root, `C--dev-other-${i}`), { recursive: true });
+  const cwd = 'C:\\dev\\probe-new';
+  const id = '3c1f0d2e-4444-4222-8333-444455556666';
+  const realReaddir = fs.promises.readdir;
+  let storeScans = 0;
+  fs.promises.readdir = function (target, ...rest) {
+    if (path.resolve(String(target)) === path.resolve(root)) storeScans += 1;
+    return realReaddir.call(this, target, ...rest);
+  };
+  const reports = [];
+  const provider = createTranscriptProvider({ home, getSessionMeta: async () => null, onOpenTiming: (r) => reports.push(r) });
+  try {
+    for (let i = 0; i < 5; i += 1) assert.equal((await provider.open(id, { provider: 'claude', cwd })).ok, false);
+    assert.equal(storeScans, 1, 'five retries inside the interval searched the store once');
+    const dir = path.join(root, 'C--dev-probe-new');
+    await fsp.mkdir(dir, { recursive: true });
+    writeLines(path.join(dir, `${id}.jsonl`), [userLine('hello')], 'w');
+    assert.equal((await provider.open(id, { provider: 'claude', cwd })).ok, true, 'the next retry binds from its own folder');
+    assert.equal(storeScans, 1, 'binding needed no store search');
+  } finally {
+    fs.promises.readdir = realReaddir;
     provider.closeAll();
     await fsp.rm(home, { recursive: true, force: true });
   }

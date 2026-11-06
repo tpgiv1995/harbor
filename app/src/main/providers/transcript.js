@@ -25,6 +25,9 @@ const { imageStore } = require('./image-store.js');
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
 // Keep recent conversation rows plus a bounded set of image-bearing rows.
 const MAX_BLOCKS = 240;
+// The newest rows a window keeps in arrival order, whatever they are; the
+// eviction tiers in push() apply only to the blocks older than these.
+const RECENT_BLOCKS = MAX_BLOCKS / 2;
 // Images no longer have a cap of their own (2026-11-05): a block carries a small
 // reference and the bytes live once in image-store.js, so an image stays exactly
 // as long as the rest of the conversation around it. The cap was 32 because the
@@ -37,6 +40,9 @@ const MAX_PREFIX_IMAGE_BLOCKS = 64;
 const MAX_INITIAL_BYTES = 1024 * 1024;
 // An open slower than this is reported to the perf log (see onOpenTiming).
 const SLOW_OPEN_MS = 2000;
+// How often a window still waiting for its transcript repeats the search of
+// every project dir; between those, each retry checks only its own cwd's dirs.
+const STORE_SCAN_INTERVAL_MS = 30_000;
 // Windowed delivery (MOBILE-3): a phone on cellular cannot take the full
 // desktop payload. A windowed open trims what gets EMITTED to the client to
 // the most recent N blocks; the live parser and its tailing offset are
@@ -253,7 +259,43 @@ function transcriptPathFor({ provider = 'claude', sessionId, cwd, home = os.home
   return path.join(claudeProjectsRoot(home), mungeCwd(cwd), `${sessionId}.jsonl`);
 }
 
-async function findProviderTranscript({ provider, sessionId, cwd, home = os.homedir() }) {
+// The project dir is named after the cwd the session STARTED in, while the cwd
+// a window knows can be a later one: the CLI follows the agent's `cd` (2.1.316
+// reports the new primary working directory), so a session launched in
+// C:\dev\harbor that cd'd into app\src lives under C--dev-harbor. The launch
+// cwd is the hint or one of its ancestors, so those are tried first.
+function claudeCwdCandidates({ sessionId, cwd, home }) {
+  const out = [];
+  let dir = cwd ? String(cwd) : '';
+  for (let i = 0; dir && i < 16; i += 1) {
+    const candidate = transcriptPathFor({ provider: 'claude', sessionId, cwd: dir, home });
+    if (candidate && !out.includes(candidate)) out.push(candidate);
+    const parent = /^[A-Za-z]:[\\/]/.test(dir) ? path.win32.dirname(dir) : path.posix.dirname(dir);
+    if (!parent || parent === dir) break;
+    dir = parent;
+  }
+  return out;
+}
+
+// The whole-store search, in parallel. It ran one fs.access at a time over
+// every project dir (4,482 on 2026-11-06), each one queued behind whatever
+// else held libuv's four threads, and a single pass took 14 to 305 seconds.
+const STORE_SCAN_CONCURRENCY = 32;
+async function firstExistingPath(candidates, concurrency = STORE_SCAN_CONCURRENCY) {
+  let next = 0;
+  let found = null;
+  const worker = async () => {
+    while (found === null && next < candidates.length) {
+      const candidate = candidates[next];
+      next += 1;
+      try { await fsp.access(candidate); if (found === null) found = candidate; } catch { /* not here */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, candidates.length) }, worker));
+  return found;
+}
+
+async function findProviderTranscript({ provider, sessionId, cwd, home = os.homedir(), scanStore = true }) {
   if (provider === 'cursor') {
     const candidate = transcriptPathFor({ provider, sessionId, cwd, home });
     try { await fsp.access(candidate); return candidate; } catch { return null; }
@@ -269,23 +311,18 @@ async function findProviderTranscript({ provider, sessionId, cwd, home = os.home
   // plainly on disk. The path is derivable and the id is unique, so neither the
   // index nor a known cwd is actually required to find it.
   if (!provider || provider === 'claude') {
-    const direct = transcriptPathFor({ provider: 'claude', sessionId, cwd, home });
-    if (direct) {
-      try { await fsp.access(direct); return direct; } catch { /* not under that cwd */ }
+    for (const candidate of claudeCwdCandidates({ sessionId, cwd, home })) {
+      try { await fsp.access(candidate); return candidate; } catch { /* not under that dir */ }
     }
     // No cwd, or the session was launched from somewhere else: a session id is
-    // unique across the store, so look for the file itself. One readdir plus a
-    // stat per project dir, and only on the path that would otherwise fail.
+    // unique across the store, so look for the file itself. One readdir plus an
+    // access per project dir, and only on the path that would otherwise fail.
+    // A caller that has scanned recently passes scanStore: false (see
+    // initializeTranscript's throttle).
+    if (!scanStore) return null;
     const root = claudeProjectsRoot(home);
     const dirs = await fsp.readdir(root).catch(() => []);
-    for (const dir of dirs) {
-      const candidate = path.join(root, dir, `${sessionId}.jsonl`);
-      try {
-        await fsp.access(candidate);
-        return candidate;
-      } catch { /* not in this project */ }
-    }
-    return null;
+    return firstExistingPath(dirs.map((dir) => path.join(root, dir, `${sessionId}.jsonl`)));
   }
   if (provider !== 'codex') return null;
   const root = path.join(home, '.codex', 'sessions');
@@ -1048,6 +1085,22 @@ class TranscriptParser {
     block.key = `b${this.seq++}`;
     this.blocks.push(block);
     while (this.blocks.length > MAX_BLOCKS) {
+      // THE NEWEST ROWS ARE NEVER EVICTED (2026-11-06, Pat: "why does the
+      // harbor ui so frequently just look frozen while theres all this activity
+      // in terminal view?"). The tiers below protect images and Pat's own turns,
+      // and nothing bounded how many of those a window could hold. A cdt-app lead
+      // that read PDF page renders all night and took Pat's prompts reached 240
+      // protected rows (182 prompts, 58 pictures, measured by replaying its real
+      // 343 MB transcript): from then on every new agent row was the ONLY
+      // evictable block and left in the same push that added it, so the window
+      // sat on a 06:19 picture while the terminal showed half an hour of replies.
+      // Only blocks older than the newest RECENT_BLOCKS are candidates; the tiers
+      // decide which of THOSE go. The window always ends on what just happened.
+      const evictable = this.blocks.length - RECENT_BLOCKS;
+      const oldest = (test) => {
+        for (let i = 0; i < evictable; i += 1) if (test(this.blocks[i])) return i;
+        return -1;
+      };
       // Trim priority, keep longest: images, then the user's OWN turns, then
       // everything else. This stops the cap from dropping Pat's text messages to
       // keep screenshots (live-caught: follow-up messages vanishing) while still
@@ -1060,14 +1113,15 @@ class TranscriptParser {
       // protected as user turns they filled all 240 slots and every agent row
       // was evicted the moment it arrived, while the `>_` terminal showed the
       // work. Peer blocks share the bottom tier with agent rows, so the window
-      // stays a time-ordered slice of both.
-      let dropIndex = this.blocks.findIndex((item) => (item.kind !== 'user' || item.peer) && !item.images?.length);
+      // stays a time-ordered slice of both. (That fix was one instance of the
+      // general hole closed by RECENT_BLOCKS above: any protected tier can fill.)
+      let dropIndex = oldest((item) => (item.kind !== 'user' || item.peer) && !item.images?.length);
       // Images have no cap of their own since 2026-11-05, so a window can fill
       // with them: a tool's screenshot (an agent row) leaves before ANY prompt
       // of Pat's, text-only or with an image.
-      if (dropIndex < 0) dropIndex = this.blocks.findIndex((item) => item.kind !== 'user' || item.peer);
-      if (dropIndex < 0) dropIndex = this.blocks.findIndex((item) => item.kind === 'user' && !item.images?.length);
-      if (dropIndex < 0) dropIndex = 0; // only Pat's own image prompts remain
+      if (dropIndex < 0) dropIndex = oldest((item) => item.kind !== 'user' || item.peer);
+      if (dropIndex < 0) dropIndex = oldest((item) => item.kind === 'user' && !item.images?.length);
+      if (dropIndex < 0) dropIndex = 0; // only Pat's own image prompts remain in the older half
       const [dropped] = this.blocks.splice(dropIndex, 1);
       this.releaseBlock(dropped);
     }
@@ -2518,6 +2572,7 @@ function createTranscriptProvider(options = {}) {
   // are reported through options.onOpenTiming into the perf log.
   const onOpenTiming = typeof options.onOpenTiming === 'function' ? options.onOpenTiming : null;
   const failingSince = new Map(); // sessionId -> { at, failures }
+  const storeScannedAt = new Map(); // sessionId -> when its last whole-store search ran
   const openTranscript = async (sessionId, hints = {}) => {
     const started = Date.now();
     const steps = {};
@@ -2582,21 +2637,38 @@ function createTranscriptProvider(options = {}) {
     // refresh, queued behind every other request on that one thread, so a NEW
     // session (the only kind it has not indexed) waited on the slowest path.
     if ((!hints.provider || hints.provider === 'claude') && hints.cwd) {
-      const direct = transcriptPathFor({ provider: 'claude', sessionId, cwd: hints.cwd, home: providerHome });
       const t = Date.now();
-      try { await fsp.access(direct); transcriptPath = direct; } catch { /* not under that cwd (yet) */ }
+      for (const candidate of claudeCwdCandidates({ sessionId, cwd: hints.cwd, home: providerHome })) {
+        try { await fsp.access(candidate); transcriptPath = candidate; break; } catch { /* not under that dir (yet) */ }
+      }
       steps.directMs = Date.now() - t;
     }
     if (!transcriptPath) {
       let t = Date.now();
       try { meta = await getSessionMeta(sessionId); } catch { meta = null; }
       steps.metaMs = Date.now() - t;
+      // A NEW SESSION'S WINDOW BINDS THE MOMENT ITS FILE APPEARS (2026-11-06,
+      // Pat: "it wasnt even showing anything in harbor ui but in terminal you
+      // had been busy"). Claude creates the transcript on the first prompt, so
+      // a window opened at launch fails until then and the renderer retries
+      // as soon as each attempt returns. Every attempt used to end in the
+      // whole-store search, which took 14 to 81 seconds under load, so the file
+      // created at 06:53:18 was found at 06:54:09. The cheap checks above run on
+      // every attempt; the store search runs once per STORE_SCAN_INTERVAL_MS.
+      const lastScan = storeScannedAt.get(sessionId);
+      const scanStore = !lastScan || Date.now() - lastScan >= STORE_SCAN_INTERVAL_MS;
+      if (scanStore) {
+        if (storeScannedAt.size >= 200) storeScannedAt.delete(storeScannedAt.keys().next().value);
+        storeScannedAt.set(sessionId, Date.now());
+      }
+      steps.storeScan = scanStore;
       t = Date.now();
       transcriptPath = meta?.path || await findProviderTranscript({
-        provider: hints.provider || meta?.provider || 'claude', sessionId, cwd: hints.cwd || meta?.cwd, home: providerHome,
+        provider: hints.provider || meta?.provider || 'claude', sessionId, cwd: hints.cwd || meta?.cwd, home: providerHome, scanStore,
       });
       steps.findMs = Date.now() - t;
     }
+    if (transcriptPath) storeScannedAt.delete(sessionId);
     const provider = hints.provider || meta?.provider || 'claude';
     const readStarted = Date.now();
     if (!transcriptPath) return { ok: false, sessionId, reason: 'transcript path unknown', provider };
