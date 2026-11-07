@@ -82,6 +82,7 @@ async function readEmail(home, readFile) {
 // endpoint directly with that home's own token.
 const STALE_AFTER_MS = 3 * 60 * 1000;
 const REMOTE_COOLDOWN_MS = 60 * 1000; // per-account floor between endpoint hits
+const LOG_CAP_BYTES = 256 * 1024; // usage-debug.log rotates to .1 past this
 
 // Direct read of the same endpoint the CLI's own rate_limits derive from.
 // Read-only: the CLI owns token refresh, so an expired access token means
@@ -200,6 +201,22 @@ function createUsageProvider(options = {}) {
   const readFile = options.readFile || fs.promises.readFile;
   const now = options.now || (() => new Date());
   const teeDir = options.teeDir || options.cacheDir || deriveDefaults().paths.cacheDir;
+  // OPT-IN DIAGNOSTIC (the "Usage debug log" preference): one JSON line per
+  // remote attempt and per unavailable answer, so a meter that reads
+  // "unavailable" in the installed app can be diagnosed without a debugger.
+  // Off unless `log: true`; capped at LOG_CAP_BYTES with one rotation (.1), so
+  // it can never grow without bound. No token, header or response body is
+  // written: only the account id, the outcome and the reason text.
+  const logFile = options.log ? (options.logFile || path.join(teeDir, 'usage-debug.log')) : null;
+  const logCap = options.logCapBytes ?? LOG_CAP_BYTES;
+  const debug = (account, event, detail = {}) => {
+    if (!logFile) return;
+    try {
+      const line = JSON.stringify({ at: now().toISOString(), pid: process.pid, account, event, ...detail });
+      try { if (fs.statSync(logFile).size > logCap) fs.renameSync(logFile, `${logFile}.1`); } catch { /* no file yet */ }
+      fs.appendFileSync(logFile, `${line}\n`);
+    } catch { /* diagnostics must never break usage */ }
+  };
   const staleAfterMs = options.staleAfterMs ?? STALE_AFTER_MS;
   const remoteCooldownMs = options.remoteCooldownMs ?? REMOTE_COOLDOWN_MS;
   // Pass fetchRemoteUsage: null to disable the direct endpoint fallback
@@ -270,7 +287,11 @@ function createUsageProvider(options = {}) {
       if (age > staleAfterMs && typeof fetchRemoteUsage === 'function'
         && nowMs - (lastRemoteAttempt.get(account) || 0) >= remoteCooldownMs) {
         lastRemoteAttempt.set(account, nowMs);
-        const fetched = await Promise.resolve(fetchRemoteUsage(homes[account])).catch(() => null);
+        let thrown = null;
+        const fetched = await Promise.resolve().then(() => fetchRemoteUsage(homes[account])).catch((error) => { thrown = error; return null; });
+        debug(account, 'remote', fetched?.payload
+          ? { ok: true }
+          : { ok: false, reason: fetched?.reason || null, thrown: thrown ? String(thrown?.message || thrown).slice(0, 400) : null });
         if (fetched?.unavailable) remoteUnavailable.set(account, fetched);
         if (fetched?.payload) {
           remoteUnavailable.delete(account);
@@ -279,7 +300,13 @@ function createUsageProvider(options = {}) {
         }
       }
 
-      if (!chosen) return { ...(remoteUnavailable.get(account) || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
+      if (!chosen) {
+        debug(account, 'unavailable', {
+          reason: remoteUnavailable.get(account)?.reason || 'no sample',
+          cooldownLeftMs: Math.max(0, remoteCooldownMs - (nowMs - (lastRemoteAttempt.get(account) || 0))),
+        });
+        return { ...(remoteUnavailable.get(account) || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
+      }
       return usageFromStatuslinePayload(chosen.payload, {
         email: chosen.email || email,
         updatedAt: chosen.updatedAt,
@@ -295,6 +322,7 @@ module.exports = {
   NOT_CLAUDE_REASON,
   STALE_AFTER_MS,
   REMOTE_COOLDOWN_MS,
+  LOG_CAP_BYTES,
   createUsageProvider,
   fetchOauthUsage,
   keychainServicesFor,

@@ -33,7 +33,8 @@ derived defaults in memory, and logs where the copy went.
   "paths":     { /* all optional, all derived when null */ },
   "workflows": [ /* quick commands, ships empty */ ],
   "orchestration": { "enabled": false, "launcher": "...", "researchCommand": "...", "executionCommand": "...", "stateDir": null },
-  "newSessionDefaults": { "provider": "claude", "model": "opus", "effort": "xhigh" }
+  "newSessionDefaults": { "provider": "claude", "model": "opus", "effort": "xhigh" },
+  "preferences": { "claudeAutoMode": false, "codexAutoMode": false, "promptSuggestions": false, "theme": "default", "usageDebugLog": false }
 }
 ```
 
@@ -150,6 +151,22 @@ What a fresh session launches with, before you change it in the popover.
 For Claude, prefer a family alias such as `opus`, `sonnet` or `haiku` so the
 CLI resolves the current family version. Codex and Cursor use their own model
 identifiers. `"default"` selects the provider default and omits the model flag.
+
+## `preferences`
+
+Opt-in behaviour, set in the setup wizard's **Preferences** card (the Defaults
+step) or by hand. Every key is off by default, and any value other than the
+opt-in reads as the default, so a config without this block behaves as Harbor
+always has. The launcher reads them on every launch; the app reads the theme and
+the debug log at startup (Finish in the wizard restarts Harbor).
+
+| Key | Default | When on |
+| --- | --- | --- |
+| `claudeAutoMode` | `false` | New and resumed Claude sessions start with `--permission-mode auto --allow-dangerously-skip-permissions` instead of `--dangerously-skip-permissions`, so bypass stays one Shift+Tab away. A model without auto mode starts in manual. The copy-paste resume command follows. |
+| `codexAutoMode` | `false` | New and resumed Codex sessions run with `--approve-for-me` instead of `--dangerously-bypass-approvals-and-sandbox`. |
+| `promptSuggestions` | `false` | Claude sessions get `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=1`. Each suggestion is an extra model request per turn. A value already in Harbor's environment wins. |
+| `theme` | `"default"` | `"reading"`: a brighter neutral palette, system fonts, and larger, looser conversation text. |
+| `usageDebugLog` | `false` | Claude usage fetch attempts and unavailable answers are appended to `<cacheDir>/usage-debug.log`, rotated to `.1` past 256 KB. No token or response body is written. |
 
 ## Settings that are environment variables, not config keys
 

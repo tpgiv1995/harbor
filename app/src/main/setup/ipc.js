@@ -18,6 +18,7 @@
 const os = require('node:os');
 const path = require('node:path');
 const { detectEnvironment, detectCatalog, readClaudeHome } = require('./detect.js');
+const { normalizePreferences } = require('../../shared/preferences.cjs');
 const { launchLogin, loginPlan, isSafeConfigHome, validateBin, CMD_METACHARACTERS } = require('./auth.js');
 const { planShared, applyShared } = require('./symlink.js');
 const { validateProviderExecutables, executablePath } = require('./executables.js');
@@ -74,6 +75,10 @@ function setupState(config) {
     // be shown an Orch tab that leads to a panel with no launcher behind it. The
     // schema defaults this true, so anything but an explicit false enables it.
     orchestrationEnabled: config?.orchestration?.enabled !== false,
+    // The opt-in preferences the renderer applies at boot (the theme, and the
+    // permission flags in the copy-paste resume command). Normalized, so an
+    // older config or a hand-edited value reads as the defaults.
+    preferences: normalizePreferences(config?.preferences),
   };
 }
 
