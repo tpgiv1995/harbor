@@ -80,8 +80,34 @@ async function readEmail(home, readFile) {
 // boot render, 1 percent, while her real 5-hour window was at 68 percent).
 // When the freshest sample is older than this, Harbor asks the OAuth usage
 // endpoint directly with that home's own token.
+//
+// How old a sample may get before the endpoint is asked depends on what the
+// user can see. A Mac reads each home's login from the Keychain, so with no
+// statusline tee every account was read from the endpoint about every four
+// minutes, 24/7, with the window hidden and nothing running on it. Now the
+// window visible with a live session on that account keeps STALE_AFTER_MS;
+// visible with nothing running on it waits IDLE_STALE_AFTER_MS; a hidden or
+// minimised window waits HIDDEN_STALE_AFTER_MS. The desktop app reports this
+// through setActivity(); without it (the phone server, tests) every account
+// counts as visible and live, as before.
 const STALE_AFTER_MS = 3 * 60 * 1000;
+const IDLE_STALE_AFTER_MS = 15 * 60 * 1000;
+const HIDDEN_STALE_AFTER_MS = 30 * 60 * 1000;
 const REMOTE_COOLDOWN_MS = 60 * 1000; // per-account floor between endpoint hits
+// A failed read (429, network, a bad answer, a refused Keychain prompt) used to
+// retry on the 60 s cooldown, so a failing account was asked four times as
+// often as a healthy one. Each consecutive failure now doubles the wait from
+// FAILURE_BACKOFF_BASE_MS up to FAILURE_BACKOFF_MAX_MS, a Retry-After header
+// waits at least as long as it says (bounded by RETRY_AFTER_MAX_MS so a bogus
+// header cannot freeze the meter for days), and a success resets it.
+const FAILURE_BACKOFF_BASE_MS = 60 * 1000;
+const FAILURE_BACKOFF_MAX_MS = 30 * 60 * 1000;
+const RETRY_AFTER_MAX_MS = 60 * 60 * 1000;
+// While the endpoint is failing, a sample older than this is not shown as
+// current: its windows have long since rolled to 0%, which read as "0% used"
+// with the real reason (a 429, a refused prompt) hidden in a tooltip.
+const FAILING_SAMPLE_MAX_AGE_MS = 60 * 60 * 1000;
+const KEYCHAIN_STICKY_HINT = 'Harbor will not ask the Keychain again until you refresh the title-bar Plan usage menu.';
 
 // Direct read of the same endpoint the CLI's own rate_limits derive from.
 // Read-only: the CLI owns token refresh, so an expired access token means
@@ -130,10 +156,29 @@ async function readClaudeCredentials(home, readFile) {
       if (error?.code !== 44) break;
     }
   }
-  // Say WHY instead of reading as "not signed in": a denied or timed-out
-  // Keychain prompt is a different fix from a missing login.
-  const why = lastError?.killed ? 'the Keychain prompt timed out' : lastError?.code === 44 ? 'no Claude Code entry in the Keychain' : `security exited ${lastError?.code ?? 'abnormally'}`;
-  return { keychainError: why };
+  return keychainFailure(lastError);
+}
+
+// Say WHY instead of reading as "not signed in": a denied or timed-out
+// Keychain prompt is a different fix from a missing login. An answer from a
+// refused or unanswered prompt (Deny, Cancel, a timeout) also carries
+// `keychainPrompt: true`: the usage provider does not ask again until the user
+// refreshes by hand, because reading again on a timer re-prompts every minute.
+// A missing item (44) or an unreadable one is not a prompt and only backs off.
+function keychainFailure(lastError) {
+  const why = lastError?.killed ? 'the Keychain prompt timed out' : lastError?.code === 44 ? 'no Claude Code entry in the Keychain' : lastError instanceof SyntaxError ? 'the Claude Code Keychain entry is not readable JSON' : `security exited ${lastError?.code ?? 'abnormally'}`;
+  const prompted = Boolean(lastError) && lastError.code !== 44 && !(lastError instanceof SyntaxError);
+  return prompted ? { keychainError: why, keychainPrompt: true } : { keychainError: why };
+}
+
+// Retry-After is either delay-seconds or an HTTP-date (RFC 9110 10.2.3).
+// Returns milliseconds from nowMs, or null when absent or unreadable.
+function parseRetryAfter(value, nowMs = Date.now()) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const text = value.trim();
+  if (/^\d+$/.test(text)) return Number(text) * 1000;
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? Math.max(0, at - nowMs) : null;
 }
 
 async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCredentials, reportUnavailable = false, now = () => new Date(), fetchImpl = fetch } = {}) {
@@ -143,7 +188,7 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   } catch {
     return null;
   }
-  if (creds?.keychainError) return reportUnavailable ? { unavailable: true, reason: `Could not read Claude credentials from the macOS Keychain: ${creds.keychainError}` } : null;
+  if (creds?.keychainError) return reportUnavailable ? { unavailable: true, reason: `Could not read Claude credentials from the macOS Keychain: ${creds.keychainError}`, ...(creds.keychainPrompt ? { sticky: true } : {}) } : null;
   const oauth = creds?.claudeAiOauth;
   if (!oauth?.accessToken) return reportUnavailable ? { unavailable: true, reason: 'Claude is not signed in for usage access. Sign in with the Claude CLI, then refresh Harbor.' } : null;
   if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return reportUnavailable ? { unavailable: true, reason: 'Claude credentials have expired. Open the Claude CLI to renew the session, then refresh Harbor.' } : null;
@@ -165,7 +210,13 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   } catch (error) {
     return failed(`Claude usage request failed: ${error?.name === 'TimeoutError' ? 'timed out after 10s' : (error?.cause?.code || error?.message || 'network error')}`);
   }
-  if (!res.ok) return failed(`Claude usage request failed: HTTP ${res.status}${res.status === 429 ? ' (rate limited; retrying shortly)' : ''}`);
+  if (!res.ok) {
+    const out = failed(`Claude usage request failed: HTTP ${res.status}${res.status === 429 ? ' (rate limited)' : ''}`);
+    // The provider's failure backoff waits at least this long.
+    const retryAfterMs = parseRetryAfter(res.headers?.get?.('retry-after'), now().getTime());
+    if (out && retryAfterMs !== null) out.retryAfterMs = retryAfterMs;
+    return out;
+  }
   let body;
   try {
     body = await res.json();
@@ -211,6 +262,72 @@ function createUsageProvider(options = {}) {
   const remoteSamples = new Map();
   const lastRemoteAttempt = new Map();
   const remoteUnavailable = new Map();
+  // The read in flight per account. Concurrent readers AWAIT it: the rail
+  // asks for every account at once on mount, on focus and on each update, so
+  // two reads routinely overlap, and the second used to see the cooldown, find
+  // no sample yet and answer "unavailable" while the first was still fetching.
+  // Whichever answer the renderer applied last won, so a launch could show the
+  // generic line until the next focus refresh.
+  const remotePending = new Map();
+  // Per-account failure state, absent while the endpoint is healthy:
+  // { failures, backoffUntil, retryAfterUntil, sticky, failedAt }.
+  const remoteHealth = new Map();
+  let activity = typeof options.activity === 'function' ? options.activity : null;
+
+  // { visible, live } for this account; anything unknown counts as visible
+  // and live, the behaviour before the cadence existed.
+  function activityFor(account) {
+    let state = null;
+    try { state = activity ? activity(account) : null; } catch { state = null; }
+    return { visible: state?.visible !== false, live: state?.live !== false };
+  }
+  function staleAfterFor(state) {
+    if (!state.visible) return Math.max(staleAfterMs, HIDDEN_STALE_AFTER_MS);
+    return state.live ? staleAfterMs : Math.max(staleAfterMs, IDLE_STALE_AFTER_MS);
+  }
+
+  // May the endpoint be asked for this account now? A manual refresh clears
+  // the backoff and a refused prompt's stop before asking; nothing clears
+  // Retry-After or the per-account cooldown.
+  function remoteAllowed(account, nowMs) {
+    if (typeof fetchRemoteUsage !== 'function') return false;
+    const health = remoteHealth.get(account);
+    if (health?.sticky) return false;
+    if (health && Math.max(health.backoffUntil, health.retryAfterUntil) > nowMs) return false;
+    return nowMs - (lastRemoteAttempt.get(account) || 0) >= remoteCooldownMs;
+  }
+
+  function startRemote(account, nowMs) {
+    lastRemoteAttempt.set(account, nowMs);
+    const inflight = (async () => {
+      const fetched = await Promise.resolve().then(() => fetchRemoteUsage(homes[account])).catch(() => null);
+      const doneMs = now().getTime();
+      if (fetched?.payload) {
+        remoteHealth.delete(account);
+        remoteUnavailable.delete(account);
+        remoteSamples.set(account, fetched);
+        return fetched;
+      }
+      const failures = (remoteHealth.get(account)?.failures || 0) + 1;
+      const backoffMs = Math.min(FAILURE_BACKOFF_MAX_MS, FAILURE_BACKOFF_BASE_MS * 2 ** (failures - 1));
+      const retryAfterMs = finiteNumber(fetched?.retryAfterMs) ? Math.min(RETRY_AFTER_MAX_MS, Math.max(0, fetched.retryAfterMs)) : 0;
+      const sticky = Boolean(fetched?.sticky);
+      remoteHealth.set(account, {
+        failures,
+        backoffUntil: doneMs + Math.max(backoffMs, retryAfterMs),
+        retryAfterUntil: doneMs + retryAfterMs,
+        sticky,
+        failedAt: doneMs,
+      });
+      if (fetched?.unavailable) {
+        const reason = sticky && fetched.reason ? `${fetched.reason}. ${KEYCHAIN_STICKY_HINT}` : fetched.reason;
+        remoteUnavailable.set(account, { unavailable: true, reason });
+      }
+      return fetched;
+    })().finally(() => remotePending.delete(account));
+    remotePending.set(account, inflight);
+    return inflight;
+  }
 
   const stampMs = (sample) => {
     const parsed = sample?.updatedAt ? Date.parse(sample.updatedAt) : NaN;
@@ -238,7 +355,17 @@ function createUsageProvider(options = {}) {
       samples.set(account, { payload, updatedAt: now().toISOString() });
     },
 
-    async getUsage(account) {
+    // The desktop app tells the provider what the user can see (see
+    // IDLE_STALE_AFTER_MS): fn(account) answers { visible, live }.
+    setActivity(fn) {
+      activity = typeof fn === 'function' ? fn : null;
+    },
+
+    // `manual: true` is a refresh the user asked for (opening the title-bar
+    // Plan usage menu or pressing its Refresh). It clears the failure backoff
+    // and a refused Keychain prompt's stop, never Retry-After or the cooldown.
+    // Timer, focus and mount reads leave it off.
+    async getUsage(account, { manual = false } = {}) {
       assertAccount(account);
       // A codex profile stays in the not-Claude lane on purpose (2026-10-06). A
       // per-profile `codex app-server` reader was offered for the rail, but it
@@ -267,24 +394,37 @@ function createUsageProvider(options = {}) {
       }
 
       const age = chosen ? nowMs - stampMs(chosen) : Infinity;
-      if (age > staleAfterMs && typeof fetchRemoteUsage === 'function'
-        && nowMs - (lastRemoteAttempt.get(account) || 0) >= remoteCooldownMs) {
-        lastRemoteAttempt.set(account, nowMs);
-        const fetched = await Promise.resolve(fetchRemoteUsage(homes[account])).catch(() => null);
-        if (fetched?.unavailable) remoteUnavailable.set(account, fetched);
-        if (fetched?.payload) {
-          remoteUnavailable.delete(account);
-          remoteSamples.set(account, fetched);
+      const failing = remoteHealth.has(account);
+      if (manual && failing) remoteHealth.set(account, { ...remoteHealth.get(account), sticky: false, backoffUntil: 0 });
+      const staleAfter = manual ? staleAfterMs : staleAfterFor(activityFor(account));
+      let inflight = remotePending.get(account);
+      if (!inflight && (age > staleAfter || (manual && failing)) && remoteAllowed(account, nowMs)) {
+        inflight = startRemote(account, nowMs);
+      }
+      if (inflight) {
+        const fetched = await inflight;
+        if (fetched?.payload && (!chosen || stampMs(fetched) > stampMs(chosen))) {
           chosen = { payload: fetched.payload, updatedAt: fetched.updatedAt, email };
         }
       }
 
-      if (!chosen) return { ...(remoteUnavailable.get(account) || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
-      return usageFromStatuslinePayload(chosen.payload, {
+      const failure = remoteUnavailable.get(account);
+      const failedAt = remoteHealth.get(account)?.failedAt;
+      const failedSince = Boolean(chosen && failure && finiteNumber(failedAt) && failedAt >= stampMs(chosen));
+      if (failedSince && nowMs - stampMs(chosen) > FAILING_SAMPLE_MAX_AGE_MS) chosen = null;
+
+      if (!chosen) return { ...(failure || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
+      const result = usageFromStatuslinePayload(chosen.payload, {
         email: chosen.email || email,
         updatedAt: chosen.updatedAt,
         nowMs,
       });
+      // The numbers shown have gone stale and the endpoint failed after them:
+      // say why they are not refreshing.
+      if (!result.unavailable && failedSince && failure.reason && nowMs - stampMs(chosen) > staleAfter) {
+        result.notice = failure.reason;
+      }
+      return result;
     },
   };
 }
@@ -294,9 +434,17 @@ module.exports = {
   NO_SAMPLE_REASON,
   NOT_CLAUDE_REASON,
   STALE_AFTER_MS,
+  IDLE_STALE_AFTER_MS,
+  HIDDEN_STALE_AFTER_MS,
   REMOTE_COOLDOWN_MS,
+  FAILURE_BACKOFF_BASE_MS,
+  FAILURE_BACKOFF_MAX_MS,
+  RETRY_AFTER_MAX_MS,
+  FAILING_SAMPLE_MAX_AGE_MS,
   createUsageProvider,
   fetchOauthUsage,
+  keychainFailure,
   keychainServicesFor,
+  parseRetryAfter,
   usageFromStatuslinePayload,
 };
