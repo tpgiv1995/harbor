@@ -1,6 +1,7 @@
 'use strict';
 
 const readline = require('node:readline');
+const { Transform } = require('node:stream');
 const { readCodexTitles } = require('./native-session-titles.cjs');
 const { sessionTitleText } = require('./session-title.cjs');
 
@@ -16,8 +17,20 @@ const { watchPath } = require('../watch-path.js');
 // the exact shape harbor-index emits, so the sidebar model, transcript open,
 // and the stage treat all three providers alike.
 //
-//   codex:  ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+//   codex:  ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl[.zst]
+//           ~/.codex/archived_sessions/rollout-<ts>-<uuid>.jsonl[.zst]
 //   cursor: ~/.cursor/projects/<munged-cwd>/agent-transcripts/<id>/<id>.jsonl
+//
+// COMPRESSED and ARCHIVED codex sessions. Codex compresses a rollout to
+// .jsonl.zst once it is about a week old and moves an archived chat to
+// archived_sessions/; a scan of plain .jsonl under sessions/ alone missed most
+// codex history (463 of 533 rollouts on one real home). Both are listed, one
+// row per id. An archived row carries `archived` and the sidebar model hides
+// it until searched, like codex's own list. A compressed head is read through
+// the zstd stream with a byte cap, and its facts persist like any other row's
+// (the path is the key, so archived and compressed come back with them).
+// Opening one decompresses it ONCE into the cache (readableMetaFor), because
+// the transcript tailer reads plain JSONL; codex never appends to a .zst.
 //
 // Titles come from the first user block the REAL parser produces (the same
 // TranscriptParser the conversation window uses), so what the rail shows is
@@ -30,12 +43,25 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { TranscriptParser } = require('./transcript.js');
-const { readCodexRolloutMeta } = require('./provider-session-link.js');
+const { readCodexRolloutMeta, codexLineage } = require('./provider-session-link.js');
+const {
+  CODEX_ID_RE, zstdAvailable, isCompressed, walkRollouts, rolloutRank, createRolloutReadStream, decompressRollout, pruneRolloutCopies,
+} = require('./codex-rollout-files.js');
 
-const CODEX_ID_RE = /([0-9a-f]{8}-[0-9a-f-]{27})\.jsonl$/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEAD_BYTES = 4 * 1024 * 1024;
+// A compressed rollout has no byte range to cut, so an uncapped head read
+// decompressed to the 120th line, or to EOF when it held no user text: about
+// 350MB of zstd per cold scan on one real home, 236MB of it from subagent
+// rollouts that carry no user text at all. The decompressed bytes AFTER the
+// first line are capped here; the first line (session_meta, which embeds the
+// system prompt) is always read whole, the rule readCodexRolloutMeta applies
+// to a plain file. On 464 real compressed rollouts every title and cwd sat
+// inside 823KB, and the capped scan changed none of them.
+const COMPRESSED_HEAD_BYTES = 1024 * 1024;
 const HEAD_LINES = 120;
+// Decompressed copies are pruned at most this often (and on the first copy).
+const COPY_PRUNE_EVERY_MS = 6 * 60 * 60 * 1000;
 const TITLE_MAX = 96;
 
 // Same local format harbor-index emits ("2026-07-24 20:18"); the sidebar's
@@ -87,7 +113,7 @@ function oneLine(text, max = TITLE_MAX) {
 // envelope that is not a reader fingerprint is never trusted.
 const FACTS_FORMAT = (() => {
   const hash = require('node:crypto').createHash('sha1');
-  for (const file of [__filename, './transcript.js', './session-title.cjs', './provider-session-link.js', '../../shared/claude-turn-state.cjs']) {
+  for (const file of [__filename, './transcript.js', './session-title.cjs', './provider-session-link.js', './codex-rollout-files.js', '../../shared/claude-turn-state.cjs']) {
     try { hash.update(fs.readFileSync(file === __filename ? file : require.resolve(file))); } catch { hash.update(file); }
   }
   return hash.digest('hex').slice(0, 16);
@@ -111,16 +137,57 @@ function storableFacts(facts) {
   };
 }
 
+// Pass the first line whole, then at most `maxBytes` more, then end. The
+// source is destroyed at the cap, so decompression stops there too; the torn
+// last line fails JSON.parse and is skipped like any partial record.
+function capAfterFirstLine(source, maxBytes) {
+  let firstLineDone = false;
+  let budget = maxBytes;
+  let ended = false;
+  const capped = new Transform({
+    transform(chunk, _encoding, callback) {
+      if (ended) { callback(); return; }
+      let rest = chunk;
+      if (!firstLineDone) {
+        const newline = chunk.indexOf(0x0a);
+        if (newline < 0) { callback(null, chunk); return; }
+        firstLineDone = true;
+        this.push(chunk.subarray(0, newline + 1));
+        rest = chunk.subarray(newline + 1);
+      }
+      if (rest.length < budget) {
+        budget -= rest.length;
+        callback(null, rest);
+        return;
+      }
+      this.push(rest.subarray(0, budget));
+      budget = 0;
+      ended = true;
+      this.push(null);
+      source.unpipe(capped);
+      source.destroy();
+      callback();
+    },
+  });
+  source.on('error', (error) => capped.destroy(error));
+  capped.on('close', () => source.destroy());
+  return source.pipe(capped);
+}
+
 // Read complete records: a large session_meta line must not consume the entire
 // title budget. Stop early once a real prompt is found, with a bounded scan.
-async function extractRowFacts(file, provider) {
+async function extractRowFacts(file, provider, { compressedHeadBytes = COMPRESSED_HEAD_BYTES } = {}) {
+  const compressed = isCompressed(file);
   // The first Codex record is unbounded (it currently embeds the system
   // prompt), so cwd + lineage use the complete-line reader rather than this
-  // module's bounded conversation head.
-  const meta = provider === 'codex' ? await readCodexRolloutMeta(file) : null;
+  // module's bounded conversation head. A compressed rollout's first line is
+  // read whole by the decompressing line reader below instead.
+  const meta = provider === 'codex' && !compressed ? await readCodexRolloutMeta(file) : null;
   let cwd = meta?.cwd || null;
-  const lineage = meta?.lineage || null;
-  const stream = fs.createReadStream(file, { end: HEAD_BYTES - 1 });
+  let lineage = meta?.lineage || null;
+  const stream = compressed
+    ? capAfterFirstLine(createRolloutReadStream(file), compressedHeadBytes)
+    : fs.createReadStream(file, { end: HEAD_BYTES - 1 });
   const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   const parser = new TranscriptParser(provider);
   let isInternalSession = lineage?.kind === 'guardian';
@@ -134,6 +201,7 @@ async function extractRowFacts(file, provider) {
       try { obj = JSON.parse(line); } catch { continue; }
       if (provider === 'codex' && obj.type === 'session_meta') {
         cwd = obj.payload?.cwd || cwd;
+        lineage = lineage || codexLineage(obj.payload || {});
         isInternalSession = isInternalSession || obj.payload?.source?.subagent?.other === 'guardian';
       }
       try { parser.applyLine(obj); } catch { /* malformed records cannot kill indexing */ }
@@ -146,6 +214,33 @@ async function extractRowFacts(file, provider) {
     lines.close();
     stream.destroy();
   }
+}
+
+// The codex-home watcher's filter. A platform that reports no filename gets
+// every event (the conservative reading); otherwise only the session index
+// and the two session dirs themselves (created, renamed, removed).
+const CODEX_HOME_ENTRIES = new Set(['session_index.jsonl', 'sessions', 'archived_sessions']);
+function acceptCodexHomeEvent(filename) {
+  if (filename == null) return true;
+  return CODEX_HOME_ENTRIES.has(path.basename(String(filename)));
+}
+
+// Trailing debounce with a max wait: quiet for `debounceMs` fires, and a
+// stream of events that never goes quiet still fires `maxWaitMs` after the
+// first one.
+function createChangeScheduler(fire, { debounceMs, maxWaitMs, now = Date.now } = {}) {
+  let timer = null;
+  let pendingSinceMs = null;
+  const cancel = () => { clearTimeout(timer); timer = null; pendingSinceMs = null; };
+  const schedule = () => {
+    const at = now();
+    if (pendingSinceMs == null) pendingSinceMs = at;
+    clearTimeout(timer);
+    const wait = Math.max(0, Math.min(debounceMs, pendingSinceMs + maxWaitMs - at));
+    timer = setTimeout(() => { cancel(); fire(); }, wait);
+    timer.unref?.();
+  };
+  return { schedule, cancel };
 }
 
 function createProviderHistory(options = {}) {
@@ -165,6 +260,13 @@ function createProviderHistory(options = {}) {
     return parts.length ? parts[parts.length - 1] : null;
   });
   const debounceMs = options.debounceMs ?? 5000;
+  // A pure trailing debounce never fired while any rollout kept streaming, so
+  // a session started outside Harbor (Codex Desktop, a terminal) stayed off
+  // the rail until every codex run went quiet.
+  const maxWaitMs = options.maxWaitMs ?? 30000;
+  const compressedHeadBytes = options.compressedHeadBytes ?? COMPRESSED_HEAD_BYTES;
+  // Decompressed copies of .jsonl.zst rollouts, made only when one is opened.
+  const rolloutCacheDir = options.rolloutCacheDir || path.join(path.dirname(metadataFile), 'codex-rollouts');
 
   // WHAT A HEAD READ LEARNED SURVIVES A RESTART (2026-10-09). The row cache
   // below lives in memory, so every launch re-read the head of every codex and
@@ -283,7 +385,8 @@ function createProviderHistory(options = {}) {
   const metaById = new Map(); // session id -> { provider, cwd, path }
   let durableMetadata = null;
   const watchers = [];
-  let changedTimer = null;
+  const changes = createChangeScheduler(() => emitter.emit('changed'), { debounceMs, maxWaitMs });
+  const scheduleChanged = changes.schedule;
   const watchFactory = options.watchFactory || ((dir, opts, listener) => watchPath(dir, opts, listener));
 
   // RE-CHECK ONLY WHAT CHANGED (2026-11-01). Every refresh used to walk every
@@ -296,20 +399,19 @@ function createProviderHistory(options = {}) {
   // A full walk still runs on the first listing, when a watcher reports no
   // filename or a folder-level change it cannot map to one log, after a
   // watcher error, and always when a configured root could not be watched.
-  const known = new Map(); // file path -> { provider, id, profileId, configHome, projectHint, order }
+  // archived_sessions/ is not watched file by file: a change to it (or to
+  // sessions/ itself) seen on the codex HOME watch forces a full walk.
+  const known = new Map(); // file path -> { provider, id, profileId, configHome, projectHint, rank, archived }
   const dirty = new Set();
   let fullScanNeeded = true;
   let rootsUnwatched = 0;
 
-  const scheduleChanged = () => {
-    clearTimeout(changedTimer);
-    changedTimer = setTimeout(() => emitter.emit('changed'), debounceMs);
-    changedTimer.unref?.();
-  };
-
-  const watchDir = (dir, { recursive = false, onEvent = null } = {}) => {
+  // `accept(filename)` filters a watcher's events (null = every event);
+  // `onEvent(filename)` sees each accepted event before the refresh is scheduled.
+  const watchDir = (dir, { recursive = false, accept = null, onEvent = null } = {}) => {
     try {
       const watcher = watchFactory(dir, { recursive }, (eventType, filename) => {
+        if (accept && !accept(filename)) return;
         if (onEvent) onEvent(filename);
         scheduleChanged();
       });
@@ -326,6 +428,13 @@ function createProviderHistory(options = {}) {
     if (parts.length === 4 && CODEX_ID_RE.test(parts[3])) { dirty.add(path.join(root, ...parts)); return; }
     // A year, month or day folder appearing or going away: rare, walk again.
     if (parts.length && parts.length < 4 && !/\.[^\\/]+$/.test(parts[parts.length - 1])) fullScanNeeded = true;
+  };
+  // The codex HOME watch (already filtered by acceptCodexHomeEvent): the index
+  // alone needs no walk (titlesFor re-reads it); sessions/ or archived_sessions/
+  // changing, or an event with no name, does.
+  const noteCodexHomeEvent = (filename) => {
+    if (filename == null) { fullScanNeeded = true; return; }
+    if (path.basename(String(filename)) !== 'session_index.jsonl') fullScanNeeded = true;
   };
   const noteCursorEvent = (filename) => {
     if (filename == null) { fullScanNeeded = true; return; }
@@ -383,8 +492,13 @@ function createProviderHistory(options = {}) {
   };
 
   const rowFor = async (file, provider, {
-    id, stat, cwdHint = null, projectHint = null, profileId = null, configHome = null,
+    id, stat, cwdHint = null, projectHint = null, profileId = null, configHome = null, archived = false,
   }) => {
+    // Derived from the path, which is the facts key, so they persist with it.
+    const flags = {
+      ...(archived ? { archived: true } : {}),
+      ...(isCompressed(file) ? { compressed: true } : {}),
+    };
     const metadata = (await loadMetadata())[id] || {};
     const hit = cache.get(file);
     if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) {
@@ -395,6 +509,7 @@ function createProviderHistory(options = {}) {
         cwd: hit.row.cwd || metadata.cwd || null,
         profileId: hit.row.profileId || metadata.profileId || null,
         configHome: hit.row.configHome || metadata.configHome || null,
+        ...flags,
       };
     }
     let facts = { cwd: null, firstUser: null };
@@ -404,7 +519,7 @@ function createProviderHistory(options = {}) {
       if (stored.format && stored.format !== FACTS_FORMAT) pendingMigration.set(file, provider);
     } else {
       try {
-        facts = await extractRowFacts(file, provider);
+        facts = await extractRowFacts(file, provider, { compressedHeadBytes });
         if (storedFacts) {
           storedFacts[file] = { size: stat.size, mtimeMs: stat.mtimeMs, facts: storableFacts(facts), format: FACTS_FORMAT };
           storedFactsDirty = true;
@@ -429,6 +544,7 @@ function createProviderHistory(options = {}) {
       path: file,
       profileId: profileId || metadata.profileId || null,
       configHome: configHome || metadata.configHome || null,
+      ...flags,
     };
     cache.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, row });
     return row;
@@ -436,29 +552,32 @@ function createProviderHistory(options = {}) {
 
   const rootInfo = (item) => (typeof item === 'string' ? { root: item, profileId: null, configHome: null } : item);
 
-  // Walks one codex root into `into` (file -> entry) and `stats` (file -> stat).
+  // Walks one codex root, and its home's archived_sessions/, into `into`
+  // (file -> entry) and `stats` (file -> stat). Plain and .jsonl.zst rollouts.
   const walkCodexRoot = async (into, stats, rank) => {
     const { root: codexRoot, profileId = null, configHome = null } = rootInfo(codexRoots[rank]);
-    const years = await fsp.readdir(codexRoot).catch(() => []);
-    for (const year of years) {
-      const months = await fsp.readdir(path.join(codexRoot, year)).catch(() => []);
-      for (const month of months) {
-        const days = await fsp.readdir(path.join(codexRoot, year, month)).catch(() => []);
-        for (const day of days) {
-          const dir = path.join(codexRoot, year, month, day);
-          const names = await fsp.readdir(dir).catch(() => []);
-          for (const name of names) {
-            const id = name.match(CODEX_ID_RE)?.[1];
-            if (!id) continue;
-            const file = path.join(dir, name);
-            const stat = await fsp.stat(file).catch(() => null);
-            if (!stat) continue;
-            into.set(file, { provider: 'codex', id, profileId, configHome, projectHint: null, rank });
-            stats.set(file, stat);
-          }
-        }
-      }
+    const archivedRoot = path.join(configHome || path.dirname(codexRoot), 'archived_sessions');
+    for (const [dir, archived] of [[codexRoot, false], [archivedRoot, true]]) {
+      await walkRollouts(dir, 3, async (file, id) => {
+        const stat = await fsp.stat(file).catch(() => null);
+        if (!stat) return;
+        into.set(file, { provider: 'codex', id, profileId, configHome, projectHint: null, rank, archived });
+        stats.set(file, stat);
+      });
     }
+  };
+
+  // One row per codex id; see rolloutRank. Ties go to the newest write. Keeps
+  // the listing order: each id stays where its chosen row sits.
+  const dedupeCodex = (rows) => {
+    const best = new Map();
+    for (const row of rows) {
+      if (row.provider !== 'codex') continue;
+      const prior = best.get(row.id);
+      if (!prior || rolloutRank(row) < rolloutRank(prior)
+        || (rolloutRank(row) === rolloutRank(prior) && row.lastWriteMs > prior.lastWriteMs)) best.set(row.id, row);
+    }
+    return rows.filter((row) => row.provider !== 'codex' || best.get(row.id) === row);
   };
 
   const walkCursor = async (into, stats) => {
@@ -484,7 +603,8 @@ function createProviderHistory(options = {}) {
       if (!file.startsWith(root + path.sep)) continue;
       const parts = relParts(file.slice(root.length + 1));
       const id = parts.length === 4 ? parts[3].match(CODEX_ID_RE)?.[1] : null;
-      return id ? { provider: 'codex', id, profileId, configHome, projectHint: null, rank } : null;
+      if (id && isCompressed(file) && !zstdAvailable()) return null;
+      return id ? { provider: 'codex', id, profileId, configHome, projectHint: null, rank, archived: false } : null;
     }
     if (file.startsWith(cursorRoot + path.sep)) {
       const parts = relParts(file.slice(cursorRoot.length + 1));
@@ -565,17 +685,24 @@ function createProviderHistory(options = {}) {
         projectHint: entry.projectHint,
         profileId: entry.profileId,
         configHome: entry.configHome,
+        archived: Boolean(entry.archived),
       }));
     }
+    const deduped = dedupeCodex(rows);
+    rows.length = 0;
+    rows.push(...deduped);
     const nativeByHome = new Map();
     for (const item of codexRoots) {
       const home = typeof item === 'string' ? path.dirname(item) : item.configHome || path.dirname(item.root);
       nativeByHome.set(home, await titlesFor(home));
     }
+    const homeOf = (item) => (typeof item === 'string' ? path.dirname(item) : item.configHome || path.dirname(item.root));
     for (const row of rows) {
       if (row.provider !== 'codex' || row.isInternalSession) continue;
-      const source = codexRoots.find(item => row.path.startsWith((typeof item === 'string' ? item : item.root) + path.sep));
-      const home = source && (typeof source === 'string' ? path.dirname(source) : source.configHome || path.dirname(source.root));
+      // An archived rollout lives beside sessions/, under the same home.
+      const source = codexRoots.find(item => row.path.startsWith((typeof item === 'string' ? item : item.root) + path.sep)
+        || row.path.startsWith(path.join(homeOf(item), 'archived_sessions') + path.sep));
+      const home = source && homeOf(source);
       const title = nativeByHome.get(home)?.get(row.id);
       if (title) row.title = title;
     }
@@ -589,14 +716,69 @@ function createProviderHistory(options = {}) {
       };
       if (row.profileId) meta.profileId = row.profileId;
       if (row.configHome) meta.configHome = row.configHome;
+      if (row.archived) meta.archived = true;
+      if (row.compressed) {
+        // No reader may take a .zst for JSONL, so the plain meta names no
+        // path; readableMetaFor decompresses on demand.
+        meta.compressed = true;
+        meta.rolloutPath = row.path;
+        meta.path = null;
+      }
       metaById.set(row.id, meta);
     }
     return rows;
   };
 
-  // The transcript provider resolves sessions through this: path + provider
-  // straight from the scan, no hints needed from the renderer.
+  // A compressed rollout, decompressed once into the cache so the transcript
+  // tailer (plain JSONL) can open it. Keyed by the source's mtime, which the
+  // copy carries; single-flight per file. Returns null when it cannot be made.
+  // The copy directory is pruned on the first copy and every 6 hours after.
+  const materializing = new Map();
+  let lastCopyPruneMs = -Infinity;
+  const pruneCopies = (keep) => {
+    if (Date.now() - lastCopyPruneMs < COPY_PRUNE_EVERY_MS) return;
+    lastCopyPruneMs = Date.now();
+    pruneRolloutCopies(rolloutCacheDir, { keep: new Set([keep]) }).catch(() => {});
+  };
+  const materializeRollout = (file) => {
+    if (materializing.has(file)) return materializing.get(file);
+    const job = (async () => {
+      const source = await fsp.stat(file);
+      const target = path.join(rolloutCacheDir, path.basename(file).replace(/\.zst$/, ''));
+      const existing = await fsp.stat(target).catch(() => null);
+      if (existing && Math.trunc(existing.mtimeMs / 1000) === Math.trunc(source.mtimeMs / 1000)) return target;
+      await fsp.mkdir(rolloutCacheDir, { recursive: true });
+      const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        await decompressRollout(file, temporary);
+        await fsp.utimes(temporary, source.atime, source.mtime);
+        await fsp.rename(temporary, target);
+      } catch (error) {
+        await fsp.rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      }
+      return target;
+    })().then((target) => { pruneCopies(target); return target; }, () => null)
+      .finally(() => materializing.delete(file));
+    materializing.set(file, job);
+    return job;
+  };
+
+  // Callers resolve sessions through this: path + provider straight from the
+  // scan, no hints needed from the renderer. Synchronous, and it never
+  // decompresses: identity, cwd and liveness lookups (the Orch join asks for
+  // every candidate worker) must not write a copy of every old rollout.
   const metaFor = (id) => metaById.get(id) || null;
+
+  // For a reader of the conversation (the transcript window, the preview): a
+  // compressed row answers with its decompressed copy as `path`.
+  const readableMetaFor = async (id) => {
+    const meta = metaById.get(id);
+    if (!meta) return null;
+    if (!meta.compressed) return meta;
+    const plain = zstdAvailable() ? await materializeRollout(meta.rolloutPath) : null;
+    return { ...meta, path: plain };
+  };
 
   const start = () => {
     // EXACTLY two watchers. A per-project watcher set was the first design
@@ -610,8 +792,12 @@ function createProviderHistory(options = {}) {
       const root = typeof item === 'string' ? item : item.root;
       if (!watchDir(root, { recursive: true, onEvent: noteCodexEvent(root) })) rootsUnwatched += 1;
       // Renaming a chat changes this sibling index without touching its rollout
-      // (re-read through titlesFor's size and mtime check).
-      watchDir(path.dirname(root));
+      // (re-read through titlesFor's size and mtime check). The watch is
+      // non-recursive on the codex HOME, so it also fires for every write codex
+      // makes to its own logs, databases and caches (logs_2.sqlite about every
+      // 90s even when idle), and each one used to refresh the whole rail. Only
+      // the index and the session dirs count.
+      watchDir(path.dirname(root), { accept: acceptCodexHomeEvent, onEvent: noteCodexHomeEvent });
     }
     if (!watchDir(cursorRoot, { recursive: true, onEvent: noteCursorEvent })) rootsUnwatched += 1;
     fullScanNeeded = true;
@@ -624,10 +810,12 @@ function createProviderHistory(options = {}) {
       pendingMigration.delete(file);
       const stored = storedFacts?.[file]; if (!stored) continue;
       try {
-        if (!COMPATIBLE_FACTS.has(stored.format)) {
+        if (!COMPATIBLE_FACTS.has(stored.format) || isCompressed(file)) {
           // Other reader fingerprints (including mixed checkout line endings)
           // refresh the whole head, but only after boot and one batch at a time.
-          stored.facts = storableFacts(await extractRowFacts(file, provider));
+          // A compressed rollout always takes this path: the lineage-only
+          // reader below reads plain JSONL.
+          stored.facts = storableFacts(await extractRowFacts(file, provider, { compressedHeadBytes }));
         } else if (provider === 'codex') {
           const meta = await readCodexRolloutMeta(file);
           stored.facts.lineage = meta?.lineage || null;
@@ -656,13 +844,13 @@ function createProviderHistory(options = {}) {
   const close = () => {
     flushStoredFacts();
     migrationClosed = true; clearTimeout(migrationTimer);
-    clearTimeout(changedTimer);
+    changes.cancel();
     for (const watcher of watchers) watcher.close();
     watchers.length = 0;
   };
 
   return {
-    emitter, listSessions, metaFor, start, close, migrateEntries, startBackgroundMigration,
+    emitter, listSessions, metaFor, readableMetaFor, materializeRollout, start, close, migrateEntries, startBackgroundMigration,
     rememberKeeperIdentity,
     rememberLink: rememberKeeperIdentity,
   };
@@ -684,4 +872,7 @@ function mergeProviderKeeperRows(historyRows, livePanes) {
   });
 }
 
-module.exports = { createProviderHistory, formatLocal, mungeCwd, mergeProviderKeeperRows };
+module.exports = {
+  createProviderHistory, formatLocal, mungeCwd, mergeProviderKeeperRows,
+  acceptCodexHomeEvent, createChangeScheduler, extractRowFacts, COMPRESSED_HEAD_BYTES,
+};

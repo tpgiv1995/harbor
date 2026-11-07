@@ -349,7 +349,7 @@ export function ArtifactsView({ sessionsById }) {
           <p className="artifacts-empty-hint">
             {search.trim() || filter !== 'all'
               ? 'Try a different search or filter.'
-              : 'HTML, images, PDFs and videos named in Claude Code transcripts from the last 14 days appear here. Codex and Cursor outputs are not indexed yet.'}
+              : 'HTML, images, PDFs and videos your Claude Code and Codex sessions wrote in the last 14 days appear here. Cursor outputs are not indexed yet.'}
           </p>
         </div>
       ) : null}
