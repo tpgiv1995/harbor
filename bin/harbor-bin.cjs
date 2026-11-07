@@ -532,6 +532,12 @@ function resolveWindowsLaunch(argv, { platform = process.platform, env = process
 //   changes the home's default. Each pair the launch home's own
 //   models_cache.json lists is acknowledged for this process only (nothing is
 //   persisted), which is what "Use existing model" does minus the config write.
+// - A codex whose own update check finds a newer release opens an update picker
+//   at startup whose first option runs the upgrade (`brew upgrade` on a
+//   Homebrew install). A send into it is refused, but it still blocks the first
+//   send, and Harbor's rule is that no CLI updates itself (cli-updates.js owns
+//   that), so every pane sets `check_for_update_on_startup=false` (a top-level
+//   ConfigToml key in 0.160.0; an older codex ignores an unknown `-c` key).
 //
 // `--no-daemon` and the transcript key exist from 0.156.0; an older codex
 // rejects an unknown flag outright, so both need a KNOWN version at least that.
@@ -630,7 +636,7 @@ function codexMigrationAcks(codexHome, version = null) {
 
 function codexPaneControls({ version, codexHome }) {
   const controls = [];
-  if (semverAtLeast(version, CODEX_PANE_CONTROLS_SINCE)) controls.push('--no-daemon', '-c', 'tui.fullscreen_transcript=false');
+  if (semverAtLeast(version, CODEX_PANE_CONTROLS_SINCE)) controls.push('--no-daemon', '-c', 'tui.fullscreen_transcript=false', '-c', 'check_for_update_on_startup=false');
   // 0.163 enables Daybreak controls by default. A cyber-policy refusal can
   // open an enable picker that drops pasted text and takes our Enter instead.
   // Preserve the previous pane behavior on both launch and resume, without
@@ -642,7 +648,11 @@ function codexPaneControls({ version, codexHome }) {
   // run an unreviewed `npm install -g @openai/codex@latest`. Updates go through
   // Harbor's chip after review (cli-updates.js). The key gates both the startup
   // check and the screen (tui/src/updates.rs, 0.164.0 and 0.165.0 binaries).
-  if (semverAtLeast(version, [0, 164, 0])) controls.push('-c', 'check_for_update_on_startup=false');
+  // The pane controls above already set it for every Codex since
+  // CODEX_PANE_CONTROLS_SINCE, so it is only added here when they did not.
+  if (semverAtLeast(version, [0, 164, 0]) && !controls.includes('check_for_update_on_startup=false')) {
+    controls.push('-c', 'check_for_update_on_startup=false');
+  }
   const acks = codexHome ? codexMigrationAcks(codexHome, version) : null;
   if (acks) controls.push('-c', acks);
   return controls;

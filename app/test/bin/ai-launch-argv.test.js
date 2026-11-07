@@ -80,11 +80,13 @@ test('codex 0.164+ panes never open on the update screen, whose Enter is "Update
     for (const version of ['0.164.0', '0.165.0']) {
       const command = argv(args, { HARBOR_CODEX_VERSION: version });
       assert.match(command, /-c check_for_update_on_startup=false/);
+      assert.equal(command.split('check_for_update_on_startup=false').length - 1, 1, 'set once, not twice');
       assert.ok(command.indexOf('check_for_update_on_startup=false') < command.lastIndexOf('hello'));
     }
-    for (const version of ['0.163.0', 'unreadable']) {
-      assert.doesNotMatch(argv(args, { HARBOR_CODEX_VERSION: version }), /check_for_update_on_startup/);
-    }
+    // Our pane controls turn the check off on every Codex since 0.157 (the
+    // 0.157.0 review), so 0.163 has it too; an unreadable version gets nothing.
+    assert.match(argv(args, { HARBOR_CODEX_VERSION: '0.163.0' }), /-c check_for_update_on_startup=false/);
+    assert.doesNotMatch(argv(args, { HARBOR_CODEX_VERSION: 'unreadable' }), /check_for_update_on_startup/);
   }
 });
 
@@ -245,12 +247,12 @@ test('codex resume argv is dry-run exact and CODEX_HOME crosses the daemon env a
 // `model = ...` into config.toml opens for every gpt-5.x model. Each is pinned
 // per launch and per resume, ahead of every positional argument.
 test('codex >= 0.156.0 panes run without the shared server and keep the inline transcript', () => {
-  const pinned = '--no-daemon -c tui.fullscreen_transcript=false';
+  const pinned = '--no-daemon -c tui.fullscreen_transcript=false -c check_for_update_on_startup=false';
   const bundledAcks = " -c 'notice.model_migrations={'\\''gpt-5.4-mini'\\''='\\''gpt-6-luna'\\'','\\''gpt-5.4'\\''='\\''gpt-6-sol'\\''}'";
   for (const [version, migrations] of [
     ['0.156.0', ''], ['0.157.0', ''], ['0.158.0', bundledAcks],
     ['0.163.0', ' -c features.cli_daybreak=false' + bundledAcks],
-    ['1.0.0', ' -c features.cli_daybreak=false -c check_for_update_on_startup=false' + bundledAcks],
+    ['1.0.0', ' -c features.cli_daybreak=false' + bundledAcks],
   ]) {
     assert.equal(
       argv(['--provider', 'codex', '--model', 'gpt-6-sol', '--effort', 'high'], { HARBOR_CODEX_VERSION: version }),
@@ -292,7 +294,7 @@ test('every migration the launch home lists is acknowledged for that process onl
     // Through --home (the profile's home, which is what the child reads)...
     assert.equal(
       argv(['--provider', 'codex', '--home', home, '--model', 'gpt-5.6-sol'], { HARBOR_CODEX_VERSION: '0.157.0' }),
-      `codex --dangerously-bypass-approvals-and-sandbox --no-daemon -c tui.fullscreen_transcript=false ${acks} --model gpt-5.6-sol`,
+      `codex --dangerously-bypass-approvals-and-sandbox --no-daemon -c tui.fullscreen_transcript=false -c check_for_update_on_startup=false ${acks} --model gpt-5.6-sol`,
     );
     // ...and through an inherited CODEX_HOME on a resume, with or without the
     // version pins, because the acknowledgment is an old, stable config key.
