@@ -51,13 +51,22 @@ account is a config home, and a config home is a path).
 
 Research:
 ```
-bin/ai --here --home <CONFIG_HOME> '/orchestrate-research <goal>'
+HARBOR_ORCH_ROLE=research bin/ai --here --home <CONFIG_HOME> '/orchestrate-research <goal>'
 ```
 
 Execute:
 ```
-bin/ai --here --home <CONFIG_HOME> '/orchestrate-execution'
+HARBOR_ORCH_ROLE=execution bin/ai --here --home <CONFIG_HOME> '/orchestrate-execution'
 ```
+
+The leading `HARBOR_ORCH_ROLE=<role>` assignment is inert for the CLI. It is
+there for the execute mutex: sessiond labels a tab with its joined argv
+(`$SHELL -lc <command>`), so the mutex reads each tab label back as shell words
+across every workspace of the project and blocks on the role word (or, for a
+pane started before the marker, the bare execution command word). A goal is one
+quoted word and cannot forge it. A successful kickoff also holds a short
+per-project reservation (`createExecuteReservations`) until the terminal bridge
+reports the new pane, or 15 s pass.
 
 `--here` tells `bin/ai` to run in the pane it was launched into rather than
 opening a new one (see `launcherFlags` in `actions/orchestration.js`, which
