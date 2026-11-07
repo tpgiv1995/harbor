@@ -38,6 +38,9 @@ test('new session options source Claude family aliases and provider defaults', (
     ['default', 'gpt-6-sol'],
   );
   assert.deepEqual(options.providers.codex.efforts, ['low', 'medium', 'high', 'xhigh']);
+  // Codex permission modes ride the registry; full access stays the default.
+  assert.deepEqual(options.providers.codex.permissions.map((mode) => mode.id), ['auto', 'ask', 'read-only', 'full']);
+  assert.equal(options.providers.codex.defaultPermission, 'full');
   assert.deepEqual(options.providers.cursor.models, [{ value: 'default', label: 'Default' }]);
   assert.equal(options.providers.cursor.bin, 'cursor-agent');
   assert.deepEqual(options.profilesByProvider.claude.map((profile) => profile.id), ['personal', 'team', 'lab']);
