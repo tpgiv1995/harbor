@@ -22,6 +22,7 @@
 // Usage (from app/):
 //   ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe scripts/probe-slash-dialogs-win.js
 // Env: HARBOR_PROBE_HOME (required), HARBOR_PROBE_CWD (default this checkout),
+// HARBOR_PROBE_CLI_VERSION (recorded in results.json),
 // HARBOR_PROBE_OUT (screens + results.json), HARBOR_PROBE_ONLY (comma list).
 
 const { execPath: guiNodeExec } = require('../test/support/gui-node.js');
@@ -194,6 +195,6 @@ function heading(screen) {
       try { fs.rmSync(store, { recursive: true, force: true }); } catch { /* busy */ }
     }
   }
-  fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ cli: '2.1.303', home: path.basename(HOME_DIR), results, skipped: SKIPPED }, null, 2));
+  fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ cli: process.env.HARBOR_PROBE_CLI_VERSION || 'unrecorded', home: path.basename(HOME_DIR), results, skipped: SKIPPED }, null, 2));
   process.exit(0);
 })();

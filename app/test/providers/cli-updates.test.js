@@ -749,6 +749,38 @@ test('permission-check, dialog, startup-warning and cleanup lines carry a flag',
   assert.equal(ids('[VSCode] Improved startup time in workspaces without a Python environment by starting Claude while the Python extension loads').includes('screen'), false);
 });
 
+// The 2026-11-09 review (claude 2.1.317 to 2.1.321): the new model and the lines
+// no flag named. Every line is verbatim from the changelog, negatives included.
+test('claude 2.1.317 to 2.1.321 lines that touch Harbor carry a flag', () => {
+  const ids = (line) => tagLine('claude', line).flags.map((f) => f.id);
+  for (const [line, flag] of [
+    ['Added Claude Fable 5.2 (`claude-fable-5-2`), now the default Fable model — 1M context, $8/$40 per Mtok with $0.20/Mtok cache reads', 'model'],
+    ['Changed saved Fable 5.1 model picks to move to `fable`: on Pro and Max plans at once, on Team and Enterprise plans once your organization allows it; use `/model claude-fable-5-1` to switch back', 'model'],
+    ['Improved the `/model` picker: "More models" is now an unnumbered row below every other, and older models open under it without renumbering the rest', 'model'],
+    ['Changed the account email check to refuse only a shell command that holds your email and names a User-Agent, without asking, so other commands and scheduled runs no longer stop at its prompt', 'tool-refusal'],
+    ['Windows: Changed how Claude Code finds programs it starts itself, such as git, to skip relative and UNC PATH entries and links onto a network share, and to pick up PATH changes from settings', 'windows-launch'],
+    ['Windows: Improved startup time with a standard Git for Windows install by no longer checking which git.exe to run on every launch', 'windows-launch'],
+    ['Windows: Fixed every tool call being refused on some volumes where the native path lookup fails; the working-directory check now compares the folder\'s identity instead', 'windows-launch'],
+    ['Fixed deny rules and protected-file prompts not applying to the file that a `cp` or `mv` into a directory writes', 'ask-dialog'],
+    ['Fixed Bash reads such as `grep -r foo "$PWD/src"` asking for permission when the same command with the path typed out runs without asking', 'ask-dialog'],
+    ['Changed `cp` and `mv` spelled by a path, such as `/bin/cp`, to get the same path checks as `cp` and `mv`', 'ask-dialog'],
+    ['Removed the Read tool\'s "file unchanged since your last Read" stub: reading an unchanged file again returns its content', 'usage'],
+    ['Windows: Fixed the session scratchpad and other temporary paths growing with your project\'s path length in sessions not started by Claude Desktop, which made repositories cloned into them hit the 260-character path limit', 'temp-paths'],
+    ['Fixed a config file left at the legacy name hiding your setup with no warning: Claude Code now says on stderr when a home holds two config files, and which is in use', 'claude-json'],
+    ['Fixed slash commands typed after a leading space, tab or newline being sent to Claude as plain text instead of running', 'composer'],
+    ['Fixed permission prompts being answered by keys typed just after sending a message, or before a slow prompt appeared', 'composer'],
+    ['Changed background command notifications and TaskStop results to show Claude only the start and end of a command over 1,000 characters, which saves context', 'background-tasks'],
+    ['Changed self-paced `/loop` to end when a turn finishes without rescheduling, instead of scheduling a fallback wakeup; set `CLAUDE_CODE_LOOP_KEEPALIVE=1` to keep the old behavior', 'background-tasks'],
+  ]) assert.ok(ids(line).includes(flag), `${flag}: ${line}`);
+  assert.equal(ids('Windows: Fixed `FileChanged` hooks stopping for paths set through `watchPaths` after the first shell command, when the session\'s working directory had a lowercase drive letter').includes('windows-launch'), false);
+  assert.equal(ids('Fixed Claude-drafted feedback, surveys and `/feedback` continuing to appear after the server refused feedback for your organization').includes('tool-refusal'), false);
+  // Near misses for the patterns widened after the first review (verbatim, from 2.1.309 to 2.1.321).
+  assert.equal(ids('Fixed sandboxed commands and auto-accepted edits being able to modify the MCP config file passed with `--mcp-config`').includes('claude-json'), false);
+  assert.equal(ids('[VSCode] Fixed missed one-time saved scheduled tasks being deleted without asking when the extension opened without a chat').includes('ask-dialog'), false);
+  assert.equal(ids('Fixed the Bash edit diff listing a whole file as changed when a CRLF file under git\'s line-ending conversion was re-saved unchanged or had one line edited').includes('usage'), false);
+  assert.equal(ids('Fixed Write results and rejected edits showing a file outside the working directory as `../../…`; they now show `~/…` or the full path').includes('windows-launch'), false);
+});
+
 // The 2026-10-28 review (claude 2.1.311 and 2.1.312): the cache-warning line
 // was the one that broke Harbor (the /model dialog Harbor answers stopped
 // matching) and it raised only `model`, whose check is the catalog scan; the
@@ -1236,4 +1268,31 @@ test('subscribers see every state change so the chip repaints without polling', 
   off();
   await checker.dismiss('codex', '0.153.2');
   assert.equal(seen.length, 3, 'initial local reconcile, check and dismiss push; unsubscribing stops pushes');
+});
+
+test('codex 0.167.0 verbatim notes cover the reviewed contracts', () => {
+  const cases = [
+    ["Open the agent command center with `codex agents --no-daemon`. The command center and session picker now mark unread results (#58238, #58239, #58263, #58264).",["visibility","daemon"]],
+    ["Switch between connected backends from the terminal session picker and keep your drafts when switching (#58280, #58457).",["visibility","composer"]],
+    ["Preview local image attachments while composing on supported terminals, and open viewed local images from clickable transcript paths (#58261, #58446).",["visibility","composer"]],
+    ["Find API key and cloud provider options under “Sign in another way.” Enable `gcp_setup_wizard` to set up Google Cloud Vertex AI with Application Default Credentials or a credential file (#57857, #58427).",["startup-screen"]],
+    ["Opt into macOS or Windows system proxy settings from `/experimental` (#58157).",["config-toml"]],
+    ["Expand patch details directly in the transcript while an approval prompt is open (#58281).",["sandbox"]],
+    ["Saved chats stay visible after you switch model providers. If a chat can’t resume, you can read its transcript and prepare an editable prompt to continue in a new chat (#58202).",["resume","startup-screen"]],
+    ["`Ctrl+L` clears the terminal display while keeping earlier messages available through `Ctrl+T` (#58266).",["visibility"]],
+    ["Deleting text that exposes a leading `!` keeps an ordinary draft in chat mode (#58412).",["composer"]],
+    ["Network approval prompts close when their requests end. Concurrent requests to the same endpoint prompt one at a time (#58350, #58351).",["sandbox"]],
+    ["Long realtime V3 conversations save completed speech to chat history as the transcript grows (#58221).",["rollout"]],
+    ["Automatic context compaction now accounts for retained output from failed responses and responses with missing token usage data (#58404).",["rollout"]],
+    ["The app-server README covers managed network constraints under `[permissions.network]` and `prompt-user` command rules that require fresh human approval (#58045, #58182).",["sandbox"]],
+    ["DotSlash manifests now reference the Cargo packages shipped with the release (#58717, #58757).",["runtime"]],
+  ];
+  const missing = cases.flatMap(([line, wanted]) => {
+    const got = tagLine('codex', line).flags.map(flag => flag.id);
+    return wanted.filter(id => !got.includes(id)).map(id => ({ line, id }));
+  });
+  assert.deepEqual(missing, []);
+  for (const line of ['Updated image benchmark fixtures.', 'Documented keyboard names in contributor examples.', 'Updated provider documentation links.', 'Changed Cargo documentation examples.']) {
+    assert.deepEqual(tagLine('codex', line).flags, [], line);
+  }
 });

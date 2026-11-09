@@ -1,0 +1,4 @@
+  🔒   This conversation is open in another app                                      r to retry
+      Close it there and press R to continue here.
+
+   r retry   f fork   esc command center   ⌃c/q exit   ← transcript

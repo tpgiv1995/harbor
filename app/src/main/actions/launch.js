@@ -219,25 +219,31 @@ function createLaunchActions(options = {}) {
     return { argv, command: AI_BIN, cwd };
   }
 
-  let newSessionInFlight = null;
+  // Keyed by the whole request (2026-11-09 review): one shared slot answered ANY
+  // launch made within 3 s of another with the first one's result, so a Codex
+  // start followed quickly by a Fable start in another folder never launched the
+  // second. Only a repeat of the same request is a double click.
+  const newSessionInFlight = new Map();
 
   async function newSession({ account, cwd, provider, model, effort, prompt }) {
     if (!cwd) throw new TypeError('newSession requires cwd');
-    // Double-clicked "+" must not spawn two sessions.
-    if (newSessionInFlight) return newSessionInFlight;
     const resolvedProvider = provider || 'claude';
+    const requestKey = JSON.stringify([account ?? null, cwd, resolvedProvider, model ?? null, effort ?? null, prompt ?? null]);
+    // Double-clicked "+" must not spawn two sessions.
+    if (newSessionInFlight.has(requestKey)) return newSessionInFlight.get(requestKey);
     const sessionId = resolvedProvider === 'claude' ? randomUUID() : null;
     const argv = buildNewArgv({ account, profiles, provider: resolvedProvider, model, effort, sessionId, prompt });
     const env = { ...process.env };
-    newSessionInFlight = new Promise((resolve, reject) => {
+    const inFlight = new Promise((resolve, reject) => {
       const launch = scriptExecArgs(AI_BIN, argv, { cwd, env });
       execFile(launch.command, launch.args, launch.options, (error) => {
-        setTimeout(() => { newSessionInFlight = null; }, 3000).unref?.();
+        setTimeout(() => { if (newSessionInFlight.get(requestKey) === inFlight) newSessionInFlight.delete(requestKey); }, 3000).unref?.();
         if (error) reject(error);
         else resolve({ argv, command: AI_BIN, cwd, sessionId });
       });
     });
-    return newSessionInFlight;
+    newSessionInFlight.set(requestKey, inFlight);
+    return inFlight;
   }
 
   return {

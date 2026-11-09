@@ -248,20 +248,26 @@ test('capabilities: Haiku 5.5 survives a failed discovery and leads the haiku fa
   assert.ok(extractIdsFromText('"claude-haiku-5-5"').has('claude-haiku-5-5'));
 });
 
-// Fable 5.1 shipped 2026-09-01. The installed CLI predated it, so discovery (which
-// scans the binary) could not surface it; the seed floor carries it until the CLI
-// catches up, the same reason Opus 5 was seeded the day it shipped.
-test('capabilities: Fable 5.1 is in the seed and leads the fable family', () => {
+// Fable 5.1 shipped 2026-09-01 and Fable 5.2 on 2026-11-09 (CLI 2.1.321, where the
+// `fable` alias resolves to it on first-party and subscription auth). Discovery
+// scans the binary, so a failed scan or an older CLI cannot surface a new id; the
+// seed floor carries the current flagship, and the older one stays offered.
+test('capabilities: Fable 5.2 is in the seed and leads the fable family', () => {
   const { MODEL_VERSION_SEED } = require('../../src/main/providers/capabilities.js');
   const fableSeed = MODEL_VERSION_SEED.filter((m) => m.family === 'fable');
-  assert.equal(fableSeed[0].id, 'claude-fable-5-1');
-  assert.equal(fableSeed[0].label, 'Fable 5.1');
-  const families = buildFamilies(buildVersions(new Set(MODEL_VERSION_SEED.map((m) => m.id))));
+  assert.equal(fableSeed[0].id, 'claude-fable-5-2');
+  assert.equal(fableSeed[0].label, 'Fable 5.2');
+  assert.ok(fableSeed.some((m) => m.id === 'claude-fable-5-1'), 'Fable 5.1 stays offered');
+  const versions = buildVersions(new Set(MODEL_VERSION_SEED.map((m) => m.id)));
+  assert.deepEqual(versions.filter((v) => v.family === 'fable').map((v) => v.label), ['Fable 5.2', 'Fable 5.1', 'Fable 5']);
+  const families = buildFamilies(versions);
   assert.deepEqual(
     families.find((f) => f.family === 'fable'),
-    { alias: 'fable', label: 'Fable 5.1', family: 'fable' },
+    { alias: 'fable', label: 'Fable 5.2', family: 'fable' },
     'the fable alias row is labeled with the flagship',
   );
+  assert.equal(labelForId('claude-fable-5-2'), 'Fable 5.2');
+  assert.ok(extractIdsFromText('"claude-fable-5-2"').has('claude-fable-5-2'));
 });
 
 // The resolver's third Windows bug, one hop past the two its own comment

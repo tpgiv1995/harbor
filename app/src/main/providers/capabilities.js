@@ -63,6 +63,7 @@ const MODEL_VERSION_SEED = [
   { id: 'claude-sonnet-4-5', label: 'Sonnet 4.5', family: 'sonnet' },
   { id: 'claude-haiku-5-5', label: 'Haiku 5.5', family: 'haiku' },
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5', family: 'haiku' },
+  { id: 'claude-fable-5-2', label: 'Fable 5.2', family: 'fable' },
   { id: 'claude-fable-5-1', label: 'Fable 5.1', family: 'fable' },
   { id: 'claude-fable-5', label: 'Fable 5', family: 'fable' },
 ];

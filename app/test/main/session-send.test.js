@@ -1223,6 +1223,7 @@ test('a FRESH cursor pane settles too: the gate is not codex-only', async () => 
 // starts its MCP servers, then draws its composer. The first-send budget was
 // 15 s, so the message went in while the pane was still blank. A blank pane is
 // booting, not busy: it gets the longer budget, and typing waits for the draw.
+// 2026-11-09: over 60 s on the same box under load, past the 45 s the budget had.
 test('a fresh pane that has drawn nothing yet gets the boot budget, not the busy one', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   let t = 0;
@@ -1230,7 +1231,7 @@ test('a fresh pane that has drawn nothing yet gets the boot budget, not the busy
   h.deps.sleep = async (ms) => { t += ms; };
   const order = [];
   h.deps.readPane = async () => {
-    const text = t < 30_000 ? '' : 'Cursor Agent v2026.09.26\n → Plan, search, build anything';
+    const text = t < 70_000 ? '' : 'Cursor Agent v2026.09.26\n → Plan, search, build anything';
     order.push(text ? 'drawn' : 'blank');
     return text;
   };
@@ -1248,6 +1249,73 @@ test('a fresh pane that has drawn nothing yet gets the boot budget, not the busy
   assert.ok(order.slice(0, firstType).filter((step) => step === 'drawn').length >= 2,
     `typing must wait for the drawn screen to settle, saw ${order.slice(0, firstType).join(',')}`);
   assert.match(h.sent.map(({ text }) => text).join(''), /typed only once cursor is listening/);
+});
+
+test('a fresh pane that never draws anything is refused after the boot budget, and nothing is typed', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let t = 0;
+  h.deps.clock = () => t;
+  h.deps.sleep = async (ms) => { t += ms; };
+  h.deps.readPane = async () => '';
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({
+      sessionId: 'pane:fresh-cursor-dead',
+      text: 'this must not be typed',
+      provider: 'cursor',
+      pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
+    }),
+    (error) => error.code === 'PROVIDER_NEVER_DREW' && /Harbor typed and sent nothing/.test(error.message) && /Your text is kept/.test(error.message),
+  );
+  assert.ok(t >= 90_000 && t < 92_000, `the refusal comes at the end of the 90 s budget, came at ${t} ms`);
+  assert.deepEqual(h.sent, [], 'no byte may reach a pane that never drew');
+});
+
+test('a blank fresh pane says why the send is slow, once, after the ordinary budget', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let t = 0;
+  h.deps.clock = () => t;
+  h.deps.sleep = async (ms) => { t += ms; };
+  h.deps.readPane = async () => (t < 40_000 ? '' : 'Cursor Agent v2026.11.05\n → Plan, search, build anything');
+  const send = createSessionSend(h.deps);
+  const details = [];
+  send.emitter.on('status', (event) => details.push(event.detail || ''));
+  await send.send({
+    sessionId: 'pane:fresh-cursor-notice',
+    text: 'typed after the notice',
+    provider: 'cursor',
+    pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
+  });
+  assert.equal(details.filter((detail) => /Cursor has not drawn its screen yet/.test(detail)).length, 1, details.join(' | '));
+  assert.match(h.sent.map(({ text }) => text).join(''), /typed after the notice/);
+});
+
+test('a resumed cursor pane that stays blank for 70 s still gets the message', async () => {
+  const h = makeHarness({ panes: [], controlled: null });
+  let t = 0;
+  h.deps.clock = () => t;
+  h.deps.sleep = async (ms) => { t += ms; };
+  let resumedAt = null;
+  h.deps.readPane = async () => (resumedAt === null || t - resumedAt < 70_000 ? '' : 'Cursor Agent v2026.11.05\n → Plan, search, build anything');
+  h.deps.launchActions.resumeProviderSession = async () => { resumedAt = t; h.state.panes.push('pane-fresh'); };
+  h.deps.getSessionMeta = async () => ({ cwd: '/home/x/dev/harbor', provider: 'cursor' });
+  const send = createSessionSend(h.deps);
+  const res = await send.send({ sessionId: 's-cursor-slow', text: 'after a slow resume', provider: 'cursor' });
+  assert.equal(res.resumed, true);
+  assert.match(h.sent.filter((s) => s.paneId === 'pane-fresh').map((s) => s.text).join(''), /after a slow resume/);
+});
+
+// The Resume buttons (desktop index.js, phone compose.js) call this with no
+// options, so the boot budget has to be the default (2026-11-09 review).
+test('waitForProviderReady with no options waits out a blank resumed pane for 70 s', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let t = 0;
+  h.deps.clock = () => t;
+  h.deps.sleep = async (ms) => { t += ms; };
+  h.deps.readPane = async () => (t < 70_000 ? '' : 'Cursor Agent v2026.11.05\n → Plan, search, build anything');
+  const send = createSessionSend(h.deps);
+  assert.equal(await send.waitForProviderReady('pane-1'), true);
+  assert.ok(t >= 70_000 && t < 75_000, `ready once drawn and settled, at ${t} ms`);
 });
 
 test('a fresh pane that is drawing but never settles still gives up on the old 15 s budget', async () => {
@@ -1766,6 +1834,57 @@ test('a Codex thread locked by the Codex app gets no keys and a refusal that say
     (error) => error.code === 'CODEX_NO_PROMPT' && /open in the Codex app/.test(error.message),
   );
   assert.deepEqual(typed(h), [], 'r, f and q are that dialog\'s keys');
+});
+
+test('Codex provider and writer notices own input even with historical prompt rows', async () => {
+  const screens = [
+    codexFixture('codex-0.167.0-provider-mismatch-120.txt'),
+    codexFixture('codex-0.167.0-provider-missing-40.txt'),
+    '› Previous synthetic message\n\n' + codexFixture('codex-0.167.0-writer-remapped.txt'),
+    '› Previous synthetic message\n\n  Model provider blocked by policy\n  c continue in new chat · n start\n  fresh · esc other\n  chats',
+    '› Previous synthetic message\n\n  This conversation is open in another app\n  r retry   f fork   ←/esc command center   ⌃c/q exit   ⌃t\n  transcript',
+    '› Previous synthetic message\n\n  This conversation is open in another app\n  r retry   f fork   esc/ctrl+c/q exit   ctrl+t transcript',
+  ];
+  for (const screen of screens) {
+    assert.equal(codexBoxState(screen, { text: '/effort high' }), 'noprompt');
+    for (const text of ['/effort high', 'Previous synthetic message']) {
+      const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+      codexPane(h, { screen });
+      const send = createSessionSend(h.deps);
+      await assert.rejects(send.send({ sessionId: 'pane:provider-notice', text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }), error => error.code === 'CODEX_NO_PROMPT');
+      assert.deepEqual(typed(h), [], 'neither text nor Enter may choose a new chat');
+      const menu = await send.getMenu({ pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+      assert.equal(menu?.fallback, true, 'the refused send has an answer panel');
+    }
+    const recovered = screen + '\n\n› Ask Codex to do anything\n\n  GPT-6-Sol low · ~/project';
+    assert.equal(codexBoxDraft(recovered), '', 'a recovered composer ends the notice');
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    codexPane(h, { screen: recovered });
+    assert.equal(await createSessionSend(h.deps).getMenu({ pane: { paneId: 'pane-1' } }), null);
+  }
+  assert.equal(codexBoxState('› n start fresh · esc other chats\n\n  GPT-6-Sol low · ~/project', { text: 'n start fresh · esc other chats' }), 'exact', 'quoting the footer in a real composer is ordinary text');
+  assert.equal(codexBoxState('› Please read the transcript\n\n  GPT-6-Sol low · ~/project', { text: 'Please read the transcript' }), 'exact');
+});
+
+test('Codex resume-only reports a notice honestly and a usable composer as ready', async () => {
+  for (const [screen, needsAnswer] of [
+    [codexFixture('codex-0.167.0-provider-mismatch-120.txt'), true],
+    [codexFixture('codex-0.167.0-writer-remapped.txt'), true],
+    ['› Ask Codex to do anything\n\n  GPT-6-Sol low · ~/project', false],
+  ]) {
+    const h = makeHarness({ panes: [], controlled: null, readFrames: [screen], promptEchoes: false });
+    h.deps.getSessionMeta = async () => ({ provider: 'codex', cwd: '/work' });
+    h.deps.launchActions.resumeProviderSession = async () => h.state.panes.push({ pane_id: 'pane-fresh', workspace_id: 'ws-1', cwd: '/work', agent: 'codex' });
+    const send = createSessionSend(h.deps), statuses = [];
+    send.emitter.on('status', entry => statuses.push(entry));
+    const result = await send.send({ sessionId: 'saved-codex', text: '', provider: 'codex', resumeOnly: true });
+    assert.equal(result.resumed, true);
+    assert.deepEqual(typed(h), []);
+    if (needsAnswer) {
+      assert.match(statuses.at(-1).detail, /needs your answer/);
+      assert.doesNotMatch(statuses.at(-1).detail, /ready/);
+    } else assert.match(statuses.at(-1).detail, /resumed and ready/);
+  }
 });
 
 test('Codex swallowing both Enters is an honest error, and the resend presses Enter without typing it twice', async () => {

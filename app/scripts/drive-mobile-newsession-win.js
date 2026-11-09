@@ -169,8 +169,15 @@ async function drive(page, fx) {
   await page.goto(`${fx.baseUrl}/#token=${fx.composed.token}&url=${encodeURIComponent(fx.baseUrl)}`);
   await page.locator('.app-shell[data-connection="online"]').waitFor({ timeout: 20000 });
   await openSheet(page);
-  await page.getByRole('button', { name: 'Codex', exact: true }).click();
   const model = page.getByRole('combobox', { name: 'Model', exact: true });
+  // The shipped seed's flagship reaches the phone's Claude list as the family row
+  // (2026-11-09, Fable 5.2), with discovery off, the path a failed scan takes.
+  await page.getByRole('button', { name: 'Claude', exact: true }).click();
+  const fable = require('../src/main/providers/capabilities.js').MODEL_VERSION_SEED.find((row) => row.family === 'fable');
+  await expect(model.locator('option', { hasText: fable.label })).toHaveCount(1);
+  await screenshot(page, '00-claude-models');
+  console.log(`PASS Claude: the phone offers ${fable.label}`);
+  await page.getByRole('button', { name: 'Codex', exact: true }).click();
   const values = () => model.locator('option').evaluateAll((options) => options.map((option) => option.value));
   assert.deepEqual(await values(), ['default', ...LISTED]);
   await model.selectOption('gpt-6-astra');
@@ -206,10 +213,14 @@ async function drive(page, fx) {
   // owns its option popup; End scrolls it to the final entry without changing
   // the production control into a test-only listbox.
   const body = page.locator('.newsession-body');
+  // The folder list collapsed into groups (2026-10), so at full height the sheet
+  // can fit with nothing to scroll; a short viewport keeps this a real wheel test.
+  await page.setViewportSize({ width: VIEWPORT.width, height: 520 });
   await body.evaluate((element) => { element.scrollTop = 0; });
   await body.hover();
   await page.mouse.wheel(0, 1800);
   await expect.poll(() => body.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.setViewportSize(VIEWPORT);
   await model.click();
   await screenshot(page, '03a-cursor-picker');
   // Chromium's native popup is outside the page DOM. Open it by keyboard and
@@ -229,13 +240,26 @@ async function drive(page, fx) {
   process.env.CODEX_HOME = fx.emptyCodexHome;
   await openSheet(page);
   await page.getByRole('button', { name: 'Codex', exact: true }).click();
-  assert.deepEqual(await values(), ['default', 'gpt-5.6-sol']);
-  await model.selectOption('gpt-5.6-sol');
+  // The no-cache floor has been gpt-6-sol since 2026-09-30 (CODEX_MODEL_FALLBACK).
+  assert.deepEqual(await values(), ['default', 'gpt-6-sol']);
+  await model.selectOption('gpt-6-sol');
   await expect(page.locator('.newsession-effort')).toHaveText(LEVELS.slice(0, 4));
   await page.locator('.newsession-effort').last().scrollIntoViewIfNeeded();
   await screenshot(page, '05-empty-home-fallback');
   await assertLayout(page, 'empty-home fallback');
   console.log('PASS empty Codex home: Default plus Sol only, low through xhigh; same server and three Claude-only profiles');
+
+  // Offering a row proves nothing about what picking it launches. Last on purpose:
+  // a Claude launch answers with its own session id and the app moves to it.
+  await page.getByRole('button', { name: 'Claude', exact: true }).click();
+  const fableValue = await model.locator('option', { hasText: fable.label }).getAttribute('value');
+  await model.selectOption(fableValue);
+  await page.getByRole('button', { name: 'Start session', exact: true }).click();
+  await expect.poll(() => fx.launches.length).toBe(2);
+  const claudeArgv = fx.launches[1].argv;
+  assert.equal(claudeArgv[claudeArgv.indexOf('--model') + 1], fableValue);
+  assert.match(fableValue, /fable/);
+  console.log(`PASS Claude launch: picking ${fable.label} submitted ${fableValue}`);
 }
 
 async function main() {

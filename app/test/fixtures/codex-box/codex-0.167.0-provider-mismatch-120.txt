@@ -1,0 +1,8 @@
+› Previous synthetic message
+
+• Previous synthetic reply
+
+  🔒  Continue in a new chat
+      This chat uses OpenAI, but Codex now uses Fixture, so this chat is read-only.
+
+  c continue in new chat · n start fresh · esc other chats

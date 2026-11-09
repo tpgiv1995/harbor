@@ -19,9 +19,11 @@ const STATUS_LABEL = {
 
 function shortModel(model) {
   if (!model) return '';
-  const m = String(model).match(/(fable|opus|sonnet|haiku)(?:-(\d+))?/);
+  // A minor version is one or two digits; a dated id's eight-digit stamp is not one.
+  const m = String(model).match(/(fable|opus|sonnet|haiku)(?:-(\d{1,2})(?!\d)(?:-(\d{1,2})(?!\d))?)?/);
   if (!m) return String(model);
-  return m[2] ? `${m[1]} ${m[2]}` : m[1];
+  if (!m[2]) return m[1];
+  return m[3] ? `${m[1]} ${m[2]}.${m[3]}` : `${m[1]} ${m[2]}`;
 }
 
 function fmtTokens(n) {

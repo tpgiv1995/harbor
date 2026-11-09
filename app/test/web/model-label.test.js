@@ -53,4 +53,6 @@ test('the phone and the desktop derive the same label from a model id', async ()
   // 5.1"; the desktop now derives too, so they agree (2026-09-01).
   assert.equal(prettyModelId('claude-fable-5-1'), 'Fable 5.1');
   assert.equal(modelDisplay('claude-fable-5-1').name, 'Fable 5.1');
+  assert.equal(prettyModelId('claude-fable-5-2'), 'Fable 5.2');
+  assert.equal(modelDisplay('claude-fable-5-2').name, 'Fable 5.2');
 });

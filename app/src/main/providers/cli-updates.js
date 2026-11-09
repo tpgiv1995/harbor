@@ -125,7 +125,7 @@ const USAGE_FLAG = {
   // its model or effort moves, not when a header merely names the model. Env
   // names sit inside longer ones (CLAUDE_CODE_SUBAGENT_MODEL_FORCE), where \b
   // never matches, so they carry no word boundary.
-  re: /^(?!\[)(?=.*(?:\bidle compaction\b|\bsummariz(?:ed|es|ing|ation)\b|\bextra requests?\b|\bmodel calls?\b|\bAPI calls?\b|\b\d+[KkMm]?\+? tokens?\b|\b(?:reasoning|output|input|thinking)[- ]tokens?\b|\btoken (?:usage|accounting|counts?|budget|spend)\b|\bprompt cache\b|\bcache (?:TTL|lifetime|writes?|reads?)\b|SUBAGENT_(?:EFFORT|MODEL)|PROMPT_CACHE_TTL|IDLE_COMPACT|\beffort level subagents\b|\bsub-?agents?\b.*\b(?:inherit\w*|mov(?:e|es|ing) to|switch\w*)\b.*\bmodel\b|\bcontinu(?:e|es|ing) automatically\b|\bauto-?continue\b|\bretr(?:y|ies) on another model\b|\breviewers?\b|\bguardian\b))/i,
+  re: /^(?!\[)(?=.*(?:\bidle compaction\b|\bfile unchanged since\b|\bsummariz(?:ed|es|ing|ation)\b|\bextra requests?\b|\bmodel calls?\b|\bAPI calls?\b|\b\d+[KkMm]?\+? tokens?\b|\b(?:reasoning|output|input|thinking)[- ]tokens?\b|\btoken (?:usage|accounting|counts?|budget|spend)\b|\bprompt cache\b|\bcache (?:TTL|lifetime|writes?|reads?)\b|SUBAGENT_(?:EFFORT|MODEL)|PROMPT_CACHE_TTL|IDLE_COMPACT|\beffort level subagents\b|\bsub-?agents?\b.*\b(?:inherit\w*|mov(?:e|es|ing) to|switch\w*)\b.*\bmodel\b|\bcontinu(?:e|es|ing) automatically\b|\bauto-?continue\b|\bretr(?:y|ies) on another model\b|\breviewers?\b|\bguardian\b))/i,
   why: 'This line changes how many model calls, tokens, summaries or retries a session, subagent or worker spends, which is plan usage on every plan at once. Measure it before installing: read the gate in the new binary, read each config home\'s settings and flags, and replay a week of real transcripts to count how often it would have fired.',
   verify: 'read the gate in the scratch binary; replay a week of transcripts (docs/claude/providers.md, newest CLI review)',
 };
@@ -168,13 +168,15 @@ const IMPACT_FLAGS = {
       // reworded the very dialog session-send answers after a /model or
       // /effort send. "cache warning" is in 2 lines of the whole changelog,
       // both this dialog.
-      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt|\brm prompts?\b|^(?!\[).*\bpermission checks?\b|^(?!\[)(?=.*\bpermission rules?\b)(?=.*\bprompt)|^(?!\[).*\b(?:Bash|PowerShell) prompt\b|auto mode's prompt|^(?!\[).*\bsafety prompt\b|Consumer Terms|^(?!\[).*\bconfirmation\b|cache warning/i,
+      re: /AskUserQuestion|permission prompt|permission dialog|\bdialog\b|approval prompt|\brm prompts?\b|^(?!\[).*\bpermission checks?\b|^(?!\[)(?=.*\bpermission rules?\b)(?=.*\bprompt)|^(?!\[).*\b(?:Bash|PowerShell) prompt\b|auto mode's prompt|^(?!\[).*\bsafety prompt\b|Consumer Terms|^(?!\[).*\bconfirmation\b|cache warning|^(?!\[).*\bprotected-file prompts?\b|^(?!\[).*\basking for permission\b|^(?!\[).*\bsame path checks\b/i,
       why: 'Harbor answers AskUserQuestion, permission and resume dialogs, and the /model and /effort cache warning, by WALKING THE PTY SCREEN, not the transcript. A change to how a dialog is drawn breaks the ask sheet.',
       verify: 'node scripts/drive-ask-sheet-win.js',
     },
     {
       id: 'claude-json',
-      re: /\.claude\.json|claude\.json/i,
+      // `config file` (2026-11-09, 2.1.319): the warning that a home holds two config
+      // files never says the file's name, and Harbor discovers homes by that file.
+      re: /\.claude\.json|claude\.json|(?<!\bMCP )\bconfig files?\b(?! passed with)/i,
       why: 'Harbor reads ~/.claude.json for the account email, the per-folder trust markers bin/ai pre-accepts, and installMethod/autoUpdates.',
       verify: 'npm test -- providers',
     },
@@ -327,7 +329,7 @@ const IMPACT_FLAGS = {
     // image counts.
     {
       id: 'composer',
-      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bbackgrounding\b|`←`|^(?!\[).*\bpast(?:e|es|ed|ing)\b.*\bimages?\b|^(?!\[).*\bimages?\b.*\bpast(?:e|es|ed|ing)\b/i,
+      re: /queued messages?|messages? queued|bracketed paste|send now|type-?ahead|keys typed|pasted text|\bpastes\b|as typed|typed text|\bslash commands? typed\b|\bbackgrounding\b|`←`|^(?!\[).*\bpast(?:e|es|ed|ing)\b.*\bimages?\b|^(?!\[).*\bimages?\b.*\bpast(?:e|es|ed|ing)\b/i,
       why: 'session-send confirms a delivery by reading the composer box and the echo above it, sends every message as a bracketed paste plus Enter, and attaches images by paste (Alt+V on the desktop, the file path from the phone) before waiting for the [Image #N] chip. A change to any of it is felt by every send.',
       verify: 'node_modules/electron/dist/electron.exe scripts/drive-resume-hooks-win.js, then scripts/drive-prompt-gate-win.js (it sends a phone image)',
     },
@@ -364,6 +366,29 @@ const IMPACT_FLAGS = {
     // 2026-10-09 (2.1.295): "Fixed `--tools` ... not applying to built-in
     // tools that register after launch" matched nothing, and the titler's
     // empty room is built from exactly these flags.
+    // 2026-11-09 (2.1.317 to 2.1.321): three kinds of line no flag named. The
+    // account email check denies a tool call outright with no one to approve it in a
+    // headless worker; how the CLI finds git and other programs decides whether hooks
+    // and worker shells start at all; and Harbor's Files view hides scratchpads by the
+    // shape of their folder path.
+    {
+      id: 'tool-refusal',
+      re: /\baccount email\b/i,
+      why: 'A built-in check can refuse a shell or web call that holds the signed-in email. In a headless worker nobody can approve it, so the call just fails (2.1.317 asked on every network word; 2.1.321 refuses only with a User-Agent).',
+      verify: 'Read the check in the binary (cc-plugin-privacy), then run one headless worker job.',
+    },
+    {
+      id: 'windows-launch',
+      re: /^Windows: .*\b(?:PATH|programs it starts|git\.exe|working-directory check)\b/,
+      why: 'How the CLI finds programs on Windows decides whether git, hooks and worker shells start. Harbor launches it with the PATH of the app that started it.',
+      verify: 'Check the PATH for relative, UNC and network-link entries, then run a hook and a git command on the new CLI.',
+    },
+    {
+      id: 'temp-paths',
+      re: /\bscratchpad\b|\btemporary paths?\b/i,
+      why: 'artifacts.js hides scratchpad files from the Files view by folder shape (WIN_SCRATCHPAD_RE), and lean-watch finds task output under the same temp root.',
+      verify: 'npm test -- artifacts',
+    },
     {
       id: 'titler',
       re: /--tools\b|--setting-sources\b|--disable-slash-commands\b|--strict-mcp-config\b|--system-prompt\b|--max-turns\b|\bMAX_THINKING_TOKENS\b/,
@@ -374,7 +399,7 @@ const IMPACT_FLAGS = {
   codex: [
     {
       id: 'rollout',
-      re: /rollout|session_meta|item_completed|event_msg|response_item|compressed histor|\bcompaction\b/i,
+      re: /rollout|session_meta|item_completed|event_msg|response_item|compressed histor|\bcompaction\b|save completed speech to chat history/i,
       why: 'transcript.js applyCodexLine parses the rollout item stream. 0.147.0 moved the conversation once already and Harbor rendered empty windows over live sessions until it was found.',
       verify: 'npm test -- transcript',
     },
@@ -392,7 +417,7 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'config-toml',
-      re: /config\.toml|CODEX_HOME|\bprofiles?\b|thread settings|configuration overrides|--config\b|(?:^|\s|`)-c(?:\s|`|$)/i,
+      re: /config\.toml|CODEX_HOME|\bprofiles?\b|thread settings|configuration overrides|system proxy settings|--config\b|(?:^|\s|`)-c(?:\s|`|$)/i,
       why: 'A codex profile travels as CODEX_HOME, and ~/.codex/config.toml is the file that decides model, approvals and MCP for that home.',
       verify: 'npm test -- providers',
     },
@@ -406,7 +431,7 @@ const IMPACT_FLAGS = {
       id: 'visibility',
       // "Enabled fullscreen transcripts by default" (0.157.0) matched nothing
       // here, and it moved the whole pane onto the alternate screen.
-      re: /visibilit|\bTUI\b|session picker|agent command center|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|transcript selection|Markdown.*async questions|\/keymap\b|\/presets\b|keyboard menu|\b(?:Kitty|Sixel)\b|inline image previews?/i,
+      re: /visibilit|\bTUI\b|session picker|agent command center|alternate screen|alt[- ]screen|full-?screen|scrollback|repaint|redraw|leader key|shortcut hints|transcript selection|Markdown.*async questions|\/keymap\b|\/presets\b|keyboard menu|\b(?:Kitty|Sixel)\b|inline image previews?|preview local image attachments|clickable transcript paths|Ctrl\+[LT]/i,
       why: 'The codex pane is read through the same pty screen model as claude; a TUI rewrite changes what Harbor sees. bin/ai pins tui.fullscreen_transcript=false so panes keep the inline transcript Harbor was proven against.',
       verify: 'npm test -- screen',
     },
@@ -427,7 +452,7 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'startup-screen',
-      re: /migration (prompt|notice)|model migration|startup (prompt|screen|dialog)|onboarding|setup wizard|\brecovery (choice|prompt)s?\b|\bmodal\b/i,
+      re: /migration (prompt|notice)|model migration|startup (prompt|screen|dialog)|onboarding|setup wizard|gcp_setup_wizard|Sign in another way|chat can.t resume|\brecovery (choice|prompt)s?\b|\bmodal\b/i,
       why: 'Harbor types into a codex pane once its screen settles. A startup screen that takes Enter eats that message: the model-migration screen also writes model = ... into config.toml. bin/ai acknowledges every migration models_cache.json lists; a new startup screen needs the same treatment.',
       verify: 'npm test -- ai-launch-argv',
     },
@@ -439,13 +464,13 @@ const IMPACT_FLAGS = {
     },
     {
       id: 'runtime',
-      re: /standalone executor|release builds.*(?:Node\.js|Rust)/i,
+      re: /standalone executor|release builds.*(?:Node\.js|Rust)|DotSlash manifests|Cargo packages shipped/i,
       why: 'Harbor launches the npm entry point under Node. Check package contents and disk growth, engine requirements, extra processes, hidden Windows launches and cleanup before installing.',
       verify: 'npm test -- cli-updates',
     },
     {
       id: 'composer',
-      re: /\bsteer(?:s|ed|ing)?\b|follow-up.*responding|selectable safer follow-up|transcript selection|local image attachments.*composer|\binterrupt(?:s|ed|ing)?\b|\bpast(?:e|es|ed|ing)\b|Ctrl\+V|Shift\+Insert|\/presets\b|keyboard menu|queued prompts?/i,
+      re: /\bsteer(?:s|ed|ing)?\b|follow-up.*responding|selectable safer follow-up|transcript selection|local image attachments.*compos|keep your drafts|leading `!`|\binterrupt(?:s|ed|ing)?\b|\bpast(?:e|es|ed|ing)\b|Ctrl\+V|Shift\+Insert|\/presets\b|keyboard menu|queued prompts?/i,
       why: 'Harbor sends Codex text through bracketed paste then Enter, including during a working turn. Input routing, paste and interrupt changes can alter what that send does.',
       verify: 'npm test -- session-send',
     },

@@ -1,0 +1,10 @@
+› Previous synthetic message
+
+  🔒  Model provider unavailable
+      This chat uses model provider
+      "old-provider", which is no longer
+      configured. Restore this provider's
+      configuration to continue.
+
+  c continue in new chat · n start fresh
+  · esc other chats

@@ -671,6 +671,10 @@ const ANSWER_MARKERS = [
 // contract; broad shared dialog chrome remains above.
 const PROVIDER_ANSWER_MARKERS = {
   codex: [
+    // Read-only provider and writer notices replace the composer. Their key
+    // hints can wrap, so allow whitespace between spans, anchored at the tail.
+    /(?:^|\s)n\s+start\s+fresh\s*·\s*esc\s+other\s+chats\s*$/u,
+    /(?:^|\s)r\s+retry\s+f\s+fork\s+(?:(?:←\/)?esc\s+command\s+center\s+)?(?:esc\/)?(?:ctrl\+c|⌃c)\/q\s+exit(?:\s+\S+\s+transcript)?\s*$/u,
     /Do you trust the contents of this directory/i,
     /Yes, continue/i,
     /Press enter to continue and create a sandbox/i,

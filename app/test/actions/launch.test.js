@@ -219,6 +219,22 @@ test('newSession: calls AI_BIN with correct argv and cwd for team', async () => 
   assert.equal(result.sessionId, calls[0].argv[3]);
 });
 
+// 2026-11-09 review: one shared slot answered a different launch within 3 s with
+// the first one's result, so the second session never started.
+test('newSession: a quick second launch of a different session still launches; a double click does not', async () => {
+  const { execFile, calls } = makeExecRecorder();
+  const launch = createLaunchActions({ execFile, profiles: FIXTURE_PROFILES });
+  const first = await launch.newSession({ account: 'team', cwd: '/tmp/a', provider: 'codex', model: 'gpt-5.5' });
+  const second = await launch.newSession({ account: 'team', cwd: '/tmp/b', model: 'fable' });
+  assert.equal(calls.length, 2, 'the Fable start in another folder must launch');
+  assert.equal(second.cwd, '/tmp/b');
+  assert.ok(calls[1].argv.includes('fable'));
+  assert.notEqual(first.cwd, second.cwd);
+  const again = await launch.newSession({ account: 'team', cwd: '/tmp/b', model: 'fable' });
+  assert.equal(calls.length, 2, 'the same request repeated at once is a double click');
+  assert.equal(again.sessionId, second.sessionId);
+});
+
 test('newSession: passes the configured home for the first account', async () => {
   const { execFile, calls } = makeExecRecorder();
   const launch = createLaunchActions({ execFile });

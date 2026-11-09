@@ -409,6 +409,17 @@ const CODEX_HINT_FOOTER_RE = /^\s+(?:\S+\s+){0,2}(?:to queue message|to queue|fo
 // An empty box draws one of these dim hints (Codex 0.165.0 and 0.166.0 binaries);
 // a plain-text screen read cannot see dimness, so they are matched by text.
 const CODEX_EMPTY_HINTS = new Set(['AskCodextodoanything', 'Askafollow-upquestion']);
+// These read-only notices replace the composer but leave historical prompt
+// rows on screen. Their final key hints own input, including single letters
+// that start or fork a chat. Match the footer, not quoted notice text above a
+// recovered composer. The daemon carries the same provider-specific veto.
+const CODEX_PROVIDER_NOTICE_RE = /(?:^|\s)n\s+start\s+fresh\s*·\s*esc\s+other\s+chats\s*$/u;
+const CODEX_WRITER_NOTICE_RE = /(?:^|\s)r\s+retry\s+f\s+fork\s+(?:(?:←\/)?esc\s+command\s+center\s+)?(?:esc\/)?(?:ctrl\+c|⌃c)\/q\s+exit(?:\s+\S+\s+transcript)?\s*$/u;
+function codexReadOnlyNotice(screen) {
+  const tail = String(screen || '').trimEnd().split('\n').slice(-8).join(' ');
+  if (CODEX_PROVIDER_NOTICE_RE.test(tail)) return 'provider';
+  return CODEX_WRITER_NOTICE_RE.test(tail) ? 'writer' : null;
+}
 // A FRESH CODEX TAKES ITS FIRST MESSAGE BEFORE IT HAS A BOX AGAIN (measured on
 // 0.166.0, 2026-11-01): Enter moves the message into the conversation as
 // "› <message>" with "Waiting for startup · esc cancel" under it, and no box
@@ -439,6 +450,7 @@ function codexStartupEcho(screen, sent = {}) {
   return Boolean(echo) && (echo === squashSpace(sent.text) || codexBoxCarries(echo, sent.text || '', sent.extra || 0));
 }
 function codexPromptBox(screen) {
+  if (codexReadOnlyNotice(screen)) return null;
   const lines = String(screen || '').split('\n');
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   const footer = lines.length > 1 && (CODEX_FOOTER_RE.test(lines.at(-1)) || CODEX_HINT_FOOTER_RE.test(lines.at(-1)));
@@ -1021,18 +1033,38 @@ function createSessionSend(deps) {
   // that throws is no evidence of anything and keeps `timeoutMs`); once anything
   // is drawn, the ordinary `timeoutMs` budget runs from that first frame, capped
   // by the blank budget, so a busy drawn pane gives up exactly as before.
-  const waitForProviderReady = async (paneId, { timeoutMs = 45_000, blankTimeoutMs = timeoutMs } = {}) => {
+  // 2026-11-09: the same pane took 42 to 64 s on 2026-10-05, 35 to 45 s in three
+  // saved runs of the new build, and over 60 s on the old build under load
+  // (cursor-pane-proof), at or past the 45 s this budget had, so a first message
+  // could be typed into a pane that was not listening.
+  // A pane with nothing drawn cannot be typed into safely, so a pane still blank
+  // when the budget ends is refused, never typed into: `outcome.neverDrew` tells
+  // the caller which of the two failures this was. `onBlankWait` fires once, when
+  // a blank pane outlasts the ordinary budget, so a wait of a minute or more says
+  // why it is taking so long.
+  // The boot budget is the DEFAULT (2026-11-09 review): the Resume buttons on the
+  // desktop and the phone call this with no options, and kept the old 45 s.
+  const waitForProviderReady = async (paneId, { timeoutMs = 45_000, blankTimeoutMs = Math.max(timeoutMs, 90_000), outcome = null, onBlankWait = null } = {}) => {
     const started = clock();
     const bootLimit = started + Math.max(timeoutMs, blankTimeoutMs);
     let deadline = started + timeoutMs;
     let drawn = false;
+    let sawBlank = false;
+    let noticed = false;
     let prev = null;
     while (clock() < deadline) {
       await sleep(800);
       let text = null;
       try { text = await readPane(paneId); } catch { continue; }
       if (!text || !text.trim()) {
-        if (!drawn) deadline = bootLimit;
+        sawBlank = true;
+        if (!drawn) {
+          deadline = bootLimit;
+          if (onBlankWait && !noticed && clock() - started >= timeoutMs) {
+            noticed = true;
+            try { onBlankWait(); } catch { /* a status line must never break a send */ }
+          }
+        }
         prev = text;
         continue;
       }
@@ -1044,6 +1076,7 @@ function createSessionSend(deps) {
       if (prev === text) return true;
       prev = text;
     }
+    if (outcome) outcome.neverDrew = sawBlank && !drawn;
     return false;
   };
 
@@ -1685,7 +1718,9 @@ function createSessionSend(deps) {
   // image failure (2026-10-28) was a send into it.
   const CODEX_LOCKED_RE = /This conversation is open in another app/i;
   const codexNoPromptError = (screen = '') => {
-    const error = new Error(CODEX_LOCKED_RE.test(screen)
+    const error = new Error(codexReadOnlyNotice(screen) === 'provider'
+      ? 'Codex cannot resume this chat with its current model provider, so Harbor typed and sent nothing. Your text is kept. Use the answer panel in its window to choose how to continue'
+      : CODEX_LOCKED_RE.test(screen)
       ? 'This Codex conversation is open in the Codex app, which keeps it locked, so Harbor typed and sent nothing. Your text is kept. Close it in the Codex app, then send again'
       : 'Codex is not showing its prompt box (a dialog or a list may be open, or it is still starting), so Harbor typed and sent nothing. Your text is kept. Check the >_ terminal');
     error.code = 'CODEX_NO_PROMPT';
@@ -1914,7 +1949,21 @@ function createSessionSend(deps) {
       // since 2026-10-09 its Enter waits until the prompt SHOWS the text
       // (waitForPromptToHold), which a TUI still starting cannot fake.
       if (provider !== 'claude' && !deliveredPanes.has(paneId)) {
-        const settled = await waitForProviderReady(paneId, { timeoutMs: 15_000, blankTimeoutMs: 45_000 });
+        const label = provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : provider;
+        const outcome = {};
+        const settled = await waitForProviderReady(paneId, {
+          timeoutMs: 15_000,
+          blankTimeoutMs: 90_000,
+          outcome,
+          onBlankWait: onWait ? () => onWait(`${label} has not drawn its screen yet. Harbor waits up to 90 seconds for it before typing`) : null,
+        });
+        if (!settled && outcome.neverDrew) {
+          logSend({ paneId, phase: 'provider-never-drew', provider });
+          await captureSendScreen(paneId, 'provider-never-drew', '');
+          const error = new Error(`${label} has not drawn anything after 90 seconds, so Harbor typed and sent nothing. Your text is kept. Check the >_ terminal, then send again`);
+          error.code = 'PROVIDER_NEVER_DREW';
+          throw error;
+        }
         if (!settled) debug('deliver: fresh', provider, 'pane never settled; sending anyway');
       }
       // Every Codex send starts at a drawn composer. Slash commands can open
@@ -2255,6 +2304,7 @@ function createSessionSend(deps) {
   // ghost, whatever blocker text sits in the scrollback.
   const classifyBlocked = (screen, blockedHint = false) => {
     if (!screen.trim()) return null;
+    if (codexReadOnlyNotice(screen)) return { lines: screen.split('\n') };
     if (parseMenu(screen)?.kind === 'model-switch') return { lines: screen.split('\n') };
     let lines = screen.split('\n');
     while (lines.length && !lines.at(-1).trim()) lines = lines.slice(0, -1);
@@ -3207,9 +3257,15 @@ function createSessionSend(deps) {
         workspaceId: providerFresh.workspaceId,
       }).catch(() => {});
       status(sessionId, 'waiting');
-      const providerReady = await waitForProviderReady(providerFresh.paneId);
-      if (!providerReady) throw new Error(`${provider} resumed, but its composer never settled; message NOT sent`);
+      // The same boot budget as a first send: a resumed cursor pane is blank
+      // while its MCP servers start. A drawn pane keeps its 45 s.
+      const providerReady = await waitForProviderReady(providerFresh.paneId, { timeoutMs: 45_000, blankTimeoutMs: 90_000 });
+      if (!providerReady) throw new Error(`${provider} resumed, but its composer never settled; message NOT sent. Your text is kept`);
       if (resumeOnly) {
+        if (provider === 'codex' && codexReadOnlyNotice(await readScreen(providerFresh.paneId, MENU_READ_LINES))) {
+          status(sessionId, 'sent', 'codex session resumed and needs your answer in its window');
+          return { ok: true, paneId: providerFresh.paneId, resumed: true };
+        }
         status(sessionId, 'sent', `${provider} session resumed and ready`);
         return { ok: true, paneId: providerFresh.paneId, resumed: true };
       }
