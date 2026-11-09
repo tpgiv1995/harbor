@@ -38,24 +38,37 @@
   inset: 0;
   width: 100%;
   border: 0;
-  background: rgba(0, 0, 0, 0.48);
+  background: #03040999;
 }
 
+/* The drawer is its own ground: the photograph again, fixed to the viewport, so
+   the panes inside it paint the same glass as the ones in the app. It is a
+   clip-path host, not an overflow one, because a fixed layer escapes overflow:
+   hidden. It slides in by `left`, never by a transform (tokens.css: a transform
+   would make the drawer the containing block of every fixed layer inside). */
 .shell-drawer {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 0;
   width: min(88vw, 380px);
-  overflow: hidden;
-  background: var(--bg);
-  box-shadow: 18px 0 48px rgba(0, 0, 0, 0.38);
+  isolation: isolate;
+  clip-path: inset(0);
   animation: shell-drawer-in var(--dur-base) var(--ease-out);
 }
 
+.shell-drawer::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--ground-shade), var(--ground-sharp), #05070d;
+}
+
 .hdr-view { flex: 1 1 auto; min-width: 0; min-height: 48px; display: flex; flex-direction: column; justify-content: center; padding: 0 var(--space-3); }
-.hdr-view-kicker { color: var(--fnt); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
-.hdr-view h1 { font-size: 1.2rem; line-height: 1.2; margin: 0; }
+.hdr-view-kicker { color: var(--sub); font-size: 12px; font-weight: 500; }
+.hdr-view h1 { font-size: 1.2rem; font-weight: 600; line-height: 1.2; margin: 0; }
 
 .shell-drawer .session-browser {
   position: absolute;
@@ -63,8 +76,8 @@
 }
 
 @keyframes shell-drawer-in {
-  from { translate: -100% 0; }
-  to { translate: 0 0; }
+  from { left: -100%; }
+  to { left: 0; }
 }
 
 /* ── Row two: the facts strip ────────────────────────────────────────────────
@@ -93,45 +106,44 @@
   background: transparent;
   color: var(--tx);
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
 }
 
+/* A solid dark inset with a lit top edge, like the desktop's model chip. */
 .hdr-chip-face {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 30px;
   padding: 0 11px;
-  border: 1px solid var(--ln);
-  border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--frame-line);
+  border-radius: 11px;
+  background: var(--frame);
+  box-shadow: var(--frame-top);
 }
 
-.hdr-chip:active .hdr-chip-face { background: rgba(255, 255, 255, 0.14); }
+.hdr-chip:active .hdr-chip-face { background: #1a1d27; }
 .hdr-chip:disabled { cursor: default; opacity: 0.6; }
 
 .hdr-chip-effort {
   padding: 1px 5px;
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.1);
+  background: #ffffff14;
   color: var(--sub);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  font-size: 10.5px;
+  font-weight: 600;
 }
 
 .hdr-model-chip .hdr-chip-face {
-  border-color: rgb(var(--ac-rgb) / 38%);
-  background: rgb(var(--ac-rgb) / 14%);
+  border-color: rgb(var(--ac-rgb) / 45%);
 }
 .hdr-model-chip.tier-low { color: color-mix(in srgb, var(--ac) 58%, var(--sub)); }
 .hdr-model-chip.tier-medium { color: color-mix(in srgb, var(--ac) 82%, white); }
 .hdr-model-chip.tier-high { color: #dce7ff; }
 
 .warm-empty { padding: var(--space-10) var(--space-5); }
-.conv-empty-eyebrow { margin: 0 0 var(--space-2); color: var(--ac); font-size: 11px; font-weight: 700; letter-spacing: .12em; }
+.conv-empty-eyebrow { margin: 0 0 var(--space-2); color: var(--ac2); font-size: 12px; font-weight: 600; }
 
 /* Feature-owned sheet markup receives the shared motion primitive behavior. */
 .mobile-sheet, .settings-panel, .newsession-panel { animation: motion-sheet-up var(--dur-slow) var(--ease-out) both; will-change: transform; }
@@ -171,7 +183,7 @@
 .hdr-ctx.warn .hdr-ring { background: conic-gradient(var(--warn) var(--pct), rgba(255, 255, 255, 0.14) 0); }
 .hdr-ctx-num { color: var(--tx); font-weight: 600; font-variant-numeric: tabular-nums; }
 .hdr-ctx.warn .hdr-ctx-num { color: var(--warn); }
-.hdr-ctx-unit { color: var(--fnt); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.hdr-ctx-unit { color: var(--fnt); font-size: 11px; }
 /* The project line carries the status: "CDT-APP  ● Waiting on you". */
 .hdr-kicker {
   display: flex;
@@ -205,25 +217,25 @@
   vertical-align: 1px;
   background: var(--fnt);
 }
-.hdr-status-working { color: color-mix(in srgb, var(--ac) 70%, white); }
+.hdr-status-working { color: var(--ac2); }
 .hdr-status-working::before { background: var(--ac); }
 .hdr-status-blocked { color: var(--warn); }
 .hdr-status-blocked::before { background: var(--warn); }
 .hdr-status-idle::before { background: var(--live); }
 .hdr-status-off { color: var(--fnt); }
-.hdr-status-background { color: #75b9e8; }
-.hdr-status-background::before { background: #75b9e8; }
+.hdr-status-background { color: var(--background-work); }
+.hdr-status-background::before { background: var(--background-work); }
 .hdr-status-stale { color: var(--fnt); }
 .hdr-cache {
   flex: 0 0 auto;
   padding: 2px 7px;
-  border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: 7px;
+  background: #ffffff12;
   color: var(--sub);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
-.hdr-cache::before { content: 'cache '; color: var(--fnt); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+.hdr-cache::before { content: 'cache '; color: var(--fnt); font-size: 11px; }
 .hdr-cache.cache-warm { color: var(--live); }
 .hdr-cache.cache-expired { color: var(--fnt); }
 
@@ -281,15 +293,16 @@
   z-index: 40;
   width: min(300px, calc(var(--app-w, 100vw) - 24px));
   padding: var(--space-4);
-  border: 1px solid var(--ln2);
-  border-radius: var(--radius-lg);
-  background: #15171d;
-  box-shadow: var(--shadow-pop);
+  border: 1px solid var(--raised-rim);
+  border-top-color: #ffffff3a;
+  border-radius: 18px;
+  background: var(--raised-solid);
+  box-shadow: var(--pane-shadow);
   white-space: normal;
 }
 
 .conn-pop p { margin: 0; }
-.conn-pop-title { color: var(--tx); font-weight: 650; font-size: 15px; }
+.conn-pop-title { color: var(--tx); font-weight: 600; font-size: 15px; }
 .conn-pop-detail { margin-top: 6px !important; color: var(--sub); font-size: 13.5px; line-height: 1.45; }
 .conn-pop-reason { margin-top: 8px !important; color: var(--fnt); font-size: 12px; line-height: 1.4; }
 
@@ -307,8 +320,8 @@
   font-weight: 600;
 }
 
-.conn-pop-retry { background: var(--ac); color: #fff; }
-.conn-pop-close { background: rgba(255, 255, 255, 0.08); color: var(--tx); }
+.conn-pop-retry { background: var(--btn); box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim); color: var(--on-ac); }
+.conn-pop-close { background: #ffffff12; color: var(--tx); }
 
 /* The full explanation, only when there is nothing else to show. */
 .offline-screen {
@@ -385,9 +398,9 @@
   gap: 8px;
   margin: 0 12px 8px;
   padding: 2px 4px 2px 12px;
-  border: 1px solid rgba(212, 165, 55, 0.4);
+  border: 1px solid rgb(242 179 79 / 45%);
   border-radius: var(--radius-pill);
-  background: #17140c;
+  background: #15120a;
 }
 
 .app-shell[data-typing="true"] .question-dock:not(:focus-within) > :not(.question-fold) {
@@ -399,7 +412,7 @@
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: #f0d48a;
+  color: var(--warn-text);
   font-size: 13px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -505,8 +518,7 @@
    .btn-ghost: 44px square, no chrome), so the three read as one set. */
 .hdr-act-id-text {
   font-size: 14px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
+  font-weight: 600;
   line-height: 1;
 }
 

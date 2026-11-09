@@ -23,6 +23,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { createWhiteboardStore } = require('./whiteboard.js');
+const { displayScene } = require('../../renderer/whiteboard/board-ink.cjs');
 
 const EXPORT_PAGE_HINT = 'the built export page (dist/export.html) is missing; run `npm run build` in app/ first';
 
@@ -96,13 +97,19 @@ function planExport({ id, frame, format, outFile, scene } = {}) {
     return { ok: false, reason: String(error.message || error) };
   }
   const target = deriveOutFile({ outFile, id: id || scene.id || scene.name, format: kind });
+  // An export looks like the board does on screen: the dark canvas, and any stored ink
+  // that would not read on it shown in a readable ink. Nothing here is written back.
+  const shown = displayScene({
+    elements: scene.elements,
+    appState: scene.appState && typeof scene.appState === 'object' ? scene.appState : {},
+  });
   return {
     ok: true,
     format: kind,
     outFile: target,
-    elements: scene.elements,
+    elements: shown.elements,
     files: scene.files && typeof scene.files === 'object' ? scene.files : {},
-    appState: scene.appState && typeof scene.appState === 'object' ? scene.appState : {},
+    appState: shown.appState,
     exportingFrame,
   };
 }

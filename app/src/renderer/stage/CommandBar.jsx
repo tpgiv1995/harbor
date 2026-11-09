@@ -631,7 +631,7 @@ export function CommandBar({
     if (!canType) return;
     if (!plusMenuOpen && attachRef.current) {
       const rect = attachRef.current.getBoundingClientRect();
-      setPlusMenuPos({ bottom: window.innerHeight - rect.top + 8, left: rect.left });
+      setPlusMenuPos({ bottom: window.innerHeight - rect.top + 8, right: window.innerWidth - rect.right });
       setPlusCmdSearch('');
     }
     setPlusMenuOpen((open) => !open);
@@ -815,18 +815,6 @@ export function CommandBar({
       </div> : null}
       <div className="ubar-row">
         <div className={`field${canType ? '' : ' off'}`}>
-          <button
-            ref={attachRef}
-            type="button"
-            className={`attach${plusMenuOpen ? ' open' : ''}`}
-            title="Add files, folders, slash commands…"
-            onClick={togglePlusMenu}
-            disabled={!canType}
-            aria-expanded={plusMenuOpen}
-            aria-haspopup="menu"
-          >
-            ＋
-          </button>
           <div className="compose-stack">
             {attachments.length ? (
               <div className="compose-attachments" aria-label="Pending attachments">
@@ -951,6 +939,21 @@ export function CommandBar({
                   the input, and its own box was the misalignment, sitting flush
                   to the bottom of a flex-end row whose other controls all ride
                   9px up. The validity signal itself is untouched. */}
+            </div>
+          </div>
+          <div className="compose-acts">
+            <button
+              ref={attachRef}
+              type="button"
+              className={`attach${plusMenuOpen ? ' open' : ''}`}
+              title="Add files, folders, slash commands…"
+              onClick={togglePlusMenu}
+              disabled={!canType}
+              aria-expanded={plusMenuOpen}
+              aria-haspopup="menu"
+            >
+              ＋
+            </button>
               <button
                 type="button"
                 className={`compose-format-toggle${formatOpen ? ' on' : ''}`}
@@ -1014,71 +1017,53 @@ export function CommandBar({
                   </svg>
                 </button>
               ) : null}
-            </div>
-          </div>
-          {dead && !nonClaudeDead && canType ? (
+            {dead && !nonClaudeDead && canType ? (
+              <button
+                type="button"
+                className="resume-chip"
+                onClick={onResume}
+                disabled={pending}
+                title={ctxPct != null && ctxPct >= 72
+                  ? `Context is at ${ctxPct}%: Claude will auto-compact when this resumes (short delay, summarized history)`
+                  : 'Resume without sending a message'}
+              >
+                {pending ? PHASE_TEXT[sendState.phase] || '…' : (ctxPct != null && ctxPct >= 72 ? 'Resume · will compact' : 'Resume')}
+              </button>
+            ) : null}
+          {/* Both buttons draw real icons rather than the bare glyphs they used to
+              (↑ and ■). The send glyph inherited a near-black colour on a blue
+              gradient, which is the "tacky" Pat flagged 2026-07-27; a white
+              stroked mark reads as a button at 40px and matches the mic and format
+              controls, which have been SVGs all along. */}
+          {showStop ? (
             <button
               type="button"
-              className="resume-chip"
-              onClick={onResume}
-              disabled={pending}
-              title={ctxPct != null && ctxPct >= 72
-                ? `Context is at ${ctxPct}%: Claude will auto-compact when this resumes (short delay, summarized history)`
-                : 'Resume without sending a message'}
+              className="send stop"
+              aria-label={sendNowHint ? sendNowHint.stopTitle : 'Stop current turn'}
+              title={sendNowHint ? sendNowHint.stopTitle : 'Stop current turn (Esc)'}
+              onClick={onInterrupt}
             >
-              {pending ? PHASE_TEXT[sendState.phase] || '…' : (ctxPct != null && ctxPct >= 72 ? 'Resume · will compact' : 'Resume')}
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />
+              </svg>
             </button>
-          ) : null}
+          ) : (
+            <button
+              type="button"
+              className="send"
+              aria-label="Send"
+              title={questionReply ? "Reply to Claude's questions (Enter)" : 'Send to the selected session (Enter)'}
+              onClick={submit}
+              disabled={!canType}
+            >
+              <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="12" y1="19.5" x2="12" y2="5.5" />
+                <polyline points="5.5,12 12,5.5 18.5,12" />
+              </svg>
+            </button>
+          )}
+          </div>
         </div>
-        {session ? (
-          <button
-            ref={switchRef}
-            type="button"
-            className={`model model-chip mswitch tone-${displayModel?.tone || 'other'}`}
-            onClick={() => onOpenConfig(insertDraft)}
-            title="Model, effort, permissions, plugins, and slash commands for this session"
-          >
-            <img className="logomk" src={provider.logo} alt="" aria-hidden="true" />
-            {displayModel?.name || provider.label}
-            {curEffort ? <span className="eff">{EFFORT_LABEL[curEffort] || curEffort}</span> : null}
-            {(session.provider === 'claude' || session.provider === 'codex') && session.home ? (
-              <ProfileBadge profileId={session.home} profiles={profiles} className="model-acct" />
-            ) : null}
-            <span className="mswitch-caret" aria-hidden="true">▾</span>
-          </button>
-        ) : null}
-        {/* Both buttons draw real icons rather than the bare glyphs they used to
-            (↑ and ■). The send glyph inherited a near-black colour on a blue
-            gradient, which is the "tacky" Pat flagged 2026-07-27; a white
-            stroked mark reads as a button at 40px and matches the mic and format
-            controls, which have been SVGs all along. */}
-        {showStop ? (
-          <button
-            type="button"
-            className="send stop"
-            aria-label={sendNowHint ? sendNowHint.stopTitle : 'Stop current turn'}
-            title={sendNowHint ? sendNowHint.stopTitle : 'Stop current turn (Esc)'}
-            onClick={onInterrupt}
-          >
-            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
-              <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />
-            </svg>
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="send"
-            aria-label="Send"
-            title={questionReply ? "Reply to Claude's questions (Enter)" : 'Send to the selected session (Enter)'}
-            onClick={submit}
-            disabled={!canType}
-          >
-            <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <line x1="12" y1="19.5" x2="12" y2="5.5" />
-              <polyline points="5.5,12 12,5.5 18.5,12" />
-            </svg>
-          </button>
-        )}
       </div>
       <div className={`ubar-status${sendState?.phase === 'error' || handoffChain?.status === 'failed' ? ' err' : ''}${session ? '' : ' idle'}`}>
         {session ? (
@@ -1126,6 +1111,21 @@ export function CommandBar({
                 </button>
               </span>
             ) : null}
+            <button
+              ref={switchRef}
+              type="button"
+              className={`model model-chip mswitch tone-${displayModel?.tone || 'other'}`}
+              onClick={() => onOpenConfig(insertDraft)}
+              title="Model, effort, permissions, plugins, and slash commands for this session"
+            >
+              <img className="logomk" src={provider.logo} alt="" aria-hidden="true" />
+              {displayModel?.name || provider.label}
+              {curEffort ? <span className="eff">{EFFORT_LABEL[curEffort] || curEffort}</span> : null}
+              {(session.provider === 'claude' || session.provider === 'codex') && session.home ? (
+                <ProfileBadge profileId={session.home} profiles={profiles} className="model-acct" />
+              ) : null}
+              <span className="mswitch-caret" aria-hidden="true">▾</span>
+            </button>
           </>
         ) : (
           <span className="ustat-title">Select a session</span>
@@ -1185,7 +1185,7 @@ export function CommandBar({
           <button type="button" className="menu-backdrop" aria-label="Close add menu" onClick={() => setPlusMenuOpen(false)} />
           <div
             className="plus-menu cap-menu"
-            style={plusMenuPos ? { bottom: plusMenuPos.bottom, left: plusMenuPos.left } : undefined}
+            style={plusMenuPos ? { bottom: plusMenuPos.bottom, right: plusMenuPos.right } : undefined}
             role="menu"
             aria-label="Add to message"
           >

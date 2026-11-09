@@ -57,12 +57,12 @@
   gap: var(--space-2);
   min-height: var(--touch-min);
   padding: var(--space-2) var(--space-4);
-  border: 1px solid var(--ln);
+  border: 1px solid var(--frame-line);
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--frame);
   color: var(--sub);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
   transition:
     background var(--dur-fast) var(--ease-out),
@@ -71,17 +71,17 @@
 }
 
 .tasks-view-tab.active {
-  border-color: rgba(var(--ac-rgb) / 0.45);
-  background: rgba(var(--ac-rgb) / 0.12);
+  border-color: rgb(141 178 255 / 0.45);
+  background: #437ffe33;
   color: var(--ac2);
 }
 
 .tasks-view-count {
   min-width: 18px;
   padding: 1px var(--space-2);
-  border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.08);
-  font-size: 11px;
+  border-radius: 7px;
+  background: #ffffff14;
+  font-size: 11.5px;
 }
 
 .tasks-mobile-search {
@@ -93,8 +93,8 @@
   min-height: var(--touch-min);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--ln);
-  border-radius: var(--radius-md);
-  background: rgba(0, 0, 0, 0.25);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
   font-size: 16px; /* iOS: avoid focus zoom */
   font-family: inherit;
@@ -111,8 +111,8 @@
   min-height: var(--touch-min);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--ln);
-  border-radius: var(--radius-md);
-  background: rgba(0, 0, 0, 0.25);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
   font-size: 16px;
   font-family: inherit;
@@ -123,9 +123,10 @@
   min-height: var(--touch-min);
   padding: 0 var(--space-4);
   border: 0;
-  border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--ac), #2f5fd6);
-  color: #fff;
+  border-radius: 11px;
+  background: var(--btn);
+  box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim);
+  color: var(--on-ac);
   font-weight: 600;
   font-family: inherit;
   transition: opacity var(--dur-fast) var(--ease-out);
@@ -175,8 +176,10 @@
   min-height: var(--touch-min);
   margin: var(--space-1) var(--space-2);
   padding: var(--space-2);
+  border: 1px solid var(--frame-line);
   border-radius: var(--radius-lg);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--frame);
+  box-shadow: var(--frame-top);
   transition: background var(--dur-fast) var(--ease-out);
 }
 
@@ -204,12 +207,12 @@
 
 .mtask-check::before, .mtask-star::before { border: 1px solid var(--ln); border-radius: 50%; content: ''; inset: 7px; position: absolute; }
 .mtask-check::before { border: 1.5px solid var(--ln2); inset: 10px; }
-.mtask-check.on::before { border-color: var(--live); background: rgba(36, 178, 124, 0.18); }
+.mtask-check.on::before { border-color: var(--live); background: rgb(111 211 157 / 18%); }
 
 .mtask-check.on {
   border-color: var(--live);
-  background: rgba(36, 178, 124, 0.18);
-  color: #8ce8c0;
+  background: rgb(111 211 157 / 18%);
+  color: var(--live);
 }
 
 .mtask-star.on {
@@ -254,8 +257,9 @@
 .tasks-mobile-done {
   margin: var(--space-3) var(--space-2);
   padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--frame-line);
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--frame);
   color: var(--sub);
 }
 
@@ -301,12 +305,12 @@
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
-  border: 1px solid var(--ln);
-  background: rgba(20, 21, 28, 0.95);
+  border: 1px solid var(--raised-rim);
+  background: var(--raised-solid);
   color: var(--tx);
   font-size: 13px;
   z-index: 30;
-  box-shadow: var(--shadow-pop);
+  box-shadow: var(--pane-shadow);
 }
 
 .app-toast button {

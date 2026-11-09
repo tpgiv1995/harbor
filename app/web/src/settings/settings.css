@@ -10,7 +10,7 @@
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
+  background: #03040999;
   padding:
     var(--safe-top)
     var(--safe-right)
@@ -27,9 +27,10 @@
   flex-direction: column;
   min-height: 0;
   margin: 0 auto;
-  background: var(--bg);
-  border: 1px solid var(--ln);
-  border-radius: 16px 16px 0 0;
+  background: var(--raised);
+  border: 1px solid var(--raised-rim);
+  border-top-color: #ffffff3a;
+  border-radius: 24px 24px 0 0;
   overflow: hidden;
 }
 
@@ -41,13 +42,12 @@
   gap: 12px;
   padding: 12px 16px 8px;
   border-bottom: 1px solid var(--ln);
-  background: var(--glass-panel);
 }
 
 .settings-title {
   margin: 0;
   font-size: 20px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .settings-close {
@@ -55,7 +55,7 @@
   height: 44px;
   border: 0;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  background: #ffffff12;
   color: var(--sub);
   font-size: 24px;
   line-height: 1;
@@ -76,10 +76,8 @@
 .settings-label {
   display: block;
   margin-bottom: 4px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--sub);
 }
 
@@ -107,25 +105,26 @@
   width: 100%;
   min-height: 44px;
   padding: 10px 14px;
-  border-radius: 12px;
+  border-radius: 11px;
   border: 1px solid var(--ln);
-  background: rgba(255, 255, 255, 0.04);
+  background: #ffffff0d;
   color: var(--tx);
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
 }
 
 .settings-btn-danger {
-  border-color: rgba(217, 138, 138, 0.35);
+  border-color: rgb(242 117 109 / 35%);
   color: var(--err);
-  background: rgba(217, 138, 138, 0.08);
+  background: rgb(242 117 109 / 8%);
 }
 
 .settings-btn-primary {
   border-color: transparent;
-  background: var(--ac);
-  color: #fff;
+  background: var(--btn);
+  box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim);
+  color: var(--on-ac);
 }
 
 .settings-btn-quiet {
@@ -154,8 +153,9 @@
 .settings-confirm {
   margin: 0 0 12px;
   padding: 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  border: 1px solid var(--frame-line);
+  background: var(--frame);
   font-size: 14px;
   line-height: 1.45;
   color: var(--sub);

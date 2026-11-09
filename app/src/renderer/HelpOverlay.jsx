@@ -77,7 +77,7 @@ export function HelpOverlay({ onClose }) {
           <div className="help-card">
             <h3>Keyboard</h3>
             <ul>
-              <li><Key>Ctrl+1–4</Key> select window · <Key>Alt</Key>+arrows move between windows · <Key>Ctrl+K</Key> search · <Key>F1</Key> this guide · <Key>F11</Key> full screen</li>
+              <li><Key>Ctrl+1–4</Key> select window · <Key>Alt</Key>+arrows move between windows · <Key>Alt+Enter</Key> make the selected window fill the stage, and back · <Key>Ctrl+K</Key> search · <Key>F1</Key> this guide · <Key>F11</Key> whole app full screen</li>
               <li><Key>Ctrl+Shift+B</Key> hide/show the rail · <Key>Ctrl+Shift+R</Key> reload the UI · <Key>Ctrl+Shift+Q</Key> quit · <Key>Ctrl</Key>+<Key>+</Key>/<Key>-</Key>/<Key>0</Key> zoom</li>
               <li>Formatting the message: <Key>Ctrl+B</Key> bold · <Key>Ctrl+I</Key> italic · <Key>Ctrl+U</Key> underline · <Key>Ctrl+Shift+X</Key> strikethrough · <Key>Ctrl+E</Key> code · <Key>Ctrl+Shift+8</Key> bullets · <Key>Ctrl+Shift+7</Key> numbering. What you see is what you get; it is sent as markdown.</li>
               <li><Key>Enter</Key> always sends, including inside a list. <Key>Shift+Enter</Key> is a new line, and makes the next bullet when you are in one.</li>

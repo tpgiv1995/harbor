@@ -3,12 +3,21 @@
    the scroller grew past the screen and pushed the composer out of the
    viewport entirely, which is why a phone could show a conversation with no
    way to reply to it. */
+/* The glass pane holds the scroller (tokens.css: a pane never scrolls itself, a
+   fixed child does not stay still inside an iOS scroller). */
+.conv-glass {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .conv {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  padding: 15px;
   /* A short conversation used to sit at the TOP of a 694px scroller holding
      512px of content, leaving 170px of nothing between the newest message and
      the composer: measured at 430x873. Every chat surface people know puts the
@@ -25,7 +34,9 @@
 .conv-body {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  /* Tool rows sit 10px apart; a reply block adds 4px of its own, so it is 14px
+     below whatever came before. */
+  gap: 10px;
   /* `margin-top: auto` rather than `justify-content: flex-end` on the scroller:
      flex-end on an overflowing scroll container pushes content out through the
      TOP, where it cannot be scrolled back to. With auto margin, an overflowing
@@ -42,10 +53,6 @@
   margin-top: 0;
 }
 
-.conv-body > .conv-assistant.leads-turn {
-  margin-top: var(--space-1);
-}
-
 .conv-empty {
   display: flex;
   flex-direction: column;
@@ -53,8 +60,10 @@
   gap: var(--space-3);
   margin-top: var(--space-6);
   padding: var(--space-4);
-  border: 1px solid var(--ln);
+  border: 1px solid var(--frame-line);
   border-radius: 14px;
+  background: var(--frame);
+  box-shadow: var(--frame-top);
   color: var(--sub);
   font-size: 14px;
 }
@@ -63,24 +72,27 @@
   padding: 10px 14px;
   min-height: var(--touch-min);
   border: 1px solid var(--ln2);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.05);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.07);
   color: var(--tx);
 }
 
 .conv-user {
   align-self: flex-end;
   max-width: 92%;
-  padding: 10px var(--space-4);
-  border-radius: var(--radius-bubble) var(--radius-bubble) var(--space-1) var(--radius-bubble);
-  background: linear-gradient(135deg, var(--ac), #2f5fd6);
-  color: #fff;
+  padding: 10px 14px;
+  border: 1px solid #8db2ff40;
+  border-radius: 16px 16px 5px 16px;
+  background: #101b38e6;
+  box-shadow: var(--frame-top);
+  color: #e4e5ec;
   font-size: 15px;
   word-break: break-word;
 }
 
 .conv-user.command {
-  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--frame-line);
+  background: var(--frame);
   color: var(--sub);
   font-family: var(--font-mono);
   font-size: 13px;
@@ -93,30 +105,12 @@
 .conv-assistant {
   align-self: stretch;
   max-width: 100%;
+  margin-top: var(--space-1);
   padding: 0 var(--space-1);
+  color: #e4e5ec;
   font-size: 15px;
   line-height: 1.5;
   word-break: break-word;
-}
-
-.conv-assistant-who {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-bottom: var(--space-1);
-}
-
-.conv-sig {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-}
-
-.conv-provider {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .conv-assistant .md-p {
@@ -129,7 +123,8 @@
 
 .conv-assistant .md-h {
   margin: var(--space-3) 0 var(--space-1);
-  font-weight: 700;
+  color: var(--tx);
+  font-weight: 600;
 }
 
 .conv-assistant .md-list {
@@ -142,8 +137,10 @@
   margin: 6px 0;
   padding: 10px 12px;
   overflow-x: auto;
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--frame-line);
+  border-radius: 12px;
+  background: #050709e0;
+  box-shadow: var(--frame-top);
   font-family: var(--font-mono);
   font-size: 13px;
   white-space: pre;
@@ -159,16 +156,20 @@
   flex-direction: column;
   margin: 6px 0;
   overflow: hidden;
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--frame-line);
+  border-radius: 12px;
+  background: #050709e0;
+  box-shadow: var(--frame-top);
 }
 
 .conv-assistant .md-code-wrap .md-code,
 .conv-user .md-code-wrap .md-code {
   margin: 0;
   padding-top: 2px;
+  border: 0;
   border-radius: 0;
   background: transparent;
+  box-shadow: none;
 }
 
 .md-code-copy {
@@ -179,7 +180,7 @@
   border: 0;
   background: transparent;
   color: var(--fnt);
-  font: 600 12px var(--font-ui);
+  font: 500 12px var(--font-ui);
 }
 
 .md-code-copy:active {
@@ -194,27 +195,40 @@
 .conv-user code {
   padding: 1px 5px;
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.09);
   font-family: var(--font-mono);
   font-size: 0.9em;
 }
 
+/* System discontinuity notes (compaction): a quiet centred divider, never a
+   speech bubble (the desktop window draws it the same way). */
 .conv-note {
   align-self: center;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--sub);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 94%;
+  color: var(--fnt);
   font-size: 12px;
   text-align: center;
+}
+
+/* `flex: none` plus a width, not `flex: 0 0 28px`: WebKit sizes the note from the
+   words alone when the dividers carry a flex-basis, and wraps "Conversation
+   compacted" onto two lines (measured, both engines agree with this form). */
+.conv-note::before,
+.conv-note::after {
+  content: '';
+  flex: none;
+  width: 28px;
+  height: 1px;
+  background: var(--ln);
 }
 
 /* Progress notes the model writes between tool calls: muted narration. */
 .conv-progress {
   align-self: flex-start;
   max-width: 92%;
-  padding-left: 10px;
-  border-left: 2px solid rgba(255, 255, 255, 0.14);
   color: var(--sub);
   font-size: 12.5px;
   line-height: 1.45;
@@ -223,8 +237,13 @@
 }
 
 .conv-note.warn {
-  background: rgba(212, 165, 55, 0.16);
-  color: #f0d48a;
+  color: var(--warn-text);
+}
+
+.conv-note.warn::before,
+.conv-note.warn::after {
+  background: var(--warn);
+  opacity: 0.5;
 }
 
 .conv-images {
@@ -263,7 +282,7 @@
     calc(var(--safe-right) + 16px)
     calc(var(--safe-bottom) + 24px)
     calc(var(--safe-left) + 16px);
-  background: rgba(0, 0, 0, 0.92);
+  background: #030409f2;
   cursor: pointer;
 }
 
@@ -284,10 +303,10 @@
   width: 44px;
   height: 44px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid #ffffff2e;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  background: #ffffff1f;
+  color: var(--tx);
   cursor: pointer;
 }
 
@@ -300,24 +319,12 @@
   position: relative;
   align-self: stretch;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--frame-line);
+  border-radius: 12px;
+  background: var(--frame);
+  box-shadow: var(--frame-top);
   font-size: 13px;
 }
-
-.conv-act::before {
-  content: '';
-  position: absolute;
-  inset: var(--space-2) auto var(--space-2) 0;
-  width: 2px;
-  border-radius: var(--radius-pill);
-  background: var(--fnt);
-}
-
-.conv-act.status-ok::before { background: var(--live); }
-.conv-act.status-err::before { background: var(--err); }
-.conv-act.status-run::before { background: var(--ac2); }
 
 .conv-act-row {
   display: flex;
@@ -326,29 +333,33 @@
   min-height: 20px;
 }
 
+/* A check for done, a ring for running, a cross for failed: state is shape and
+   colour, never motion (the same marks as the desktop window's tool rows). */
 .conv-act-k {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--fnt);
-}
-
-.conv-act-k.ok {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
   background: var(--live);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .conv-act-k.err {
   background: var(--err);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M4 4l8 8M12 4l-8 8'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M4 4l8 8M12 4l-8 8'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .conv-act-k.run {
   background: var(--ac2);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='5.2' stroke-dasharray='24 9'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='5.2' stroke-dasharray='24 9'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .conv-act-verb {
   flex: 0 0 auto;
-  color: var(--sub);
+  color: var(--tx);
+  font-weight: 600;
 }
 
 /* A described command: Claude's sentence leads; on a phone there is no room
@@ -382,38 +393,38 @@
   flex: 0 0 auto;
   margin-left: auto;
   padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 11px;
+  border-radius: 7px;
+  font-size: 11.5px;
   color: var(--sub);
-  background: rgba(255, 255, 255, 0.06);
+  background: #ffffff12;
 }
 
 .conv-act-pill.tone-ok {
-  color: #8ce8c0;
-  background: rgba(36, 178, 124, 0.14);
+  color: var(--live);
+  background: rgb(111 211 157 / 14%);
 }
 
 .conv-act-pill.tone-err {
-  color: #f0b0b0;
-  background: rgba(217, 138, 138, 0.16);
+  color: var(--err-text);
+  background: rgb(242 117 109 / 16%);
 }
 
 .conv-act-code {
   margin-top: var(--space-2);
   padding: var(--space-2);
   border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.35);
+  background: #050709e0;
   font-family: var(--font-mono);
   font-size: 12px;
   overflow-x: auto;
 }
 
 .diff-del {
-  color: #f0b0b0;
+  color: var(--err-text);
 }
 
 .diff-add {
-  color: #8ce8c0;
+  color: var(--live);
 }
 
 .diff-ctx {
@@ -431,9 +442,10 @@
   width: 100%;
   min-height: var(--touch-min);
   padding: var(--space-2) var(--space-3);
-  border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--frame-line);
+  border-radius: 12px;
+  background: var(--frame);
+  box-shadow: var(--frame-top);
   color: var(--sub);
   font-size: 13px;
   text-align: left;
@@ -442,8 +454,8 @@
 }
 
 .conv-act-group-toggle:active {
-  background: rgb(var(--ac-rgb) / 10%);
-  border-color: rgb(var(--ac-rgb) / 22%);
+  background: #171a23;
+  border-color: var(--ln2);
 }
 
 .conv-act-group-caret {
@@ -475,18 +487,18 @@
 .conv-act-group-count {
   flex: 0 0 auto;
   padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  font-size: 11px;
+  border-radius: 7px;
+  background: #ffffff14;
+  font-size: 11.5px;
 }
 
+/* An expanded run indents its rows; no rule down the side. */
 .conv-act-group-items {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
-  margin-top: var(--space-1);
-  padding-left: var(--space-2);
-  border-left: 2px solid var(--ln);
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-left: var(--space-3);
 }
 
 .conv-working {
@@ -495,8 +507,10 @@
   gap: var(--space-2);
   align-self: flex-start;
   padding: 6px 12px;
+  border: 1px solid var(--frame-line);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--frame);
+  box-shadow: var(--frame-top);
   color: var(--sub);
   font-size: 13px;
 }
@@ -529,9 +543,9 @@
   min-height: var(--touch-min);
   padding: 0 16px;
   transform: translateY(calc(-100% - 10px));
-  border: 1px solid var(--ln2);
+  border: 1px solid var(--raised-rim);
   border-radius: var(--radius-pill);
-  background: #1b1e26;
+  background: var(--raised-solid);
   box-shadow: var(--shadow-pop);
   color: var(--tx);
   font-size: 13.5px;

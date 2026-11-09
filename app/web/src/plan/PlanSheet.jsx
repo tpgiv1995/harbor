@@ -29,11 +29,11 @@ export function PlanSheet({ open, onClose, client, session }) {
   const ids = [...new Set([...Object.keys(usage), ...Object.keys(emails)])];
   return <div className="mobile-sheet-backdrop" onClick={(event) => event.target === event.currentTarget && onClose()}>
     <section className="mobile-sheet plan-sheet" role="dialog" aria-modal="true" aria-labelledby="plan-title">
-      <header className="mobile-sheet-head"><div><span>ACCOUNTS</span><h2 id="plan-title">Plans</h2></div><button type="button" onClick={onClose} aria-label="Close">×</button></header>
+      <header className="mobile-sheet-head"><div><span>Accounts</span><h2 id="plan-title">Plans</h2></div><button type="button" onClick={onClose} aria-label="Close">×</button></header>
       <div className="mobile-sheet-scroll">
         {error ? <p className="sheet-error" role="alert">{error}</p> : null}
         <div className="plan-list">{ids.map((id) => { const data = usage[id] || {}; const active = current === id; return <article className={`plan-card${active ? ' active' : ''}`} key={id}>
-          <header><div><strong>{LABELS[id] || titleCase(id)}</strong>{active ? <span>THIS SESSION</span> : null}</div><small>{data.email || emails[id] || 'Email unavailable'}</small></header>
+          <header><div><strong>{LABELS[id] || titleCase(id)}</strong>{active ? <span>This session</span> : null}</div><small>{data.email || emails[id] || 'Email unavailable'}</small></header>
           <Meter label="5 hour" value={data.fiveHourPct} resetsAt={data.fiveHourResetsAt} rolled={data.fiveHourRolled} kind="fiveHour" />
           <Meter label="Weekly" value={data.weeklyPct} resetsAt={data.weeklyResetsAt} rolled={data.weeklyRolled} kind="weekly" />
         </article>; })}</div>

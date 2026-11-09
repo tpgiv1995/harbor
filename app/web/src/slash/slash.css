@@ -24,20 +24,20 @@
  * cannot hold cleanly and which this project does not draw. */
 .composer-card.slash-valid,
 .composer-card.slash-valid:focus-within {
-  border-color: rgb(110 207 154 / 0.75);
+  border-color: rgb(111 211 157 / 0.75);
 }
 
 .composer-card.slash-invalid,
 .composer-card.slash-invalid:focus-within {
-  border-color: rgb(255 143 143 / 0.75);
+  border-color: rgb(255 154 146 / 0.75);
 }
 
 .slash-token-ok {
-  color: #6ecf9a;
+  color: var(--live);
 }
 
 .slash-token-bad {
-  color: #ff8f8f;
+  color: var(--err-text);
 }
 
 .slash-palette {
@@ -45,10 +45,11 @@
   z-index: 40;
   max-height: calc(var(--app-h, 100dvh) * 0.35);
   overflow: auto;
-  border: 1px solid var(--ln2);
-  border-radius: 14px;
-  background: rgba(18, 20, 26, 0.98);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--raised-rim);
+  border-top-color: #ffffff3a;
+  border-radius: 18px;
+  background: var(--raised-solid);
+  box-shadow: var(--pane-shadow);
 }
 
 .slash-palette-row {
@@ -59,18 +60,18 @@
   min-height: 44px;
   padding: 10px 12px;
   border: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid #ffffff10;
   background: transparent;
   color: var(--tx);
   text-align: left;
 }
 
 .slash-palette-row.active {
-  background: rgba(255, 255, 255, 0.08);
+  background: #ffffff1f;
 }
 
 .slash-palette-name {
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .slash-palette-src {

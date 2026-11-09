@@ -83,7 +83,7 @@ function renderTaskbarBadge(plan) {
   context.arc(8, 8, 7.5, 0, Math.PI * 2);
   context.fill();
   context.fillStyle = '#ffffff';
-  context.font = `700 ${plan.label.length > 1 ? 8 : 10}px "Schibsted Grotesk", sans-serif`;
+  context.font = `700 ${plan.label.length > 1 ? 8 : 10}px Inter, sans-serif`;
   context.textAlign = 'center';
   context.textBaseline = 'middle';
   context.fillText(plan.label, 8, 8.25);
@@ -403,6 +403,14 @@ function App() {
         // leak a stale model into every scenario that runs after it.
         setAppTestModel(model);
       };
+      // Pending hook-lane questions, permission prompts and send states, so a
+      // capture drive can draw the cards without a live CLI behind them.
+      window.__setAsksForTest = (list) => setAsks(Array.isArray(list) ? list : []);
+      window.__setSendStateForTest = (sessionId, state) => setSendStates((prev) => {
+        const next = new Map(prev);
+        if (state) next.set(sessionId, state); else next.delete(sessionId);
+        return next;
+      });
       window.__setTranscriptForTest = (sessionId, data) => {
         setTranscripts((prev) => {
           const next = new Map(prev);
@@ -419,6 +427,8 @@ function App() {
       delete window.__openOrchForTest;
       delete window.__setSidebarModelForTest;
       delete window.__setTranscriptForTest;
+      delete window.__setAsksForTest;
+      delete window.__setSendStateForTest;
     };
   }, [openOrch]);
 
@@ -1556,6 +1566,19 @@ function App() {
         if (targetTile) selectTile(targetTile.sessionId);
         return;
       }
+      // Alt+Enter: the selected window takes the whole stage, and again puts it
+      // back. F11 stays the whole app. Capture-phase like Alt+arrows, so it works
+      // with focus in the composer or a terminal and neither of them sees the key.
+      if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key === 'Enter') {
+        if (view !== 'agents' || tiles.length === 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.repeat) return;
+        const selectedTile = tiles.find((t) => t.sessionId === selectedId)
+          || [...tiles].sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0))[0];
+        if (selectedTile) toggleFocus(selectedTile.sessionId);
+        return;
+      }
       if (!event.ctrlKey || event.altKey) return;
       if (event.key >= '1' && event.key <= '9') {
         const bySlot = [...tiles].sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
@@ -1573,7 +1596,7 @@ function App() {
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [tiles, selectTile, view, selectedId, stageLayout]);
+  }, [tiles, selectTile, toggleFocus, view, selectedId, stageLayout]);
 
   const openOrchSession = useCallback(async (id) => {
     const row = sessionsById.get(id) || await window.harbor.orchestration.getSession?.(id);
@@ -1788,6 +1811,7 @@ createRoot(document.getElementById('root')).render(
   ) : (
     <React.StrictMode>
       <ProfilesProvider>
+        <div className="ground" aria-hidden="true" />
         <App />
         {/* Deliberately a SIBLING of App, not a gate around it: first run must
             not entangle itself with the rail, the stage or their persisted

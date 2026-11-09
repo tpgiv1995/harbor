@@ -14,6 +14,32 @@ import {
 } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import boardFiles from './board-files.cjs';
+import boardInk from './board-ink.cjs';
+import { installGridInk, setGridInkDark } from './board-grid-ink.js';
+
+const {
+  INK_LIGHT,
+  INK_DARK,
+  SHAPE_CONTRAST,
+  canvasForDisplay,
+  canvasForStorage,
+  isDarkBackdrop,
+  readableInk,
+  applyBoardInk,
+  fixBoundTextInk,
+  restoreStoredInk,
+} = boardInk;
+
+// The colour the board shows behind everything right now (a hex, never 'transparent': dot
+// mode holds the live canvas transparent and keeps the real colour in dotBgRef). The module
+// helpers that build elements outside the component read it to pick a readable default ink.
+let boardCanvasHex = canvasForDisplay(null);
+function defaultInk() { return isDarkBackdrop(boardCanvasHex) ? INK_LIGHT : INK_DARK; }
+
+// Dots for the dot grid, tuned to the canvas they sit on.
+function dotColorFor(canvasHex) {
+  return isDarkBackdrop(canvasHex) ? 'rgba(176, 188, 212, 0.30)' : 'rgba(90, 100, 118, 0.38)';
+}
 
 const {
   FLUSH_DELAY_MS,
@@ -495,7 +521,7 @@ function Minimap({ getApi }) {
       ctx.clearRect(0, 0, MINIMAP_W, MINIMAP_H);
       ctx.fillStyle = '#7ba1f0';
       for (const box of plan.boxes) ctx.fillRect(box.x, box.y, Math.max(2, box.w), Math.max(2, box.h));
-      ctx.strokeStyle = '#1f2937';
+      ctx.strokeStyle = INK_LIGHT;
       ctx.lineWidth = 1.5;
       ctx.strokeRect(plan.view.x, plan.view.y, plan.view.w, plan.view.h);
     };
@@ -568,7 +594,9 @@ async function copyElementsAsPng(api, elements) {
     const appState = api.getAppState();
     const blob = await exportToBlob({
       elements,
-      appState: { ...appState, exportBackground: true, exportEmbedScene: false },
+      // The real canvas colour, not the live one: dot mode holds the live canvas transparent,
+      // and a transparent export of light ink would be unreadable on a white page.
+      appState: { ...appState, viewBackgroundColor: boardCanvasHex, exportBackground: true, exportEmbedScene: false },
       files: api.getFiles(),
       mimeType: 'image/png',
       exportPadding: 24,
@@ -737,7 +765,7 @@ function createConnector(api, sourceId, fromSide, drop) {
   const [arrow] = convertToExcalidrawElements([{
     type: 'arrow', x: from.x, y: from.y,
     points: [[0, 0], [to.x - from.x, to.y - from.y]],
-    strokeColor: '#495057', strokeWidth: 2, roughness: 0,
+    strokeColor: defaultInk(), strokeWidth: 2, roughness: 0,
   }]);
   arrow.roundness = { type: 2 };
   // A poly SOURCE cannot take a native binding either; its end rides polyBind.
@@ -934,7 +962,7 @@ function ConnectorLayer({ anchor, getApi, onCreated }) {
         <svg className="wb-connect-line" aria-hidden="true">
           <defs>
             <marker id="wb-conn-head" markerWidth="9" markerHeight="8" refX="7.2" refY="4" orient="auto">
-              <path d="M0.8 0.8 L8 4 L0.8 7.2 Z" fill="#1a1a1a" />
+              <path d="M0.8 0.8 L8 4 L0.8 7.2 Z" fill="#e4e5ec" />
             </marker>
           </defs>
           <line x1={drag.from.x} y1={drag.from.y} x2={drag.to.x} y2={drag.to.y} markerEnd="url(#wb-conn-head)" />
@@ -1302,6 +1330,15 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
   const [dotActive, setDotActive] = useState(false);
   const dotBgRef = useRef(null); // the real background colour while dot mode holds the canvas transparent
   const dotLayerRef = useRef(null);
+  // Board ink (board-ink.cjs): stored ink that would not read on the canvas is SHOWN in a
+  // readable ink, and this ledger (id -> { stored, shown }) is how a save puts the stored ink
+  // back. canvasHexRef is the colour behind everything right now; lastCanvasRef is what the
+  // last pass adapted the ink to, so a canvas change (and only a canvas change) re-adapts.
+  const inkLedgerRef = useRef(null);
+  const canvasHexRef = useRef(null);
+  const lastCanvasRef = useRef(null);
+  const inkPassRef = useRef(false);
+  const railRef = useRef(null);
   // A clean external merge (H1) marks its own onChange so it is absorbed into
   // savedRef instead of scheduling a flush: updateScene re-indexes the merged
   // elements and bumps their versions AFTER the merge effect's synchronous
@@ -1316,25 +1353,53 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
     ? (entry) => { (window.__harborBoardTrace = window.__harborBoardTrace || []).push({ t: Date.now(), ...entry }); }
     : () => {};
 
-  const initialData = useMemo(() => restore({
-    // Normalize existing shapes to a clean (non-sketchy) render: Excalidraw's
-    // `roughness` gives the hand-drawn wobble Pat flagged (uneven circles, doubled
-    // outlines). Miro-clean means roughness 0 everywhere.
-    elements: (board.elements || []).map((element) => ({ ...element, roughness: 0 })),
+  const initialData = useMemo(() => {
+    // The canvas the board shows: the retired white default (or unset) becomes the dark
+    // canvas, a background the user chose on purpose stays. The ledger is made ONCE (this
+    // memo can re-run for a new `board` object, but Excalidraw only reads initialData at mount).
+    const canvas = canvasForDisplay((board.appState || {}).viewBackgroundColor);
+    installGridInk();
+    setGridInkDark(isDarkBackdrop(canvas));
+    if (!inkLedgerRef.current) {
+      inkLedgerRef.current = new Map();
+      canvasHexRef.current = canvas;
+      lastCanvasRef.current = canvas;
+      boardCanvasHex = canvas;
+    }
+    const inked = applyBoardInk(
+      // Normalize existing shapes to a clean (non-sketchy) render: Excalidraw's
+      // `roughness` gives the hand-drawn wobble Pat flagged (uneven circles, doubled
+      // outlines). Miro-clean means roughness 0 everywhere.
+      (board.elements || []).map((element) => ({ ...element, roughness: 0 })),
+      canvas,
+      inkLedgerRef.current,
+    ).elements;
+    const saved = board.appState || {};
+    return restore({
+    elements: inked,
     // ITEM_DEFAULTS win over the board's saved appState: the clean look (roughness 0,
     // solid fill, Nunito) is Harbor's aesthetic, not a per-board choice, and a board
     // saved with Excalidraw's rough default must not drag new shapes back to sketchy.
     // Smart guides (objectsSnapModeEnabled) DEFAULT ON, Miro-style (finding 66: Miro
     // has no toggle at all); a board whose saved appState explicitly turned them off
     // keeps its choice because the board spread wins over the seed.
-    appState: stableAppState({ objectsSnapModeEnabled: true, ...(board.appState || {}), ...ITEM_DEFAULTS }),
+    appState: stableAppState({
+      objectsSnapModeEnabled: true,
+      ...saved,
+      ...ITEM_DEFAULTS,
+      viewBackgroundColor: canvas,
+      // New text, lines and connectors start in the board's light ink; a colour the user
+      // chose last time that reads on this canvas is kept.
+      currentItemStrokeColor: readableInk(saved.currentItemStrokeColor || INK_DARK, canvas, SHAPE_CONTRAST),
+    }),
     files: board.files || {},
     // repairBindings heals a one-sided containerId/boundElements pair or a
     // dangling arrow binding at load (b6 review M4). Do NOT also add the
     // dimension-refresh option: it re-measures text before the fonts load and
     // would rewrite existing labels with fallback-font metrics (a source-shape
     // spec in test/renderer/board-files.test.js enforces both halves).
-  }, null, null, { repairBindings: true }), [board]);
+    }, null, null, { repairBindings: true });
+  }, [board]);
 
   const flush = useCallback(() => {
     clearTimeout(flushTimerRef.current);
@@ -1348,14 +1413,79 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
     const persisted = dotBgRef.current
       ? { ...appState, viewBackgroundColor: dotBgRef.current, gridModeEnabled: true, gridSize: appState.gridSize || 20 }
       : appState;
-    const scene = JSON.parse(serializeAsJSON(elements, stableAppState(persisted), files, 'local'));
+    // The ink the board SHOWED is not what is stored: every element still wearing the ink
+    // board-ink gave it goes back to its stored ink, so opening and saving never rewrites
+    // a colour. A canvas the user picked on purpose is stored as picked (a deliberate white
+    // is stored one level off white so the retired default stays distinguishable).
+    const storedElements = restoreStoredInk(elements, inkLedgerRef.current);
+    const scene = JSON.parse(serializeAsJSON(
+      storedElements,
+      stableAppState({ ...persisted, viewBackgroundColor: canvasForStorage(persisted.viewBackgroundColor) }),
+      files,
+      'local',
+    ));
     savedRef.current = { version: getSceneVersion(elements), appSig: appStatePersistSignature(appState) };
     trace({ kind: 'flush', v: savedRef.current.version });
     onSceneChange(scene);
   }, [onSceneChange]);
 
+  // The canvas colour changed (the user picked another one): adapt every element's shown ink
+  // to the new colour, keep the ledger honest, and move the default ink for new items. Shown
+  // ink is the only thing that changes (stored ink rides the ledger), and a repaint needs a
+  // new version on each element it touches.
+  const remapInkForCanvas = useCallback(() => {
+    const api = apiRef.current;
+    if (!api || !inkLedgerRef.current) return;
+    const bg = dotBgRef.current || api.getAppState().viewBackgroundColor;
+    if (!bg || bg === 'transparent') return;
+    lastCanvasRef.current = bg;
+    canvasHexRef.current = bg;
+    boardCanvasHex = bg;
+    setGridInkDark(isDarkBackdrop(bg));
+    const bump = (el, patch) => ({
+      ...el, ...patch, version: (el.version || 0) + 1, versionNonce: Math.floor(Math.random() * 2147483647), updated: Date.now(),
+    });
+    const { elements, changed } = applyBoardInk(api.getSceneElementsIncludingDeleted(), bg, inkLedgerRef.current, bump);
+    const current = api.getAppState().currentItemStrokeColor;
+    const nextStroke = readableInk(current || INK_DARK, bg, SHAPE_CONTRAST);
+    const patch = nextStroke !== current ? { currentItemStrokeColor: nextStroke } : null;
+    if (changed || patch) {
+      api.updateScene({
+        ...(changed ? { elements } : {}),
+        ...(patch ? { appState: patch } : {}),
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    }
+    if (dotLayerRef.current) {
+      dotLayerRef.current.style.backgroundColor = bg;
+    }
+  }, []);
+
+  // The tool rail grows a second column on a short window, and Excalidraw's menu flies out to
+  // its right: publish the rail's real width so the menu always clears it. Event driven, no timer.
+  useEffect(() => {
+    const rail = railRef.current;
+    const host = rail && rail.closest('.whiteboard-canvas');
+    if (!rail || !host || typeof ResizeObserver === 'undefined') return undefined;
+    const publish = () => host.style.setProperty('--wb-rail-w', `${Math.ceil(rail.getBoundingClientRect().width)}px`);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(rail);
+    return () => observer.disconnect();
+  }, []);
+
   const handleChange = useCallback((elements, appState) => {
     sceneRef.current = { elements, appState, files: apiRef.current?.getFiles() || sceneRef.current.files };
+
+    // A different canvas colour re-adapts the shown ink (board-ink.cjs). Dot mode holds the
+    // live canvas transparent, so the real colour is read from dotBgRef there. Deferred to a
+    // microtask like the other maintenance passes (never updateScene inside onChange).
+    const liveCanvas = dotBgRef.current || appState.viewBackgroundColor;
+    if (liveCanvas && liveCanvas !== 'transparent' && inkLedgerRef.current
+      && liveCanvas !== lastCanvasRef.current && !inkPassRef.current) {
+      inkPassRef.current = true;
+      queueMicrotask(() => { inkPassRef.current = false; remapInkForCanvas(); });
+    }
 
     // Sticky maintenance plus connector-label glue, in ONE deferred pass: fit the
     // sticky label font (Miro autosize) and restore a face Excalidraw grew, glue
@@ -1371,7 +1501,7 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
     if (!syncScheduledRef.current
       && (syncStickyShadows(elements).changed || fitStickyLabels(elements, stickyMeasure).changed
         || syncConnectorLabels(elements).changed || syncPolyConnectors(elements).changed
-        || normalizeLinearPoints(elements).changed)) {
+        || normalizeLinearPoints(elements).changed || fixBoundTextInk(elements).changed)) {
       syncScheduledRef.current = true;
       queueMicrotask(() => {
         syncScheduledRef.current = false;
@@ -1389,8 +1519,13 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
         const labels = syncConnectorLabels(shadows.elements);
         const polys = syncPolyConnectors(labels.elements);
         const normal = normalizeLinearPoints(polys.elements);
-        if (fitted.changed || shadows.changed || labels.changed || polys.changed || normal.changed) {
-          api.updateScene({ elements: normal.elements, captureUpdate: CaptureUpdateAction.NEVER });
+        // Text typed into a light sticky or shape arrives in the board's light default ink;
+        // make it readable on its fill (board-ink.cjs fixBoundTextInk).
+        const texts = fixBoundTextInk(normal.elements, (el, patch) => ({
+          ...el, ...patch, version: (el.version || 0) + 1, versionNonce: Math.floor(Math.random() * 2147483647), updated: Date.now(),
+        }));
+        if (fitted.changed || shadows.changed || labels.changed || polys.changed || normal.changed || texts.changed) {
+          api.updateScene({ elements: texts.elements, captureUpdate: CaptureUpdateAction.NEVER });
         }
       });
     }
@@ -1428,6 +1563,7 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
         zoom: appState.zoom?.value || 1,
         scrollX: appState.scrollX || 0,
         scrollY: appState.scrollY || 0,
+        color: dotColorFor(canvasHexRef.current || boardCanvasHex),
       });
       Object.assign(dotLayerRef.current.style, style);
     }
@@ -1580,7 +1716,7 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
     trace({ kind: 'schedule-flush', v: next.version, saved: savedRef.current.version });
     clearTimeout(flushTimerRef.current);
     flushTimerRef.current = setTimeout(flush, FLUSH_DELAY_MS);
-  }, [flush]);
+  }, [flush, remapInkForCanvas]);
 
   useEffect(() => () => { if (flushTimerRef.current) flush(); }, [flush]);
 
@@ -1605,7 +1741,10 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
       version: getSceneVersion(current),
       appSig: appStatePersistSignature(api.getAppState()),
     });
-    const merged = mergeBoardScene(current, externalScene.elements);
+    // The disk copy is STORED ink; the canvas holds SHOWN ink. Bring the disk copy to the same
+    // form first or every adapted element would read as a material conflict.
+    const diskShown = applyBoardInk(externalScene.elements, canvasHexRef.current || boardCanvasHex, inkLedgerRef.current).elements;
+    const merged = mergeBoardScene(current, diskShown);
     const files = newBoardFiles(api.getFiles(), externalScene.files);
     trace({ kind: 'merge', dirty, changed: merged.changed, canvasAhead: merged.canvasAhead, timer: Boolean(flushTimerRef.current), v: getSceneVersion(current), saved: savedRef.current.version });
     if (!merged.changed && !files.length && !merged.canvasAhead) return;
@@ -1706,7 +1845,10 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
         });
       }
     }
-    api.updateScene({ elements: [...api.getSceneElements(), ...created], captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    // A template or sticky is authored for a light page (dark labels); anything that would not
+    // read on this canvas is shown in a readable ink the way a loaded board's would be.
+    const placed = applyBoardInk([...api.getSceneElements(), ...created], canvasHexRef.current || boardCanvasHex, inkLedgerRef.current).elements;
+    api.updateScene({ elements: placed, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     if (select && created.length) {
       // Never select the shadow (it is locked decoration); a sticky selects as its face.
       const selectedElementIds = {};
@@ -1944,7 +2086,7 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
     const patch = { gridModeEnabled: on && style === 'line', gridSize: on ? 20 : null };
     if (dot && !dotBgRef.current) {
       const bg = api.getAppState().viewBackgroundColor;
-      dotBgRef.current = bg && bg !== 'transparent' ? bg : '#ffffff';
+      dotBgRef.current = bg && bg !== 'transparent' ? bg : canvasForDisplay(null);
       patch.viewBackgroundColor = 'transparent';
     } else if (!dot && dotBgRef.current) {
       patch.viewBackgroundColor = dotBgRef.current;
@@ -1958,8 +2100,11 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
     api.updateScene({ appState: patch, captureUpdate: CaptureUpdateAction.EVENTUALLY });
     if (dot && dotLayerRef.current) {
       const app = api.getAppState();
+      const real = dotBgRef.current || canvasHexRef.current || boardCanvasHex;
+      dotLayerRef.current.style.backgroundColor = real;
       Object.assign(dotLayerRef.current.style, dotGridStyle({
         gridSize: 20, zoom: app.zoom?.value || 1, scrollX: app.scrollX || 0, scrollY: app.scrollY || 0,
+        color: dotColorFor(real),
       }));
     }
   }, []);
@@ -2974,9 +3119,10 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
     box: selBox,
     size: barSize,
     viewport: canvasView,
-    // The tool rail owns the left edge of the canvas at every window size (12px in,
-    // ~50px wide), so the card starts clear of it.
-    minLeft: canvasView.left + 70,
+    // The tool rail owns the left edge of the canvas at every window size (12px in, 50px
+    // wide, or about 90px when a short window wraps it into two columns), so the card starts
+    // clear of its measured right edge.
+    minLeft: Math.max(canvasView.left + 70, (railRef.current ? railRef.current.getBoundingClientRect().right : 0) + 8),
   }) : null;
   const showToolbar = selCount > 0 && !multiActive && Boolean(placement);
   // The right-click card is anchored by its top OR its bottom, so it never needs its own
@@ -3056,7 +3202,7 @@ function WhiteboardCanvas({ board, onSceneChange, externalScene = null }) {
         </WelcomeScreen>
       </Excalidraw>
 
-      <div className="wb-rail" role="toolbar" aria-label="Board tools" aria-orientation="vertical">
+      <div ref={railRef} className="wb-rail" role="toolbar" aria-label="Board tools" aria-orientation="vertical">
         {TOOLS.map((entry) => {
           if (entry.key === 'sticky') {
             return (

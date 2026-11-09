@@ -3,21 +3,23 @@
    the composer with the keyboard up. It is the last thing in the column, so it
    carries the home-bar inset; while typing it is not drawn at all (shell.css). */
 .bottom-nav {
+  --pane-r: 20px;
   position: relative;
   z-index: 20;
   flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  height: calc(var(--bottomnav-h) + var(--safe-bottom));
-  padding: 0 var(--space-2) var(--safe-bottom);
-  border-top: 1px solid var(--ln);
-  background: var(--bg);
+  height: var(--bottomnav-h);
+  /* A floating pane. The home bar sits in the gap below it, so the pane clears
+     it instead of growing to cover it (the shell already leaves 8px). */
+  margin-bottom: max(0px, calc(var(--safe-bottom) - 10px));
+  padding: 0 var(--space-2);
 }
 .bottom-nav-item {
   min-width: var(--touch-min); min-height: var(--touch-min); padding: var(--space-1) var(--space-2);
   border: 0; background: transparent; color: var(--fnt); display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 3px; font-size: 11.5px; font-weight: 600;
+  align-items: center; justify-content: center; gap: 3px; font-size: 11.5px; font-weight: 500;
 }
 .bottom-nav-item svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.bottom-nav-item.active { color: var(--tx); }
-.bottom-nav-item.active svg { color: var(--ac); }
+.bottom-nav-item.active { color: var(--tx); font-weight: 600; }
+.bottom-nav-item.active svg { color: var(--ac2); }

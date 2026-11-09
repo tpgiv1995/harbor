@@ -98,7 +98,7 @@ export function CapabilitySheet({ open, onClose, client, session, header, onAppl
 
   return <div className="mobile-sheet-backdrop" onClick={(event) => event.target === event.currentTarget && onClose()}>
     <section className="mobile-sheet capability-sheet" role="dialog" aria-modal="true" aria-labelledby="capability-title">
-      <header className="mobile-sheet-head"><div><span>SESSION</span><h2 id="capability-title">Capabilities</h2></div><button type="button" onClick={onClose} aria-label="Close">×</button></header>
+      <header className="mobile-sheet-head"><div><span>Session</span><h2 id="capability-title">Capabilities</h2></div><button type="button" onClick={onClose} aria-label="Close">×</button></header>
       <div className="mobile-sheet-scroll">
         <div className="cap-current"><span>{provider}</span><strong>{header?.model?.label || header?.model?.id || session?.modelLabel || session?.model || 'Model not reported'}</strong><small>{header?.effort || session?.effort || 'Effort not reported'}</small></div>
         {error ? <p className="sheet-error" role="alert">{error}</p> : null}

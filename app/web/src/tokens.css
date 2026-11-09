@@ -1,25 +1,47 @@
-/* Slate design tokens for harbor-web. Font files and :root values match
-   app/src/renderer/styles.css; layout lives in web.css. */
+/* Lighthouse glass design tokens for harbor-web. Font files and :root values
+   match app/src/renderer/styles.css; layout lives in the other sheets.
+
+   THE GLASS IS PAINTED, NEVER SAMPLED (2026-11-09). No backdrop-filter: the
+   desktop client once held the display GPU at 85 to 94% with it, and a phone
+   re-blurs on every frame too. The photograph never moves, so its blur is baked
+   into lighthouse-blur-960.webp and every glass pane paints it itself.
+
+   WHY position:fixed LAYERS AND NOT background-attachment:fixed. The desktop
+   sheet lines each pane up with the ground through `background-attachment:
+   fixed`. iOS Safari (the phone this client is for) does not implement that
+   value: it treats it as `scroll`, so each pane would draw its own private copy
+   of the photograph, scaled to the pane. Instead:
+     - the ground is ONE `position: fixed; inset: 0` layer (body::before);
+     - a glass pane is an element with `clip-path: inset(0 round R)` that owns a
+       `::before` which is ALSO `position: fixed; inset: 0` and paints tint,
+       shade, blurred photo and the base colour. A fixed box fills the same
+       layout viewport as the ground, so the two line up on every engine, and the
+       clip-path cuts the copy down to the pane. clip-path does not make the pane
+       a containing block (transform, filter and will-change do), which is the
+       one rule that keeps this working: never put a transform, `translate`,
+       filter or will-change on a glass pane or on anything that holds one. The
+       bottom sheets and the drawer therefore do not use glass panes: sheets are
+       solid (--raised), and the drawer slides by `left`, not by transform.
+     - panes never scroll themselves; the scroller is a child, because iOS
+       does not keep a fixed child still inside an overflow scroller. */
 
 @import './motion.css';
 
 @font-face {
-  font-family: 'Schibsted Grotesk';
-  font-weight: 400;
-  src: url('../../assets/fonts/SchibstedGrotesk-Regular.ttf') format('truetype');
+  font-family: Inter;
+  font-weight: 100 900;
+  font-style: normal;
+  src: url('../../assets/fonts/inter-latin-wght-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
   font-display: swap;
 }
 @font-face {
-  font-family: 'Schibsted Grotesk';
-  font-weight: 600;
-  src: url('../../assets/fonts/SchibstedGrotesk-SemiBold.ttf') format('truetype');
+  font-family: Inter;
+  font-style: normal;
+  font-weight: 100 900;
   font-display: swap;
-}
-@font-face {
-  font-family: 'Schibsted Grotesk';
-  font-weight: 700;
-  src: url('../../assets/fonts/SchibstedGrotesk-Bold.ttf') format('truetype');
-  font-display: swap;
+  src: url('../../assets/fonts/inter-latin-ext-wght-normal.woff2') format('woff2');
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
 }
 @font-face {
   font-family: 'IBM Plex Mono';
@@ -29,33 +51,73 @@
 }
 
 :root {
-  --bg: #0b0c0f;
+  --bg: #05070d;
   --tx: #f6f7ff;
-  --sub: #a4abbd;
-  /* AA-compliant against every surface in this sheet (worst case 4.66:1 on
-     --bg #0b0c0f). It was #666d7c, which measured 3.60:1 behind .hdr-project
-     and failed the contrast sweep rel-5 asked for. Chosen by walking lightness
-     up the same hue until the DARKEST surface cleared 4.5, so no caller has to
-     know which surface it lands on. */
-  --fnt: #7e8594;
+  --sub: #c6c7cc;
+  --fnt: #acadb2;
   --ac: #437ffe;
-  --ac2: #79a6ff;
+  --ac2: #8db2ff;
   --ac-rgb: 67 127 254;
-  --sel: #e8973f;
-  --sel-rgb: 232 151 63;
-  --live: #24b27c;
-  --warn: #d4a537;
-  --err: #d98a8a;
-  --ln: rgba(255, 255, 255, 0.1);
-  --ln2: rgba(255, 255, 255, 0.18);
-  --font-ui: 'Schibsted Grotesk', Inter, system-ui, sans-serif;
+  /* Selection wears gold, never a second blue: blue already means "this
+     session is live / mid-turn". */
+  --sel: #e9c46a;
+  --sel-rgb: 233 196 106;
+  --live: #6fd39d;
+  --warn: #f2b34f;
+  --warn-text: #f6cf8e;
+  --err: #f2756d;
+  --err-text: #ff9a92;
+  --finished: #a98bff;
+  --dormant: #8d96b5;
+  --background-work: #75b9e8;
+  --ln: #ffffff20;
+  --ln2: #ffffff3b;
+  --font-ui: Inter, system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --glass-panel: rgba(17, 18, 23, 0.55);
-  --glass-blur: blur(24px) saturate(1.1);
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
+
+  /* The material. Tints sit over the painted ground. */
+  --pane: #00000054;
+  --pane-read: #00000080;
+  --frame: #080a0dcc;
+  --frame-line: #ffffff1f;
+  --frame-top: inset 0 1px 0 #ffffff12;
+  --raised: #171a27f2;
+  /* The same surface, opaque, for anything that floats over text (a popover, a
+     toast, the Latest pill): at 95% the line beneath ghosts through it. */
+  --raised-solid: #171a27;
+  --raised-rim: #ffffff24;
+  --well: #04050a;
+  --btn: #2563ffa8;
+  --btn-hover: #2563ffcc;
+  --btn-rim: #ffffff4a;
+  --btn-light: inset 0 1px 0 #ffffff24, inset 0 14px 14px -14px #ffffff1f;
+  --on-ac: #f6f7ff;
+  --pane-shadow: 0 30px 60px -30px #000000b3, 0 2px 8px -2px #00000059;
+  --halo: 0 1px 2px #04070de6, 0 0 10px #04070db3;
+  --rim-light: linear-gradient(135deg, #ffffff80 0%, #ffffff3d 16%, #ffffff1c 40%, #ffffff1a 62%, #ffffff26 84%, #ffffff5c 100%);
+  --rim-field: linear-gradient(135deg, #ffffff66 0%, #ffffff33 16%, #ffffff1a 40%, #ffffff1a 62%, #ffffff2b 84%, #ffffff4d 100%);
+  /* A solid that matches what a pane looks like over the ground, for sticky
+     headers that must be opaque (they stack at top:0 and may not show the one
+     beneath through them). Measured off a real capture of the drawer's list pane. */
+  --pane-solid: #08080e;
+
+  /* The ground. --lamp-* keep the lantern disc on the photo as the window
+     changes shape. Every layer below is meant for a box that is itself the
+     whole viewport (a fixed, inset:0 layer), so none of them is attached. */
+  --lamp-y: min(16.63dvh, calc(22dvh - 2.757vw));
+  --lamp-r: calc(max(100vw, 177.78dvh) * .12);
+  --ground-shade:
+    radial-gradient(circle var(--lamp-r) at 50% var(--lamp-y), #030409a6 0%, #03040999 45%, #03040900 100%) center / 100% 100% no-repeat,
+    linear-gradient(180deg, #0304098c 0%, #03040959 30%, #03040999 70%, #030409d9 100%) center / 100% 100% no-repeat;
+  --ground-sharp: url('../../assets/ground/lighthouse-sharp-2880.webp') center 22% / cover no-repeat;
+  --ground-blur: url('../../assets/ground/lighthouse-blur-960.webp') center 22% / cover no-repeat;
+
+  /* Compatibility aliases for the older sheet names. */
+  --glass-panel: var(--pane-solid);
 
   /* Spacing scale (rel-mobile redesign). Prefer these over ad-hoc px so the
      redesigned surfaces share one rhythm. 4px base step. */
@@ -83,15 +145,128 @@
   /* Bottom tab bar height (excludes the safe-area inset, added where used). */
   --bottomnav-h: 56px;
 
+  /* The gap between floating panes and the margin round them. */
+  --pane-gap: 8px;
+
   /* Motion. Consumed by motion.css and any component transition. */
   --dur-fast: 120ms;
   --dur-base: 180ms;
   --dur-slow: 280ms;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
 
   /* Elevation. Sheets rise from the bottom; popovers hover. */
   --shadow-sheet: 0 -8px 32px rgba(0, 0, 0, 0.45);
   --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* The photograph, under everything, fixed to the layout viewport. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--ground-shade), var(--ground-sharp), #05070d;
+}
+
+/* ── Glass panes ──────────────────────────────────────────────────────────────
+   One recipe, many hosts. --pane-r is the corner radius and --pane-tint the
+   film over the painted ground (--pane 33%, --pane-read 50%). The ::before is the
+   painted copy; the ::after is the hairline on top of the content. */
+.conv-glass,
+.conv-pane.empty,
+.bottom-nav,
+.tasks-mobile,
+.notes-mobile,
+.session-browser-top,
+.session-browser-body,
+.connect-card {
+  --pane-tint: var(--pane);
+  isolation: isolate;
+  border-radius: var(--pane-r, 22px);
+  clip-path: inset(0 round var(--pane-r, 22px));
+}
+
+.conv-glass::before,
+.conv-pane.empty::before,
+.bottom-nav::before,
+.tasks-mobile::before,
+.notes-mobile::before,
+.session-browser-top::before,
+.session-browser-body::before,
+.connect-card::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--pane-tint), var(--pane-tint)),
+    var(--ground-shade),
+    var(--ground-blur),
+    #05070d;
+}
+
+.conv-glass::after,
+.conv-pane.empty::after,
+.bottom-nav::after,
+.tasks-mobile::after,
+.notes-mobile::after,
+.session-browser-top::after,
+.session-browser-body::after,
+.connect-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border: 1px solid #ffffff29;
+  border-top-color: #ffffff42;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* A pane whose content may overhang it (the header's connection card hangs
+   below it) cannot be a clip-path host, or the card would be cut off. It carries
+   an underlay instead: .pane-glass is the first child, behind the content, and
+   it is the clip-path host. */
+.pane-glass {
+  --pane-tint: var(--pane);
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: var(--pane-r, 22px);
+  clip-path: inset(0 round var(--pane-r, 22px));
+  pointer-events: none;
+}
+
+.pane-glass::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    linear-gradient(var(--pane-tint), var(--pane-tint)),
+    var(--ground-shade),
+    var(--ground-blur),
+    #05070d;
+}
+
+.pane-glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid #ffffff29;
+  border-top-color: #ffffff42;
+  border-radius: inherit;
+}
+
+/* The reading panes are a step darker, like the desktop's session windows. */
+.conv-glass,
+.conv-pane.empty,
+.tasks-mobile,
+.notes-mobile,
+.session-browser-body,
+.connect-card {
+  --pane-tint: var(--pane-read);
 }

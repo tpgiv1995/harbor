@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Harbor has a new look on desktop and phone: a dark coastal night scene behind
+  glass panels, the Inter typeface, plan usage shown as bars, and a roomier
+  message box with its buttons on the right. Everything works the way it did,
+  the glass is drawn without a live blur so it costs no more graphics power
+  than before, and the whiteboard is now a dark canvas.
+- Alt+Enter makes the selected session window fill the stage, and pressing it
+  again puts the window back. F11 still takes the whole app full screen.
 - A session that is waiting for its own background work (a long command, a
   Monitor, a background agent) is no longer put to sleep for being idle. Harbor
   used to end any session that sat at its prompt for an hour with little CPU,

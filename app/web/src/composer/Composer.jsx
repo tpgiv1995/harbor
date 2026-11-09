@@ -291,7 +291,9 @@ export function Composer({
             }}
           />
           <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-            <path d="M6.8 10.8 11.9 5.7a3 3 0 1 1 4.2 4.2l-6.2 6.2a4.5 4.5 0 0 1-6.4-6.4l6-6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            {/* A document with a plus, never a paperclip (Pat's standing rule for every attach button). */}
+            <path d="M6 2.6h5.3l4.2 4.2V16a1.4 1.4 0 0 1-1.4 1.4H6A1.4 1.4 0 0 1 4.6 16V4A1.4 1.4 0 0 1 6 2.6Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+            <path d="M11 2.8v4.2h4.2M10 10.4v4.4M7.8 12.6h4.4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </label>
         <button

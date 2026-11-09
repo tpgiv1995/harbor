@@ -159,7 +159,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
     return (
       <div className="ask-card" role="group" aria-label="Answer this prompt">
         <div className="ask-head">
-          <span className="ask-badge" aria-hidden="true">✳</span>
+          <span className="ask-badge" aria-hidden="true">{'\u2733\uFE0E'}</span>
           <span className="ask-eyebrow">Needs your answer</span>
         </div>
         <p className="ask-note">
@@ -223,7 +223,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
   return (
     <div className="ask-card" role="group" aria-label="Answer this question">
       <div className="ask-head">
-        <span className="ask-badge" aria-hidden="true">✳</span>
+        <span className="ask-badge" aria-hidden="true">{'\u2733\uFE0E'}</span>
         <span className="ask-eyebrow">Needs your answer</span>
         {batch ? (
           <span className="ask-count">{`Question ${batch.currentIndex + 1} of ${batch.count}`}</span>

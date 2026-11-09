@@ -246,19 +246,6 @@ export function TaskEditor({ doc, taskId, today, onNavigate, onClose, mutate, on
           >
             ★
           </button>
-          <button
-            type="button"
-            className="task-editor-duplicate"
-            onClick={async () => {
-              if (!await flush()) return;
-              mutate({ type: 'task.duplicate', taskId }).then((r) => {
-                if (r?.ok && r.taskId) onNavigate(r.taskId);
-              });
-            }}
-          >
-            Duplicate
-          </button>
-          <button type="button" className="task-editor-assign" onClick={async () => { if (await flush()) onAssign(); }}>Assign to Claude</button>
           <button type="button" className="task-editor-close" aria-label="Close" onClick={close}>×</button>
         </div>
 
@@ -390,15 +377,30 @@ export function TaskEditor({ doc, taskId, today, onNavigate, onClose, mutate, on
             {task.updatedAt && task.updatedAt !== task.createdAt ? ` · Modified ${stamp(task.updatedAt)}` : ''}
             {task.completedAt ? ` · Completed ${stamp(task.completedAt)}` : ''}
           </span>
-          <button
-            type="button"
-            className={`task-editor-delete${armedDelete ? ' armed' : ''}`}
-            onClick={onDelete}
-          >
-            {armedDelete
-              ? (children.length ? `Delete this and ${children.length} sub-task${children.length > 1 ? 's' : ''}?` : 'Delete for good?')
-              : 'Delete'}
-          </button>
+          <div className="task-editor-foot-actions">
+            <button
+              type="button"
+              className="task-editor-duplicate"
+              onClick={async () => {
+                if (!await flush()) return;
+                mutate({ type: 'task.duplicate', taskId }).then((r) => {
+                  if (r?.ok && r.taskId) onNavigate(r.taskId);
+                });
+              }}
+            >
+              Duplicate
+            </button>
+            <button type="button" className="task-editor-assign" onClick={async () => { if (await flush()) onAssign(); }}>Assign to Claude</button>
+            <button
+              type="button"
+              className={`task-editor-delete${armedDelete ? ' armed' : ''}`}
+              onClick={onDelete}
+            >
+              {armedDelete
+                ? (children.length ? `Delete this and ${children.length} sub-task${children.length > 1 ? 's' : ''}?` : 'Delete for good?')
+                : 'Delete'}
+            </button>
+          </div>
         </div>
       </div>
     </div>,

@@ -211,22 +211,16 @@ function AccountBadge({ home, profiles }) {
 // `short` marks the 5-hour group: it is the one that gives up its inline reset
 // badge first when the rail is dragged narrow, because a 5-hour window resets
 // again within the day while the weekly one is the planning number.
-function MeterDonut({ pct, reset, title, short = false }) {
+function MeterBar({ pct, reset, title, short = false }) {
   const has = typeof pct === 'number' && Number.isFinite(pct);
   const shown = has ? Math.round(pct) : null;
-  const fill = has ? Math.max(2, Math.min(100, pct)) : 0;
-  const color = !has ? 'var(--fnt)' : pct >= 75 ? 'var(--warn)' : 'currentColor';
+  const fill = has ? Math.max(0, Math.min(100, pct)) : 0;
+  const level = !has ? '' : pct >= 100 ? ' max' : pct >= 75 ? ' hi' : '';
   return (
-    <span className={`rm-g${short ? ' rm-g-5h' : ''}`} title={title}>
-      <span
-        className="rm-donut"
-        style={{ background: `conic-gradient(${color} ${fill}%, rgba(255,255,255,.12) 0)` }}
-        aria-hidden="true"
-      >
-        <span />
-      </span>
+    <span className={`rm-g${short ? ' rm-g-5h' : ''}${level}`} title={title}>
       <b>{has ? `${shown}%` : '--'}</b>
       {reset ? <em>{reset}</em> : null}
+      <i aria-hidden="true"><s style={{ width: `${fill}%` }} /></i>
     </span>
   );
 }
@@ -262,6 +256,18 @@ function RailMeters({ profiles: allProfiles }) {
 
   return (
     <div className="rail-meters" aria-label="Plan usage" data-profile-count={profiles.length}>
+      <div className="rm-head">
+        <span className="rm-title">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" aria-hidden="true">
+            <path d="M2.7 12.5a6.1 6.1 0 1 1 10.6 0M8 10l3-3" />
+            <circle cx="8" cy="10" r="1" />
+          </svg>
+          Plans
+        </span>
+        <span aria-hidden="true" />
+        <span>5 hours</span>
+        <span>This week</span>
+      </div>
       {profiles.map((profile) => {
         const account = profile.id;
         const data = usage[account];
@@ -282,7 +288,7 @@ function RailMeters({ profiles: allProfiles }) {
             style={profileStyle(profile)}
           >
             <ProfileBadge profileId={account} profiles={profiles} className="rm-b" title={profile.label} />
-            <MeterDonut
+            <MeterBar
               pct={data?.fiveHourPct}
               title={resetTooltip({
                 window: 'fiveHour',
@@ -293,7 +299,7 @@ function RailMeters({ profiles: allProfiles }) {
               reset={fiveHourBadge ? `↻${fiveHourBadge}` : ''}
               short
             />
-            <MeterDonut
+            <MeterBar
               pct={data?.weeklyPct}
               title={resetTooltip({
                 window: 'weekly',
@@ -928,6 +934,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
 
   return (
     <aside className="rail" aria-label="Session rail" style={{ '--rail-width': `${width}px` }} data-grouping={grouping} data-profile-count={profiles.length}>
+      <div className="rail-main">
       {onViewChange ? (
         <div className="rail-view-switch">
           <ViewSwitch view={view} onViewChange={onViewChange} orchEnabled={orchEnabled} taskAlert={taskAlert} />
@@ -1190,6 +1197,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
       </RailMenu>
 
       <VirtualList rows={rows} renderRow={renderRow} />
+      </div>
 
       <RailMeters profiles={profiles} />
       <div

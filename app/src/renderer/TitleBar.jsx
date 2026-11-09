@@ -119,7 +119,7 @@ export function PlanUsageButton() {
       if (r) {
         setPos({
           top: r.bottom + 6,
-          left: Math.max(8, Math.min(r.right - 360, window.innerWidth - 368)),
+          left: Math.max(8, Math.min(r.right - 480, window.innerWidth - 488)),
           maxHeight: Math.max(100, window.innerHeight - r.bottom - 14),
         });
       }

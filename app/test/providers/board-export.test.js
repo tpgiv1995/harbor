@@ -178,6 +178,19 @@ test('planExport selects the whole board or a named frame', () => {
   assert.equal(framed.elements.length, 3, 'Excalidraw filters by exportingFrame; keep the full element list');
 });
 
+test('planExport renders the board as it looks on screen: the dark canvas and readable ink, stored scene untouched', () => {
+  const text = { id: 't', type: 'text', x: 0, y: 0, width: 80, height: 24, strokeColor: '#1e1e1e', backgroundColor: 'transparent', isDeleted: false, opacity: 100 };
+  const board = scene([text], {}, { viewBackgroundColor: '#ffffff' });
+  const plan = planExport({ id: 'ideas', format: 'png', scene: board });
+  assert.equal(plan.appState.viewBackgroundColor, '#141a26');
+  assert.equal(plan.elements[0].strokeColor, '#e4e5ec');
+  assert.equal(board.elements[0].strokeColor, '#1e1e1e', 'the stored scene is not rewritten');
+  assert.equal(board.appState.viewBackgroundColor, '#ffffff');
+  const chosen = planExport({ id: 'ideas', format: 'png', scene: scene([text], {}, { viewBackgroundColor: '#f8f9fa' }) });
+  assert.equal(chosen.appState.viewBackgroundColor, '#f8f9fa', 'a background picked on purpose stays');
+  assert.equal(chosen.elements[0].strokeColor, '#1e1e1e', 'and dark ink is already readable on it');
+});
+
 test('planExport refuses a bad format without throwing', () => {
   const board = scene([rect('r1')]);
   const bad = planExport({ id: 'x', format: 'svg', scene: board });

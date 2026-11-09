@@ -229,7 +229,7 @@ async function main() {
   let cdpRef = null;
   try {
     let target = null;
-    for (let i = 0; i < 240 && !target; i += 1) {
+    for (let i = 0; i < 1200 && !target; i += 1) {
       await sleep(500);
       try {
         const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();

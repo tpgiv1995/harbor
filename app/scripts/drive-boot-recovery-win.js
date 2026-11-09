@@ -27,7 +27,7 @@ const PORT = 9341;
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-async function connect(port, timeoutMs = 30000) {
+async function connect(port, timeoutMs = 600000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {

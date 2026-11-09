@@ -14,16 +14,16 @@
   min-width: 94px;
   height: 32px;
   padding: 0 12px;
-  border: 1px solid var(--ln2);
-  border-radius: 8px;
-  background: var(--glass-2);
+  border: 1px solid var(--raised-rim);
+  border-radius: 11px;
+  background: var(--raised);
   color: var(--tx);
   font: 500 12px var(--font-ui);
   cursor: pointer;
 }
 
-.conv-lightbox-copy:hover { background: #29313e; }
-.conv-lightbox-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.conv-lightbox-copy:hover { background: #232738; }
+.conv-lightbox-copy:focus-visible { outline: 2px solid var(--ac2); outline-offset: 3px; }
 .conv-lightbox-copy:disabled { cursor: wait; }
 
 /* An image the store no longer holds (see Conversation.jsx ConvImage). */

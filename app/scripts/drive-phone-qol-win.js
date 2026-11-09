@@ -353,13 +353,13 @@ function sameBox(a, b, label, tolerance = 0.6) {
   }
 }
 
-// The card pattern, asserted on one measurement: one card, 24px corners, a thin
-// border, the text box at the card's FULL inner width with 24px of padding, the
+// The card pattern, asserted on one measurement: one card, 20px corners (the
+// Lighthouse glass text box; 24 in Slate), a thin border, the text box at the card's FULL inner width with 24px of padding, the
 // toolbar 12px in from the card's left, right and bottom edges, and the toolbar
 // circles one size (40px) on one centre line, all inside the card.
 function assertCardPattern(g, label) {
   assert.ok(g.card, `${label}: one composer card`);
-  assert.equal(g.cardRadius, 24, `${label}: the card has 24px corners`);
+  assert.equal(g.cardRadius, 20, `${label}: the card has 20px corners`);
   assert.equal(g.cardBorder, 1, `${label}: the card has a thin border`);
   assert.equal(g.outsideCard, 0, `${label}: no composer button sits outside the card`);
   assert.ok(Math.abs(g.textarea.x - (g.card.x + 1)) <= 0.6 && Math.abs(g.textarea.width - (g.card.width - 2)) <= 0.6,

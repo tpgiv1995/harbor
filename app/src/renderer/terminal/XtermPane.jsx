@@ -15,10 +15,10 @@ const THEME = {
   // Transparent: the pane div's heavy glass fill provides the ground, so the
   // lighthouse ghosts through behind the text (allowTransparency below).
   background: 'rgba(0, 0, 0, 0)',
-  foreground: '#ecf0f4',
-  cursor: '#e6ebf0',
+  foreground: '#e4e5ec',
+  cursor: '#f6f7ff',
   cursorAccent: '#05080c',
-  selectionBackground: 'rgba(217, 224, 231, 0.28)',
+  selectionBackground: 'rgba(141, 178, 255, 0.34)',
   black: '#3a3a37',
   red: '#e06c60',
   green: '#8fbc8a',

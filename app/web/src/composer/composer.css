@@ -10,9 +10,11 @@
   max-height: calc(var(--app-h, 100dvh) * .4);
   overflow: hidden;
   width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border-top: 1px solid var(--ln);
-  background: rgba(11, 12, 15, 0.96);
+  /* No pane of its own: the text box is the pane. Anything above it (queued
+     message, status line, tools tray) is a solid inset of its own, 8px apart. */
+  gap: var(--pane-gap);
+  padding: 0;
+  background: transparent;
   color: var(--tx);
 }
 
@@ -22,6 +24,15 @@
 
 
 .composer-extras { min-height: 0; overflow-y: auto; }
+.composer-extras:not(:empty) {
+  flex: 0 1 auto;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--frame-line);
+  border-radius: 16px;
+  background: var(--frame);
+  box-shadow: var(--frame-top);
+}
+.composer-extras > :last-child { margin-bottom: 0; }
 
 /* THE CARD (2026-10-31, Pat: "go look at best practices and good examples
    online ... you shouldnt be trying to invent this stuff yourself every time",
@@ -31,22 +42,47 @@
      chips      attachments, only while there are any
      field      the text box at the card's FULL width, generous left padding
      bar        tools toggle left, Stop / Send right, 12px in from the edges
-   Every button in the bar is the same circle (--cmp-btn) on one centre line. The
-   card is a step lighter than the page with a thin border; the border takes the
-   accent while the box has focus, and the slash colour while a command is typed. */
+   Every button in the bar is the same size (--cmp-btn) on one centre line. The
+   card is the text box of the Lighthouse glass: a near-solid dark well with the
+   hybrid silver rim at its corners (its own border is transparent, or the two
+   would add up); while the box has focus the rim steps aside and the border
+   takes the accent, and the slash colour while a command is typed. */
 .composer-card {
   --cmp-btn: 40px;
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--ln2);
-  border-radius: 24px;
-  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid transparent;
+  border-radius: 20px;
+  background: #04050aeb;
+  box-shadow: var(--pane-shadow);
   transition: border-color var(--dur-fast) var(--ease-out);
 }
 
+.composer-card::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: 1;
+  padding: 1px;
+  border-radius: 20px;
+  background: var(--rim-light);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
 .composer-card:focus-within {
-  border-color: rgb(var(--ac-rgb) / 0.55);
+  border-color: #8db2ffb3;
+}
+
+.composer-card:focus-within::after,
+.composer-card.slash-valid::after,
+.composer-card.slash-invalid::after {
+  opacity: 0;
 }
 
 .composer-bar {
@@ -81,16 +117,16 @@
   width: var(--touch-min);
   min-width: var(--touch-min);
   height: var(--touch-min);
-  border-radius: 50%;
+  border-radius: 13px;
   color: var(--sub);
   cursor: pointer;
 }
 
 .composer-attach:focus-within {
-  background: rgba(255, 255, 255, 0.08);
+  background: #ffffff14;
 }
 .composer-attach:focus-visible {
-  outline: 2px solid rgb(var(--ac-rgb) / 0.5);
+  outline: 2px solid var(--ac2);
   outline-offset: 2px;
 }
 
@@ -131,9 +167,10 @@
   align-items: center;
   max-width: 230px;
   min-height: var(--touch-min);
-  border: 1px solid var(--ln2);
+  border: 1px solid var(--frame-line);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--frame);
+  box-shadow: var(--frame-top);
   overflow: hidden;
 }
 
@@ -229,11 +266,11 @@
   min-width: var(--touch-min);
   min-height: var(--touch-min);
   padding: 0 10px;
-  border: 1px solid var(--ln2);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--frame-line);
+  border-radius: 11px;
+  background: var(--frame);
   color: var(--tx);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 /* The placeholder a textarea drew for itself. Absolutely placed so the caret
@@ -261,19 +298,19 @@
 .composer-queue-item button {
   min-height: var(--touch-min);
   border: 1px solid var(--ln2);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  background: #ffffff12;
   color: var(--tx);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 /* THE TOOLBAR'S BUTTONS (2026-10-31). All of them are one circle, --cmp-btn, on one
    centre line, and each is a 44px target: the extra 2px a side is an inset pseudo
    element, and the gap between neighbours keeps two tap areas from
    overlapping (Stop and Send keep 12px between theirs). Same family as Claude's phone composer:
-     plus   a subtle filled circle, a step lighter than the card, light icon
-     stop   the same subtle circle with a solid square in the text colour
-     send   the one accent circle, a white arrow; muted until there is a draft */
+     plus   a subtle filled square (radius 13), light icon
+     stop   the same subtle square with a solid square glyph in the text colour
+     send   the one accent button (--btn), a white arrow; muted until there is a draft */
 .composer-plus,
 .composer-stop,
 .composer-send {
@@ -286,7 +323,7 @@
   height: var(--cmp-btn);
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  border-radius: 13px;
   cursor: pointer;
 }
 
@@ -301,20 +338,20 @@
 .composer-plus:focus-visible,
 .composer-stop:focus-visible,
 .composer-send:focus-visible {
-  outline: 2px solid rgb(var(--ac-rgb) / 0.6);
+  outline: 2px solid var(--ac2);
   outline-offset: 2px;
 }
 
 .composer-plus,
 .composer-stop {
-  background: rgba(255, 255, 255, 0.09);
+  background: #ffffff14;
   color: var(--tx);
   transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 
 .composer-plus:active,
 .composer-stop:active {
-  background: rgba(255, 255, 255, 0.15);
+  background: #ffffff24;
 }
 
 .composer-plus svg { width: 18px; height: 18px; }
@@ -322,7 +359,7 @@
 /* Open stays a plus, never an x: next to an attachment chip an x reads as
    "remove the image" (Pat, 2026-10-06). The highlight says the tray is open. */
 .composer-plus.on {
-  background: rgb(var(--ac-rgb) / 24%);
+  background: #437ffe33;
   color: var(--ac2);
 }
 
@@ -334,13 +371,14 @@
 }
 
 .composer-send {
-  background: var(--ac);
-  color: #fff;
+  background: var(--btn);
+  box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim);
+  color: var(--on-ac);
   transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 
 .composer-send:active {
-  background: var(--ac2);
+  background: var(--btn-hover);
 }
 
 .composer-send svg {
@@ -351,7 +389,7 @@
 .composer-send-spinner {
   width: 15px;
   height: 15px;
-  border: 2px solid #fff;
+  border: 2px solid var(--on-ac);
   border-radius: 50%;
 }
 
@@ -361,8 +399,9 @@
 
 /* Nothing to send: the same circle, dimmed, so Send never changes place or size. */
 .composer-send:disabled {
-  background: rgb(var(--ac-rgb) / 30%);
-  color: rgb(255 255 255 / 55%);
+  background: #2563ff38;
+  box-shadow: inset 0 0 0 1px #ffffff1f;
+  color: #f6f7ff80;
   opacity: 1;
 }
 
@@ -402,7 +441,7 @@
 }
 
 .composer-status.error {
-  color: #ff8f8f;
+  color: var(--err-text);
 }
 
 .composer-status.waiting {
@@ -419,8 +458,11 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
-  padding: var(--space-1) 0;
+  padding: var(--space-1);
+  border: 1px solid var(--frame-line);
+  border-radius: 16px;
+  background: var(--frame);
+  box-shadow: var(--frame-top);
 }
 
 .composer-tools > * { flex: 0 0 auto; }

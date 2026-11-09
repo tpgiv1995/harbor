@@ -25,8 +25,8 @@
   gap: var(--space-2);
   min-height: var(--touch-min);
   padding: 0 var(--space-3);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: 13px;
+  background: var(--well);
 }
 .notes-search > span { color: var(--sub); font-size: 1.15rem; }
 .notes-search input { flex: 1; min-width: 0; border: 0; background: transparent; outline: 0; min-height: var(--touch-min); }
@@ -43,17 +43,16 @@
 .notes-section {
   padding: var(--space-4) var(--space-1) var(--space-2);
   color: var(--sub);
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 0.82rem;
+  font-weight: 500;
 }
 .notes-group {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--ln);
+  border: 1px solid var(--frame-line);
   border-radius: var(--radius-lg);
-  background: var(--glass-panel);
+  background: var(--frame);
+  box-shadow: var(--frame-top);
   overflow: hidden;
 }
 .note-row {
@@ -68,7 +67,7 @@
   text-align: left;
 }
 .note-row:last-child { border-bottom: 0; }
-.note-row:active { background: rgba(255, 255, 255, 0.05); }
+.note-row:active { background: #ffffff14; }
 .note-row-title {
   color: var(--tx);
   font-size: 1.02rem;
@@ -89,9 +88,9 @@
 .notes-empty {
   margin: var(--space-6) var(--space-4);
   padding: var(--space-8) var(--space-5);
-  border: 1px solid var(--ln);
+  border: 1px solid var(--frame-line);
   border-radius: var(--radius-lg);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--frame);
   text-align: center;
 }
 .notes-empty-mark { color: var(--sel); font-size: 2rem; }
@@ -109,10 +108,10 @@
   width: 52px;
   height: 52px;
   border: 0;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--ac), #2f5fd6);
-  color: #fff;
-  box-shadow: var(--shadow-pop);
+  border-radius: 17px;
+  background: var(--btn);
+  color: var(--on-ac);
+  box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim), var(--shadow-pop);
 }
 .notes-compose:active { transform: scale(0.96); }
 
@@ -130,9 +129,24 @@
   display: flex;
   flex-direction: column;
   padding-top: var(--safe-top);
-  background: var(--bg);
+  isolation: isolate;
   color: var(--tx);
   font-family: var(--font-ui);
+}
+
+/* The full-screen editor is a reading surface: the frosted ground, painted from
+   the baked blur, with no photograph detail behind the note. */
+.ne-screen::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--pane-read), var(--pane-read)),
+    var(--ground-shade),
+    var(--ground-blur),
+    #05070d;
 }
 .ne-screen input,
 .ne-screen textarea,
@@ -154,7 +168,7 @@
   padding: 0 var(--space-3) 0 var(--space-2);
   border: 0;
   background: transparent;
-  color: var(--ac);
+  color: var(--ac2);
   font-size: 1.05rem;
 }
 .ne-back svg { margin-right: 2px; }
@@ -168,7 +182,7 @@
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: var(--ac);
+  color: var(--ac2);
 }
 .ne-more svg { fill: currentColor; }
 .ne-menu {
@@ -180,10 +194,10 @@
   flex-direction: column;
   min-width: 168px;
   padding: var(--space-1);
-  border: 1px solid var(--ln2);
-  border-radius: var(--radius-md);
-  background: #14161c;
-  box-shadow: var(--shadow-pop);
+  border: 1px solid var(--raised-rim);
+  border-radius: 18px;
+  background: var(--raised-solid);
+  box-shadow: var(--pane-shadow);
 }
 .ne-menu button {
   min-height: var(--touch-min);
@@ -194,7 +208,7 @@
   color: var(--tx);
   text-align: left;
 }
-.ne-menu button:active { background: rgba(255, 255, 255, 0.06); }
+.ne-menu button:active { background: #ffffff14; }
 .ne-menu button.danger { color: var(--err); }
 .ne-scrim { position: fixed; inset: 0; z-index: 1; border: 0; background: transparent; }
 
@@ -262,16 +276,18 @@
   display: grid;
   place-items: center;
   padding: var(--space-5);
-  background: rgb(0 0 0 / 0.55);
+  background: #03040999;
 }
 .ne-confirm {
   width: 100%;
   max-width: 20rem;
   padding: var(--space-5);
   border: 1px solid var(--ln2);
-  border-radius: var(--radius-lg);
-  background: #14161c;
-  box-shadow: var(--shadow-sheet);
+  border: 1px solid var(--raised-rim);
+  border-top-color: #ffffff3a;
+  border-radius: 24px;
+  background: var(--raised);
+  box-shadow: var(--pane-shadow);
   text-align: center;
 }
 .ne-confirm h3 { margin: 0 0 var(--space-2); }

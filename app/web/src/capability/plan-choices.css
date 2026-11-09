@@ -1,5 +1,5 @@
 .plan-choices { display: flex; flex-wrap: wrap; gap: 8px; }
-.plan-choices button { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 12px; border: 1px solid var(--ln2); border-radius: 10px; background: var(--well); color: var(--tx); }
+.plan-choices button { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 12px; border: 1px solid var(--ln2); border-radius: 11px; background: var(--well); color: var(--tx); }
 /* --plan-fill/-fg/-edge are set only for a plan with a textColor (PlanChoices.jsx planStyle); everyone else takes the fallback. */
 .plan-choices button[aria-pressed="true"] { border-color: var(--plan-fg, var(--plan-color)); background: color-mix(in srgb, var(--plan-fg, var(--plan-color)) 14%, transparent); }
 .plan-letter { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--plan-fg, var(--plan-color)); background: var(--plan-fill, color-mix(in srgb, var(--plan-color) 14%, transparent)); box-shadow: inset 0 0 0 1px var(--plan-edge, transparent); font-weight: 700; }

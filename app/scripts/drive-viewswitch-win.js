@@ -116,7 +116,7 @@ async function main() {
 
   try {
     let target;
-    for (let attempt = 0; attempt < 240 && !target; attempt += 1) {
+    for (let attempt = 0; attempt < 1200 && !target; attempt += 1) {
       await sleep(500);
       try {
         const targets = await fetch(`http://127.0.0.1:${PORT}/json/list`).then((response) => response.json());

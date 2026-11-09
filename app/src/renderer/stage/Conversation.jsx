@@ -2,7 +2,6 @@ import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, 
 import { createPortal } from 'react-dom';
 import { Markdown } from './md.jsx';
 import turnMeta from './turn-meta.cjs';
-import { providerIdentity, ProfileBadge } from '../providers.js';
 import { clipboardImageDataURL } from '../image-clipboard.js';
 import './conversation-image-copy.css';
 
@@ -267,7 +266,7 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   );
 });
 
-const Block = memo(function Block({ block, provider, home, profiles, onImageLoad }) {
+const Block = memo(function Block({ block, onImageLoad }) {
   if (block.kind === 'note') {
     return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`}>{block.text}</div>;
   }
@@ -304,16 +303,8 @@ const Block = memo(function Block({ block, provider, home, profiles, onImageLoad
     );
   }
   if (block.kind === 'assistant') {
-    const identity = providerIdentity(provider);
     return (
       <div className="conv-assistant">
-        <div className="conv-assistant-who">
-          <img className="conv-sig" src={identity.logo} alt="" aria-hidden="true" />
-          <span className="conv-provider" style={{ color: identity.color }}>{identity.label}</span>
-          {provider === 'claude' && home ? (
-            <ProfileBadge profileId={home} profiles={profiles} className="conv-acct" />
-          ) : null}
-        </div>
         {block.text ? <Markdown text={block.text} /> : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
       </div>
@@ -328,7 +319,7 @@ function distFromBottom(node) {
 }
 
 export const Conversation = memo(function Conversation({
-  blocks, header, provider = 'claude', home = null, profiles = [], empty, emptyAction = null,
+  blocks, header, empty, emptyAction = null,
 }) {
   const scrollRef = useRef(null);
   const contentRef = useRef(null);
@@ -434,9 +425,6 @@ export const Conversation = memo(function Conversation({
               <Block
                 key={item.block.key}
                 block={item.block}
-                provider={provider}
-                home={home}
-                profiles={profiles}
                 onImageLoad={scrollToTail}
               />
             );

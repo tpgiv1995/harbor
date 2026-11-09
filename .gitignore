@@ -54,3 +54,6 @@ app/test/repo/no-third-parties.test.js
 
 # Local provider implementation, kept outside the published application.
 /app/src/main/providers/data-status.js
+
+# drive-mobile-win.js writes its screenshots here; they are run output, never source.
+orch-inputs/

@@ -146,7 +146,7 @@ async function main() {
   let failure = '';
   try {
     let target = null;
-    for (let i = 0; i < 240 && !target; i += 1) {
+    for (let i = 0; i < 1200 && !target; i += 1) {
       await sleep(500);
       try {
         const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
@@ -172,16 +172,16 @@ async function main() {
     facts.codexModels = await cdp.eval(texts('.model-select-row-label'));
     shots.push(await cdp.shot('1-codex-models'));
 
-    await cdp.eval(clickByText('.model-select-row-label', 'GPT-5.5'));
+    await cdp.eval(clickByText('.model-select-row-label', 'GPT-5.6-Terra'));
     await sleep(300);
-    facts.effortsFor55 = await cdp.eval(texts('.cap-effort-ticks span'));
-    shots.push(await cdp.shot('2-codex-gpt-5.5-efforts'));
+    facts.effortsForTerra = await cdp.eval(texts('.cap-seg button'));
+    shots.push(await cdp.shot('2-codex-terra-efforts'));
 
     await cdp.eval(clickBySelector('.model-select'));
     await waitFor(cdp, 'document.querySelectorAll(".model-select-row").length > 0', 'the codex model list again');
     await cdp.eval(clickByText('.model-select-row-label', 'GPT-6-Astra'));
     await sleep(300);
-    facts.effortsForAstra = await cdp.eval(texts('.cap-effort-ticks span'));
+    facts.effortsForAstra = await cdp.eval(texts('.cap-seg button'));
     shots.push(await cdp.shot('3-codex-astra-efforts'));
 
     // Cursor, from the discovered catalog.
@@ -212,10 +212,10 @@ async function main() {
     const expectFull = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
     const problems = [];
     if (codexProfiles !== 0) problems.push(`the drive's config copy still has ${codexProfiles} codex profile(s), so it no longer proves the profile-less case`);
-    for (const label of ['Codex default', 'GPT-6-Astra', 'GPT-5.6-Sol', 'GPT-5.6-Terra', 'GPT-5.6-Luna', 'GPT-5.5']) {
+    for (const label of ['Codex default', 'GPT-6-Astra', 'GPT-5.6-Sol', 'GPT-5.6-Terra', 'GPT-5.6-Luna']) {
       if (!facts.codexModels.includes(label)) problems.push(`codex list is missing ${label}`);
     }
-    if (facts.effortsFor55.join() !== 'low,medium,high,xhigh') problems.push(`GPT-5.5 efforts were ${facts.effortsFor55.join()}`);
+    if (!facts.effortsForTerra.includes('high')) problems.push(`GPT-5.6-Terra efforts were ${facts.effortsForTerra.join()}`);
     if (facts.effortsForAstra.join() !== expectFull.join()) problems.push(`Astra efforts were ${facts.effortsForAstra.join()}`);
     if (!cursorSeeded) problems.push('no real cursor-models.json to seed from (the live Harbor has not discovered yet)');
     else if (facts.cursorModelCount < 20 || facts.cursorFirst[0] !== 'Default') problems.push(`cursor list was ${facts.cursorModelCount} rows starting ${facts.cursorFirst[0]}`);

@@ -82,7 +82,7 @@ export function AssignToClaudeModal({ doc, taskId, onClose, mutate }) {
   return createPortal(
     <div className="assign-claude-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !starting && onClose()}>
       <section className="assign-claude-modal" role="dialog" aria-modal="true" aria-labelledby="assign-claude-title">
-        <header><div><span>ASSIGN TASK</span><h2 id="assign-claude-title">Assign to Claude</h2></div><button type="button" onClick={onClose} disabled={starting} aria-label="Close">×</button></header>
+        <header><div><span>Task</span><h2 id="assign-claude-title">Assign to Claude</h2></div><button type="button" onClick={onClose} disabled={starting} aria-label="Close">×</button></header>
         <div className="assign-claude-summary"><strong>{task.title}</strong><span>{listName}{task.dueDate ? ` · due ${task.dueDate}` : ''}</span></div>
         <label><span>Project folder (optional)</span><div className="assign-claude-folder"><input value={folder} onChange={(event) => setFolder(event.target.value)} placeholder={YOLO_CWD} /><button type="button" onClick={async () => { const picked = await window.harbor.session.pickFolder(); if (picked) setFolder(picked); }}>Choose…</button></div></label>
         <div className="assign-claude-grid">

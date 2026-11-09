@@ -115,7 +115,7 @@ export function ConnectionsPanel({ session, pane, planLabel, onClose }) {
       >
         <div className="conn-head">
           <div className="conn-head-text">
-            <span className="conn-eyebrow">CONNECTIONS</span>
+            <span className="conn-eyebrow">Connections</span>
             <h2 id="conn-title">MCP servers and connectors</h2>
             <div className="conn-sub" title={folder || ''}>
               {[planLabel ? `${planLabel} plan` : null, folder].filter(Boolean).join(' · ') || 'this session'}

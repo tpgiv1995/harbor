@@ -8,7 +8,7 @@
   display: flex;
   align-items: stretch;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
+  background: #03040999;
   padding:
     var(--safe-top)
     var(--safe-right)
@@ -23,9 +23,10 @@
   min-height: 0;
   max-width: 430px;
   margin: 0 auto;
-  background: var(--bg);
-  border: 1px solid var(--ln);
-  border-radius: 16px;
+  background: var(--raised);
+  border: 1px solid var(--raised-rim);
+  border-top-color: #ffffff3a;
+  border-radius: 24px;
   overflow: hidden;
 }
 
@@ -37,13 +38,12 @@
   gap: 12px;
   padding: 12px 16px 8px;
   border-bottom: 1px solid var(--ln);
-  background: var(--glass-panel);
 }
 
 .newsession-title {
   margin: 0;
   font-size: 20px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .newsession-close {
@@ -51,7 +51,7 @@
   height: 44px;
   border: 0;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  background: #ffffff12;
   color: var(--sub);
   font-size: 24px;
   line-height: 1;
@@ -63,7 +63,7 @@
   margin: 8px 16px 0;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(217, 138, 138, 0.12);
+  background: rgb(242 117 109 / 12%);
   color: var(--err);
   font-size: 14px;
 }
@@ -87,11 +87,9 @@
 .newsession-field legend {
   display: block;
   margin-bottom: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--fnt);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--sub);
 }
 
 /* Same shape as the session browser's search. 16px text, because iOS Safari
@@ -117,8 +115,8 @@
   min-height: 44px;
   padding: 9px 44px 9px 36px;
   border: 1px solid var(--ln);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
   font-size: 16px;
   outline: none;
@@ -129,8 +127,7 @@
 }
 
 .newsession-search input:focus {
-  border-color: rgb(var(--ac-rgb) / 0.55);
-  background: rgba(255, 255, 255, 0.09);
+  border-color: rgb(141 178 255 / 0.7);
 }
 
 .newsession-search-clear {
@@ -180,8 +177,8 @@
 }
 
 .newsession-folder.on {
-  border-color: rgb(var(--ac-rgb) / 0.65);
-  background: rgb(var(--ac-rgb) / 0.12);
+  border-color: rgb(141 178 255 / 0.65);
+  background: #437ffe26;
 }
 
 /* A parent no session ever ran in: it only opens its folders. */
@@ -240,7 +237,6 @@
   gap: 6px;
   margin: 6px 0 2px 14px;
   padding-left: 10px;
-  border-left: 2px solid var(--ln);
 }
 
 .newsession-folder.sub {
@@ -280,8 +276,8 @@
   min-height: 44px;
   padding: 10px 12px;
   border: 1px solid var(--ln);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.25);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
 }
 
@@ -305,8 +301,8 @@
 
 .newsession-provider.on,
 .newsession-effort.on {
-  border-color: rgb(var(--ac-rgb) / 0.65);
-  background: rgb(var(--ac-rgb) / 0.18);
+  border-color: rgb(141 178 255 / 0.65);
+  background: #437ffe33;
   color: var(--ac2);
 }
 
@@ -314,7 +310,6 @@
   flex: 0 0 auto;
   padding: 12px 16px 16px;
   border-top: 1px solid var(--ln);
-  background: var(--glass-panel);
 }
 
 .newsession-start {
@@ -351,9 +346,9 @@
   gap: 8px;
   min-height: 52px;
   padding: 6px 6px 6px 12px;
-  border: 1px solid rgb(var(--ac-rgb) / 0.65);
+  border: 1px solid rgb(141 178 255 / 0.65);
   border-radius: 12px;
-  background: rgb(var(--ac-rgb) / 0.12);
+  background: #437ffe26;
 }
 
 .newsession-chosen + .newsession-search {

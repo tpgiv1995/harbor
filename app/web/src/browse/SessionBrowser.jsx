@@ -144,92 +144,152 @@ export function SessionBrowser({
 
   return (
     <div className="session-browser" role="dialog" aria-modal="true" aria-label="Sessions">
-      <header className="session-browser-head">
-        <button type="button" className="session-browser-close" onClick={onClose} aria-label="Back">
-          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-            <path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
-        <h2 className="session-browser-title">Sessions</h2>
-        {onNewSession ? (
-          <button type="button" className="session-browser-add" onClick={onNewSession} aria-label="New session">
+      <div className="session-browser-top">
+        <header className="session-browser-head">
+          <button type="button" className="session-browser-close" onClick={onClose} aria-label="Back">
             <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-              <path d="M8 3.4v9.2M3.4 8h9.2" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+              <path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-        ) : null}
-      </header>
+          <h2 className="session-browser-title">Sessions</h2>
+          {onNewSession ? (
+            <button type="button" className="session-browser-add" onClick={onNewSession} aria-label="New session">
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M8 3.4v9.2M3.4 8h9.2" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+              </svg>
+            </button>
+          ) : null}
+        </header>
 
-      <div className="session-browser-toolbar">
-        <div className="session-browser-search">
-          <svg className="sb-search-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-            <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-            <path d="m10.2 10.2 3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
-          <input
-            autoComplete="off"
-            type="search"
-            placeholder="Search sessions"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search sessions"
-          />
+        <div className="session-browser-toolbar">
+          <div className="session-browser-search">
+            <svg className="sb-search-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <path d="m10.2 10.2 3 3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+            <input
+              autoComplete="off"
+              type="search"
+              placeholder="Search sessions"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search sessions"
+            />
+          </div>
+          <button
+            type="button"
+            className={`browser-filter-toggle${controlsOpen ? ' open' : ''}`}
+            aria-expanded={controlsOpen}
+            aria-controls="browser-filter-panel"
+            onClick={() => setControlsOpen((value) => !value)}
+          >
+            <span className="browser-filter-label">{activeFilterLabel}</span>
+            <span className="browser-filter-sep">·</span>
+            <span className="browser-filter-group">{prefs.grouping === 'date' ? 'Date' : 'Project'}</span>
+          </button>
         </div>
-        <button
-          type="button"
-          className={`browser-filter-toggle${controlsOpen ? ' open' : ''}`}
-          aria-expanded={controlsOpen}
-          aria-controls="browser-filter-panel"
-          onClick={() => setControlsOpen((value) => !value)}
-        >
-          <span className="browser-filter-label">{activeFilterLabel}</span>
-          <span className="browser-filter-sep">·</span>
-          <span className="browser-filter-group">{prefs.grouping === 'date' ? 'Date' : 'Project'}</span>
-        </button>
+
+        {controlsOpen ? (
+          <div id="browser-filter-panel" className="browser-filter-panel" role="region" aria-label="Filter and group sessions">
+            <div className="browser-filter-chips" role="group" aria-label="Time window">
+              {BROWSER_FILTER_OPTIONS.map((option) => (
+                <button
+                  key={option.label}
+                  type="button"
+                  className={`browser-filter-chip${filterMatches(option.filter, prefs.filter) ? ' active' : ''}`}
+                  data-filter={option.label.toLowerCase()}
+                  aria-pressed={filterMatches(option.filter, prefs.filter)}
+                  onClick={() => updatePrefs({ filter: option.filter })}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className="browser-grouping-toggle" role="group" aria-label="Group sessions by">
+              {['project', 'date'].map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={prefs.grouping === mode ? 'active' : ''}
+                  data-grouping={mode}
+                  aria-pressed={prefs.grouping === mode}
+                  onClick={() => updatePrefs({ grouping: mode })}
+                >
+                  {mode === 'project' ? 'Project' : 'Date'}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
 
-      {controlsOpen ? (
-        <div id="browser-filter-panel" className="browser-filter-panel" role="region" aria-label="Filter and group sessions">
-          <div className="browser-filter-chips" role="group" aria-label="Time window">
-            {BROWSER_FILTER_OPTIONS.map((option) => (
-              <button
-                key={option.label}
-                type="button"
-                className={`browser-filter-chip${filterMatches(option.filter, prefs.filter) ? ' active' : ''}`}
-                data-filter={option.label.toLowerCase()}
-                aria-pressed={filterMatches(option.filter, prefs.filter)}
-                onClick={() => updatePrefs({ filter: option.filter })}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          <div className="browser-grouping-toggle" role="group" aria-label="Group sessions by">
-            {['project', 'date'].map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={prefs.grouping === mode ? 'active' : ''}
-                data-grouping={mode}
-                aria-pressed={prefs.grouping === mode}
-                onClick={() => updatePrefs({ grouping: mode })}
-              >
-                {mode === 'project' ? 'Project' : 'Date'}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {pinned.length > 0 ? (
-        <div className="session-browser-pinned" aria-label="Needs your answer">
-          {pinned.map((row) => {
-            if (row.kind === 'answer-section') {
+      <div className="session-browser-body">
+        {pinned.length > 0 ? (
+          <div className="session-browser-pinned" aria-label="Needs your answer">
+            {pinned.map((row) => {
+              if (row.kind === 'answer-section') {
+                return (
+                  <div key={row.key} className="answer-section-header">
+                    <span className="answer-section-label">Needs your answer</span>
+                    <span className="answer-section-count">{row.count}</span>
+                  </div>
+                );
+              }
               return (
-                <div key={row.key} className="answer-section-header">
-                  <span className="answer-section-label">Needs your answer</span>
-                  <span className="answer-section-count">{row.count}</span>
-                </div>
+                <SessionRow
+                  key={row.key}
+                  row={row}
+                  selected={row.session.id === activeSessionId}
+                  iconUrl={row.iconUrl}
+                  showProject={showProject}
+                  onSelect={(session) => {
+                    onPick(session);
+                    onClose();
+                  }}
+                />
+              );
+            })}
+          </div>
+        ) : null}
+
+        <div className="session-browser-list">
+          {!hasSessions ? (
+            <div className="empty-state">
+              <p>{(wantsWide || searching) && !slice ? 'Loading…' : 'No sessions match.'}</p>
+            </div>
+          ) : null}
+          {slice?.truncated ? (
+            <p className="browser-note">Showing the {slice.shown} most recent{searching ? ' matches' : ''}. Search to reach older sessions.</p>
+          ) : null}
+          {list.map((row) => {
+            if (row.kind === 'project') {
+              const count = row.project.sessionCount ?? row.project.sessions?.length ?? 0;
+              return (
+                <button
+                  key={row.key}
+                  type="button"
+                  className={`project-header${row.collapsed ? ' collapsed' : ''}`}
+                  aria-expanded={!row.collapsed}
+                  onClick={() => toggleCollapse(row.project.label)}
+                >
+                  <Chevron collapsed={row.collapsed} />
+                  <ProjectIcon label={row.project.label} url={row.iconUrl} />
+                  <span className="project-label">{row.project.label}</span>
+                  <span className="project-count">{count}</span>
+                  {row.project.hasLive ? <span className="project-live">live</span> : null}
+                </button>
+              );
+            }
+            if (row.kind === 'older') {
+              return (
+                <button
+                  key={row.key}
+                  type="button"
+                  className="older-row"
+                  onClick={() => setExpandedOlder((prev) => new Set([...prev, row.project.label]))}
+                >
+                  {row.hiddenCount} older sessions
+                </button>
               );
             }
             return (
@@ -247,62 +307,6 @@ export function SessionBrowser({
             );
           })}
         </div>
-      ) : null}
-
-      <div className="session-browser-list">
-        {!hasSessions ? (
-          <div className="empty-state">
-            <p>{(wantsWide || searching) && !slice ? 'Loading…' : 'No sessions match.'}</p>
-          </div>
-        ) : null}
-        {slice?.truncated ? (
-          <p className="browser-note">Showing the {slice.shown} most recent{searching ? ' matches' : ''}. Search to reach older sessions.</p>
-        ) : null}
-        {list.map((row) => {
-          if (row.kind === 'project') {
-            const count = row.project.sessionCount ?? row.project.sessions?.length ?? 0;
-            return (
-              <button
-                key={row.key}
-                type="button"
-                className={`project-header${row.collapsed ? ' collapsed' : ''}`}
-                aria-expanded={!row.collapsed}
-                onClick={() => toggleCollapse(row.project.label)}
-              >
-                <Chevron collapsed={row.collapsed} />
-                <ProjectIcon label={row.project.label} url={row.iconUrl} />
-                <span className="project-label">{row.project.label}</span>
-                <span className="project-count">{count}</span>
-                {row.project.hasLive ? <span className="project-live">live</span> : null}
-              </button>
-            );
-          }
-          if (row.kind === 'older') {
-            return (
-              <button
-                key={row.key}
-                type="button"
-                className="older-row"
-                onClick={() => setExpandedOlder((prev) => new Set([...prev, row.project.label]))}
-              >
-                {row.hiddenCount} older sessions
-              </button>
-            );
-          }
-          return (
-            <SessionRow
-              key={row.key}
-              row={row}
-              selected={row.session.id === activeSessionId}
-              iconUrl={row.iconUrl}
-              showProject={showProject}
-              onSelect={(session) => {
-                onPick(session);
-                onClose();
-              }}
-            />
-          );
-        })}
       </div>
     </div>
   );

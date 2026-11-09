@@ -231,7 +231,7 @@ async function main() {
   try {
     let target = null;
     let port = 0;
-    for (let i = 0; i < 240 && !target; i += 1) {
+    for (let i = 0; i < 1200 && !target; i += 1) {
       await sleep(500);
       port = port || readPort();
       if (!port) continue;

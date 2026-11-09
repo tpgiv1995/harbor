@@ -55,3 +55,23 @@ test('browser and PWA icon declarations resolve through the app static route', a
     assert.equal(response.headers['content-type'], icon.type, `${icon.src} must use its declared MIME type`);
   }
 });
+
+// The ground photograph ships as two .webp files under /assets/ (web/src/tokens.css). A browser
+// sniffs an image, but the type should still be right, and an octet-stream here would be the one
+// image on the phone the static route mislabels.
+test('the static route serves .webp with the image MIME type', async (t) => {
+  const root = await fs.mkdtemp(path.join(require('node:os').tmpdir(), 'harbor-static-webp-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'assets'));
+  await fs.writeFile(path.join(root, 'assets', 'ground-abc123.webp'), Buffer.from('RIFF0000WEBPVP8 '));
+  const staticHandler = createStaticHandler({ root });
+  const server = http.createServer(async (req, res) => {
+    if (!(await staticHandler(req, res))) { res.writeHead(404); res.end('not found'); }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await request(server.address().port, '/assets/ground-abc123.webp');
+  assert.equal(response.status, 200);
+  assert.equal(response.headers['content-type'], 'image/webp');
+  assert.match(response.headers['cache-control'], /immutable/, 'hashed assets stay cacheable forever');
+});

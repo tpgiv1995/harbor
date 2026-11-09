@@ -354,7 +354,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
             <button
               type="button"
               className={`ico tile-focus${focused ? ' on' : ''}`}
-              title={focused ? 'Back to the grid' : 'Focus: this window takes the full stage'}
+              title={focused ? 'Back to the grid (Alt+Enter)' : 'This window takes the full stage (Alt+Enter)'}
               aria-label={focused ? 'Collapse window back to the grid' : 'Focus this window'}
               onClick={(e) => { e.stopPropagation(); onToggleFocus(); }}
             >
@@ -448,9 +448,6 @@ export const SessionTile = memo(forwardRef(function SessionTile({
         <Conversation
           blocks={blocks}
           header={header}
-          provider={session.provider || 'claude'}
-          home={session.home}
-          profiles={profiles}
           empty={data && !data.missing
             ? 'No conversation in this session yet.'
             : String(session.id).startsWith('pane:')

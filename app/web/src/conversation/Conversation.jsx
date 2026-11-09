@@ -1,7 +1,6 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Markdown } from '../md/index.jsx';
-import { providerIdentity } from '../../../src/renderer/providers.js';
 import './conversation.css';
 
 // The phone's conversation surface: prompt bubbles, assistant prose, and
@@ -173,22 +172,10 @@ function summarizeActions(blocks) {
 function groupConversationBlocks(blocks) {
   const items = [];
   let i = 0;
-  // A "turn" is everything since the last user prompt. The first assistant
-  // block of a turn carries the attribution; the rest are the same speaker
-  // still talking, so they do not repeat it.
-  let spokenThisTurn = false;
   while (i < blocks.length) {
     const block = blocks[i];
     if (block.kind !== 'action') {
-      if (block.kind === 'user') {
-        spokenThisTurn = false;
-        items.push({ type: 'block', block });
-      } else if (block.kind === 'assistant') {
-        items.push({ type: 'block', block, leadsTurn: !spokenThisTurn });
-        spokenThisTurn = true;
-      } else {
-        items.push({ type: 'block', block });
-      }
+      items.push({ type: 'block', block });
       i += 1;
       continue;
     }
@@ -234,7 +221,7 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   );
 });
 
-const Block = memo(function Block({ block, provider, onImageLoad, leadsTurn = true }) {
+const Block = memo(function Block({ block, onImageLoad }) {
   if (block.kind === 'note') {
     return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`}>{block.text}</div>;
   }
@@ -255,20 +242,11 @@ const Block = memo(function Block({ block, provider, onImageLoad, leadsTurn = tr
     );
   }
   if (block.kind === 'assistant') {
-    const identity = providerIdentity(provider);
-    // The attribution is drawn once per TURN, not once per block. A phone
-    // screen was showing "CLAUDE" five times in 900 vertical pixels, ~35px
-    // each, because the desktop tile draws it on every assistant block and
-    // that was copied straight across. Everything between two user prompts is
-    // one speaker, so saying so once is both truer and ~150px cheaper.
+    // No name line above a reply (Pat, 2026-11-09: the window header already
+    // names the model, "no reason to repeat"). This supersedes the 2026-10 rule
+    // that drew the attribution once per turn: it is drawn nowhere now.
     return (
-      <div className={`conv-assistant${leadsTurn ? ' leads-turn' : ' cont-turn'}`}>
-        {leadsTurn ? (
-          <div className="conv-assistant-who">
-            <img className="conv-sig" src={identity.logo} alt="" aria-hidden="true" />
-            <span className="conv-provider" style={{ color: identity.color }}>{identity.label}</span>
-          </div>
-        ) : null}
+      <div className="conv-assistant">
         {block.text ? <Markdown text={block.text} /> : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
       </div>
@@ -283,7 +261,7 @@ function distFromBottom(node) {
 }
 
 export const Conversation = memo(function Conversation({
-  blocks, header, provider = 'claude', empty, emptyAction = null, topAction = null,
+  blocks, header, empty, emptyAction = null, topAction = null,
 }) {
   const scrollRef = useRef(null);
   const contentRef = useRef(null);
@@ -359,52 +337,52 @@ export const Conversation = memo(function Conversation({
   }, [scrollToTail]);
 
   return (
-    <div className="conv" ref={scrollRef} onScroll={onScroll} role="log" aria-label="Conversation transcript" aria-live={header?.working ? 'polite' : 'off'} aria-relevant="additions text">
-      <div className="conv-body" ref={contentRef}>
-        {topAction}
-        {blocks.length === 0 ? (
-          <div className="conv-empty">
-            <span>{empty || 'No conversation yet.'}</span>
-            {emptyAction}
-          </div>
-        ) : (
-          items.map((item) => {
-            if (item.type === 'action-group') {
+    <div className="conv-glass">
+      <div className="conv" ref={scrollRef} onScroll={onScroll} role="log" aria-label="Conversation transcript" aria-live={header?.working ? 'polite' : 'off'} aria-relevant="additions text">
+        <div className="conv-body" ref={contentRef}>
+          {topAction}
+          {blocks.length === 0 ? (
+            <div className="conv-empty">
+              <span>{empty || 'No conversation yet.'}</span>
+              {emptyAction}
+            </div>
+          ) : (
+            items.map((item) => {
+              if (item.type === 'action-group') {
+                return (
+                  <ActionGroup
+                    key={item.groupKey}
+                    groupKey={item.groupKey}
+                    blocks={item.blocks}
+                    expanded={expandedGroups.has(item.groupKey)}
+                    onToggle={toggleGroup}
+                  />
+                );
+              }
               return (
-                <ActionGroup
-                  key={item.groupKey}
-                  groupKey={item.groupKey}
-                  blocks={item.blocks}
-                  expanded={expandedGroups.has(item.groupKey)}
-                  onToggle={toggleGroup}
+                <Block
+                  key={item.block.key}
+                  block={item.block}
+                  onImageLoad={scrollToTail}
                 />
               );
-            }
-            return (
-              <Block
-                key={item.block.key}
-                block={item.block}
-                provider={provider}
-                leadsTurn={item.leadsTurn !== false}
-                onImageLoad={scrollToTail}
-              />
-            );
-          })
-        )}
-        {header?.working ? (
-          <div className="conv-working">
-            <span className="conv-spinner" aria-hidden="true" />
-            <span className="conv-working-text">{header.workingText || header.text || 'Working…'}</span>
-          </div>
-        ) : null}
-        {away ? (
-          <div className="conv-jump-dock">
-            <button type="button" className="conv-jump" onClick={jumpToLatest} aria-label={unseen ? `Jump to latest, ${unseen} new` : 'Jump to latest'}>
-              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9.5M3.5 8.5 8 13l4.5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              {unseen ? `${unseen} new` : 'Latest'}
-            </button>
-          </div>
-        ) : null}
+            })
+          )}
+          {header?.working ? (
+            <div className="conv-working">
+              <span className="conv-spinner" aria-hidden="true" />
+              <span className="conv-working-text">{header.workingText || header.text || 'Working…'}</span>
+            </div>
+          ) : null}
+          {away ? (
+            <div className="conv-jump-dock">
+              <button type="button" className="conv-jump" onClick={jumpToLatest} aria-label={unseen ? `Jump to latest, ${unseen} new` : 'Jump to latest'}>
+                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 3v9.5M3.5 8.5 8 13l4.5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                {unseen ? `${unseen} new` : 'Latest'}
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   );

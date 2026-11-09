@@ -9,11 +9,12 @@
   flex-direction: column;
   gap: 10px;
   max-height: calc(var(--app-h, 100dvh) * 0.5);
-  margin: 0 14px 12px;
+  margin: 0;
   padding: 12px;
-  border: 1px solid rgba(212, 165, 55, 0.4);
-  border-radius: 16px;
-  background: rgba(23, 20, 12, 0.72);
+  border: 1px solid rgb(242 179 79 / 45%);
+  border-radius: 18px;
+  background: #14110afa;
+  box-shadow: var(--frame-top);
   /* The WHOLE card scrolls inside its cap, explanation and choices together:
      with only the option list scrolling, a long explanation took the whole
      cap and the list was left zero pixels tall, so no answer could be reached
@@ -36,11 +37,9 @@
 
 .ask-eyebrow {
   flex: 1 1 auto;
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #f0d48a;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--warn-text);
 }
 
 .ask-count {
@@ -77,8 +76,9 @@
   padding: 10px;
   max-height: calc(var(--app-h, 100dvh) * 0.3);
   overflow: auto;
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--frame-line);
+  border-radius: 12px;
+  background: #050709e0;
   color: var(--tx);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -105,9 +105,10 @@
 }
 
 .ask-key.primary {
-  border-color: rgba(67, 127, 254, 0.5);
-  background: linear-gradient(135deg, var(--ac), #2f5fd6);
-  color: #fff;
+  border-color: transparent;
+  background: var(--btn);
+  box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim);
+  color: var(--on-ac);
 }
 
 .ask-key:disabled,
@@ -141,8 +142,8 @@
 .ask-err {
   padding: 8px 10px;
   border-radius: 10px;
-  background: rgba(217, 138, 138, 0.16);
-  color: #f0b0b0;
+  background: rgb(242 117 109 / 16%);
+  color: var(--err-text);
   font-size: 13px;
 }
 
@@ -170,12 +171,12 @@
 .ask-tab.cur,
 .ask-tab.done {
   color: var(--tx);
-  background: rgba(67, 127, 254, 0.18);
+  background: #437ffe33;
 }
 
 .ask-tab.submit {
-  color: #8ce8c0;
-  background: rgba(36, 178, 124, 0.14);
+  color: var(--live);
+  background: rgb(111 211 157 / 14%);
 }
 
 .ask-list {
@@ -206,13 +207,13 @@
 }
 
 .ask-row-btn.cur {
-  border-color: rgba(67, 127, 254, 0.6);
-  background: rgba(67, 127, 254, 0.12);
+  border-color: rgb(141 178 255 / 60%);
+  background: #437ffe33;
 }
 
 .ask-row-btn.on {
-  border-color: rgba(36, 178, 124, 0.55);
-  background: rgba(36, 178, 124, 0.12);
+  border-color: rgb(111 211 157 / 55%);
+  background: rgb(111 211 157 / 12%);
 }
 
 .ask-row-btn.off {
@@ -255,11 +256,10 @@
   margin-left: 8px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgba(36, 178, 124, 0.16);
-  color: #8ce8c0;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
+  background: rgb(111 211 157 / 16%);
+  color: var(--live);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .ask-desc {
@@ -304,8 +304,8 @@
   min-height: 44px;
   padding: 10px 12px;
   border: 1px solid var(--ln2);
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.3);
+  border-radius: 11px;
+  background: var(--well);
   color: var(--tx);
   font-size: 15px;
 }
@@ -314,10 +314,11 @@
   flex: 0 0 auto;
   width: 44px;
   height: 44px;
-  border: 1px solid rgba(67, 127, 254, 0.5);
-  border-radius: 10px;
-  background: linear-gradient(135deg, var(--ac), #2f5fd6);
-  color: #fff;
+  border: 0;
+  border-radius: 11px;
+  background: var(--btn);
+  box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim);
+  color: var(--on-ac);
   font-size: 16px;
 }
 

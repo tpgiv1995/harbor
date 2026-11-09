@@ -78,8 +78,10 @@ test('the toolbar circles are one size with a 44px target, and the card is the e
   assert.match(css, /--cmp-btn:\s*40px/, 'one diameter for every toolbar circle');
   assert.match(css, /\.composer-plus,\s*\.composer-stop,\s*\.composer-send\s*\{[^}]*width:\s*var\(--cmp-btn\)[^}]*height:\s*var\(--cmp-btn\)/, 'plus, stop and send share the diameter');
   assert.match(css, /\.composer-send::before[\s\S]*?inset:\s*-2px/, 'a 40px circle plus 2px a side is a 44px target');
-  assert.match(css, /\.composer-card\s*\{[^}]*border-radius:\s*24px/, 'a 24px card');
-  assert.doesNotMatch(css, /linear-gradient/, 'no gradient on Send');
+  // Lighthouse glass (2026-11-09): the card is the text box, radius 20 (it was 24 in Slate).
+  assert.match(css, /\.composer-card\s*\{[^}]*border-radius:\s*20px/, 'a 20px card');
+  // The rim's mask is a gradient on the card's ::after; Send itself paints no gradient.
+  for (const rule of css.match(/\.composer-send\s*\{[^}]*\}/g)) assert.doesNotMatch(rule, /linear-gradient/, 'no gradient on Send');
   const slash = read('slash/slash.css');
   assert.doesNotMatch(slash, /inset 3px 0 0/, 'no coloured bar down the left of the text box');
 });

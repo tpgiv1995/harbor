@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { providerIdentity, useProfiles, profileStyle } from './providers.js';
+import { providerIdentity, useProfiles, profileStyle, ProfileBadge } from './providers.js';
 import { sessionModelOptions, sessionEffortOptions } from './session-model-options.cjs';
 import { watchProviderOptions } from './provider-options.cjs';
 import { folderLabel as labelFolder } from './folder-label.cjs';
@@ -65,7 +65,7 @@ function ModelSelect({ options, value, onChange, disabled }) {
         onClick={() => { if (!open) place(); setOpen((value_) => !value_); }}
       >
         <span className="model-select-val">{current?.label || value || 'select a model'}</span>
-        <span className="model-select-caret" aria-hidden="true">▾</span>
+        <span className="model-select-caret" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 4.5 6 7.5 9 4.5" /></svg></span>
       </button>
       {open && pos ? createPortal(
         <>
@@ -273,10 +273,10 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
     <div className="new-session-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <form className="new-session-popover config-modal" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="new-session-title">
         <div className="new-session-heading">
-          <div><span>SESSION CONFIGURATION</span><h2 id="new-session-title">Session configuration</h2></div>
+          <div><h2 id="new-session-title">Session configuration</h2></div>
           <button type="button" className="new-session-close" onClick={onClose} aria-label="Close">×</button>
         </div>
-        <fieldset className="new-session-field"><legend>PROVIDER</legend><div className="new-session-providers">
+        <fieldset className="new-session-field"><legend>Provider</legend><div className="new-session-providers">
           {PROVIDER_KEYS.map((key) => { const ident = providerIdentity(key); return <button type="button" key={key} className={provider === key ? 'active' : ''} style={{ '--provider-color': ident.color }} onClick={() => setProvider(key)}><img src={ident.logo} alt="" />{ident.label}</button>; })}
         </div></fieldset>
 
@@ -290,10 +290,10 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
                   key={profile.id}
                   className={account === profile.id ? 'active' : ''}
                   aria-pressed={account === profile.id}
-                  style={profileStyle(profile)}
                   onClick={() => setAccount(profile.id)}
                 >
-                  {profile.label}
+                  <ProfileBadge profileId={profile.id} profiles={providerProfiles} className="sr-b" />
+                  <span>{profile.label}</span>
                 </button>
               ))}
             </div>
@@ -307,10 +307,15 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
 
           {effortLevels.length ? <section className="cap-sec">
             <div className="cap-sec-h">Effort</div>
-            <div className="cap-effort-slider-wrap">
-              <div className="cap-effort-value" aria-hidden="true">{effortLevels[effortIndex]}</div>
-              <input className="cap-effort-slider" type="range" min="0" max={effortLevels.length - 1} step="1" value={effortIndex} aria-label="Effort" aria-valuetext={effortLevels[effortIndex]} onChange={(event) => setEffort(effortLevels[Number(event.target.value)])} />
-              <div className="cap-effort-ticks" aria-hidden="true">{effortLevels.map((value) => <span key={value}>{value}</span>)}</div>
+            <div className="cap-seg" role="radiogroup" aria-label="Effort" onKeyDown={(event) => {
+              const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+              if (!step) return;
+              event.preventDefault();
+              setEffort(effortLevels[Math.min(effortLevels.length - 1, Math.max(0, effortIndex + step))]);
+            }}>
+              {effortLevels.map((value, index) => (
+                <button type="button" key={value} role="radio" aria-checked={index === effortIndex} tabIndex={index === effortIndex ? 0 : -1} className={index === effortIndex ? 'on' : ''} onClick={() => setEffort(value)}>{value}</button>
+              ))}
             </div>
             {provider === 'claude' && caps?.effort?.note ? <div className="cap-note">{caps.effort.note}</div> : null}
           </section> : null}
@@ -333,7 +338,7 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
                 controlled session has a pane Harbor still may not type into,
                 and both the status word and the tooltip must agree with the
                 button's disable about that. */}
-            <section className="cap-sec"><div className="cap-sec-h">Permission mode</div><div className="cap-status"><span className="cap-status-lbl">current</span><span className="cap-status-val">{permModeStatus(permMode, driving)}</span></div><button type="button" className="cap-action" onClick={cycleMode} disabled={!canCyclePermission} title={driving ? 'Cycle this session’s permission mode' : 'Harbor is not driving this session: launch it from the rail, or send a message to adopt it'}>Cycle mode (⇧Tab)</button></section>
+            <section className="cap-sec"><div className="cap-sec-h">Permission mode</div><div className="cap-status"><span className="cap-status-lbl">current</span><span className="cap-status-val">{permModeStatus(permMode, driving)}</span></div><button type="button" className="cap-action" onClick={cycleMode} disabled={!canCyclePermission} title={driving ? 'Cycle this session’s permission mode' : 'Harbor is not driving this session: launch it from the rail, or send a message to adopt it'}>Cycle mode (Shift Tab)</button></section>
             <section className="cap-sec"><div className="cap-sec-h">Fast mode</div><div className="cap-row disabled"><span className="cap-row-lbl">Unavailable</span><span className="cap-row-reason">{caps?.fastMode?.reason || 'Fast mode: unavailable on subscription auth'}</span></div></section>
             <section className="cap-sec"><div className="cap-sec-h">Workflow</div><button type="button" className="cap-action" onClick={() => insert(`${caps?.dynamicWorkflow?.keyword || 'ultracode'} `)}>Insert “{caps?.dynamicWorkflow?.keyword || 'ultracode'}” keyword</button></section>
             <section className="cap-sec"><div className="cap-sec-h">Plugins &amp; connectors</div>{caps?.plugins?.length ? <div className="cap-plugins">{caps.plugins.map((plugin) => <div key={`${plugin.name}@${plugin.marketplace}`} className={`cap-plugin${plugin.enabled ? '' : ' off'}`}><span className="cap-plugin-dot" /><span className="cap-plugin-name">{plugin.name}</span><span className="cap-plugin-state">{plugin.enabled ? 'on' : 'off'}</span></div>)}</div> : <div className="cap-note">no plugins installed</div>}{caps?.mcpServers?.length ? <div className="cap-mcp"><span className="cap-mcp-lbl">MCP</span><span className="cap-mcp-names">{caps.mcpServers.join(', ')}</span></div> : null}</section>

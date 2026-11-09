@@ -216,7 +216,6 @@ function SessionScreen({
       <Conversation
         blocks={blocks}
         header={header}
-        provider={session.provider || 'claude'}
         empty={empty}
       />
       {pane && !subSessionReadOnly(session) && session.provider === 'claude' ? (
@@ -229,7 +228,7 @@ function SessionScreen({
         // when a surface is actually present.
         <div className="question-dock">
           <div className="question-fold">
-            <span className="question-fold-badge" aria-hidden="true">✳</span>
+            <span className="question-fold-badge" aria-hidden="true">{'\u2733\uFE0E'}</span>
             <span className="question-fold-text">Claude is asking you something</span>
             <button type="button" className="question-fold-open" onClick={() => document.activeElement?.blur?.()}>Answer</button>
           </div>
@@ -452,6 +451,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                 context, status, cache. It used to be three rows (identity,
                 chips, facts) plus a banner row and an error card. */}
             <header className="app-header">
+              <span className="pane-glass" aria-hidden="true" />
               <div className={`header-top${view === 'chat' ? ' has-session' : ''}`} ref={headerTopRef}>
                 {view === 'chat' ? <SessionHeaderButton
                   header={activeHeader}

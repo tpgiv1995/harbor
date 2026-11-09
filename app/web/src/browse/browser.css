@@ -4,12 +4,28 @@
   z-index: 50;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
+  gap: var(--pane-gap);
   padding:
-    var(--safe-top)
-    var(--safe-right)
-    var(--safe-bottom)
-    var(--safe-left);
+    calc(var(--safe-top) + var(--pane-gap))
+    var(--pane-gap)
+    calc(var(--safe-bottom) + var(--pane-gap))
+    var(--pane-gap);
+}
+
+/* Two floating panes, like the app behind it: the title and search on the lighter
+   glass, the list on the reading glass. The list's scroller is a child of the
+   pane (tokens.css). */
+.session-browser-top {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-browser-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .session-browser-head {
@@ -18,16 +34,13 @@
   align-items: center;
   gap: 4px;
   padding: 4px 8px;
-  border-bottom: 1px solid var(--ln);
-  background: var(--glass-panel);
 }
 
 .session-browser-title {
   flex: 1 1 auto;
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: 600;
 }
 
 .session-browser-close,
@@ -66,6 +79,21 @@
   padding: 0;
 }
 
+/* The search box wears the field rim: a soft silver glint at its corners. */
+.session-browser-search::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: 13px;
+  background: var(--rim-field);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
 .session-browser-toolbar {
   flex: 0 0 auto;
   display: flex;
@@ -90,8 +118,8 @@
   min-height: 44px;
   padding: 9px 12px 9px 36px;
   border: 0;
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
   font-size: 15px;
   outline: none;
@@ -102,7 +130,7 @@
 }
 
 .session-browser-search input:focus {
-  background: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 0 0 2px var(--ac2);
 }
 
 .session-browser-list {
@@ -125,7 +153,6 @@
   max-height: 40%;
   overflow-y: auto;
   border-bottom: 1px solid var(--ln);
-  background: var(--bg);
 }
 
 .browser-filter-toggle {
@@ -135,20 +162,20 @@
   gap: 4px;
   min-height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--ln);
+  border: 1px solid var(--frame-line);
   border-radius: 11px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--frame);
   color: var(--sub);
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
 }
 
 .browser-filter-toggle.open,
 .browser-filter-toggle:active {
-  background: rgba(var(--ac-rgb) / 12%);
-  border-color: rgba(var(--ac-rgb) / 28%);
+  background: #437ffe33;
+  border-color: rgb(141 178 255 / 40%);
   color: var(--ac2);
 }
 
@@ -184,19 +211,19 @@
   min-height: 44px;
   min-width: 44px;
   padding: 0 14px;
-  border: 1px solid var(--ln);
+  border: 1px solid var(--frame-line);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--frame);
   color: var(--sub);
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
 }
 
 .browser-filter-chip.active,
 .browser-grouping-toggle button.active {
-  background: rgba(var(--ac-rgb) / 14%);
-  border-color: rgba(var(--ac-rgb) / 30%);
+  background: #437ffe33;
+  border-color: rgb(141 178 255 / 40%);
   color: var(--ac2);
 }
 
@@ -221,23 +248,22 @@
   margin: 0;
   padding: 10px 16px 6px;
   border: 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid #ffffff0a;
   /* OPAQUE on purpose (2026-10-06). Every header is sticky at top:0 inside one
      list, so all the headers scrolled past stay stacked there, and a 96% fill
      let the one beneath show through as faint ghost text behind the current
-     project name. */
-  background: var(--bg);
-  color: var(--sub);
-  font-size: 12px;
+     project name. --pane-solid is the colour the glass reads as, so the header
+     does not show as a darker strip on it. */
+  background: var(--pane-solid);
+  color: var(--tx);
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
   text-align: left;
-  text-transform: uppercase;
   cursor: pointer;
 }
 
 .session-browser .project-header:active {
-  background: #17181b; /* --bg under 5% white, kept opaque */
+  background: #10121a; /* --pane-solid under 6% white, kept opaque */
 }
 
 .session-browser .project-chevron {
@@ -259,14 +285,12 @@
   flex: 0 0 auto;
   min-width: 22px;
   padding: 2px 7px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--fnt);
+  border-radius: 7px;
+  background: #ffffff12;
+  color: var(--sub);
   font-size: 11px;
   font-weight: 700;
   text-align: center;
-  text-transform: none;
-  letter-spacing: 0;
 }
 
 .session-browser .older-row {
@@ -300,26 +324,24 @@
 
 .answer-section-label {
   color: var(--warn);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .answer-section-count {
   min-width: 18px;
   padding: 1px 6px;
-  border-radius: 999px;
-  background: rgba(212, 165, 55, 0.18);
+  border-radius: 7px;
+  background: rgb(242 179 79 / 18%);
   color: var(--warn);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
   text-align: center;
 }
 
 .session-browser .session-row.pinned,
 .session-browser .session-row.needs-answer {
-  box-shadow: inset 3px 0 0 var(--warn);
+  background: rgb(242 179 79 / 10%);
 }
 
 .session-browser .session-row {
@@ -327,12 +349,12 @@
 }
 
 .session-browser .session-status.needs-answer {
-  color: #f0d48a;
+  color: var(--warn-text);
   font-weight: 600;
 }
 
 .session-browser .session-status.working {
-  color: #8ce8c0;
+  color: var(--live);
   font-weight: 600;
 }
 

@@ -12,6 +12,14 @@ body,
   margin: 0;
 }
 
+/* Everything in the app sits above the fixed ground (tokens.css body::before,
+   z-index 0): a positioned layer paints over non-positioned content, so the root
+   must be a positioned layer of its own. */
+#root {
+  position: relative;
+  z-index: 1;
+}
+
 /* dvh, not vh: on a phone browser vh includes the retracting chrome, so a
    100vh app is taller than the screen it is on and the bottom of it sits
    under the URL bar. Only applies before --app-h is set at runtime. */
@@ -95,13 +103,16 @@ input {
   height: var(--app-h, 100%);
   width: var(--app-w, 100%);
   min-height: 0;
-  /* No bottom inset here: the bottom tab bar is the last thing in the column
-     and owns the home-bar inset, and while typing the keyboard covers it. */
+  /* Floating panes with an 8px gap and an 8px margin round them (Lighthouse
+     glass, 2026-11-09). The bottom tab bar is the last pane in the column and
+     keeps clear of the home bar itself (bottom-nav.css); while typing the
+     keyboard covers it and the composer sits 8px above the keyboard. */
+  gap: var(--pane-gap);
   padding:
-    var(--safe-top)
-    var(--safe-right)
-    0
-    var(--safe-left);
+    calc(var(--safe-top) + var(--pane-gap))
+    calc(var(--safe-right) + var(--pane-gap))
+    var(--pane-gap)
+    calc(var(--safe-left) + var(--pane-gap));
 }
 
 .app-shell.is-disconnected .session-list {
@@ -111,11 +122,10 @@ input {
 
 .app-header {
   position: relative;
+  isolation: isolate;
   z-index: 30;
   flex: 0 0 auto;
-  padding: 2px 4px 0 4px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--ln);
+  padding: 3px 4px 2px 4px;
 }
 
 /* Row one: the session (icon, project, title, state, chevron), the connection
@@ -145,8 +155,10 @@ input {
 .notes-pin:focus-visible,
 .notes-editor button:focus-visible,
 .app-shell input:focus-visible,
-.app-shell textarea:focus-visible {
-  outline: 3px solid rgb(var(--ac-rgb) / 92%);
+.app-shell textarea:focus-visible,
+.connect-card input:focus-visible,
+.connect-card button:focus-visible {
+  outline: 2px solid var(--ac2);
   outline-offset: 2px;
 }
 
@@ -193,20 +205,17 @@ input {
 
 .hdr-project {
   overflow: hidden;
-  color: var(--fnt);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  color: var(--sub);
+  font-size: 12px;
+  font-weight: 500;
   text-overflow: ellipsis;
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .hdr-title {
   overflow: hidden;
   font-size: 15px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -221,9 +230,9 @@ input {
   background: var(--fnt);
 }
 
-.hdr-state-live { background: var(--live); box-shadow: 0 0 0 3px rgba(36, 178, 124, 0.16); }
+.hdr-state-live { background: var(--live); box-shadow: 0 0 0 3px rgb(111 211 157 / 16%); }
 .hdr-state-working { background: var(--ac); box-shadow: 0 0 0 3px rgb(var(--ac-rgb) / 18%); }
-.hdr-state-blocked { background: var(--warn); box-shadow: 0 0 0 3px rgba(212, 165, 55, 0.2); }
+.hdr-state-blocked { background: var(--warn); box-shadow: 0 0 0 3px rgb(242 179 79 / 20%); }
 
 .hdr-chev {
   flex: 0 0 auto;
@@ -262,10 +271,14 @@ input {
 .btn-primary {
   width: 100%;
   padding: 14px 16px;
-  background: linear-gradient(135deg, var(--ac), #2f5fd6);
-  color: #fff;
+  border-radius: 11px;
+  background: var(--btn);
+  box-shadow: var(--btn-light), inset 0 0 0 1px var(--btn-rim);
+  color: var(--on-ac);
   font-weight: 600;
 }
+
+.btn-primary:active { background: var(--btn-hover); }
 
 .search-row {
   margin-top: 10px;
@@ -275,8 +288,8 @@ input {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--ln);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.25);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
 }
 
@@ -296,8 +309,9 @@ input {
   margin: 16px;
   padding: 16px;
   border-radius: 14px;
-  border: 1px solid var(--ln);
-  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--frame-line);
+  background: var(--frame);
+  box-shadow: var(--frame-top);
 }
 
 .offline-detail,
@@ -316,17 +330,15 @@ input {
   align-items: center;
   gap: 8px;
   padding: 14px 16px 6px;
-  color: var(--sub);
-  font-size: 12px;
+  color: var(--tx);
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .project-live {
   color: var(--live);
   font-size: 12px;
-  text-transform: lowercase;
+  font-weight: 500;
 }
 
 /* Rows are a LIST, not a stack of cards. At 70px per card with a 1px border
@@ -337,27 +349,28 @@ input {
   display: flex;
   align-items: center;
   gap: 11px;
-  width: 100%;
-  margin: 0;
-  padding: 9px 16px;
+  width: calc(100% - 12px);
+  margin: 0 6px;
+  padding: 9px 10px;
   border: 0;
-  border-radius: 0;
+  border-radius: 12px;
   background: transparent;
-  color: inherit;
+  color: var(--text-soft, #d8d9e0);
   text-align: left;
 }
 
 .session-row:active {
-  background: rgba(255, 255, 255, 0.05);
+  background: #ffffff14;
 }
 
+/* Selection is a lifted row, never a coloured bar down one edge. */
 .session-row.selected {
-  box-shadow: inset 3px 0 0 rgb(var(--sel-rgb) / 0.9);
-  background: rgba(var(--sel-rgb) / 0.07);
+  background: #ffffff1f;
+  color: var(--tx);
 }
 
 .session-row.needs-answer {
-  box-shadow: inset 3px 0 0 var(--warn);
+  background: rgb(242 179 79 / 10%);
 }
 
 .session-dot {
@@ -370,12 +383,12 @@ input {
 
 .session-dot.live {
   background: var(--live);
-  box-shadow: 0 0 0 3px rgba(36, 178, 124, 0.18);
+  box-shadow: 0 0 0 3px rgb(111 211 157 / 18%);
 }
 
 .session-dot.blocked {
   background: var(--warn);
-  box-shadow: 0 0 0 3px rgba(212, 165, 55, 0.2);
+  box-shadow: 0 0 0 3px rgb(242 179 79 / 20%);
 }
 
 .session-body {
@@ -392,7 +405,7 @@ input {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   font-size: 14.5px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.3;
 }
 
@@ -433,15 +446,15 @@ input {
   flex: 0 0 auto;
   padding: 4px 9px;
   border-radius: 999px;
-  background: rgba(212, 165, 55, 0.18);
-  color: #f0d48a;
+  background: rgb(242 179 79 / 16%);
+  color: var(--warn-text);
   font-size: 12px;
   font-weight: 600;
 }
 
 .session-badge.working {
-  background: rgba(36, 178, 124, 0.16);
-  color: #8ce8c0;
+  background: rgb(111 211 157 / 14%);
+  color: var(--live);
 }
 
 .older-row {
@@ -455,9 +468,7 @@ input {
    in a slightly brighter blue was almost invisible against the other label. */
 .preview-label {
   color: var(--fnt);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-size: 11.5px;
 }
 
 .connect-screen {
@@ -470,15 +481,12 @@ input {
     calc(20px + var(--safe-right))
     calc(24px + var(--safe-bottom))
     calc(20px + var(--safe-left));
-  background: var(--bg);
 }
 
 .connect-card {
+  position: relative;
   width: min(100%, 390px);
   padding: 24px 20px;
-  border: 1px solid var(--ln);
-  border-radius: 18px;
-  background: var(--glass-panel);
 }
 
 .connect-mark {
@@ -486,10 +494,8 @@ input {
   height: 48px;
   margin-bottom: 12px;
   border-radius: 12px;
-  background:
-    radial-gradient(circle at 50% 45%, rgba(67, 127, 254, 0.35), transparent 70%),
-    #14161c;
-  border: 1px solid var(--ln2);
+  background: url('/pwa/icon-192.png') center / cover no-repeat, var(--well);
+  border: 1px solid var(--raised-rim);
 }
 
 .connect-card h1 {
@@ -514,14 +520,14 @@ input {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--ln);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.25);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
 }
 
 .connect-error {
   margin: 12px 0 0;
-  color: #f0b0b0;
+  color: var(--err-text);
   font-size: 13px;
 }
 
@@ -543,7 +549,7 @@ code {
   height: 44px;
   border: 0;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.07);
   color: var(--tx);
   font-size: 24px;
   line-height: 1;
@@ -561,9 +567,7 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--sub);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-size: 11.5px;
 }
 
 .detail-name {
@@ -581,8 +585,8 @@ code {
   gap: 5px;
   padding: 4px 10px;
   border-radius: 999px;
-  background: rgba(36, 178, 124, 0.16);
-  color: #8ce8c0;
+  background: rgb(111 211 157 / 14%);
+  color: var(--live);
   font-size: 11px;
   font-weight: 600;
 }
@@ -627,7 +631,7 @@ code {
   position: absolute;
   inset: 0;
   border: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: #03040999;
 }
 
 .sheet-panel {
@@ -636,10 +640,11 @@ code {
   display: flex;
   flex-direction: column;
   max-height: min(calc(var(--app-h, 100dvh) * 0.88), 780px);
-  border-radius: 18px 18px 0 0;
-  border: 1px solid var(--ln);
+  border-radius: 24px 24px 0 0;
+  border: 1px solid var(--raised-rim);
+  border-top-color: #ffffff3a;
   border-bottom: 0;
-  background: rgba(14, 15, 20, 0.96);
+  background: var(--raised);
   padding-bottom: calc(8px + var(--safe-bottom));
 }
 
@@ -648,7 +653,7 @@ code {
   height: 4px;
   margin: 10px auto 4px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.22);
+  background: #ffffff38;
 }
 
 .sheet-head {
@@ -661,7 +666,7 @@ code {
 .sheet-title {
   margin: 0;
   font-size: 18px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .sheet-close {
@@ -669,7 +674,7 @@ code {
   height: 44px;
   border: 0;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.07);
   color: var(--sub);
   font-size: 24px;
   line-height: 1;
@@ -684,8 +689,8 @@ code {
   min-height: 44px;
   padding: 12px 14px;
   border: 1px solid var(--ln);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.25);
+  border-radius: 13px;
+  background: var(--well);
   color: var(--tx);
 }
 
@@ -722,11 +727,17 @@ code {
 .conv-pane {
   display: flex;
   flex-direction: column;
+  gap: var(--pane-gap);
   height: 100%;
   min-height: 0;
 }
 
 .conv-pane.empty {
+  position: relative;
+  /* The fade-up entrance must not leave its end transform behind: a transform
+     would make this glass pane the containing block of its own fixed layer
+     (tokens.css), and the photograph would stop lining up. */
+  animation-fill-mode: backwards;
   align-items: center;
   justify-content: center;
   padding: 24px;
@@ -736,7 +747,7 @@ code {
 .conv-empty-title {
   margin: 0 0 8px;
   font-size: 18px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .conv-empty-hint {
@@ -763,9 +774,9 @@ code {
   width: 100%;
   min-height: 44px;
   padding: 8px 10px;
-  border: 1px solid var(--ln);
+  border: 1px solid var(--frame-line);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--frame);
   color: inherit;
   text-align: left;
 }
@@ -801,6 +812,8 @@ code {
 }
 
 .splash {
+  position: relative;
+  z-index: 1;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
@@ -818,6 +831,6 @@ code {
   border: 2px solid var(--ac);
 }
 
-.hdr-state-background { background: #75b9e8; }
-.session-badge.background { color: #75b9e8; padding: 8px 12px; font-size: 12px; }
-.session-dot.background, .session-status.background { background: #75b9e8; }
+.hdr-state-background { background: var(--background-work); }
+.session-badge.background { color: var(--background-work); padding: 8px 12px; font-size: 12px; }
+.session-dot.background, .session-status.background { background: var(--background-work); }

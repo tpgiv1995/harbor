@@ -7,6 +7,8 @@ const {
   TABLE_CELL_W, TABLE_CELL_H, routeConnector, anchorPoints,
 } = require('../renderer/whiteboard/board-files.cjs');
 
+const { INK_LIGHT, INK_DARK } = require('../renderer/whiteboard/board-ink.cjs');
+
 const MAX_INT = 2 ** 31;
 const BASE_KEYS = [
   'id', 'type', 'x', 'y', 'width', 'height', 'angle', 'strokeColor',
@@ -25,6 +27,12 @@ function context(ctx = {}) {
   };
 }
 function clock(ctx) { return typeof ctx.now === 'function' ? ctx.now() : ctx.now; }
+// The board is dark, so new ink is light. The one exception is ink that sits on a LIGHT
+// opaque fill (a sticky, a pastel shape, a table cell), which stays dark so it reads there.
+function inkOnFill(fill) {
+  const v = hexLuminance(fill);
+  return v !== null && v >= 0.5 ? INK_DARK : INK_LIGHT;
+}
 function base(type, props = {}, supplied = {}) {
   const ctx = context(supplied);
   const element = {
@@ -32,7 +40,7 @@ function base(type, props = {}, supplied = {}) {
     x: Number(props.x) || 0, y: Number(props.y) || 0,
     width: Number(props.width) || 0, height: Number(props.height) || 0,
     angle: Number(props.angle) || 0,
-    strokeColor: props.strokeColor ?? '#1e1e1e',
+    strokeColor: props.strokeColor ?? inkOnFill(props.backgroundColor),
     backgroundColor: props.backgroundColor ?? 'transparent',
     fillStyle: props.fillStyle || 'solid', strokeWidth: props.strokeWidth ?? 2,
     strokeStyle: props.strokeStyle || 'solid', roughness: 0,
@@ -133,7 +141,7 @@ function textNote(props = {}, supplied = {}) {
   if (!wrapped.original) return null;
   const lines = wrapped.wrapped.split('\n');
   const width = Math.min(maxWidth, Math.max(1, ...lines.map((line) => estimateLineWidth(line, fontSize))));
-  const el = Object.assign(base('text', { ...props, width, height: fontSize * lineHeight * lines.length, strokeColor: props.strokeColor || '#1e1e1e' }, supplied), {
+  const el = Object.assign(base('text', { ...props, width, height: fontSize * lineHeight * lines.length, strokeColor: props.strokeColor || INK_LIGHT }, supplied), {
     text: wrapped.wrapped, fontSize, fontFamily: 6,
     textAlign: props.container ? 'center' : (props.textAlign || 'left'),
     verticalAlign: props.container ? 'middle' : (props.verticalAlign || 'top'),
@@ -145,7 +153,7 @@ function textNote(props = {}, supplied = {}) {
 }
 function bindLabel(container, text, ctx, options = {}) {
   if (!String(text ?? '').trim()) return [];
-  const label = textNote({ text, container, fontSize: options.fontSize || 20, strokeColor: options.strokeColor || '#212529' }, ctx);
+  const label = textNote({ text, container, fontSize: options.fontSize || 20, strokeColor: options.strokeColor || inkOnFill(container.backgroundColor) }, ctx);
   // APPEND to boundElements, never replace: a connected shape's boundElements
   // also carries its arrow mirrors, and wiping those strands every connector
   // (the setText-on-a-connected-shape path hits exactly that).
@@ -165,7 +173,7 @@ function polyLabel(poly, text, ctx, options = {}) {
   const label = textNote({
     text,
     fontSize: options.fontSize || 20,
-    strokeColor: options.strokeColor || '#212529',
+    strokeColor: options.strokeColor || inkOnFill(poly.backgroundColor),
     maxWidth: Math.max(1, poly.width - 10),
     textAlign: 'center',
     customData: { labelFor: poly.id },
@@ -182,7 +190,7 @@ function shape(props = {}, supplied = {}) {
   let el;
   if (def.kind === 'poly') {
     const raw = [...def.points, def.points[0]].map(([x, y]) => [Number((x * width).toFixed(2)), Number((y * height).toFixed(2))]);
-    el = linear('line', { ...props, type: undefined, points: raw, backgroundColor: props.backgroundColor || '#a5d8ff', strokeColor: props.strokeColor || '#1e1e1e', customData: { polyShape: key } }, supplied);
+    el = linear('line', { ...props, type: undefined, points: raw, backgroundColor: props.backgroundColor || '#a5d8ff', strokeColor: props.strokeColor || inkOnFill(props.backgroundColor || '#a5d8ff'), customData: { polyShape: key } }, supplied);
     return [el, ...polyLabel(el, props.text, supplied, props)];
   }
   el = base(def.tool, { ...props, width, height, backgroundColor: props.backgroundColor || 'transparent', roundness: def.rounded ? { type: 3 } : props.roundness }, supplied);
@@ -252,7 +260,7 @@ function connector(props = {}, supplied = {}) {
   const sy = props.y ?? (anchored ? anchored.from.y : (source ? source.y + source.height / 2 : 0));
   const ex = props.endX ?? (anchored ? anchored.to.x : (target ? target.x + target.width / 2 : sx + 100));
   const ey = props.endY ?? (anchored ? anchored.to.y : (target ? target.y + target.height / 2 : sy));
-  let arrow = linear('arrow', { ...props, x: sx, y: sy, points: [[0, 0], [ex - sx, ey - sy]], startBinding: source ? { elementId: source.id, focus: 0, gap: 6 } : null, endBinding: target ? { elementId: target.id, focus: 0, gap: 6 } : null, strokeColor: props.strokeColor || '#868e96' }, supplied);
+  let arrow = linear('arrow', { ...props, x: sx, y: sy, points: [[0, 0], [ex - sx, ey - sy]], startBinding: source ? { elementId: source.id, focus: 0, gap: 6 } : null, endBinding: target ? { elementId: target.id, focus: 0, gap: 6 } : null, strokeColor: props.strokeColor || INK_LIGHT }, supplied);
   arrow = routeConnector(arrow, props.routing || 'straight');
   if (source) source.boundElements = [...(source.boundElements || []).filter((b) => b.id !== arrow.id), { id: arrow.id, type: 'arrow' }];
   if (target) target.boundElements = [...(target.boundElements || []).filter((b) => b.id !== arrow.id), { id: arrow.id, type: 'arrow' }];
@@ -418,8 +426,8 @@ function applyOp(input, op, supplied = {}) {
         // create one now (H3), standalone for a poly line, else no-op honestly.
         if (el.type === 'text' || !wantsText) return scene;
         const labels = el.type === 'line'
-          ? polyLabel(el, op.text, ctx, { fontSize: 20, strokeColor: '#212529' })
-          : bindLabel(el, op.text, ctx, { fontSize: 20, strokeColor: '#212529' });
+          ? polyLabel(el, op.text, ctx, { fontSize: 20 })
+          : bindLabel(el, op.text, ctx, { fontSize: 20 });
         const idx = scene.elements.findIndex((e) => e.id === el.id); scene.elements[idx] = bump(el, ctx);
         if (labels.length) scene.elements.push(...labels);
         return scene;
