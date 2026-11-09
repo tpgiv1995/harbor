@@ -57,6 +57,17 @@ The live baseline of the old look, sampled only while Harbor was in front, read 
 
 The two decoded ground images take about 19 MB: 2880x1479 sharp and 960x493 blurred.
 
+## Files page load
+
+`drive-artifacts-win.js` read slower on the new build at first: 2.8 to 6.8 seconds to the first cards, against 2.1 to 5.9 on the old one. But the old build always ran first in those pairs, and every run on both builds went over the drive's 3-second budget while other sessions loaded the machine. The page was then timed from inside the renderer, in the order new, old, old, new:
+
+| | New look | Old look |
+|---|---|---|
+| Click to first card in the page | 4,810 and 4,931 ms | 4,341 and 4,995 ms |
+| First card to painted | 39 and 26 ms | 66 and 35 ms |
+
+Neither build had a task blocking the page. Painting the glass adds nothing measurable. The wait is the card list arriving from the main process, which this work did not change, and the gap between builds is smaller than the spread between two runs of the same build.
+
 ## Contrast
 
 All visible text was measured against the real pixels behind it, with text hidden, at 956x574 at 1.8x and at 1906x908, across 1, 2 and 6 windows. That is 918 text runs. The lowest real reading is 5.18:1, on a plan badge letter; everything else is higher. Two runs read lower, and neither is text that needs to be read: a decorative middle dot, and a note partly tucked under a window's working line, where the sampler caught the line itself. The fixture uses the darkest real plan colours, a deep blue and a deep green.
@@ -67,7 +78,7 @@ All visible text was measured against the real pixels behind it, with text hidde
 
 **Drives that pass.** `composer-focus`, `composer-paste`, `model-menus`, `toolbar` (78 checks), `whiteboard`, `board-look` (38 checks), `viewswitch`, `notes`, `team-chart`, `plan-surfaces`, `render-leak`, `boot-recovery`, `sidebar-lag` and `ask-sheet`. `drive-look-win.js` covers every size, layout, menu, card, state, the Alt+Enter shortcut, a held window, contrast and GPU, with geometry checks only.
 
-**Failing before this work.** `drive-rail-controls-win.js` fails two checks on the real session history: an Oldest ordering tie, and a count under date grouping. It fails the same two checks at the pre-reskin commit, and no sort or filter code changed. `drive-phone-ux-win.js` fails one check, that formatted text stays selected in the phone's plain-text box, and it fails the same way at the pre-reskin commit.
+**Failing before this work.** `drive-rail-controls-win.js` fails two checks on the real session history: an Oldest ordering tie, and a count under date grouping. It fails the same two checks at the pre-reskin commit, and no sort or filter code changed. `drive-phone-ux-win.js` fails one check, that formatted text stays selected in the phone's plain-text box, and it fails the same way at the pre-reskin commit. `drive-mobile-win.js` passes all its checks and writes its evidence, then never exits, because shutting down its test server waits forever. It hangs the same way at the pre-reskin commit.
 
 **Not proven here.** Pressing Alt+Enter while focus is in a live raw terminal was not tested; the harness had no live pane. It uses the same capture-phase handler as Alt+arrows.
 
