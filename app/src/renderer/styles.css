@@ -1505,28 +1505,6 @@ button { font-family: inherit; }
   border-top: 1px solid var(--ln);
 }
 
-.rm-head {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) minmax(0, 1fr);
-  column-gap: 10px;
-  align-items: center;
-  color: var(--fnt);
-  font-size: 11.5px;
-}
-
-.rm-title {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-  color: var(--text-soft);
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.rm-title svg { flex: 0 0 auto; color: var(--fnt); }
-
 /* CAPPED for the same reason the grouping toggle is. The weekly group is
    `flex: 1 1 0`, so on a wide rail its reset track absorbed every spare pixel
    and the row became a tight cluster of numbers trailing ~110px of dead space
@@ -1656,7 +1634,6 @@ button { font-family: inherit; }
   .rail-view-controls, .rail-list-controls { margin-top: 4px; }
   .rail-opt-chip { height: 26px; }
   .rail-meters { gap: 2px; padding: 8px 12px; }
-  .rm-head { display: none; }
   .rm-b { width: 16px; height: 16px; }
   .rm-g { line-height: 16px; }
   .rm-g i { margin-top: 1px; }
@@ -1685,7 +1662,7 @@ button { font-family: inherit; }
   .rail-opt-chip { gap: 4px; padding-inline: 5px; font-size: 9.5px; }
   .rail-opt-chip .rail-opt-glyph { display: none; }
   .rail-meters { padding-inline: 8px; }
-  .rm-row, .rm-head { column-gap: 6px; }
+  .rm-row { column-gap: 6px; }
   .rm-g b { font-size: 10px; }
   .rm-g em { font-size: 9px; }
 }

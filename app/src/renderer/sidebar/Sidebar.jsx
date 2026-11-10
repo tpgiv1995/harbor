@@ -238,6 +238,10 @@ function MeterBar({ pct, reset, title, short = false }) {
 // Claude profiles only (2026-09-28): these donuts read the Claude statusline
 // and OAuth usage, which a codex home does not have, so a codex profile's row
 // could only ever read "--". Codex and cursor plans live in the title-bar menu.
+// No heading (2026-11-09, Pat: "users know which is which and what they are
+// for"): the "Plans" title and the "5 hours" / "This week" column labels are
+// gone, so the first plan's row is the top of the pane. The left meter is the
+// 5-hour window and the right one the week; each tooltip still says which.
 function RailMeters({ profiles: allProfiles }) {
   const profiles = allProfiles.filter((profile) => (profile.provider || 'claude') === 'claude');
   const [usage, setUsage] = useState({});
@@ -256,18 +260,6 @@ function RailMeters({ profiles: allProfiles }) {
 
   return (
     <div className="rail-meters" aria-label="Plan usage" data-profile-count={profiles.length}>
-      <div className="rm-head">
-        <span className="rm-title">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" aria-hidden="true">
-            <path d="M2.7 12.5a6.1 6.1 0 1 1 10.6 0M8 10l3-3" />
-            <circle cx="8" cy="10" r="1" />
-          </svg>
-          Plans
-        </span>
-        <span aria-hidden="true" />
-        <span>5 hours</span>
-        <span>This week</span>
-      </div>
       {profiles.map((profile) => {
         const account = profile.id;
         const data = usage[account];

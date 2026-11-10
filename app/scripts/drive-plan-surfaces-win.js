@@ -290,6 +290,31 @@ async function main() {
       }
     }
 
+    // 2b. No heading (2026-11-09, Pat: "get rid of the 'plans' icon and text ... along with
+    // the 5 hours and this week headers ... just start with first plan at the top"). Checked
+    // on a TALL window as well: under 700px tall a media query already hid the old heading,
+    // so Pat's short window alone could not tell the two builds apart on screen.
+    for (const height of [574, 900]) {
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 956, height, deviceScaleFactor: 1.8, mobile: false });
+      await sleep(400);
+      const top = await cdp.eval(`(() => {
+        const pane = document.querySelector('.rail-meters');
+        const first = pane.firstElementChild;
+        const st = getComputedStyle(pane);
+        const inset = parseFloat(st.borderTopWidth) + parseFloat(st.paddingTop);
+        return { heading: Boolean(pane.querySelector('.rm-head, .rm-title')),
+          words: /\\bPlans\\b|5 hours|This week/i.test(pane.textContent),
+          firstIsPlan: Boolean(first && first.matches('.rm-row:not(.rm-sys)')),
+          gap: first ? Math.round((first.getBoundingClientRect().top - pane.getBoundingClientRect().top - inset) * 10) / 10 : null };
+      })()`);
+      facts[`metersTop${height}`] = top;
+      if (top.heading || top.words) problems.push(`the plan meters still carry a heading at ${height}px tall`);
+      if (!top.firstIsPlan || Math.abs(top.gap) > 1) problems.push(`the first plan is not at the top of the meters at ${height}px tall (${JSON.stringify(top)})`);
+      shots.push(await cdp.shot(`1d-meters-${height}-tall`));
+    }
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 956, height: 574, deviceScaleFactor: 1.8, mobile: false });
+    await sleep(300);
+
     // 3. File menu: one "New <plan> session" per profile.
     await cdp.eval(click('.app-menu-btn'));
     await waitFor(cdp, 'Boolean(document.querySelector(".app-menu-dropdown"))', 'the app menu');
