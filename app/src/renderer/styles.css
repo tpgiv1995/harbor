@@ -21,6 +21,26 @@
   unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
   font-display: swap;
 }
+/* Slate's face, kept for the session windows (see .win2). Glyphs it lacks fall
+   through to Inter, which is next in that stack. */
+@font-face {
+  font-family: 'Schibsted Grotesk';
+  font-weight: 400;
+  src: url('../../assets/fonts/SchibstedGrotesk-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Schibsted Grotesk';
+  font-weight: 600;
+  src: url('../../assets/fonts/SchibstedGrotesk-SemiBold.ttf') format('truetype');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Schibsted Grotesk';
+  font-weight: 700;
+  src: url('../../assets/fonts/SchibstedGrotesk-Bold.ttf') format('truetype');
+  font-display: swap;
+}
 @font-face {
   font-family: 'IBM Plex Mono';
   font-weight: 400;
@@ -1717,9 +1737,40 @@ button { font-family: inherit; }
 
 .stage-empty-inner p { margin: 0 0 18px; font-size: 13px; }
 
-/* Session window: glass at 50%, a quiet hairline rim (no silver). The gold
-   outline on the selected one is the only selection mark. */
+/* Session window: the SLATE look, inside Lighthouse glass (Pat, 2026-11-09,
+   after living with the glass windows: "the windows are kinda brutal to look
+   at ... go back to feel more like what we had before"). The rail, title bar,
+   message box and popups stay glass; everything INSIDE a window (header,
+   chips, conversation, tool rows, question cards, terminal) is Slate again.
+   Two mechanisms keep that honest:
+   1. The window is OPAQUE. Slate's window was a 56-66% slate gradient over a
+      flat #0b0c0f ground; that gradient is composited over that ground here
+      (#23262e to #13151a), so the night photograph never shows behind text.
+   2. Slate's tokens are set ON the window, so every rule inside reads Slate's
+      type (Schibsted Grotesk) and greys while the rest of the app keeps the
+      glass values. Status lights (--live, --warn, --err, --ac) are NOT
+      overridden: a green dot means the same thing in the rail and a window. */
 .win2 {
+  --font-ui: 'Schibsted Grotesk', Inter, system-ui, sans-serif;
+  --sub: #a4abbd;
+  --fnt: #666d7c;
+  --ac2: #79a6ff;
+  --sel: #e8973f;
+  --sel-rgb: 232 151 63;
+  --ln: rgba(255, 255, 255, 0.1);
+  --ln2: rgba(255, 255, 255, 0.18);
+  --text-soft: #c6cfdd;
+  --muted: #666d7c;
+  --slate: #a4abbd;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --tide-bright: #79a6ff;
+  --glass-win: linear-gradient(150deg, #23262e, #13151a);
+  --glass-panel: rgba(17, 18, 23, 0.55);
+  --glass-1: rgba(14, 15, 19, 0.72);
+  --glass-2: rgba(22, 23, 29, 0.92);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  --glass-sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 30%);
   position: relative;
   display: flex;
   min-height: 0;
@@ -1730,22 +1781,47 @@ button { font-family: inherit; }
      density block below the cols rules): the cell's width is imposed by the
      grid, so inline-size containment changes nothing about layout here. */
   container: win / inline-size;
-  border-radius: 20px;
-  border: 1px solid #ffffff29;
-  border-top-color: #ffffff42;
-  background: var(--glass-read);
-  box-shadow: var(--pane-shadow);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--glass-win);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 16px 36px -28px rgba(0, 0, 0, 0.85);
+  font-family: var(--font-ui);
+  line-height: 1.4;
   transition: box-shadow 0.18s ease, border-color 0.18s ease;
 }
 
-/* Emphasis is by edge colour ONLY: every window keeps identical geometry and
-   identical glass. (A brightness filter on resting windows also broke the
-   fixed background and re-filtered on every frame.) */
-.win2.rest { box-shadow: var(--pane-shadow); }
+/* Specular top edge */
+.win2::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 24%);
+}
 
-/* Drag rearrange: only the actively dragged tile moves. No transform on it:
-   a transform re-anchors the fixed glass background to the element, and it
-   would visibly slide against the photo. */
+/* Emphasis is by light and shadow ONLY: every window keeps identical geometry.
+   A window that is not selected sits 15% darker, which is exactly Slate's old
+   brightness(0.85), painted as a still black layer instead of a filter: a
+   filter on a window would also break any fixed (glass) background inside it
+   and promote every window to its own filtered layer. */
+.win2.rest {
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.win2.rest::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  pointer-events: none;
+  border-radius: inherit;
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* Drag rearrange: only the actively dragged tile moves. No transform on it,
+   so it never changes size against its neighbours. */
 .win2.dragging {
   box-shadow:
     var(--pane-shadow),
@@ -1770,10 +1846,11 @@ button { font-family: inherit; }
 
 .win2.sel {
   z-index: 3;
-  border-color: #e9c46ab3;
+  border-color: rgb(var(--sel-rgb) / 55%);
   box-shadow:
-    var(--pane-shadow),
-    0 0 0 1px #e9c46a40;
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 24px 50px -30px rgba(0, 0, 0, 0.9),
+    0 0 0 1px rgb(var(--sel-rgb) / 26%);
 }
 
 .win2.slot {
@@ -1785,6 +1862,8 @@ button { font-family: inherit; }
   justify-content: center;
 }
 
+.win2.slot::before { display: none; }
+
 .slot-inner { text-align: center; }
 
 .slot-word {
@@ -1792,6 +1871,8 @@ button { font-family: inherit; }
   margin-bottom: 12px;
   color: var(--fnt);
   font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 /* WRAPS, because the alternative is spilling out of the card. These pills are
@@ -1819,7 +1900,7 @@ button { font-family: inherit; }
   height: 30px;
   padding: 0 14px;
   border: 1px solid var(--ln);
-  border-radius: 10px;
+  border-radius: 999px;
   background: rgba(255, 255, 255, 0.04);
   cursor: pointer;
   font-size: 12px;
@@ -1851,9 +1932,9 @@ button { font-family: inherit; }
 .wh {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  padding: 11px 14px 10px 16px;
-  border-bottom: 1px solid #ffffff14;
+  gap: 3px;
+  padding: 9px 13px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   position: relative;
   flex: 0 0 auto;
 }
@@ -1874,6 +1955,7 @@ button { font-family: inherit; }
 /* The selected window gets a soft gold underline; a window whose session is
    mid-turn gets a solid accent one, selected or not, so a busy grid reads at a
    glance. Both are static. */
+.win2.sel .wh::after,
 .win2.working .wh::after {
   content: '';
   position: absolute;
@@ -1881,6 +1963,10 @@ button { font-family: inherit; }
   right: 0;
   bottom: -1px;
   height: 2px;
+}
+
+.win2.sel .wh::after {
+  background: linear-gradient(90deg, transparent, rgb(var(--sel-rgb) / 60%), transparent);
 }
 
 .win2.working .wh::after {
@@ -1895,12 +1981,16 @@ button { font-family: inherit; }
 
 .kc {
   flex: 0 0 auto;
-  font: 500 10.5px/1 var(--font-ui);
-  color: var(--sub);
+  font: 700 9px var(--font-mono);
+  color: #b7c2d6;
   background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 6px;
-  padding: 4px 5px;
+  padding: 2px 5px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 1px 2px rgba(0, 0, 0, 0.4);
 }
+
+.win2.rest .kc { opacity: 0.5; }
 
 .pjdot {
   width: 9px;
@@ -1916,7 +2006,7 @@ button { font-family: inherit; }
   width: 18px;
   height: 18px;
   flex: 0 0 18px;
-  border-radius: 6px;
+  border-radius: 4px;
   object-fit: contain;
 }
 .ubar-status .pj-icon {
@@ -1936,8 +2026,7 @@ button { font-family: inherit; }
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin-top: 7px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -1950,6 +2039,43 @@ button { font-family: inherit; }
   margin-left: auto;
 }
 
+/* The window header's model chip keeps Slate's tinted mono chip. The plain
+   `.model` rules further down belong to the glass message box's chip under the
+   text box, which shares the class. These sit ABOVE the density blocks on
+   purpose: same specificity, so the compact sizes below still win. */
+.wh .model {
+  height: auto;
+  gap: 5px;
+  font: 600 10px var(--font-mono);
+  padding: 2px 8px 2px 3px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: none;
+  color: var(--sub);
+}
+.wh .logomk {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  border-radius: 5px;
+}
+.wh .model .eff {
+  font: 700 8px var(--font-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--sub);
+}
+.wh .model.tone-opus { color: #c3a6ff; background: rgba(155, 124, 240, 0.13); }
+.wh .model.tone-sonnet { color: #e6c06a; background: rgba(224, 180, 90, 0.12); }
+.wh .model.tone-haiku { color: #8fd0de; background: rgba(116, 182, 198, 0.13); }
+.wh .model.tone-fable { color: #5fc79a; background: rgba(60, 190, 140, 0.13); }
+.wh .model.tone-other { color: var(--sub); }
+.wh .model:hover { border-color: rgba(255, 255, 255, 0.2); }
+
 /* ── Grid density ──────────────────────────────────────────────────────────
    Past 2 columns a cell is too narrow for one header line, so the chips drop to
    a second line INSIDE the header instead of being squeezed out of existence.
@@ -1960,18 +2086,18 @@ button { font-family: inherit; }
    focused window gets the full single-line header back. */
 .grid4[data-grid-cols="3"] .wh,
 .grid4[data-grid-cols="4"] .wh {
-  padding: 9px 12px 9px 13px;
+  padding: 8px 11px 9px;
 }
 
 /* At density the title drops nearly to the project slug's size (Pat, 2026-08-31),
    which both shortens the header and fits more of the title before it clips. */
 .grid4[data-grid-cols="3"] .wh .ti,
-.grid4[data-grid-cols="4"] .wh .ti { font-size: 12.5px; }
+.grid4[data-grid-cols="4"] .wh .ti { font-size: 11px; }
 
 /* Denser conversation rows at density, for the same "stop wasting the room"
    reason: the padding is tuned for a full-width window and eats most of a
    558px cell. */
-.grid4[data-grid-cols="4"] .conv { padding: 12px; }
+.grid4[data-grid-cols="4"] .conv { padding: 10px 12px; }
 
 /* ── Width density (2026-08-12) ────────────────────────────────────────────
    The cols rules above assume a cell's width follows its column count, which
@@ -1983,32 +2109,36 @@ button { font-family: inherit; }
    container query on .win2. The cols rules stay: the Linux gate asserts
    them, and double-matching applies identical declarations. */
 @container win (max-width: 860px) {
-  .wh { padding: 9px 12px 9px 13px; }
-  .wh .wh-meta { gap: 7px; margin-top: 6px; }
-  .wh .ti { font-size: 12.5px; }
+  .wh { padding: 8px 12px 9px; }
+  .wh .wh-meta { gap: 7px; }
+  .wh .ti { font-size: 11px; }
 
   /* KEEP EVERY FACT, TIGHTER (Pat, 2026-08-31, "the layout is genuinely
      inefficient... free up a lot of space"). Chip SIZING keys off the measured
      width here, NOT the count-based cols rules: a 3-up window on a huge display
      is roomy and must not compact. No chip is removed; the strip just shrinks so
      the 2-line header eats less of a small card. */
-  .wh .pj { font-size: 11.5px; }
-  .wh .model { height: 22px; font-size: 11.5px; padding: 0 6px 0 4px; gap: 4px; }
+  .wh .pj { font-size: 9.5px; }
+  .wh .model { font-size: 9px; padding: 2px 6px 2px 2px; gap: 4px; }
   .wh .logomk { width: 13px; height: 13px; flex-basis: 13px; }
-  .wh .model .eff { font-size: 10px; }
+  .wh .model .eff { font-size: 7.5px; padding: 1px 4px; }
   .wh .gauge { width: 20px; height: 20px; }
   .wh .gauge > span { width: 14px; height: 14px; font-size: 7px; }
-  .wh .cache-chip { font-size: 10.5px; padding: 2px 6px; }
+  .wh .cache-chip { font-size: 8.5px; padding: 1px 5px; }
   .wh .selflag { font-size: 8px; padding: 2px 6px; }
-  .wh .apill { font-size: 10px; padding: 2px 5px; }
+  .wh .apill { font-size: 8px; padding: 2px 5px; }
+  .wh .lv { font-size: 9.5px; gap: 4px; }
   .wh .ico { width: 22px; height: 22px; }
   .wh .tile-close, .wh .tile-new { font-size: 14px; }
 }
 
+/* 4-up on this laptop lands here (~510px cells): squeeze a touch more so the
+   header is a tight two lines and the conversation gets the rest. */
 @container win (max-width: 600px) {
   .wh { padding: 8px 11px 9px; }
   .wh .wh-meta { gap: 6px; }
-  .conv { padding: 12px; }
+  .wh .model .eff { padding: 1px 3px; }
+  .conv { padding: 10px 12px; }
 }
 
 /* NARROW CELL: 4-up on a 150%-scaled Legion is a ~330px cell, where the keycap +
@@ -2022,26 +2152,23 @@ button { font-family: inherit; }
    ~90px more on line 1 without adding a single header row. */
 @container win (max-width: 380px) {
   .wh .kc { display: none; }
-  .wh-ctl { gap: 1px; }
+  .wh-ctl { gap: 2px; }
   .wh .ico { width: 20px; height: 20px; }
   .wh .tile-close, .wh .tile-new { font-size: 13px; }
   .wh .ico.tty { font-size: 7.5px; }
   .wh .ico.tile-id { font-size: 8px; }
 }
 
-/* Short rows: three or four rows of windows in a short window give each header
-   only about 90px, so its three lines tighten until they all fit. */
+/* Short rows: three or four rows of windows in a short window leave each header
+   little height, so the chip row stops wrapping and clips instead. */
 @media (max-height: 1000px) {
   .grid4[data-grid-rows="4"] .wh { padding: 7px 11px 8px; }
-  .grid4[data-grid-rows="4"] .wh .ti { margin-top: 3px; }
-  .grid4[data-grid-rows="4"] .wh .wh-meta { margin-top: 4px; gap: 6px; flex-wrap: nowrap; overflow: hidden; }
-  .grid4[data-grid-rows="4"] .wh .model { height: 20px; font-size: 11.5px; }
+  .grid4[data-grid-rows="4"] .wh .wh-meta { gap: 6px; flex-wrap: nowrap; overflow: hidden; }
   .grid4[data-grid-rows="4"] .wh .cache-chip { display: none; }
 }
 @media (max-height: 700px) {
   .grid4[data-grid-rows="3"] .wh { padding: 7px 11px 8px; }
-  .grid4[data-grid-rows="3"] .wh .wh-meta { margin-top: 4px; flex-wrap: nowrap; overflow: hidden; }
-  .grid4[data-grid-rows="3"] .wh .ti { margin-top: 3px; }
+  .grid4[data-grid-rows="3"] .wh .wh-meta { flex-wrap: nowrap; overflow: hidden; }
 }
 
 /* The tightest grids (16 windows in a small window): the project name and the
@@ -2057,8 +2184,10 @@ button { font-family: inherit; }
 }
 
 .wh .pj {
-  font: 500 12px var(--font-ui);
-  color: var(--sub);
+  font: 600 10px var(--font-mono);
+  letter-spacing: 0.02em;
+  color: var(--pj, var(--fnt));
+  opacity: 0.9;
   /* Narrow tiles (9-16 up) must clip the project slug, never wrap it mid-word
      ("cdt-" over "app"); the title below already ellipsizes the same way. */
   white-space: nowrap;
@@ -2068,25 +2197,28 @@ button { font-family: inherit; }
 
 /* The title is the PRIMARY line by weight and colour. */
 .wh .ti {
-  margin-top: 5px;
-  font-size: 13.5px;
+  margin-top: 1px;
+  font-size: 12.5px;
   font-weight: 600;
-  color: var(--tx);
+  letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.win2.rest .wh .ti { color: var(--sub); }
+
 /* Per-window run-state chip (selection pill is separate) */
 .runstate {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   max-width: 100%;
-  font: 500 12px var(--font-ui);
+  font: 600 10px var(--font-ui);
+  letter-spacing: 0.02em;
 }
 
-.runstate-running { color: var(--ac2); }
+.runstate-running { color: var(--ac); }
 .runstate-ready { color: var(--live); }
 .runstate-blocked { color: var(--warn); }
 
@@ -2097,7 +2229,7 @@ button { font-family: inherit; }
   border-radius: 50%;
 }
 
-.runstate-running .runstate-dot { background: var(--ac2); }
+.runstate-running .runstate-dot { background: var(--ac); }
 .runstate-ready .runstate-dot { background: var(--live); }
 .runstate-blocked .runstate-dot { background: var(--warn); }
 
@@ -2119,8 +2251,10 @@ button { font-family: inherit; }
   align-items: center;
   gap: 5px;
   flex: 0 0 auto;
-  font: 600 11.5px var(--font-ui);
-  color: var(--warn);
+  font: 700 9px var(--font-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ffd9ac;
   background: linear-gradient(90deg, rgb(var(--sel-rgb) / 26%), rgb(var(--sel-rgb) / 14%));
   border-radius: 999px;
   padding: 3px 9px;
@@ -2142,11 +2276,11 @@ button { font-family: inherit; }
   overflow: hidden;
   padding: 3px 8px;
   border: 1px solid rgb(var(--ac-rgb) / 28%);
-  border-radius: 8px;
-  background: rgb(var(--ac-rgb) / 12%);
-  color: var(--ac2);
+  border-radius: 999px;
+  background: rgb(var(--ac-rgb) / 10%);
+  color: #a9cfff;
   cursor: pointer;
-  font: 600 10.5px/1.2 var(--font-ui);
+  font: 600 9px/1.2 var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2157,7 +2291,7 @@ button { font-family: inherit; }
   color: var(--tx);
 }
 
-.orch-pill.quiet { border-color: var(--warn); color: var(--warn); background: rgb(242 179 79 / 13%); }
+.orch-pill.quiet { border-color: #d69a37; color: #f1bd62; background: rgba(214, 154, 55, 0.13); }
 
 .orch-overview {
   flex: 1;
@@ -2216,28 +2350,30 @@ button { font-family: inherit; }
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  padding: 3px 7px;
-  border-radius: 7px;
-  font: 600 11.5px/1 var(--font-ui);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font: 600 9.5px var(--font-ui);
+  letter-spacing: 0.04em;
   white-space: nowrap;
 }
 .cache-chip.cache-warm {
   color: var(--live);
-  background: #6fd39d24;
+  background: rgba(74, 222, 128, 0.09);
 }
 .cache-chip.cache-expired {
-  color: var(--sub);
-  background: #ffffff14;
+  color: #8fa3bd;
+  background: rgba(143, 163, 189, 0.12);
 }
 
 .ro-flag {
   flex: 0 0 auto;
-  font: 500 11.5px var(--font-ui);
+  font: 600 9px var(--font-ui);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--sub);
-  border: 1px solid var(--frame-line);
-  border-radius: 9px;
-  background: var(--frame);
-  padding: 2px 8px;
+  border: 1px solid var(--ln);
+  border-radius: 999px;
+  padding: 3px 8px;
 }
 
 /* Model chip */
@@ -2271,7 +2407,7 @@ button { font-family: inherit; }
   font: 500 10.5px var(--font-ui);
   color: var(--sub);
 }
-.terminal-provider-note { position: absolute; z-index: 2; top: 8px; left: 50%; transform: translateX(-50%); padding: 4px 10px; border: 1px solid var(--frame-line); border-radius: 999px; background: var(--raised); color: var(--sub); font: 11.5px var(--font-ui); }
+.terminal-provider-note { position: absolute; z-index: 2; top: 8px; left: 50%; transform: translateX(-50%); padding: 4px 9px; border: 1px solid var(--ln2); border-radius: 999px; background: rgba(14, 14, 18, .88); color: var(--muted); font: 10px var(--font-mono); }
 
 /* Context gauge donut */
 .gauge {
@@ -2287,7 +2423,7 @@ button { font-family: inherit; }
   width: 17px;
   height: 17px;
   border-radius: 50%;
-  background: #0a0c12;
+  background: #101216;
   display: grid;
   place-items: center;
   font: 700 7.5px var(--font-mono);
@@ -2307,6 +2443,7 @@ button { font-family: inherit; }
 .gauge.gauge-tokens > span {
   color: var(--sub);
   font-size: 6.5px;
+  letter-spacing: 0;
   width: auto;
   min-width: 17px;
   padding: 0 5px;
@@ -2316,9 +2453,11 @@ button { font-family: inherit; }
 /* Account pill */
 .apill {
   flex: 0 0 auto;
-  font: 700 10px var(--font-ui);
+  font: 700 9px var(--font-ui);
+  letter-spacing: 0.05em;
   padding: 3px 7px;
-  border-radius: 6px;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
 }
 
 /* Header icon buttons (tty toggle, close) */
@@ -2332,7 +2471,7 @@ button { font-family: inherit; }
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: var(--sub);
+  color: var(--fnt);
   cursor: pointer;
   font-size: 12px;
 }
@@ -2342,18 +2481,18 @@ button { font-family: inherit; }
 .wh .ico.tty { font: 700 8.5px var(--font-mono); }
 
 .wh .ico.tty.on {
-  background: #437ffe33;
-  color: var(--ac2);
+  background: rgb(var(--ac-rgb) / 16%);
+  color: var(--ac);
 }
 
 /* Copy-session-id button: two-letter "id" label reads best in the same small
    mono face as the tty toggle. The .ok state flashes the accent on a copy. */
 .wh .ico.tile-id { font: 700 9px var(--font-mono); }
 .wh .ico.tile-id:hover { color: var(--ac2); background: rgb(var(--ac-rgb) / 16%); }
-.wh .ico.tile-id.ok { color: var(--ac2); background: #437ffe33; }
+.wh .ico.tile-id.ok { color: var(--ac); background: rgb(var(--ac-rgb) / 16%); }
 
 .wh .tile-close { font-size: 15px; }
-.wh .tile-close:hover { color: var(--err-text); }
+.wh .tile-close:hover { color: #ff9c9c; }
 
 /* One click for a sibling session in the same project on the same plan. It
    sits at the FAR side of the control group from the close button, so the
@@ -2370,20 +2509,11 @@ button { font-family: inherit; }
   padding: 15px;
 }
 
-/* Reply blocks sit 14px apart, tool rows 10px; a margin on the prose block is
-   the gap so the two rhythms do not fight. */
 .conv-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
 }
-
-.conv-body > .conv-assistant,
-.conv-body > .conv-user,
-.conv-body > .conv-note,
-.conv-body > .conv-progress,
-.conv-body > .conv-working { margin-top: 4px; }
-.conv-body > :first-child { margin-top: 0; }
 
 .conv-empty {
   margin: auto;
@@ -2401,8 +2531,8 @@ button { font-family: inherit; }
   border: 1px solid var(--ln2);
   border-radius: 999px;
   background: rgba(255, 255, 255, .04);
-  color: var(--sub);
-  font: 500 12px var(--font-ui);
+  color: var(--muted);
+  font: 11px var(--font-mono);
   cursor: pointer;
 }
 
@@ -2420,7 +2550,8 @@ button { font-family: inherit; }
   gap: 10px;
   max-width: 90%;
   color: var(--fnt);
-  font-size: 11.5px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
   text-align: center;
 }
 
@@ -2454,8 +2585,8 @@ button { font-family: inherit; }
   align-self: flex-start;
   max-width: 85%;
   color: var(--sub);
-  font-size: 12.5px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -2463,14 +2594,14 @@ button { font-family: inherit; }
 .conv-user {
   align-self: flex-end;
   max-width: 85%;
-  background: #101b38e6;
-  border: 1px solid #8db2ff40;
-  border-radius: 16px 16px 5px 16px;
-  box-shadow: var(--frame-top);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 15px 15px 5px 15px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   padding: 10px 13px;
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 1.5;
-  color: #e4e5ec;
+  color: var(--tx);
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
@@ -2487,7 +2618,7 @@ button { font-family: inherit; }
 
 /* The live work meter beside a working window's run state. */
 .work-meter {
-  font: 500 11.5px var(--font-ui);
+  font: 500 10px var(--font-mono);
   color: var(--sub);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -2498,13 +2629,13 @@ button { font-family: inherit; }
    takes it, the edge is solid again and a long wait is noted in the quiet tone. */
 .conv-user.queued-waiting {
   border-style: dashed;
-  border-color: #f2b34f80;
+  border-color: rgba(212, 165, 55, 0.5);
 }
 .conv-queue-state {
   align-self: flex-end;
   margin-top: -4px;
   padding-right: 4px;
-  font-size: 11.5px;
+  font-size: 10.5px;
   line-height: 1.4;
   color: var(--fnt);
 }
@@ -2516,23 +2647,20 @@ button { font-family: inherit; }
    edge, and names its sender in the accent colour before the text. */
 .conv-user.peer {
   align-self: flex-start;
-  max-width: 90%;
-  padding: 11px 13px;
-  border-radius: 14px;
-  background: #0e1830e6;
-  border-color: #8db2ff40;
-  font-size: 12.5px;
+  border-radius: 15px 15px 15px 5px;
+  background: rgb(var(--ac-rgb) / 7%);
+  border-color: rgb(var(--ac-rgb) / 35%);
 }
 .conv-user.peer.queued-waiting {
   border-style: dashed;
-  border-color: #f2b34f80;
+  border-color: rgba(212, 165, 55, 0.5);
 }
 .conv-peer-from {
   display: block;
   margin-bottom: 4px;
-  font-size: 12.5px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--ac2);
+  color: var(--accent);
 }
 .conv-queue-state.peer,
 .conv-turn-meta.peer {
@@ -2543,7 +2671,7 @@ button { font-family: inherit; }
 
 /* The header's count of messages waiting in Claude's queue. */
 .queue-chip {
-  font: 500 11.5px var(--font-ui);
+  font: 500 10px var(--font-mono);
   color: var(--warn);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -2553,9 +2681,9 @@ button { font-family: inherit; }
 /* What a task spent (output tokens + elapsed), tucked under its prompt. */
 .conv-turn-meta {
   align-self: flex-end;
-  margin-top: -2px;
+  margin-top: -4px;
   padding-right: 4px;
-  font: 400 11.5px var(--font-ui);
+  font: 500 10.5px var(--font-mono);
   color: var(--fnt);
   font-variant-numeric: tabular-nums;
 }
@@ -2594,7 +2722,7 @@ button { font-family: inherit; }
   height: auto;
   object-fit: contain;
   border-radius: 10px;
-  border: 1px solid var(--frame-line);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(0, 0, 0, 0.25);
 }
 
@@ -2620,9 +2748,9 @@ button { font-family: inherit; }
 
 .conv-assistant {
   max-width: 92%;
-  font-size: 13px;
-  line-height: 1.55;
-  color: #e4e5ec;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--tx);
   overflow-wrap: break-word;
 }
 
@@ -2644,20 +2772,19 @@ button { font-family: inherit; }
 
 .conv-assistant code,
 .conv-user code {
-  font: 500 11.5px var(--font-mono);
+  font: 500 11px var(--font-mono);
   background: rgba(255, 255, 255, 0.07);
-  border-radius: 5px;
+  border-radius: 4px;
   padding: 1px 4px;
 }
 
 .md-code {
   margin: 0 0 8px;
   padding: 10px 12px;
-  border: 1px solid var(--frame-line);
-  border-radius: 12px;
-  background: #050709e0;
-  box-shadow: var(--frame-top);
-  font: 500 11.5px var(--font-mono);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+  font: 500 11px var(--font-mono);
   line-height: 1.6;
   overflow-x: auto;
   white-space: pre;
@@ -2680,11 +2807,12 @@ button { font-family: inherit; }
   right: 6px;
   z-index: 1;
   padding: 3px 9px;
-  border: 1px solid var(--frame-line);
-  border-radius: 7px;
-  background: var(--frame);
-  color: var(--sub);
-  font: 500 11px var(--font-ui);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(18, 22, 30, 0.9);
+  color: rgba(255, 255, 255, 0.62);
+  font: 500 10px var(--font-mono);
+  letter-spacing: 0.02em;
   cursor: pointer;
   opacity: 0.85;
   transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
@@ -2697,22 +2825,21 @@ button { font-family: inherit; }
 }
 
 .md-code-copy:hover {
-  color: var(--tx);
-  border-color: var(--ln2);
+  color: rgba(255, 255, 255, 0.92);
+  border-color: rgba(255, 255, 255, 0.26);
 }
 
 .md-code-copy.is-copied {
   opacity: 1;
-  color: var(--live);
-  border-color: #6fd39d73;
+  color: #7ee2a8;
+  border-color: rgba(126, 226, 168, 0.45);
 }
 
 /* Tool-action block */
 .conv-act {
-  border: 1px solid var(--frame-line);
+  border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 12px;
-  background: var(--frame);
-  box-shadow: var(--frame-top);
+  background: rgba(10, 13, 20, 0.4);
   overflow: hidden;
   flex: 0 0 auto;
 }
@@ -2720,38 +2847,29 @@ button { font-family: inherit; }
 .conv-act-row {
   display: flex;
   align-items: center;
-  gap: 9px;
-  min-height: 34px;
-  padding: 5px 12px;
+  gap: 10px;
+  padding: 9px 12px;
   min-width: 0;
-  font-size: 12.5px;
 }
 
 /* A check for done, a ring for running, a cross for failed: state is shape
    and colour, never motion. */
 .conv-act-k {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 14px;
-  border-radius: 0;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 3px;
   background: var(--live);
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
-.conv-act-k.run {
-  background: var(--ac2);
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='5.2' stroke-dasharray='24 9'/%3E%3C/svg%3E") center / contain no-repeat;
-}
+.conv-act-k.run { background: var(--ac); }
 
-.conv-act-k.err {
-  background: var(--err);
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M4 4l8 8M12 4l-8 8'/%3E%3C/svg%3E") center / contain no-repeat;
-}
+.conv-act-k.err { background: var(--err); }
 
 .conv-act-verb {
   flex: 0 0 auto;
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 /* A described command: Claude's sentence leads and the command follows it.
@@ -2798,19 +2916,30 @@ button { font-family: inherit; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 500 11.5px var(--font-mono);
+  font: 500 11px var(--font-mono);
   color: var(--sub);
+  background: rgba(255, 255, 255, 0.07);
+  padding: 2px 7px;
+  border-radius: 6px;
 }
 
 .conv-act-pill {
   margin-left: auto;
   flex: 0 0 auto;
-  font: 500 11.5px var(--font-ui);
+  font: 600 10.5px var(--font-ui);
+  padding: 3px 9px;
+  border-radius: 7px;
 }
 
-.conv-act-pill.tone-ok { color: var(--live); }
+.conv-act-pill.tone-ok {
+  background: linear-gradient(90deg, rgba(94, 201, 138, 0.2), rgba(116, 198, 182, 0.16));
+  color: #8fe6c4;
+}
 
-.conv-act-pill.tone-err { color: var(--err-text); }
+.conv-act-pill.tone-err {
+  background: rgba(217, 138, 138, 0.16);
+  color: #ffb3b3;
+}
 
 .conv-act-cv {
   margin-left: auto;
@@ -2819,8 +2948,8 @@ button { font-family: inherit; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--sub);
-  font-size: 11.5px;
+  color: var(--fnt);
+  font-size: 11px;
 }
 
 /* A sub-agent's progress under its Delegated row (subagentLabel). */
@@ -2837,17 +2966,17 @@ button { font-family: inherit; }
 .conv-act-sub.run { color: var(--sub); }
 
 .conv-act-code {
-  border-top: 1px solid var(--frame-line);
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
   padding: 9px 12px;
-  background: #050709e0;
-  font: 500 11.5px var(--font-mono);
+  background: rgba(0, 0, 0, 0.35);
+  font: 500 11px var(--font-mono);
   line-height: 1.65;
   overflow-x: auto;
 }
 
 .conv-act-code > div { white-space: pre; }
 .diff-add { color: var(--live); }
-.diff-del { color: var(--err-text); }
+.diff-del { color: var(--err); }
 .diff-ctx { color: var(--fnt); }
 
 /* Collapsed tool-action groups (consecutive runs between prose) */
@@ -2861,23 +2990,21 @@ button { font-family: inherit; }
 .conv-act-group-toggle {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   width: 100%;
-  min-height: 34px;
-  padding: 5px 12px;
-  border: 1px solid var(--frame-line);
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 12px;
-  background: var(--frame);
-  box-shadow: var(--frame-top);
+  background: rgba(10, 13, 20, 0.4);
   color: var(--sub);
-  font: 500 12.5px var(--font-ui);
+  font: 500 12px var(--font-ui);
   text-align: left;
   cursor: pointer;
 }
 
 .conv-act-group-toggle:hover {
-  border-color: var(--ln2);
-  background: #10131acc;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(14, 18, 28, 0.55);
   color: var(--tx);
 }
 
@@ -2922,8 +3049,11 @@ button { font-family: inherit; }
 
 .conv-act-group-count {
   flex: 0 0 auto;
-  font: 500 11.5px var(--font-ui);
-  color: var(--sub);
+  font: 600 10.5px var(--font-mono);
+  color: var(--fnt);
+  background: rgba(255, 255, 255, 0.07);
+  padding: 2px 7px;
+  border-radius: 6px;
 }
 
 .conv-act-group-items {
@@ -2962,7 +3092,7 @@ button { font-family: inherit; }
   position: absolute;
   inset: 0;
   padding: 8px 4px 8px 10px;
-  background: #04050ad9;
+  background: rgba(4, 8, 13, 0.72);
   overflow: hidden;
 }
 
@@ -2980,11 +3110,11 @@ button { font-family: inherit; }
   top: 8px;
   z-index: 6;
   padding: 3px 9px;
-  border-radius: 9px;
+  border-radius: 999px;
   border: 1px solid rgb(var(--team-rgb) / 40%);
-  background: var(--frame);
+  background: rgba(10, 13, 20, 0.8);
   color: var(--team);
-  font-size: 11.5px;
+  font-size: 10.5px;
 }
 
 .terminal-menu-backdrop,
@@ -3354,16 +3484,18 @@ button { font-family: inherit; }
   flex-direction: column;
   gap: 9px;
   margin: 2px 12px 10px;
-  padding: 14px;
-  border: 1px solid #8db2ff4d;
-  border-radius: 18px;
-  background: rgb(var(--ac-rgb) / 8%);
-  box-shadow: var(--frame-top);
+  padding: 11px 13px;
+  border: 1px solid rgb(var(--ac-rgb) / 34%);
+  border-radius: 14px;
+  background:
+    linear-gradient(rgb(var(--ac-rgb) / 8%), rgb(var(--ac-rgb) / 4%)),
+    var(--glass-win);
+  box-shadow: 0 -10px 24px -18px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 /* The card takes keyboard focus so the keys work without a click; the ring
    shows only for keyboard focus, never after a mouse click. */
 .ask:focus { outline: none; }
-.ask:focus-visible { outline: 2px solid var(--ac2); outline-offset: 2px; }
+.ask:focus-visible { outline: 2px solid rgb(var(--ac-rgb) / 70%); outline-offset: 2px; }
 .ask.busy { opacity: 0.85; }
 
 .ask-head { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
@@ -3376,7 +3508,9 @@ button { font-family: inherit; }
 }
 .ask-eyebrow {
   color: var(--sub);
-  font: 600 11.5px/1 var(--font-ui);
+  font: 600 9.5px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
 }
 .ask-count {
   padding: 2px 7px;
@@ -3384,9 +3518,10 @@ button { font-family: inherit; }
   background: rgb(var(--ac-rgb) / 14%);
   color: var(--ac);
   font: 600 9.5px/1.4 var(--font-mono);
+  letter-spacing: 0.04em;
   white-space: nowrap;
 }
-.ask-count-warn { background: rgb(242 179 79 / 14%); color: var(--warn); }
+.ask-count-warn { background: rgba(212, 165, 55, 0.14); color: var(--warn); }
 .ask-dismiss {
   margin-left: auto;
   padding: 3px 9px;
@@ -3395,10 +3530,12 @@ button { font-family: inherit; }
   background: transparent;
   color: var(--fnt);
   cursor: pointer;
-  font: 600 11.5px/1 var(--font-ui);
+  font: 600 10px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   transition: background 0.14s ease, color 0.14s ease;
 }
-.ask-dismiss:hover:not(:disabled) { background: rgb(242 117 109 / 14%); color: var(--err-text); }
+.ask-dismiss:hover:not(:disabled) { background: rgba(255, 106, 106, 0.14); color: #ff9b9b; }
 .ask-dismiss:disabled { cursor: default; opacity: 0.5; }
 
 /* The batch stepper: one chip per question, its number or a check, clickable. */
@@ -3415,12 +3552,12 @@ button { font-family: inherit; }
   gap: 6px;
   max-width: 100%;
   padding: 3px 9px 3px 5px;
-  border: 1px solid #ffffff12;
+  border: 1px solid var(--ln);
   border-radius: 999px;
-  background: #ffffff09;
+  background: rgba(255, 255, 255, 0.035);
   color: var(--sub);
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: 10.5px;
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3438,14 +3575,14 @@ button { font-family: inherit; }
   font: 600 9px/1 var(--font-mono);
 }
 .ask-step:hover:not(:disabled) { border-color: rgb(var(--ac-rgb) / 45%); color: var(--tx); }
-.ask-step.cur { border-color: #8db2ff80; background: #437ffe33; color: var(--tx); }
+.ask-step.cur { border-color: rgb(var(--ac-rgb) / 60%); background: rgb(var(--ac-rgb) / 14%); color: var(--tx); }
 /* The specificity trap the hover guard exists for: the bare hover (0,3,0)
    outranks the state class (0,2,0), so the current step lost its edge exactly
    when pointed at. */
-.ask-step.cur:hover:not(:disabled) { border-color: #8db2ffb3; }
-.ask-step.cur .ask-step-mark { background: var(--ac2); color: var(--bg); }
-.ask-step.done .ask-step-mark { background: rgb(111 211 157 / 28%); color: var(--live); }
-.ask-step.done.cur .ask-step-mark { background: var(--live); color: var(--bg); }
+.ask-step.cur:hover:not(:disabled) { border-color: rgb(var(--ac-rgb) / 70%); }
+.ask-step.cur .ask-step-mark { background: var(--ac); color: #06121f; }
+.ask-step.done .ask-step-mark { background: rgba(36, 178, 124, 0.28); color: var(--live); }
+.ask-step.done.cur .ask-step-mark { background: var(--live); color: #06121f; }
 .ask-step:disabled { cursor: default; opacity: 0.6; }
 
 /* The body scrolls INSIDE the card, visibly. */
@@ -3470,14 +3607,16 @@ button { font-family: inherit; }
 .ask-body::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.32); background-clip: content-box; }
 
 /* One question. In a staged sheet each is a section and the active one is lit. */
-.ask-q { display: flex; flex-direction: column; gap: 6px; border-radius: 12px; }
+.ask-q { display: flex; flex-direction: column; gap: 6px; border-radius: 10px; }
 .ask-staged .ask-q { padding: 8px 9px; border: 1px solid transparent; transition: border-color 0.14s ease, background 0.14s ease, opacity 0.14s ease; }
-.ask-staged .ask-q.cur { border-color: #8db2ff40; background: var(--frame); box-shadow: var(--frame-top); }
+.ask-staged .ask-q.cur { border-color: rgb(var(--ac-rgb) / 28%); background: rgba(255, 255, 255, 0.025); }
 .ask-staged .ask-q:not(.cur) { opacity: 0.78; }
 .ask-staged .ask-q:not(.cur):hover { opacity: 1; }
 .ask-q-head {
   color: var(--ac2);
-  font: 600 11.5px/1 var(--font-ui);
+  font: 600 9.5px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .ask-q-text {
   margin: 0;
@@ -3493,23 +3632,23 @@ button { font-family: inherit; }
   align-items: flex-start;
   gap: 10px;
   width: 100%;
-  padding: 9px 11px;
-  border: 1px solid #ffffff12;
-  border-radius: 12px;
-  background: #ffffff09;
+  padding: 7px 10px;
+  border: 1px solid var(--ln);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
   color: var(--tx);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12.5px;
   text-align: left;
   transition: background 0.14s ease, border-color 0.14s ease, transform 0.06s ease;
 }
 .ask-row:hover:not(:disabled),
-.ask-row.hl { background: #437ffe26; border-color: #8db2ff66; }
+.ask-row.hl { background: rgb(var(--ac-rgb) / 12%); border-color: rgb(var(--ac-rgb) / 50%); }
 .ask-row:active:not(:disabled) { transform: translateY(1px); }
 .ask-row:disabled { cursor: default; opacity: 0.5; }
-.ask-row.picked { border-color: #8db2ff80; background: #437ffe33; }
+.ask-row.picked { border-color: rgb(var(--ac-rgb) / 62%); background: rgb(var(--ac-rgb) / 16%); }
 /* A picked row stays picked under the cursor (same trap as .ask-step.cur). */
-.ask-row.picked:hover:not(:disabled) { border-color: #8db2ffb3; background: #437ffe40; }
+.ask-row.picked:hover:not(:disabled) { border-color: rgb(var(--ac-rgb) / 72%); background: rgb(var(--ac-rgb) / 20%); }
 /* An option the pty is not currently drawing: still a real button, the
    delivery walks the terminal highlight to it and confirms before choosing. */
 .ask-row.off { border-style: dashed; }
@@ -3521,12 +3660,12 @@ button { font-family: inherit; }
   height: 20px;
   margin-top: 1px;
   border-radius: 6px;
-  background: #04050a;
+  background: rgba(0, 0, 0, 0.32);
   color: var(--sub);
-  font: 600 11.5px/1 var(--font-mono);
+  font: 600 10.5px/1 var(--font-mono);
 }
-.ask-row.hl .ask-key { background: var(--ac2); color: var(--bg); }
-.ask-row.picked .ask-key { background: var(--ac2); color: var(--bg); }
+.ask-row.hl .ask-key { background: rgb(var(--ac-rgb) / 80%); color: #06121f; }
+.ask-row.picked .ask-key { background: var(--ac); color: #06121f; }
 .ask-body-col { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding-top: 1px; }
 .ask-label { min-width: 0; font-weight: 500; line-height: 1.35; }
 /* Claude's own "(Recommended)" marker, lifted out of the label. */
@@ -3534,10 +3673,12 @@ button { font-family: inherit; }
   display: inline-block;
   margin-left: 7px;
   padding: 1px 6px;
+  border: 1px solid rgb(var(--ac-rgb) / 45%);
   border-radius: 999px;
-  background: rgb(var(--ac-rgb) / 16%);
-  color: var(--ac2);
-  font: 600 11.5px/1.5 var(--font-ui);
+  color: var(--ac);
+  font: 600 9px/1.5 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   vertical-align: 1px;
   white-space: nowrap;
 }
@@ -3553,16 +3694,16 @@ button { font-family: inherit; }
   align-items: center;
   gap: 8px;
   padding: 4px 6px 4px 10px;
-  border: 1px solid #ffffff12;
-  border-radius: 12px;
-  background: var(--well);
+  border: 1px solid var(--ln);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
   transition: border-color 0.14s ease, background 0.14s ease;
 }
 .ask-text.hl,
-.ask-text:focus-within { border-color: #8db2ff66; background: var(--well); }
-.ask-text.picked { border-color: #8db2ff80; }
+.ask-text:focus-within { border-color: rgb(var(--ac-rgb) / 50%); background: rgb(var(--ac-rgb) / 8%); }
+.ask-text.picked { border-color: rgb(var(--ac-rgb) / 62%); }
 .ask-text.picked .ask-key,
-.ask-text:focus-within .ask-key { background: var(--ac2); color: var(--bg); }
+.ask-text:focus-within .ask-key { background: var(--ac); color: #06121f; }
 .ask-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -3582,18 +3723,17 @@ button { font-family: inherit; }
   place-items: center;
   width: 28px;
   height: 28px;
-  border: 1px solid var(--btn-rim);
-  border-radius: 9px;
-  background: var(--btn);
-  box-shadow: var(--btn-light);
-  color: var(--on-ac);
+  border: 0;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--ac), #2563ff);
+  color: #fff;
   cursor: pointer;
   font-size: 14px;
   font-weight: 700;
-  transition: background 0.14s ease;
+  transition: filter 0.14s ease, opacity 0.14s ease;
 }
-.ask-send:hover:not(:disabled) { background: var(--btn-hover); }
-.ask-send:disabled { background: #ffffff14; border-color: transparent; box-shadow: none; color: var(--fnt); cursor: default; }
+.ask-send:hover:not(:disabled) { filter: brightness(1.08); }
+.ask-send:disabled { background: rgba(255, 255, 255, 0.08); color: var(--fnt); cursor: default; }
 .ask-notes { display: flex; }
 
 /* One primary action, the quiet ones beside it, the keys said once. */
@@ -3607,41 +3747,42 @@ button { font-family: inherit; }
   border-top: 1px solid var(--ln);
 }
 .ask-primary {
-  padding: 7px 16px;
-  border: 1px solid var(--btn-rim);
-  border-radius: 11px;
-  background: var(--btn);
-  color: var(--on-ac);
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--ac), #2563ff);
+  color: #fff;
   cursor: pointer;
-  font: 600 13px/1.3 var(--font-ui);
-  box-shadow: var(--btn-light);
-  transition: background 0.14s ease;
+  font: 600 12px/1.3 var(--font-ui);
+  letter-spacing: 0.01em;
+  box-shadow: 0 2px 10px -4px rgb(var(--ac-rgb) / 80%);
+  transition: filter 0.14s ease, opacity 0.14s ease;
 }
-.ask-primary:hover:not(:disabled) { background: var(--btn-hover); }
-.ask-primary:disabled { background: #ffffff14; border-color: transparent; color: var(--fnt); cursor: default; box-shadow: none; }
+.ask-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.ask-primary:disabled { background: rgba(255, 255, 255, 0.08); color: var(--fnt); cursor: default; box-shadow: none; }
 .ask-quiet {
-  padding: 6px 12px;
-  border: 1px solid #ffffff3b;
-  border-radius: 11px;
-  background: #ffffff09;
-  color: var(--tx);
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sub);
   cursor: pointer;
   font-size: 11.5px;
   transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
 }
-.ask-quiet:hover:not(:disabled) { background: #ffffff14; }
+.ask-quiet:hover:not(:disabled) { border-color: var(--ln2); color: var(--tx); background: rgba(255, 255, 255, 0.04); }
 .ask-quiet:disabled { cursor: default; opacity: 0.5; }
-.ask-hint { margin-left: auto; color: var(--fnt); font-size: 11.5px; line-height: 1.9; }
+.ask-hint { margin-left: auto; color: var(--fnt); font-size: 10.5px; letter-spacing: 0.01em; line-height: 1.9; }
 .ask-kbd {
   display: inline-block;
   min-width: 14px;
   margin: 0 1px;
   padding: 0 4px;
-  border: 1px solid #ffffff29;
-  border-radius: 5px;
-  background: #ffffff0f;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
   color: var(--sub);
-  font: 600 11px/1.5 var(--font-mono);
+  font: 600 9.5px/1.5 var(--font-mono);
   text-align: center;
 }
 
@@ -3649,9 +3790,9 @@ button { font-family: inherit; }
 .ask-err {
   flex: 0 0 auto;
   padding: 5px 8px;
-  border: 1px solid rgb(242 179 79 / 45%);
-  border-radius: 10px;
-  background: rgb(242 179 79 / 12%);
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: rgba(212, 165, 55, 0.12);
   color: var(--warn);
   font-size: 11.5px;
   line-height: 1.35;
@@ -3666,10 +3807,9 @@ button { font-family: inherit; }
   padding: 7px 9px;
   max-height: 180px;
   overflow: auto;
-  border: 1px solid var(--frame-line);
-  border-radius: 12px;
-  background: #050709e0;
-  box-shadow: var(--frame-top);
+  border: 1px solid var(--ln);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
   color: var(--tx);
   font-family: var(--font-mono);
   font-size: 11px;
@@ -3680,15 +3820,15 @@ button { font-family: inherit; }
 .ask-keys { display: flex; gap: 5px; }
 .ask-keybtn {
   padding: 4px 10px;
-  border: 1px solid #ffffff3b;
-  border-radius: 9px;
-  background: #ffffff09;
+  border: 1px solid var(--ln);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
   color: var(--tx);
   cursor: pointer;
   font-size: 11.5px;
   transition: background 0.14s ease, border-color 0.14s ease;
 }
-.ask-keybtn:hover:not(:disabled) { background: #437ffe33; border-color: #8db2ff80; }
+.ask-keybtn:hover:not(:disabled) { background: rgb(var(--ac-rgb) / 16%); border-color: rgb(var(--ac-rgb) / 50%); }
 .ask-keybtn:disabled { cursor: default; opacity: 0.5; }
 
 /* A built-in LIST dialog (/mcp and kin, 2026-10-24): every row the CLI drew,
@@ -3703,16 +3843,16 @@ button { font-family: inherit; }
   max-height: min(62vh, 620px);
   overflow: auto;
   padding: 4px;
-  border: 1px solid var(--frame-line);
-  border-radius: 12px;
-  background: var(--frame);
-  box-shadow: var(--frame-top);
+  border: 1px solid var(--ln);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.22);
 }
 .ask-list-rows > * { flex: 0 0 auto; }
 .ask-list-h {
   padding: 8px 8px 3px;
   color: var(--sub);
-  font: 600 11.5px/1.3 var(--font-ui);
+  font: 600 9.5px/1.3 var(--font-mono);
+  letter-spacing: 0.06em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3736,11 +3876,11 @@ button { font-family: inherit; }
   font-size: 12px;
   text-align: left;
 }
-.ask-list-row:hover:not(:disabled) { background: #ffffff0f; }
+.ask-list-row:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
 .ask-list-row.sel,
-.ask-list-row.sel:hover:not(:disabled) { background: #437ffe33; border-color: #8db2ff80; }
+.ask-list-row.sel:hover:not(:disabled) { background: rgb(var(--ac-rgb) / 16%); border-color: rgb(var(--ac-rgb) / 42%); }
 .ask-list-row:disabled { cursor: default; opacity: 0.6; }
-.ask-list-mark { color: var(--ac2); font-weight: 700; }
+.ask-list-mark { color: var(--ac); font-weight: 700; }
 .ask-list-glyph { color: var(--sub); }
 .ask-list-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ask-list-desc { display: block; overflow: hidden; color: var(--sub); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -3800,24 +3940,26 @@ button { font-family: inherit; }
   margin-left: 8px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgb(111 211 157 / 16%);
+  background: rgba(36, 178, 124, 0.16);
   color: var(--live);
-  font: 600 11.5px/1.5 var(--font-ui);
+  font: 600 9px/1.5 var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   vertical-align: 1px;
 }
 /* The clipped-pane direct keys: the pty is drawing part of this dialog above
    its own viewport, so the terminal highlight can be moved by hand and
    confirmed, which keeps every option reachable without leaving the window. */
 .ask-clipped { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ask-clipped-note { color: var(--fnt); font-size: 11.5px; line-height: 1.4; }
+.ask-clipped-note { color: var(--fnt); font-size: 10.5px; line-height: 1.4; }
 
 /* The batch's review screen: what will be submitted, one line per question. */
 .ask-review { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 .ask-review li { display: flex; align-items: baseline; gap: 8px; color: var(--tx); font-size: 12.5px; }
-.ask-review-head { flex: 0 0 auto; color: var(--sub); font: 600 11.5px/1.6 var(--font-ui); }
+.ask-review-head { flex: 0 0 auto; color: var(--sub); font: 600 9.5px/1.6 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; }
 .ask-review-answer { min-width: 0; font-weight: 500; }
 .ask-review li.missing { color: var(--sub); }
-.ask-check { color: var(--live); font-size: 11.5px; }
+.ask-check { color: var(--live); font-size: 10px; }
 .ask-review li.missing .ask-check { color: var(--warn); }
 
 .compose-stack {
@@ -5702,6 +5844,7 @@ button { font-family: inherit; }
   flex: 0 0 auto;
   color: rgba(255, 255, 255, 0.35);
   font-size: 11px;
+  letter-spacing: -1px;
   cursor: grab;
   user-select: none;
 }
@@ -5873,9 +6016,11 @@ button { font-family: inherit; }
   gap: 8px;
   margin: 8px 12px 0;
   padding: 6px 11px;
-  border: 1px solid #8db2ff40;
-  border-radius: 12px;
-  background: rgb(var(--ac-rgb) / 8%);
+  border: 1px solid rgb(var(--ac-rgb) / 30%);
+  border-radius: 11px;
+  background:
+    linear-gradient(rgb(var(--ac-rgb) / 8%), rgb(var(--ac-rgb) / 4%)),
+    var(--glass-win);
   color: var(--fnt);
   font: 500 12px/1.3 var(--font-ui);
   text-align: left;
@@ -5883,10 +6028,10 @@ button { font-family: inherit; }
   min-width: 0;
 }
 
-.wf-strip.killed { border-color: rgb(242 117 109 / 40%); }
-.wf-strip.failed { border-color: rgb(242 117 109 / 40%); }
+.wf-strip.killed { border-color: rgb(255 120 90 / 35%); }
+.wf-strip.failed { border-color: rgb(255 120 90 / 35%); }
 
-.wf-strip-glyph { flex: 0 0 auto; font-size: 11.5px; opacity: 0.9; }
+.wf-strip-glyph { flex: 0 0 auto; font-size: 10px; opacity: 0.9; }
 .wf-strip-glyph.running { color: var(--live); }
 .wf-strip-glyph.completed { color: var(--live); }
 .wf-strip-glyph.killed, .wf-strip-glyph.failed { color: var(--err); }
@@ -5901,7 +6046,7 @@ button { font-family: inherit; }
 
 .wf-strip-facts { flex: 1 1 auto; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wf-strip-more { flex: 0 0 auto; color: var(--muted); }
-.wf-strip-open { flex: 0 0 auto; color: var(--ac2); font-size: 11.5px; }
+.wf-strip-open { flex: 0 0 auto; color: var(--accent); font-size: 11px; }
 
 .wf-inspector {
   flex: 0 1 auto;
@@ -5912,10 +6057,10 @@ button { font-family: inherit; }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  border: 1px solid var(--frame-line);
-  border-radius: 14px;
-  background: var(--frame);
-  box-shadow: var(--frame-top);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--glass-win);
+  box-shadow: 0 -10px 24px -18px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 
 .wf-run { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
@@ -5926,13 +6071,15 @@ button { font-family: inherit; }
   flex: 0 0 auto;
   padding: 1px 8px;
   border-radius: 999px;
-  font: 600 11.5px/1.6 var(--font-ui);
+  font: 600 10px/1.6 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   border: 1px solid var(--border-strong);
   color: var(--muted);
 }
-.wf-pill.running { color: var(--live); border-color: rgb(111 211 157 / 35%); }
+.wf-pill.running { color: var(--live); border-color: rgb(120 255 170 / 30%); }
 .wf-pill.completed { color: var(--fnt); }
-.wf-pill.killed, .wf-pill.failed { color: var(--err-text); border-color: rgb(242 117 109 / 45%); }
+.wf-pill.killed, .wf-pill.failed { color: var(--err); border-color: rgb(255 120 90 / 40%); }
 
 .wf-run-name { font: 600 12.5px/1.3 var(--font-ui); color: var(--fnt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wf-run-count, .wf-run-totals { font: 500 11px/1.3 var(--font-ui); color: var(--muted); }
@@ -5946,7 +6093,7 @@ button { font-family: inherit; }
 }
 
 .wf-phases { font: 500 11px/1.3 var(--font-ui); color: var(--muted); }
-.wf-phase-title { font: 600 11.5px/1.4 var(--font-ui);   color: var(--muted); margin-top: 2px; }
+.wf-phase-title { font: 600 10.5px/1.4 var(--font-ui); letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); margin-top: 2px; }
 
 .wf-agents, .wf-phase-group { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 
@@ -9995,8 +10142,8 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .md-table-wrap {
   overflow-x: auto;
   margin: 2px 0 10px;
-  border: 1px solid var(--frame-line);
-  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
 }
 
 .md-table {
@@ -10204,12 +10351,12 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
    pointer, free text, a note that never blocks, a skip, and a Submit that is never dead. */
 .askf { gap: 8px; }
 .askf-head { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
-.askf-eyebrow { font: 600 13px var(--font-ui); color: var(--tx); }
-.askf-count { font: 500 11.5px var(--font-ui); color: var(--fnt); }
+.askf-eyebrow { font: 600 10px var(--font-ui); letter-spacing: 0.14em; text-transform: uppercase; color: var(--sub); }
+.askf-count { font: 500 10px var(--font-mono); color: var(--fnt); }
 .askf-progress { display: inline-flex; gap: 4px; margin-left: auto; }
-.askf-dot { width: 7px; height: 7px; border-radius: 50%; background: #ffffff24; }
-.askf-dot.cur { box-shadow: 0 0 0 2px #8db2ff66; }
-.askf-dot.on { background: var(--ac2); }
+.askf-dot { width: 7px; height: 7px; border-radius: 50%; background: rgba(255, 255, 255, 0.14); }
+.askf-dot.cur { box-shadow: 0 0 0 2px rgb(var(--ac-rgb) / 35%); }
+.askf-dot.on { background: var(--ac); }
 .askf-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -10228,20 +10375,19 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
   display: flex;
   flex-direction: column;
   gap: 7px;
-  padding: 12px 12px 10px;
-  border: 1px solid var(--frame-line);
-  border-radius: 14px;
-  background: var(--frame);
-  box-shadow: var(--frame-top);
+  padding: 9px 10px 8px;
+  border: 1px solid var(--ln);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
 }
 .askf-q.focused { border-color: #8db2ff66; }
 .askf-q.missing.focused { border-color: #8db2ff66; }
 .askf-q.skipped { opacity: 0.72; }
 .askf-q-head { display: flex; align-items: center; gap: 8px; }
-.askf-chip { font: 600 12px var(--font-ui); color: var(--ac2); padding: 1px 8px; border-radius: 999px; background: rgb(var(--ac-rgb) / 16%); }
-.askf-q-n, .askf-q-multi, .askf-q-state { font: 500 12px var(--font-ui); color: var(--sub); }
+.askf-chip { font: 600 10px var(--font-ui); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ac); padding: 1px 7px; border: 1px solid rgb(var(--ac-rgb) / 40%); border-radius: 999px; }
+.askf-q-n, .askf-q-multi, .askf-q-state { font: 500 10px var(--font-mono); color: var(--fnt); }
 .askf-q-state { color: var(--warn); }
-.askf-q-text { margin: 0; font: 600 13.5px/1.4 var(--font-ui); color: var(--tx); }
+.askf-q-text { margin: 0; font: 500 13px/1.4 var(--font-ui); color: var(--tx); }
 .askf-opts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .askf-opts.with-preview { grid-template-columns: minmax(0, 1fr) minmax(200px, 44%); }
 .askf-opt-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -10250,35 +10396,35 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
   align-items: flex-start;
   gap: 9px;
   width: 100%;
-  padding: 9px 11px;
-  border: 1px solid #ffffff12;
-  border-radius: 12px;
-  background: #ffffff09;
+  padding: 6px 9px;
+  border: 1px solid var(--ln);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
   color: var(--tx);
   text-align: left;
   cursor: pointer;
-  font: 500 13px/1.35 var(--font-ui);
+  font: 500 12px/1.35 var(--font-ui);
 }
-.askf-opt:hover, .askf-opt:focus-visible { background: #437ffe26; border-color: #8db2ff66; outline: none; }
-.askf-opt.on { background: #437ffe33; border-color: #8db2ff80; }
-.askf-key { flex: 0 0 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; background: var(--well); font: 600 11.5px var(--font-ui); color: var(--sub); }
-.askf-opt.on .askf-key { background: var(--ac2); color: var(--bg); }
+.askf-opt:hover, .askf-opt:focus-visible { background: rgb(var(--ac-rgb) / 12%); border-color: rgb(var(--ac-rgb) / 50%); outline: none; }
+.askf-opt.on { background: rgb(var(--ac-rgb) / 18%); border-color: var(--ac); }
+.askf-key { flex: 0 0 18px; height: 18px; display: grid; place-items: center; border-radius: 5px; background: rgba(255, 255, 255, 0.08); font: 600 10px var(--font-mono); color: var(--sub); }
+.askf-opt.on .askf-key { background: var(--ac); color: #fff; }
 .askf-opt-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
 .askf-opt-label { font-weight: 600; }
-.askf-opt-desc { font: 400 12px/1.35 var(--font-ui); color: var(--sub); }
-.askf-opt-has-preview { flex: 0 0 auto; color: var(--fnt); font-size: 12px; }
+.askf-opt-desc { font: 400 11px/1.35 var(--font-ui); color: var(--sub); }
+.askf-opt-has-preview { flex: 0 0 auto; color: var(--fnt); font-size: 11px; }
 .askf-other { display: flex; align-items: center; gap: 9px; padding: 0 0 0 9px; }
 .askf-text, .askf-note {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 7px 10px;
-  border: 1px solid var(--frame-line);
-  border-radius: 12px;
-  background: var(--well);
+  padding: 6px 9px;
+  border: 1px solid var(--ln);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
   color: var(--tx);
-  font: 500 12.5px/1.35 var(--font-ui);
+  font: 500 12px/1.35 var(--font-ui);
 }
-.askf-text:focus, .askf-note:focus { outline: none; border-color: #8db2ff80; }
+.askf-text:focus, .askf-note:focus { outline: none; border-color: rgb(var(--ac-rgb) / 60%); }
 .askf-note { width: 100%; resize: vertical; box-sizing: border-box; }
 .askf-preview {
   margin: 0;
@@ -10286,43 +10432,43 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--frame-line);
-  border-radius: 12px;
-  background: #050709e0;
+  padding: 7px 9px;
+  border: 1px solid var(--ln);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
 }
-.askf-preview figcaption { font: 600 12px var(--font-ui); color: var(--sub); }
-.askf-preview pre { margin: 0; overflow: auto; font: 500 11.5px/1.35 var(--font-mono); color: var(--tx); white-space: pre; }
+.askf-preview figcaption { font: 600 10px var(--font-ui); letter-spacing: 0.06em; text-transform: uppercase; color: var(--sub); }
+.askf-preview pre { margin: 0; overflow: auto; font: 500 10.5px/1.3 var(--font-mono); color: var(--tx); white-space: pre; }
 .askf-q-foot { display: flex; align-items: center; gap: 10px; }
 .askf-quiet {
-  padding: 4px 9px;
+  padding: 3px 8px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 6px;
   background: transparent;
   color: var(--sub);
   cursor: pointer;
-  font: 500 12px var(--font-ui);
+  font: 500 11px var(--font-ui);
 }
-.askf-quiet:hover:not(:disabled) { color: var(--tx); border-color: #ffffff3b; }
+.askf-quiet:hover:not(:disabled) { color: var(--tx); border-color: var(--ln); }
 .askf-quiet.on,
-.askf-quiet.on:hover:not(:disabled) { color: var(--ac2); }
+.askf-quiet.on:hover:not(:disabled) { color: var(--ac); }
 .askf-foot { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; flex-wrap: wrap; }
 .askf-primary {
-  padding: 7px 16px;
-  border: 1px solid var(--btn-rim);
-  border-radius: 11px;
-  background: var(--btn);
-  color: var(--on-ac);
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--ac), #2563ff);
+  color: #fff;
   cursor: pointer;
-  font: 600 13px/1.3 var(--font-ui);
-  box-shadow: var(--btn-light);
+  font: 600 12px/1.3 var(--font-ui);
+  box-shadow: 0 2px 10px -4px rgb(var(--ac-rgb) / 80%);
 }
 .askf-primary:hover:not(:disabled) { background: var(--btn-hover); }
 .askf-primary.partial,
 .askf-primary.partial:hover:not(:disabled) { background: #ffffff14; border-color: #ffffff3b; color: var(--tx); box-shadow: none; }
 .askf-primary:disabled { opacity: 0.6; cursor: default; }
-.askf-hints { margin-left: auto; font: 500 11.5px var(--font-ui); color: var(--fnt); }
-.askf-err { flex: 1 1 100%; font: 500 12px var(--font-ui); color: var(--err-text); }
+.askf-hints { margin-left: auto; font: 500 10px var(--font-mono); color: var(--fnt); }
+.askf-err { flex: 1 1 100%; font: 500 11px var(--font-ui); color: var(--err); }
 @container (max-width: 520px) { .askf-opts.with-preview { grid-template-columns: minmax(0, 1fr); } }
 
 /* The commit meter as a title-bar chip (2026-09-05). Same rule as the plan
