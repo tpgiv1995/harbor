@@ -32,6 +32,9 @@ function windowsPtyCompat() {
 // session's empty composer draws a dim `Try "…"` hint the same way, which is a
 // placeholder, not a prediction, so it is dropped. Measured against CLI 2.1.289.
 const DIVIDER_RE = /^\s*─{8,}\s*$/;
+// A named session draws its name in the composer's TOP edge (CLI 2.1.316,
+// "───… vm-template-build ─"); see shared/divider.cjs isComposerEdge.
+const NAMED_TOP_EDGE_RE = /^\s*─{8,} \S(?:.*\S)? ─+\s*$/;
 // The glyph is followed by a NO-BREAK SPACE (U+00A0) in the real CLI; JS \s covers both.
 const COMPOSER_RE = /^(\s*)❯\s/;
 const PLACEHOLDER_RE = /^Try ".*"$/;
@@ -45,7 +48,8 @@ function composerSuggestion(terminal) {
   const cell = buffer.getNullCell();
   for (let y = rows.length - 1; y > 0; y -= 1) {
     const match = COMPOSER_RE.exec(text(rows[y]));
-    if (!match || !DIVIDER_RE.test(text(rows[y - 1]))) continue;
+    const edge = text(rows[y - 1]);
+    if (!match || !(DIVIDER_RE.test(edge) || NAMED_TOP_EDGE_RE.test(edge))) continue;
     const parts = [];
     for (let row = y; row < rows.length && !DIVIDER_RE.test(text(rows[row])); row += 1) {
       const line = rows[row];
