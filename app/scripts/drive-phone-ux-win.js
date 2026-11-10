@@ -343,6 +343,45 @@ async function assertPannedVisible(page, label, selectors) {
   }
 }
 
+// THE iOS HALF NO DESKTOP ENGINE SHOWS (2026-11-10). Hit-testing above proves the
+// layout; it cannot prove what iOS paints. iOS Safari composites every
+// position:fixed layer (each glass pane's painted copy) and cuts composited
+// layers to the box of any ancestor that is a STACKING CONTEXT and clips, whatever
+// their containing block. html, body and #root are --app-h tall and clip, so a
+// panned screen below them vanishes on the phone while Chromium and WebKit on
+// this machine draw it: `isolation: isolate` on #root passed every check here and
+// still cut Pat's chat off. So every ancestor of a screen root must be a plain
+// box: no stacking context, no containing block.
+async function assertPlainAncestors(page, label, selector) {
+  const offenders = await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return [`${sel} missing`];
+    const bad = [];
+    for (let node = el.parentElement; node; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      const name = node.id ? `#${node.id}` : node.tagName.toLowerCase();
+      const checks = {
+        position: cs.position !== 'static',
+        zIndex: cs.zIndex !== 'auto',
+        isolation: cs.isolation !== 'auto',
+        opacity: cs.opacity !== '1',
+        transform: cs.transform !== 'none' || (cs.translate && cs.translate !== 'none') || (cs.scale && cs.scale !== 'none') || (cs.rotate && cs.rotate !== 'none'),
+        filter: cs.filter !== 'none' || (cs.backdropFilter && cs.backdropFilter !== 'none') || (cs.webkitBackdropFilter && cs.webkitBackdropFilter !== 'none'),
+        clipPath: cs.clipPath !== 'none',
+        mask: (cs.maskImage && cs.maskImage !== 'none') || (cs.webkitMaskImage && cs.webkitMaskImage !== 'none'),
+        contain: cs.contain && cs.contain !== 'none',
+        willChange: cs.willChange !== 'auto',
+        blend: cs.mixBlendMode !== 'normal',
+        perspective: cs.perspective !== 'none',
+      };
+      for (const [prop, hit] of Object.entries(checks)) if (hit) bad.push(`${name} ${prop}`);
+    }
+    return bad;
+  }, selector);
+  console.log(`${label} ancestors of ${selector}: ${offenders.length ? offenders.join(', ') : 'all plain'}`);
+  assert.deepEqual(offenders, [], `${label}: every ancestor of ${selector} is a plain box (iOS cuts composited layers to a clipping stacking context)`);
+}
+
 async function openChat(page, title) {
   await page.getByRole('button', { name: 'Switch session' }).click();
   await page.locator('.session-row', { hasText: title }).first().click();
@@ -395,21 +434,22 @@ const STATES = {
     await assertTypingVisible(page, 'keyboard (overlay)');
     await shot(page, '03-typing-keyboard-overlay', { clip: { x: 0, y: 0, width: PHONE.width, height: VISIBLE_WITH_KEYBOARD } });
   },
-  // THE PANNED KEYBOARD (Pat's phone, 2026-11-09). Safari does not only shrink
-  // the visual viewport: it also SCROLLS it down the full-height layout so the
-  // field you tapped sits above the keyboard. visualViewport.offsetTop was 338 in
-  // Pat's screenshot, and the shell follows it (top: --app-offset-top). The
-  // Lighthouse reskin made #root a positioned box, so the shell was positioned
-  // inside #root, which is only --app-h tall and clips: everything below 552
-  // vanished, the composer with it, and the bare ground showed through. Neither
-  // mode above pans, which is how it shipped. Asserted by hit-testing, because a
-  // clipped element still reports its full rectangle.
+  // THE PANNED KEYBOARD (Pat's phone, 2026-11-09 and 2026-11-10). Safari does not
+  // only shrink the visual viewport: it also SCROLLS it down the full-height
+  // layout so the field you tapped sits above the keyboard. 338 is inferred from
+  // Pat's screenshot (552 visible, 214 of it drawn), not measured on the phone.
+  // The shell follows it (top: --app-offset-top), below html/body/#root, which
+  // are --app-h tall and clip. The reskin made #root positioned (cut by the
+  // rules, which the hit-test below catches); the first fix made it
+  // `isolation: isolate` (cut by iOS compositing only, which only the ancestor
+  // check catches). Neither keyboard mode above pans, which is how it shipped.
   async typingPanned(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
     await page.locator('.composer-field .composer-input').click();
     await page.locator('.composer-field .composer-input').fill(LONG_DRAFT);
     await panKeyboard(page, PANNED_OFFSET);
     await assertPannedVisible(page, 'keyboard (panned)', ['.composer-field', '.conv-pane']);
+    await assertPlainAncestors(page, 'keyboard (panned)', '.app-shell');
     await shot(page, '03b-typing-keyboard-panned', { clip: { x: 0, y: PANNED_OFFSET, width: PHONE.width, height: VISIBLE_WITH_KEYBOARD } });
   },
   async noteEditorPanned(page) {
@@ -419,6 +459,7 @@ const STATES = {
     await page.locator('.ne-body').click();
     await panKeyboard(page, PANNED_OFFSET);
     await assertPannedVisible(page, 'note editor (panned)', ['.ne-body', '.ne-tags']);
+    await assertPlainAncestors(page, 'note editor (panned)', '.ne-screen');
     await shot(page, '19b-note-editing-keyboard-panned', { clip: { x: 0, y: PANNED_OFFSET, width: PHONE.width, height: VISIBLE_WITH_KEYBOARD } });
   },
   async reconnecting(page, { link }) {

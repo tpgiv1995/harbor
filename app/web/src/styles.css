@@ -12,21 +12,27 @@ body,
   margin: 0;
 }
 
-/* Everything in the app sits above the fixed ground (tokens.css body::before,
-   z-index 0). `isolation` makes the root a stacking context, which paints at the
-   ground's level and after it in tree order, so the app is on top.
+/* #root, body and html stay PLAIN BOXES: no position, z-index, isolation,
+   opacity, transform, filter, clip-path, contain or will-change, ever. The app is
+   kept above the fixed ground by the ground's own z-index: -1 (tokens.css
+   body::before), not by anything on these boxes.
 
-   NEVER `position` here (2026-11-09, Pat's phone: "mobile got fucked"). A
-   positioned #root becomes the containing block of .app-shell, and #root is only
-   --app-h tall with overflow hidden. When Safari scrolls the visual viewport down
-   to keep the message box above the keyboard (offsetTop 338 on Pat's phone), the
-   shell moves to top: --app-offset-top INSIDE #root and everything below #root's
-   bottom edge is clipped: the conversation stopped a third of the way down and
-   the message box vanished. Unpositioned, the shell is placed against the page
-   as it always was. Proof: scripts/drive-phone-ux-win.js --only=typingPanned. */
-#root {
-  isolation: isolate;
-}
+   Why (Pat's phone, twice). All three are --app-h tall (552 on his iPhone with the
+   keyboard up) and clip. Safari scrolls the visual viewport down to keep the
+   message box above the keyboard, and the shell follows it (top:
+   --app-offset-top), so it sits BELOW that 552 box.
+   - 2026-11-09 morning: the reskin made #root `position: relative`, so it was the
+     shell's containing block and clipped it by the rules.
+   - 2026-11-09 evening "fix": `isolation: isolate` instead. Correct by the rules,
+     and every desktop engine shows the shell, but on the iPhone it changed
+     nothing (2026-11-10, same screenshot). iOS Safari puts every position:fixed
+     layer (each glass pane's painted copy) on the GPU, and GPU layers inside a
+     STACKING CONTEXT that clips are cut to its box whatever their containing
+     block. His screenshot proved which box: body is the same 552 clip, but no
+     stacking context, and the ground inside it still drew below the cut.
+   A plain #root is how it was before the reskin, when typing worked. Desktop
+   engines cannot reproduce the iOS half; the guard is the computed-style check in
+   scripts/drive-phone-ux-win.js (typingPanned) and MOBILE-KEYBOARD-2. */
 
 /* dvh, not vh: on a phone browser vh includes the retracting chrome, so a
    100vh app is taller than the screen it is on and the bottom of it sits

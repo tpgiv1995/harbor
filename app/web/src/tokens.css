@@ -161,12 +161,15 @@
   --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
-/* The photograph, under everything, fixed to the layout viewport. */
+/* The photograph, under everything, fixed to the layout viewport. z-index -1
+   puts it below all page content in the root stacking context (the page colour
+   is on the canvas, beneath it), so #root needs no stacking context of its own;
+   giving it one cut the app off above the keyboard on iOS (styles.css, #root). */
 body::before {
   content: '';
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: -1;
   pointer-events: none;
   background: var(--ground-shade), var(--ground-sharp), #05070d;
 }

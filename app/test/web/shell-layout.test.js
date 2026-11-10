@@ -50,24 +50,37 @@ test('MOBILE-KEYBOARD-1: shell follows visualViewport directly without keyboard 
   assert.match(html, /interactive-widget=resizes-visual/);
 });
 
-// 2026-11-09, Pat's phone after the Lighthouse reskin: a positioned #root became
-// the shell's containing block, and #root is --app-h tall and clips, so when
-// Safari panned the visual viewport for the keyboard the shell (top:
-// --app-offset-top) slid past #root's bottom edge and the conversation and the
-// message box were cut away. Any of these properties on #root re-anchors the
-// shell to that clipping box. The browser proof is
-// scripts/drive-phone-ux-win.js --only=typingPanned.
-test('MOBILE-KEYBOARD-2: #root never anchors the shell (no position, transform, filter or contain)', () => {
-  const styles = fs.readFileSync(path.join(WEB_ROOT, 'src/styles.css'), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = [...styles.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
-    .filter(([, selector]) => selector.split(',').some((s) => s.trim() === '#root'));
-  assert.ok(rules.length > 0, 'styles.css styles #root');
-  for (const [, selector, body] of rules) {
-    assert.doesNotMatch(body, /(^|;|\s)(position|transform|filter|contain|will-change)\s*:/, `#root rule "${selector.trim()}" must not anchor the shell: ${body.trim()}`);
+// Pat's phone after the Lighthouse reskin, twice. html, body and #root are
+// --app-h tall and clip; with the keyboard up Safari pans the visual viewport and
+// the shell (top: --app-offset-top) sits below that box. 2026-11-09: a positioned
+// #root was the shell's containing block and cut it off. 2026-11-10: with
+// `isolation: isolate` instead, iOS still cut it, because iOS composites every
+// position:fixed glass layer and clips composited layers to an overflow-clipping
+// STACKING CONTEXT's box regardless of containing block. So none of the three may
+// form a stacking context or a containing block; the ground goes under the app by
+// its own z-index: -1. The browser check is scripts/drive-phone-ux-win.js
+// --only=typingPanned (computed styles of the shell's ancestors).
+test('MOBILE-KEYBOARD-2: html, body and #root stay plain boxes; the ground sits under the app by z-index -1', () => {
+  const strip = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const sheets = {
+    'styles.css': strip(fs.readFileSync(path.join(WEB_ROOT, 'src/styles.css'), 'utf8')),
+    'tokens.css': strip(readSource('tokens.css')),
+  };
+  const forbidden = /(^|;|\s)(position|z-index|isolation|opacity|transform|translate|rotate|scale|filter|backdrop-filter|-webkit-backdrop-filter|clip-path|mask|contain|will-change|mix-blend-mode|perspective|container-type)\s*:/;
+  let seen = 0;
+  for (const [name, css] of Object.entries(sheets)) {
+    for (const [, selector, body] of css.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+      const hits = selector.split(',').map((s) => s.trim()).filter((s) => ['html', 'body', '#root', ':root'].includes(s));
+      if (hits.length === 0) continue;
+      seen += 1;
+      assert.doesNotMatch(body, forbidden, `${name} rule "${selector.trim()}" must not make ${hits.join('/')} a stacking context or containing block: ${body.trim()}`);
+    }
   }
-  // The app must still paint over the fixed ground.
-  assert.ok(rules.some(([, , body]) => /isolation\s*:\s*isolate/.test(body)), '#root is its own stacking context');
+  assert.ok(seen > 0, 'the sheets style html/body/#root');
+  const ground = sheets['tokens.css'].match(/body::before\s*\{([^{}]*)\}/);
+  assert.ok(ground, 'tokens.css paints the ground on body::before');
+  assert.match(ground[1], /position:\s*fixed/);
+  assert.match(ground[1], /z-index:\s*-1\s*;/, 'the ground sits under the app by its own negative z-index');
 });
 
 test('MOBILE-OVERHAUL-1: sprint-2 seam signatures exist', () => {
