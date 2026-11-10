@@ -50,6 +50,26 @@ test('MOBILE-KEYBOARD-1: shell follows visualViewport directly without keyboard 
   assert.match(html, /interactive-widget=resizes-visual/);
 });
 
+// 2026-11-09, Pat's phone after the Lighthouse reskin: a positioned #root became
+// the shell's containing block, and #root is --app-h tall and clips, so when
+// Safari panned the visual viewport for the keyboard the shell (top:
+// --app-offset-top) slid past #root's bottom edge and the conversation and the
+// message box were cut away. Any of these properties on #root re-anchors the
+// shell to that clipping box. The browser proof is
+// scripts/drive-phone-ux-win.js --only=typingPanned.
+test('MOBILE-KEYBOARD-2: #root never anchors the shell (no position, transform, filter or contain)', () => {
+  const styles = fs.readFileSync(path.join(WEB_ROOT, 'src/styles.css'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...styles.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+    .filter(([, selector]) => selector.split(',').some((s) => s.trim() === '#root'));
+  assert.ok(rules.length > 0, 'styles.css styles #root');
+  for (const [, selector, body] of rules) {
+    assert.doesNotMatch(body, /(^|;|\s)(position|transform|filter|contain|will-change)\s*:/, `#root rule "${selector.trim()}" must not anchor the shell: ${body.trim()}`);
+  }
+  // The app must still paint over the fixed ground.
+  assert.ok(rules.some(([, , body]) => /isolation\s*:\s*isolate/.test(body)), '#root is its own stacking context');
+});
+
 test('MOBILE-OVERHAUL-1: sprint-2 seam signatures exist', () => {
   const browser = readSource('browse/SessionBrowser.jsx');
   const composer = readSource('composer/Composer.jsx');

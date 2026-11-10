@@ -2,54 +2,54 @@
    (Lighthouse glass), no animation: a busy row says so in words. Column flex
    so only the server list scrolls and the header and footer stay on screen
    (the same rule as .new-session-popover). */
-.conn-panel{box-sizing:border-box;width:min(820px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:20px 22px 14px;border:1px solid var(--raised-rim);border-radius:24px;background:var(--raised);color:var(--tx);box-shadow:inset 0 1px 0 #ffffff3a,0 28px 80px -20px #000000cc;display:flex;flex-direction:column;gap:14px;overflow:hidden;outline:none}
+.conn-panel{ box-sizing:border-box; width:min(820px,calc(100vw - 32px)); max-height:calc(100vh - 48px); padding:20px 22px 14px; display:flex; flex-direction:column; gap:14px; overflow:hidden; border:1px solid rgba(255,255,255,.14); border-radius:16px; background:#11151d; color:#f5f7fa; box-shadow:0 28px 80px rgba(0,0,0,.55); outline:none}
 .conn-panel>*{flex:0 0 auto}
 .conn-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
 .conn-head-text{min-width:0}
-.conn-eyebrow{display:block;margin-bottom:6px;color:var(--fnt);font-size:12px;font-weight:500}
-.conn-head h2{margin:0;font-size:22px;font-weight:600}
-.conn-sub{margin-top:5px;color:var(--fnt);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:560px}
+.conn-eyebrow{ display:block; margin-bottom:6px; color:#8e98a8; font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase}
+.conn-head h2{ margin:0; font-size:20px; font-weight:650}
+.conn-sub{ margin-top:5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:560px; color:#8e98a8; font-size:12px}
 .conn-head-ctl{display:flex;align-items:center;gap:10px;flex:0 0 auto}
-.conn-scroll{flex:1 1 auto;min-height:0;overflow:auto;border-top:1px solid var(--frame-line);border-bottom:1px solid var(--frame-line);padding:4px 2px 10px}
+.conn-scroll{ flex:1 1 auto; min-height:0; overflow:auto; padding:4px 2px 10px; border-top:1px solid rgba(255,255,255,.08); border-bottom:1px solid rgba(255,255,255,.08)}
 .conn-scroll::-webkit-scrollbar{width:10px}
-.conn-scroll::-webkit-scrollbar-thumb{background:#ffffff29;border-radius:6px;border:2px solid transparent;background-clip:padding-box}
+.conn-scroll::-webkit-scrollbar-thumb{ background:rgba(255,255,255,.16); border-radius:6px; border:2px solid #11151d}
 .conn-group{padding-top:10px}
-.conn-group-h{padding:6px 4px;color:var(--sub);font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.conn-group-path{margin-left:6px;font:11.5px var(--font-mono);font-weight:400;text-transform:none;color:var(--fnt)}
-.conn-row{border-radius:12px;padding:2px 4px}
-.conn-row:hover{background:#ffffff0d}
+.conn-group-h{ padding:6px 4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#8e98a8; font-size:10px; font-weight:700; letter-spacing:.12em; text-transform:uppercase}
+.conn-group-path{ margin-left:6px; font:10.5px var(--font-mono); font-weight:400; letter-spacing:0; text-transform:none; color:#6c7686}
+.conn-row{ padding:2px 4px; border-radius:10px}
+.conn-row:hover{ background:rgba(255,255,255,.035)}
 .conn-row-main{display:grid;grid-template-columns:10px minmax(0,1fr) auto auto;align-items:center;gap:10px;min-height:40px}
-.conn-dot{width:8px;height:8px;border-radius:50%;background:var(--dormant)}
+.conn-dot{ width:8px; height:8px; border-radius:50%; background:#5b6474}
 .conn-dot.tone-ok{background:var(--live)}
 .conn-dot.tone-warn{background:var(--warn)}
 .conn-dot.tone-err{background:var(--err)}
 .conn-dot.tone-pending{background:var(--ac2)}
-.conn-dot.tone-off{background:transparent;border:1.5px solid var(--dormant);box-sizing:border-box}
+.conn-dot.tone-off{ box-sizing:border-box; background:transparent; border:1.5px solid #5b6474}
 .conn-id{min-width:0}
-.conn-name{font-size:13.5px;color:var(--tx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.conn-target{margin-top:1px;color:var(--fnt);font:11.5px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.conn-status{padding:3px 8px;border-radius:999px;font-size:11.5px;white-space:nowrap;color:var(--sub);background:#ffffff14}
-.conn-status.tone-ok{color:var(--live);background:rgb(111 211 157 / 13%)}
-.conn-status.tone-warn{color:var(--warn);background:rgb(242 179 79 / 14%)}
-.conn-status.tone-err{color:var(--err-text);background:rgb(242 117 109 / 14%)}
-.conn-status.tone-pending{color:var(--ac2);background:rgb(67 127 254 / 16%)}
+.conn-name{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13.5px; color:#eef1f6}
+.conn-target{ margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#727c8c; font:11px var(--font-mono)}
+.conn-status{ padding:3px 8px; white-space:nowrap; border-radius:999px; font-size:11px; color:#aab2c0; background:rgba(255,255,255,.06)}
+.conn-status.tone-ok{ color:#8fd8b6; background:rgba(36,178,124,.12)}
+.conn-status.tone-warn{ color:#f0cf7f; background:rgba(212,165,55,.14)}
+.conn-status.tone-err{ color:#f0b3b3; background:rgba(217,138,138,.14)}
+.conn-status.tone-pending{ color:#a9c4ff; background:rgba(67,127,254,.14)}
 .conn-acts{display:flex;gap:6px;justify-content:flex-end;min-width:156px}
-.conn-btn{height:30px;padding:0 12px;border:1px solid #ffffff3b;border-radius:11px;background:#ffffff09;color:var(--tx);font:inherit;font-size:12.5px;font-weight:500;cursor:pointer;white-space:nowrap}
-.conn-btn:hover:not(:disabled){background:#ffffff14}
+.conn-btn{ height:30px; padding:0 12px; cursor:pointer; white-space:nowrap; border:1px solid #303744; border-radius:8px; background:#171c25; color:#cfd5de; font:inherit; font-size:12px}
+.conn-btn:hover:not(:disabled){ border-color:#4a5468; color:#fff}
 .conn-btn:disabled{opacity:.5;cursor:default}
-.conn-btn.primary{border-color:var(--btn-rim);background:var(--btn);box-shadow:var(--btn-light);color:var(--on-ac);font-weight:600}
-.conn-btn.primary:hover:not(:disabled){background:var(--btn-hover)}
-.conn-job{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:0 0 8px 20px;padding:8px 11px;border-radius:12px;background:#ffffff0d;font-size:12px;line-height:1.45}
-.conn-job.tone-ok{background:rgb(111 211 157 / 10%)}
-.conn-job.tone-warn{background:rgb(242 179 79 / 11%)}
-.conn-job.tone-err{background:rgb(242 117 109 / 12%)}
-.conn-job.tone-pending{background:rgb(67 127 254 / 12%)}
-.conn-job-label{font-weight:600;color:var(--tx)}
-.conn-job-msg{color:var(--text-soft);min-width:0;overflow-wrap:anywhere}
+.conn-btn.primary{ border-color:rgb(var(--ac-rgb) / 70%); background:rgb(var(--ac-rgb) / 22%); color:#fff}
+.conn-btn.primary:hover:not(:disabled){ background:rgb(var(--ac-rgb) / 34%)}
+.conn-job{ display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; margin:0 0 8px 20px; padding:8px 11px; border-radius:9px; background:rgba(255,255,255,.045); font-size:12px; line-height:1.45}
+.conn-job.tone-ok{ background:rgba(36,178,124,.10)}
+.conn-job.tone-warn{ background:rgba(212,165,55,.11)}
+.conn-job.tone-err{ background:rgba(217,138,138,.12)}
+.conn-job.tone-pending{ background:rgba(67,127,254,.11)}
+.conn-job-label{ font-weight:650; color:#eef1f6}
+.conn-job-msg{ min-width:0; overflow-wrap:anywhere; color:#b7bfcb}
 .conn-job-ctl{display:flex;gap:12px;margin-left:auto}
 .conn-link{border:0;padding:0;background:transparent;color:var(--ac2);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
 .conn-link:hover{text-decoration:underline}
-.conn-empty{padding:28px 6px;color:var(--fnt);font-size:13px;text-align:center}
-.conn-error{margin:12px 4px;padding:10px 12px;border-radius:12px;background:rgb(242 117 109 / 12%);color:var(--err-text);font-size:12.5px;overflow-wrap:anywhere}
-.conn-foot{display:flex;justify-content:space-between;align-items:baseline;gap:16px;color:var(--fnt);font-size:11.5px}
+.conn-empty{ padding:28px 6px; text-align:center; color:#8e98a8; font-size:13px}
+.conn-error{ margin:12px 4px; padding:10px 12px; overflow-wrap:anywhere; border-radius:9px; background:rgba(217,138,138,.12); color:#f0b3b3; font-size:12.5px}
+.conn-foot{ display:flex; justify-content:space-between; align-items:baseline; gap:16px; color:#8e98a8; font-size:11.5px}
 .conn-foot-note{text-align:right}
