@@ -2085,23 +2085,42 @@ button { font-family: inherit; }
 @media (max-height: 1000px) {
   .grid4[data-grid-rows="4"] .wh { padding: 7px 11px 8px; }
   .grid4[data-grid-rows="4"] .wh .wh-meta { gap: 6px; flex-wrap: nowrap; overflow: hidden; }
-  .grid4[data-grid-rows="4"] .wh .cache-chip { display: none; }
 }
 @media (max-height: 700px) {
   .grid4[data-grid-rows="3"] .wh { padding: 7px 11px 8px; }
   .grid4[data-grid-rows="3"] .wh .wh-meta { flex-wrap: nowrap; overflow: hidden; }
 }
 
-/* The tightest grids (16 windows in a small window): the project name and the
-   close button still fit on one line beside the two controls that matter. */
-@container win (max-width: 300px) {
-  .wh .ico.tile-id,
-  .wh .ico.tile-new,
-  .wh .ico.tty { display: none; }
-  .wh .pj-icon { width: 15px; height: 15px; flex-basis: 15px; }
-  .wh .model .eff { display: none; }
-  .wh .model { flex: 0 1 auto; min-width: 0; overflow: hidden; }
-  .wh .model-acct { display: none; }
+/* NO HIDING TIER (Pat, 2026-11-10: "the recent harbor updates took away my
+   buttons in condensed card view (the id copy button, terminal view, etc) -
+   need thos eback. i also cant see the plan in the card ... no one told you to
+   do these"). The Lighthouse glass day added a max-width 300px tier that hid
+   the +, copy id and >_ buttons, the effort tag and the plan badge, and it
+   fired on Pat's ordinary 12-window grid. A narrow window keeps every control
+   and every chip; the tiers only shrink them. Never add a display:none for a
+   window control or a header chip without Pat asking.
+   Pat's own maximized 4-by-3 grid is about 272px a cell and keeps the full
+   pre-glass header (24px buttons) untouched. Only the narrowest cells (4-up in
+   a 956px window, about 153px) get the tight tier below, which fits everything
+   by size alone: smaller buttons, the model NAME shortens first so the effort
+   tag and plan badge stay whole, and the chip row wraps to a second line
+   instead of clipping. Its selectors carry .grid4 .win2 because the base .wh
+   .ico / .tile-new / cols-padding rules come LATER or weigh more (which is why
+   the 860px and 380px tiers' button sizes have never applied). The drive
+   (scripts/drive-look-win.js, windows scene) fails on any rendered control or
+   chip that is hidden or outside its window. */
+.model .model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@container win (max-width: 240px) {
+  .grid4 .win2 .wh { padding-left: 7px; padding-right: 5px; }
+  .grid4 .win2 .wh-top { gap: 3px; }
+  .grid4 .win2 .wh .pj-icon { width: 14px; height: 14px; flex-basis: 14px; }
+  .grid4 .win2 .wh-ctl { gap: 0; }
+  .grid4 .win2 .wh .ico { width: 17px; height: 20px; border-radius: 5px; }
+  .grid4 .win2 .wh .tile-close, .grid4 .win2 .wh .tile-new { font-size: 12px; }
+  .grid4 .win2 .wh .ico.tty { font-size: 7px; }
+  .grid4 .win2 .wh .ico.tile-id { font-size: 7.5px; }
+  .grid4 .win2 .wh .model { flex: 0 1 auto; min-width: 0; }
+  .grid4[data-grid-rows] .win2 .wh .wh-meta { flex-wrap: wrap; overflow: visible; }
 }
 
 .wh .pj {

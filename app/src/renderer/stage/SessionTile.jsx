@@ -101,7 +101,9 @@ function ModelChip({ model, effort, provider = 'claude', home, profiles, onClick
   return (
     <button type="button" className={`model model-chip tone-${model?.tone || 'other'}`} title="Configure this session" onClick={(event) => { event.stopPropagation(); onClick(); }}>
       <img className="logomk" src={identity.logo} alt="" aria-hidden="true" />
-      {label}
+      {/* Its own box so a narrow window shortens the model name and keeps the
+          effort tag and plan badge whole (styles.css, the 300px tier). */}
+      <span className="model-name">{label}</span>
       {effort ? <span className="eff">{EFFORT_LABEL[effort] || effort}</span> : null}
       {PLAN_IN_CHIP.has(provider) && home ? (
         <ProfileBadge profileId={home} profiles={profiles} className="model-acct" />

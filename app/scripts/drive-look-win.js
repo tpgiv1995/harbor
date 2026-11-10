@@ -12,7 +12,7 @@
 //
 // Usage (from app/, after `npx vite build`):
 //   node scripts/drive-look-win.js --out <dir> [--scenes s1,s2] [--sizes pat,max,mock,wide]
-// Scenes: windows (0,1,2,6,16 windows at each size), rail (hidden, widest, long titles),
+// Scenes: windows (0,1,2,6,11,16 windows at each size), rail (hidden, widest, long titles),
 // states (run states, stop, queued, attachments, slash, question), menus, surfaces.
 // A scene's assertions are geometry only; the captures are read by a person.
 
@@ -319,12 +319,12 @@ async function main() {
       await cdp.eval(`window.__look.open(${count})`);
       await cdp.size(size);
       await sleep(count > 2 ? 700 : 400);
-      if (count) await waitFor(cdp, `document.querySelectorAll('.win2').length === ${count}`, `${count} windows`, 20_000);
+      if (count) await waitFor(cdp, `document.querySelectorAll('.win2:not(.slot)').length === ${count}`, `${count} windows`, 20_000);
       await sleep(300);
     };
     const geometry = () => cdp.eval(`(() => {
       const out = [];
-      for (const w of document.querySelectorAll('.win2')) {
+      for (const w of document.querySelectorAll('.win2:not(.slot)')) {
         const r = w.getBoundingClientRect();
         for (const name of ['.pj', '.ti', '.tile-close']) {
           const el = w.querySelector(name);
@@ -332,13 +332,24 @@ async function main() {
           const b = el.getBoundingClientRect();
           if (b.right > r.right + 0.5 || b.left < r.left - 0.5 || b.width <= 0) out.push(name + ' outside window ' + w.dataset.sessionId);
         }
+        // No narrow tier may hide a window control or a header chip (Pat,
+        // 2026-11-10: the glass day's 300px tier hid +, copy id, >_, the effort
+        // tag and the plan badge on his 12-cell grid, and "no one told you to do
+        // these"). Every one that is rendered must be visible and inside the window.
+        for (const el of w.querySelectorAll('.wh-ctl button, .wh .model .eff, .wh .model-acct, .wh .cache-chip')) {
+          const b = el.getBoundingClientRect();
+          const what = el.className.split(' ').find((c) => /tile-|tty|eff|model-acct|cache-chip/.test(c)) || el.className;
+          if (b.width <= 0 || b.height <= 0) out.push(what + ' hidden in window ' + w.dataset.sessionId);
+          else if (b.right > r.right + 0.5 || b.left < r.left - 0.5) out.push(what + ' outside window ' + w.dataset.sessionId);
+        }
       }
       return out;
     })()`);
 
     if (SCENES.includes('windows')) {
       for (const sizeName of SIZES) {
-        for (const count of [0, 1, 2, 6, 16]) {
+        // 11 is Pat's real grid: eleven windows plus the New session cell, 4 by 3.
+        for (const count of [0, 1, 2, 6, 11, 16]) {
           await show(count, SIZE_TABLE[sizeName]);
           for (const p of await geometry()) problems.push(`${sizeName}/${count}: ${p}`);
           await cdp.shot(`win-${sizeName}-${String(count).padStart(2, '0')}`);
