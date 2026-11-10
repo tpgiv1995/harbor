@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { createPlanUsageProvider, discoverCodexHomes, windowsFromLimits, readRolloutSample,
-  jwtClaims, resetCredits, cursorWindow, TAIL_BYTES } = require('../../src/main/providers/plan-usage.js');
+  jwtClaims, resetCredits, cursorWindow, codexHomeLabel, TAIL_BYTES } = require('../../src/main/providers/plan-usage.js');
 
 const NOW = Date.parse('2026-10-01T12:00:00Z');
 const io = fs.promises;
@@ -27,6 +27,14 @@ test('plan-usage discovers both home suffixes, env and configured homes, ignores
   const homes = await discoverCodexHomes({ io, home: root, env: { CODEX_HOME: path.join(root, 'custom') },
     profiles: [{ provider: 'codex', configHome: path.join(root, '.codex') }, { provider: 'codex', configHome: path.join(root, 'missing') }], platform: process.platform });
   assert.deepEqual(homes.map((p) => path.basename(p)).sort(), ['.codex', '.codex-extra', 'custom']);
+});
+
+test('plan-usage names a codex home from its folder; a one- or two-letter suffix is drawn in capitals', () => {
+  assert.equal(codexHomeLabel('C:\\Users\\me\\.codex'), 'Default');
+  assert.equal(codexHomeLabel('C:\\Users\\me\\.codex-studio'), 'Studio');
+  assert.equal(codexHomeLabel('C:\\Users\\me\\.codex-pro'), 'Pro');
+  assert.equal(codexHomeLabel('C:\\Users\\me\\.codex-iv'), 'IV');
+  assert.equal(codexHomeLabel('/home/me/.codex-x'), 'X');
 });
 
 test('plan-usage classifies windows by minutes, including weekly primary and expired secondary', () => {

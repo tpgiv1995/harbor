@@ -56,10 +56,13 @@ function windowsFromLimits(limits, nowMs, endpoint = false) {
 }
 
 // The dropdown's name for a codex home: `.codex` is Default, `.codex-work` is
-// Work. bin/harbor-lean names seats with the same function.
+// Work. bin/harbor-lean names seats with the same function. A suffix of one or
+// two letters reads as an abbreviation and is drawn in capitals (`.codex-iv`
+// is IV, matching the Claude plan of the same name, 2026-11-09).
 function codexHomeLabel(dir) {
   const name = path.basename(dir);
   const derived = name === '.codex' ? 'Default' : name.replace(/^\.codex-/, '');
+  if (/^[a-z]{1,2}$/i.test(derived)) return derived.toUpperCase();
   return derived.charAt(0).toUpperCase() + derived.slice(1);
 }
 
