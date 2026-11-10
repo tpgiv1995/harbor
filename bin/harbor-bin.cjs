@@ -643,6 +643,9 @@ function codexPaneControls({ version, codexHome }) {
   // Harbor's chip after review (cli-updates.js). The key gates both the startup
   // check and the screen (tui/src/updates.rs, 0.164.0 and 0.165.0 binaries).
   if (semverAtLeast(version, [0, 164, 0])) controls.push('-c', 'check_for_update_on_startup=false');
+  // Resume argv keeps the old id after /new or provider recovery. The keeper
+  // records the title prefix; main's linker alone resolves and annotates it.
+  if (semverAtLeast(version, [0, 167, 0])) controls.push('-c', 'tui.terminal_title=["thread-id"]');
   const acks = codexHome ? codexMigrationAcks(codexHome, version) : null;
   if (acks) controls.push('-c', acks);
   return controls;

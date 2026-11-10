@@ -5,9 +5,9 @@ const assert = require('node:assert/strict');
 const { createSessionSend } = require('../../src/main/session-send.js');
 const { MODE_LABEL } = require('../../src/shared/permission-modes.cjs');
 
-test('permission readback has human labels shared by desktop and phone', async () => {
+test('permission readback has human labels shared by desktop and phone', async t => {
   let screen = '';
-  const send = createSessionSend({ readPane: async () => screen });
+  const send = createSessionSend({ sendLogFile: require('../support/send-log-fixture.cjs').testSendLog(t), readPane: async () => screen });
   for (const [footer, expected] of [
     ['❯', 'default · asks before edits'],
     ['plan mode on', 'plan mode · read-only'],

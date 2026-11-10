@@ -259,7 +259,97 @@ test('keeper annotation must acknowledge before a link publishes, and transient 
   linker.close();
 });
 
-test('a pane herdr already named is left alone, and claude panes are never touched', async () => {
+test('keeper first bindings and rebinds publish once and refresh metadata when the rollout appears', async () => {
+  const home = makeHome(), configuredHome = path.join(home, '.codex-work'), cwd = path.join(home, 'work');
+  let pane = { pane_id: 'native', workspace_id: 'w', agent: 'codex', provider_home: configuredHome, agent_session: { kind: 'id', value: ID_A }, cwd };
+  let meta = null; const remembered = [], events = [];
+  const linker = createProviderSessionLinker({ home, profiles: [{ id: 'work', provider: 'codex', configHome: configuredHome }],
+    listPanes: () => [pane], paneAgentProcess: async () => assert.fail('known identity needs no process scan'),
+    lookupSessionMeta: () => meta, rememberLink: async fact => remembered.push(fact),
+    annotateSessionIdentity: async () => assert.fail('the keeper already named itself') });
+  linker.emitter.on('link', event => events.push(event));
+  assert.equal(await linker.resolveNow(), true);
+  assert.equal(events.length, 1); assert.equal(events[0].sessionId, ID_A);
+  assert.equal(remembered[0].configHome, configuredHome); assert.equal(remembered[0].profileId, 'work');
+  assert.equal(remembered[0].transcriptPath, null);
+  meta = { path: path.join(configuredHome, 'sessions', 'rollout-' + ID_A + '.jsonl'), configHome: configuredHome, profileId: 'work', cwd };
+  await linker.resolveNow();
+  assert.equal(remembered.at(-1).transcriptPath, meta.path);
+  for (let i = 0; i < 40; i++) await linker.resolveNow();
+  assert.equal(events.length, 1); assert.equal(remembered.length, 2, 'unchanged metadata is not rewritten on every tick');
+  pane = { ...pane, agent_session: { kind: 'id', value: ID_B } }; meta = { ...meta, path: meta.path.replace(ID_A, ID_B) };
+  await linker.resolveNow();
+  assert.equal(events.length, 2); assert.equal(events[1].previousSessionId, ID_A); assert.equal(events[1].sessionId, ID_B);
+  assert.equal(remembered.at(-1).transcriptPath, meta.path); linker.close();
+});
+
+test('linker-owned annotations do not publish again when the keeper echoes them', async () => {
+  for (const agent of ['codex', 'cursor']) {
+    const home = makeHome(); let pane = { pane_id: 'p', agent, agent_session: null, cwd: '/work' }; const events = [], remembered = [];
+    const linker = createProviderSessionLinker({ home, listPanes: () => [pane],
+      paneAgentProcess: async () => ({ startedMs: T0, cwd: '/work', argv: [agent, 'resume', ID_A] }),
+      annotateSessionIdentity: async (_, identity) => { pane = { ...pane, agent_session: { kind: 'id', value: identity.agentSession } }; },
+      rememberLink: async fact => remembered.push(fact) });
+    linker.emitter.on('link', event => events.push(event));
+    await linker.resolveNow(); await linker.resolveNow(); await linker.resolveNow();
+    assert.equal(events.length, 1); assert.equal(remembered.length, 1); linker.close();
+  }
+});
+
+test('late rollout metadata is remembered after a switch or close without reviving an old link', async () => {
+  const home = makeHome(), facts = new Map(), writes = [], events = [];
+  let panes = [{ pane_id: 'p', agent: 'codex', agent_session: { kind: 'id', value: ID_A }, cwd: '/work' }];
+  const linker = createProviderSessionLinker({ home, listPanes: () => panes, lookupSessionMeta: id => facts.get(id),
+    paneAgentProcess: async () => assert.fail('named'), rememberLink: async fact => writes.push(fact) });
+  linker.emitter.on('link', event => events.push(event));
+  await linker.resolveNow();
+  panes = [{ ...panes[0], agent_session: { kind: 'id', value: ID_B } }]; await linker.resolveNow();
+  panes = []; facts.set(ID_A, { path: path.join(home, '.codex', 'sessions', ID_A + '.jsonl') });
+  await linker.resolveNow();
+  assert.equal(writes.at(-1).id, ID_A); assert.equal(writes.at(-1).transcriptPath, facts.get(ID_A).path);
+  assert.equal(events.length, 2); assert.equal(linker.get('p'), null); linker.close();
+});
+
+test('a binding that changed during a metadata write cannot publish a stale window replacement', async () => {
+  const home = makeHome(); let release;
+  let pane = { pane_id: 'p', agent: 'codex', agent_session: { kind: 'id', value: ID_A }, cwd: '/work' };
+  const events = [];
+  const linker = createProviderSessionLinker({ home, listPanes: () => [pane], lookupSessionMeta: () => null,
+    paneAgentProcess: async () => assert.fail('named'), rememberLink: fact => fact.id === ID_A ? new Promise(resolve => { release = resolve; }) : Promise.resolve() });
+  linker.emitter.on('link', event => events.push(event));
+  const resolving = linker.resolveNow();
+  while (!release) await new Promise(resolve => setImmediate(resolve));
+  pane = { ...pane, agent_session: { kind: 'id', value: ID_B } }; release(); await resolving;
+  assert.equal(events.length, 0);
+  await linker.resolveNow(); assert.deepEqual(events.map(e => e.sessionId), [ID_B]); linker.close();
+});
+
+test('a keeper home outranks indexed facts from a different account home', async () => {
+  const home = makeHome(), work = path.join(home, '.codex-work'), writes = [];
+  let meta = { configHome: path.join(home, '.codex'), profileId: 'personal', path: path.join(home, '.codex', 'sessions', ID_A + '.jsonl') };
+  const linker = createProviderSessionLinker({ home, profiles: [{ id: 'work', provider: 'codex', configHome: work }],
+    listPanes: () => [{ pane_id: 'p', agent: 'codex', provider_home: work, agent_session: { kind: 'id', value: ID_A }, cwd: '/work' }],
+    lookupSessionMeta: () => meta, paneAgentProcess: async () => assert.fail('named'), rememberLink: async fact => writes.push(fact) });
+  await linker.resolveNow();
+  assert.equal(writes[0].profileId, 'work'); assert.equal(writes[0].configHome, work); assert.equal(writes[0].transcriptPath, null);
+  meta = { configHome: work, profileId: 'work', path: path.join(work, 'sessions', ID_A + '.jsonl') };
+  await linker.resolveNow(); assert.equal(writes.at(-1).transcriptPath, meta.path); linker.close();
+});
+
+test('an exit during a metadata write cannot publish a live binding', async () => {
+  const home = makeHome(); let release;
+  const pane = { pane_id: 'p', agent: 'codex', agent_session: { kind: 'id', value: ID_A }, cwd: '/work' };
+  const events = [];
+  const linker = createProviderSessionLinker({ home, listPanes: () => [pane],
+    paneAgentProcess: async () => assert.fail('named'), rememberLink: () => new Promise(resolve => { release = resolve; }) });
+  linker.emitter.on('link', event => events.push(event));
+  const resolving = linker.resolveNow();
+  while (!release) await new Promise(resolve => setImmediate(resolve));
+  pane.exited = true; release(); await resolving;
+  assert.deepEqual(events, []); assert.equal(linker.get('p'), null); linker.close();
+});
+
+test('claude panes are never touched', async () => {
   const home = makeHome();
   const linker = createProviderSessionLinker({
     home,
@@ -268,12 +358,6 @@ test('a pane herdr already named is left alone, and claude panes are never touch
         pane_id: 'w1:p1',
         agent: 'claude',
         agent_session: { kind: 'id', value: 'claude-1' },
-        cwd: '/work',
-      },
-      {
-        pane_id: 'w2:p2',
-        agent: 'codex',
-        agent_session: { kind: 'id', value: ID_A },
         cwd: '/work',
       },
     ],

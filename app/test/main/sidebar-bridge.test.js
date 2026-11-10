@@ -4,6 +4,43 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { applyPaneEvent, withLaunchedHomes } = require('../../src/main/sidebar-bridge.js');
 
+test('a provider identity change publishes the old and new window keys through the real bridge', async t => {
+  const { fixture, row, pane } = require('./sidebar-round3-fixture.cjs');
+  const oldId = '019f8250-89cc-73d3-9c1a-30007bced9ff', newId = '019f8251-89cc-73d3-9c1a-30007bced9ff';
+  let bridge;
+  const linker = require('../../src/main/providers/provider-session-link.js').createProviderSessionLinker({
+    listPanes: () => bridge?.getLivePanes() || [pane('pane', oldId, 'codex')], lookupSessionMeta: () => null,
+    paneAgentProcess: async () => assert.fail('keeper identity needs no process query'),
+  });
+  const setup = await fixture(t, { rows: [row(oldId, { provider: 'codex' }), row(newId, { provider: 'codex' })], panes: [pane('pane', oldId, 'codex')], linker });
+  bridge = setup.bridge; const { emit } = setup;
+  const events = []; bridge.emitter.on('provider-session-linked', event => events.push(event));
+  emit({ event: 'pane.updated', data: { pane: pane('pane', newId, 'codex') } });
+  await linker.resolveNow(); // legacy identity discovery runs on its timer, not pane chatter
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].previousSessionId, oldId);
+  assert.equal(events[0].sessionId, newId);
+  emit({ event: 'pane.updated', data: { pane: pane('pane', newId, 'codex') } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.length, 1, 'same identity is not another replacement');
+});
+
+test('a keeper-named fresh pane reaches the first-binding event through the bridge', async t => {
+  const { fixture, pane } = require('./sidebar-round3-fixture.cjs');
+  const id = '019f8250-89cc-73d3-9c1a-30007bced9ff'; let bridge;
+  const linker = require('../../src/main/providers/provider-session-link.js').createProviderSessionLinker({
+    listPanes: () => bridge?.getLivePanes() || [], lookupSessionMeta: () => null,
+    paneAgentProcess: async () => assert.fail('already named'),
+  });
+  const setup = await fixture(t, { linker }); bridge = setup.bridge;
+  const events = []; bridge.emitter.on('provider-session-linked', event => events.push(event));
+  setup.emit({ event: 'pane.created', data: { pane: pane('fresh', id, 'codex') } });
+  await linker.resolveNow();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(events.length, 1); assert.equal(events[0].sessionId, id); assert.equal(events[0].previousSessionId, null);
+});
+
 test('pane agent status events update the sidebar pane state', () => {
   const state = {
     workspaces: [],

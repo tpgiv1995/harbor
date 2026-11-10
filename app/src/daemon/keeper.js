@@ -30,6 +30,7 @@ try {
   throw err;
 }
 const { ScreenModel } = require('./screen.js');
+const { createCodexTitleIdentity, codexHomeFromEnv, coalesceTitleWrites } = require('./codex-title-identity.js');
 const { writeStateResilient } = require('./persist-state.js');
 const { readRecords, writeRecord } = require('./ndjson.js');
 const { ObserverWriter } = require('./observer-writer.js');
@@ -109,6 +110,7 @@ const ACTIVITY_PERSIST_MS = Number(process.env.HARBOR_SESSIOND_ACTIVITY_PERSIST_
 let exitAnnotation = null;
 
 const PROVIDER_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+let codexTitle = null;
 
 function annotateProviderIdentity(params) {
   const allowed = new Set(['id', 'agent', 'agent_session']);
@@ -120,6 +122,9 @@ function annotateProviderIdentity(params) {
   }
   if (typeof params.agent_session !== 'string' || !PROVIDER_SESSION_ID_RE.test(params.agent_session)) {
     throw new Error('annotate agent_session must be a UUID');
+  }
+  if (params.agent === 'codex' && codexTitle?.prefix && !params.agent_session.toLowerCase().startsWith(codexTitle.prefix)) {
+    throw new Error('Codex current thread differs from the requested annotation');
   }
   const previous = config.agent_session ?? null;
   config.agent = params.agent;
@@ -146,6 +151,8 @@ function persist(extra = {}) {
     cwd: config.cwd,
     agent: config.agent ?? null,
     agent_session: config.agent_session ?? null,
+    ...(config.agent === 'codex' ? { provider_home: codexHomeFromEnv(config.env) } : {}),
+    ...(codexTitle ? { codex_title: codexTitle } : {}),
     cols: screen.terminal.cols,
     rows: screen.terminal.rows,
     pid: terminal.pid,
@@ -205,6 +212,18 @@ function startSession() {
     cols: config.cols,
     rows: config.rows,
   });
+
+  const persistCodexTitle = coalesceTitleWrites(() => { if (exit === null) persist(); });
+  const observeCodexTitle = createCodexTitleIdentity({
+    agent: config.agent, argv: config.argv,
+    isAlive: () => exit === null,
+    onTitle: prefix => {
+      codexTitle = { prefix, revision: (codexTitle?.revision || 0) + 1 };
+      persistCodexTitle();
+    },
+  });
+  if (observeCodexTitle.enabled) codexTitle = { prefix: null, revision: 0 };
+  screen.terminal.onTitleChange(observeCodexTitle);
 
   // THE KEEPER LOSES OOM CONTESTS LAST (2026-08-09). A session's scope has a
   // MemoryMax now, and when the kernel enforces it, it kills ONE task in the

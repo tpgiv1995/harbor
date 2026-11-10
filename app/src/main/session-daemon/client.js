@@ -158,7 +158,10 @@ class SessionSubscription extends EventEmitter {
         if (previous) {
           const beforeId = previous.agent_session?.value ?? null;
           const afterId = pane.agent_session?.value ?? null;
-          if (previous.agent !== pane.agent || beforeId !== afterId) {
+          if (previous.agent !== pane.agent || beforeId !== afterId
+            || previous.codex_title?.prefix !== pane.codex_title?.prefix
+            || previous.codex_title?.revision !== pane.codex_title?.revision
+            || previous.provider_home !== pane.provider_home) {
             this.emit('event', { event: 'pane.updated', data: { pane } });
           }
           // Another client (the phone server, a tool) can resize a pane; the
@@ -217,6 +220,8 @@ function paneFor(session) {
     // The launch argv (model and effort as launched), for the team chart.
     argv: Array.isArray(session.argv) ? session.argv : [],
     agent: session.agent ?? null,
+    ...(session.provider_home ? { provider_home: session.provider_home } : {}),
+    ...(session.codex_title ? { codex_title: session.codex_title } : {}),
     agent_session: session.agent_session
       ? { kind: 'id', value: session.agent_session }
       : null,

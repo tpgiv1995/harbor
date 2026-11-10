@@ -15,13 +15,26 @@ const {
 } = require('../../src/daemon/dormancy.js');
 const { mergeProviderKeeperRows } = require('../../src/main/providers/provider-history.js');
 const { mergeSidebarModel } = require('../../src/shared/sidebar-model.cjs');
-const { SessionSubscription } = require('../../src/main/session-daemon/client.js');
+const { SessionSubscription, snapshotFromSessions } = require('../../src/main/session-daemon/client.js');
+const { createProviderSessionLinker } = require('../../src/main/providers/provider-session-link.js');
 
 const KEEPER = path.resolve(__dirname, '../../src/daemon/keeper.js');
 const CODEX_ID = '019f8250-89cc-73d3-9c1a-30007bced9ff';
 const CODEX_ID_2 = '019f8250-89cc-73d3-9c1a-30007bced900';
 const CURSOR_ID = '4692b1ae-1af9-4147-879c-65c0b0b48ca2';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('a non-default keeper home survives the daemon adapter into first-binding metadata', async () => {
+  const personal = path.resolve('C:/synthetic/personal'), work = path.resolve('C:/synthetic/work'), facts = [];
+  const snapshot = snapshotFromSessions([{ id: 'pane', agent: 'codex', agent_session: CODEX_ID,
+    provider_home: work, cwd: 'C:/synthetic/project', argv: [], created_at: new Date().toISOString() }], 'C:/synthetic');
+  const linker = createProviderSessionLinker({ profiles: [
+    { id: 'personal', provider: 'codex', configHome: personal }, { id: 'work', provider: 'codex', configHome: work },
+  ], listPanes: () => snapshot.panes, lookupSessionMeta: () => null,
+  paneAgentProcess: async () => assert.fail('known keeper identity'), rememberLink: async fact => facts.push(fact) });
+  await linker.resolveNow(); linker.close();
+  assert.equal(facts[0].profileId, 'work'); assert.equal(facts[0].configHome, work);
+});
 
 async function waitUntil(probe, message, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;

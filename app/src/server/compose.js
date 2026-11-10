@@ -328,6 +328,7 @@ async function composeServer(options = {}) {
     launchActions,
     getSessionMeta: (id) => sidebar.getSessionMeta(id),
     resolveTranscriptPath: (id) => askTranscript.resolve(id),
+    recheckProviderTitle: paneId => sidebar.recheckProviderTitle?.(paneId),
     links,
     projectLabelForCwd,
   });
@@ -657,6 +658,12 @@ async function composeServer(options = {}) {
     router.emit('transcript:update', payload);
   });
   sessionSend.emitter?.on('status', (payload) => router.emit('send:status', payload));
+  sidebar.emitter?.on('provider-session-linked', link => {
+    require('../main/providers/provider-link-events.js').publishProviderLink(link, links, (channel, payload) => router.emit(channel, payload));
+  });
+  sidebar.emitter?.on('provider-session-restored', link => {
+    require('../main/providers/provider-link-events.js').restoreProviderLink(link, links, (channel, payload) => router.emit(channel, payload));
+  });
   links.emitter?.on('update', () => router.emit('links:update', links.all()));
   icons.watch?.((payload) => router.emit('project-icons:update', payload));
   tasks.subscribe?.((doc) => router.emit('tasks:changed', { doc }));
@@ -806,7 +813,7 @@ async function composeServer(options = {}) {
     async close() {
       askInbox.stop();
       loopLag?.close?.();
-      transcript.closeAll?.(); terminalBridge.close?.(); sidebar.close?.(); tasks.close?.(); notes.close?.();
+      transcript.closeAll?.(); terminalBridge.close?.(); await sidebar.close?.(); tasks.close?.(); notes.close?.();
       await ws.close(); await new Promise((resolve) => server.close(resolve));
     },
   };

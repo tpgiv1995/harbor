@@ -12,9 +12,9 @@ Neither CLI broke a Harbor contract outright. The review found these problems ar
 - **Codex 0.167.0 keeps a provider-mismatch resume open on a read-only notice** instead of exiting (Astra). Sends refuse it, the answer panel takes it, dormancy keeps it awake, the writer notice accepts a remapped transcript key, and resume-only says it needs an answer.
 - **The update chip** missed several lines that touch Harbor. New and widened flags, each pinned by verbatim lines and near-miss negatives; the notes table reconciles the 139 no-contact notes that still raise a flag.
 
-## Not in this commit
+## Codex thread-following (second commit)
 
-Following a Codex pane to a new thread after `c`, `n`, `/new`, `/fork` or `/resume` (the argv keeps the old id). Astra's first design had the session keeper query Codex's SQLite store on PTY output; the second Opus review found that retry unbounded and synchronous in the process that owns the terminal, and found it would regress new panes until Harbor restarts. It is being redone with the keeper doing no lookups and the main-process linker as the only annotator.
+Following a Codex pane to a new thread after `c`, `n`, `/new`, `/fork` or `/resume` (the argv keeps the old id) landed in its own commit after four more Astra rounds, each read by a fresh Opus reviewer. Astra's first design had the session keeper query Codex's SQLite store on PTY output; review found that retry unbounded and synchronous in the process that owns the terminal, and found it would regress new panes until Harbor restarts. The landed design pins Codex's terminal title to the thread id; the keeper only records the displayed prefix, and the main-process linker resolves it and moves the window. A new chat with no rollout yet takes its first Harbor message through a provisional pane key; subagent and `/side` views keep the parent and refuse parent-directed sends with the way back. Driven on scratch 0.167.0 through the real launcher, daemon, keeper, linker and send engine: `/new`, `n` and `c` each recorded the first Harbor message exactly once in the new thread. Child and `/side` refusals were driven at 80 and 50 columns with zero writes. The same commit stops tests writing the real send log and config-load log. Doctrine: `docs/claude/providers.md`; record: `reviews/ROUND5-codex.md` to `ROUND7-codex.md`.
 
 ## Decisions
 
@@ -32,9 +32,13 @@ Following a Codex pane to a new thread after `c`, `n`, `/new`, `/fork` or `/resu
 - Tests on the commit: full gate 3,111 passed, 0 failed, 11 skipped (serial pass 7/7, 4/4); daemon suite 147 passed, 0 failed, 23 skipped (POSIX-only). Every new spec fails on the code before its fix.
 - Installed Claude 2.1.321: `claude --version` 2.1.321, chip history ok, Harbor's live model cache lists `claude-fable-5-2`.
 
+## Installed and proven
+
+- Codex 0.167.0 installed through Harbor's installer (23:45Z). Its pane proof drew the version banner, kept the inline transcript, accepted the strict config and left no daemon state; the three Codex config files were unchanged.
+- Cursor 2026.11.05-86047df landed by hand from the reviewed package (archive and extracted tree hashes matched the review). Its pane proof drew the banner in 27 s, and a cursor-worker job passed.
+- Claude 2.1.321: the prompt gate, answer sheet and resume-send drives passed on the installed build, the live model list includes Fable 5.2, the Bash backslash behavior was re-measured (unchanged) and the hook tests are green.
+
 ## Pending
 
-- Install Codex 0.167.0 through Harbor's installer and land Cursor 2026.11.05 by hand; post-install pane proofs, the Bash backslash re-measure on 2.1.321, `verify-harbor.ps1`, statusline samples and a cursor-worker job.
-- A Harbor restart (Pat's choice) loads the main-process changes; the dormancy markers need the daemon restarted.
-- The Codex thread-following round, then its own review and commit.
+- A Harbor restart (Pat's choice) loads the main-process changes, including thread-following; the dormancy markers need the daemon restarted. New Codex panes get the new keeper and launcher at once.
 - Pat: Fable 5.2 inherits the saved xhigh effort and spends its weekly allowance faster than Opus; 2.1.321 shows a free Fable limit reset to redeem by March 8, 2027.

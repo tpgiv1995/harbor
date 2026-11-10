@@ -115,7 +115,7 @@ test('"Press Enter to continue" alone is not enough without a first-run marker',
   assert.equal(isFirstRunNotice(stranger), false);
 });
 
-test('the real module advances the notice chain and stops at the trust dialog', async () => {
+test('the real module advances the notice chain and stops at the trust dialog', async t => {
   const { createSessionSend } = require('../../src/main/session-send.js');
 
   // Screens are served in order; each Enter advances one step. The last screen
@@ -125,6 +125,7 @@ test('the real module advances the notice chain and stops at the trust dialog', 
   const keysSent = [];
 
   const sessionSend = createSessionSend({
+    sendLogFile: require('../support/send-log-fixture.cjs').testSendLog(t),
     herdr: {
       paneRead: async () => ({ text: screens[Math.min(index, screens.length - 1)] }),
       request: async () => ({}),

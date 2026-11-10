@@ -2766,13 +2766,11 @@ app.whenReady().then(async () => {
   // (live:<id>). Both upgrade in place, exactly like a claude session whose
   // transcript materialized, so the conversation renders where the terminal
   // fallback used to sit.
-  sidebarBridge.emitter.on('provider-session-linked', ({ paneId, sessionId, provider, cwd, workspaceId }) => {
-    paneLinks?.set(sessionId, { paneId, workspaceId });
-    for (const replacesKey of [`pane:${paneId}`, `live:${paneId}`]) {
-      sendToRenderer('session:launched', {
-        sessionId, paneId, workspaceId, cwd, provider, replacesKey,
-      });
-    }
+  sidebarBridge.emitter.on('provider-session-linked', link => {
+    require('./providers/provider-link-events.js').publishProviderLink(link, paneLinks, sendToRenderer);
+  });
+  sidebarBridge.emitter.on('provider-session-restored', link => {
+    require('./providers/provider-link-events.js').restoreProviderLink(link, paneLinks, sendToRenderer);
   });
 
   // Conversation-surface plumbing: transcript tailing, the command-bar send
@@ -2822,6 +2820,7 @@ app.whenReady().then(async () => {
     },
     getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
     resolveTranscriptPath: (id) => askTranscript.resolve(id),
+    recheckProviderTitle: paneId => sidebarBridge.recheckProviderTitle(paneId),
     links: paneLinks,
     projectLabelForCwd,
     setXClipboardImage: (imagePath) => platform.clipboardImage(imagePath),

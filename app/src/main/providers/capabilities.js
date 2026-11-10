@@ -153,7 +153,10 @@ function newSessionOptions(rawConfig, deps = {}) {
   // inside the app, this names the caller. (Was a default parameter, which
   // could fire without leaving any trace at all.)
   const config = rawConfig || legacyConfig();
-  if (!rawConfig) {
+  // Not from the Node test runner: specs call this with no config on purpose,
+  // and their 286 lines were the only "discovery default fired" entries the
+  // real log held (2026-11-09).
+  if (!rawConfig && !process.env.NODE_TEST_CONTEXT) {
     try {
       const os = require('node:os');
       const fsSync = require('node:fs');

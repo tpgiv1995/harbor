@@ -663,6 +663,7 @@ function createProviderHistory(options = {}) {
 
   return {
     emitter, listSessions, metaFor, start, close, migrateEntries, startBackgroundMigration,
+    rememberedLinkFor: async id => (await loadMetadata())[id] || null,
     rememberKeeperIdentity,
     rememberLink: rememberKeeperIdentity,
   };

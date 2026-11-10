@@ -75,7 +75,7 @@ after(async () => {
   }
 });
 
-test('a new session reaches a composer, or presents something answerable', { skip: SKIP, timeout: 180000 }, async () => {
+test('a new session reaches a composer, or presents something answerable', { skip: SKIP, timeout: 180000 }, async (t) => {
   // Isolated store AND isolated config home. The config home is the point: a
   // fresh one is what puts Claude into its first-run flow, which is the exact
   // state that broke.
@@ -137,6 +137,7 @@ test('a new session reaches a composer, or presents something answerable', { ski
   // Driving the production getMenu is the whole point: a copy of the rule in
   // the test would pass while the shipped one was broken.
   const sessionSend = createSessionSend({
+    sendLogFile: require('../support/send-log-fixture.cjs').testSendLog(t),
     snapshot: async () => ({ panes: [], workspaces: [] }),
     readPane: async () => {
       const screen = await client.request('screen', { id, lines: 90 });

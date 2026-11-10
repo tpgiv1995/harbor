@@ -152,7 +152,7 @@ function codexLineage(payload = {}) {
   };
 }
 
-async function readCodexRolloutMeta(rolloutPath) {
+async function readCodexRolloutMeta(rolloutPath, { history = false } = {}) {
   let handle = null;
   try {
     handle = await fsp.open(rolloutPath, 'r');
@@ -171,7 +171,8 @@ async function readCodexRolloutMeta(rolloutPath) {
     }
     const row = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (row.type !== 'session_meta') return null;
-    return { cwd: row.payload?.cwd || null, lineage: codexLineage(row.payload) };
+    return { cwd: row.payload?.cwd || null, lineage: codexLineage(row.payload),
+      ...(history ? { historyBase: row.payload?.history_base || null, forkedFromId: row.payload?.forked_from_id || null } : {}) };
   } catch {
     return null;
   } finally {
@@ -242,6 +243,19 @@ async function assignSessionsToPanes(panes, sessions, { readPaneText = null } = 
   return links;
 }
 
+function codexTitleIndex(rows) {
+  const index = new Map();
+  const key = (home, prefix) => `${process.platform === 'win32' ? path.resolve(home).toLowerCase() : path.resolve(home)}\0${prefix}`;
+  for (const row of rows) {
+    if (row.provider !== 'codex' || !row.configHome || !UUID_RE.test(row.id || '')) continue;
+    for (const prefix of [row.id, row.id.slice(0, 29)]) {
+      const k = key(row.configHome, prefix);
+      index.set(k, index.has(k) ? null : row); // collisions never select a newest row
+    }
+  }
+  return (prefix, home) => index.get(key(home, prefix)) || null;
+}
+
 function createProviderSessionLinker(options = {}) {
   const {
     home = os.homedir(),
@@ -251,12 +265,58 @@ function createProviderSessionLinker(options = {}) {
     readPaneText = null, // async (paneId) => string  (tie-break only)
     annotateSessionIdentity = null, // async (paneId, { agent, agentSession }) => keeper acknowledgement
     rememberLink = null, // async (durable derived metadata) => void
+    lookupSessionMeta = null, // resident provider-history facts, including late materialization
+    lookupRememberedLink = null, // existing durable fact, loaded once by provider history
+    lookupTitle = null, // resident, home-scoped prefix index; never scans files
     intervalMs = 5_000,
+    clock = Date.now,
   } = options;
   const emitter = new EventEmitter();
   const links = new Map();      // paneId -> sessionId
   const rolloutCwd = new Map(); // sessionId -> cwd | null (null retried: the rollout may not exist yet)
   const identityMeta = new Map(); // sessionId -> owning provider-home facts
+  const remembered = new Map(); // sessionId -> last persisted metadata fingerprint
+  const pendingMetadata = new Map(); // bounded late rollout metadata, no extra timer or disk scan
+  const titleChecks = new Map(); // timer-paced recovery; explicit refusals can invalidate one pane
+  const handledTitles = new Map();
+  const paneIdValue = pane => typeof pane.agent_session === 'string' ? pane.agent_session : pane.agent_session?.value;
+  const matchesPrefix = (id, prefix) => UUID_RE.test(id || '') && (!prefix || id.toLowerCase().startsWith(prefix));
+  const titleRow = pane => pane.codex_title?.prefix && pane.provider_home ? lookupTitle?.(pane.codex_title.prefix, pane.provider_home) : null;
+  const titleSignature = pane => {
+    const row = titleRow(pane);
+    return JSON.stringify([pane.codex_title, paneIdValue(pane), row?.id, row?.lineage, row?.path]);
+  };
+  const screenEvidence = async (pane, fullPass = false, contested = false) => {
+    const key = `${pane.codex_title?.revision}:${pane.codex_title?.prefix}`;
+    let check = titleChecks.get(pane.pane_id);
+    if (!check || check.key !== key) { check = { key, attempts: 0, available: false, writer: false, view: null, checkedAt: -Infinity }; titleChecks.set(pane.pane_id, check); }
+    const inconclusive = !check.writer && !check.view && !check.notice;
+    const retryMs = check.notice === 'writer' || check.attempts > 12 ? 30_000 : 5_000;
+    const retryDue = fullPass && (inconclusive || check.notice === 'writer' || contested)
+      && clock() - check.checkedAt >= retryMs;
+    if ((!check.attempts || retryDue) && readPaneText) {
+      check.attempts++;
+      check.checkedAt = clock();
+      try {
+        const screen = await readPaneText(pane.pane_id);
+        // Keep the last writer lock visible to apply() until this read settles.
+        check.available = false; check.writer = false; check.view = null; check.notice = null;
+        if (screen) {
+          const { codexReadOnlyNotice, codexThreadView, codexWritableComposer } = require('../session-send.js');
+          check.view = codexThreadView(screen); check.notice = codexReadOnlyNotice(screen);
+          check.writer = codexWritableComposer(screen);
+          check.available = true;
+        }
+      } catch { /* the full timer retries; output and history events do not poll */ }
+    }
+    return check;
+  };
+  const sameDisplayedThread = (a, b) => {
+    const ap = a.codex_title?.prefix || paneIdValue(a), bp = b.codex_title?.prefix || paneIdValue(b);
+    return ap && bp && (ap.startsWith(bp) || bp.startsWith(ap));
+  };
+  const hasPendingTitles = () => (listPanes?.() || []).some(p => p.agent === 'codex' && p.codex_title && !p.exited
+    && handledTitles.get(p.pane_id) !== titleSignature(p));
   const codexSources = profiles
     .filter((profile) => profile?.provider === 'codex' && profile.configHome)
     .map((profile) => ({ profileId: profile.id, configHome: profile.configHome }));
@@ -264,6 +324,7 @@ function createProviderSessionLinker(options = {}) {
   let timer = null;
   let running = false;
   let closed = false;
+  const idleWaiters = [];
 
   const codexCwdFor = async (sessionId, source) => {
     const cacheKey = `${source.configHome}\0${sessionId}`;
@@ -276,9 +337,75 @@ function createProviderSessionLinker(options = {}) {
     return cwd;
   };
 
-  const record = async (paneId, sessionId, pane, rawPanes) => {
-    if (!sessionId || links.get(paneId) === sessionId) return false;
-    if (annotateSessionIdentity) {
+  const enrich = async (sessionId, pane) => {
+    let indexed = null;
+    try { indexed = await lookupSessionMeta?.(sessionId); } catch { /* retry resident facts next tick */ }
+    let prior = identityMeta.get(sessionId) || {};
+    const home = pane.providerHome || indexed?.configHome || prior.configHome;
+    const samePath = (a, b) => process.platform === 'win32'
+      ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b);
+    if (home && indexed?.configHome && !samePath(home, indexed.configHome)) indexed = null;
+    if (home && prior.configHome && !samePath(home, prior.configHome)) prior = {};
+    const source = home
+      ? codexSources.find(source => samePath(source.configHome, home)) || { profileId: null, configHome: home }
+      : codexSources.length === 1 ? codexSources[0] : {};
+    if (pane.agent === 'codex') {
+      identityMeta.set(sessionId, { ...prior, ...source,
+        ...(indexed?.profileId && !source.profileId ? { profileId: indexed.profileId } : {}),
+        ...(indexed?.path ? { transcriptPath: indexed.path } : {}) });
+    }
+  };
+
+  const sameDurableFact = (prior, fact) => prior && ['id', 'provider', 'cwd', 'profileId', 'configHome', 'transcriptPath'].every(key => {
+    const canonical = value => value && ['cwd', 'configHome', 'transcriptPath'].includes(key)
+      ? (process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value)) : (value ?? null);
+    return canonical(prior[key]) === canonical(fact[key] ?? prior[key]);
+  });
+  const remember = async (paneId, sessionId, pane) => {
+    let unchanged = false;
+    if (rememberLink) {
+      const metadata = identityMeta.get(sessionId) || {};
+      const fact = {
+        id: sessionId,
+        provider: pane.agent,
+        cwd: pane.cwd || null,
+        paneId,
+        profileId: metadata.profileId || null,
+        configHome: metadata.configHome || null,
+        transcriptPath: metadata.transcriptPath || null,
+      };
+      const fingerprint = JSON.stringify(fact);
+      if (remembered.get(sessionId) !== fingerprint && lookupRememberedLink) {
+        try {
+          if (sameDurableFact(await lookupRememberedLink(sessionId), fact)) remembered.set(sessionId, fingerprint);
+        } catch { /* a missing durable fact can be repaired through the normal write */ }
+      }
+      unchanged = remembered.get(sessionId) === fingerprint;
+      if (remembered.get(sessionId) !== fingerprint) {
+        await rememberLink(fact);
+        remembered.set(sessionId, fingerprint);
+      }
+      if (pane.agent === 'codex' && lookupSessionMeta && !fact.transcriptPath) {
+        pendingMetadata.set(sessionId, { paneId, pane });
+        while (pendingMetadata.size > 512) pendingMetadata.delete(pendingMetadata.keys().next().value);
+      } else pendingMetadata.delete(sessionId);
+    }
+    return unchanged;
+  };
+
+  const record = async (paneId, sessionId, pane, rawPanes, alreadyNamed = false) => {
+    if (!sessionId) return false;
+    const ownedElsewhere = () => [...links].some(([owner, id]) => owner !== paneId && id === sessionId
+      && (listPanes?.() || []).some(p => p.pane_id === owner && !p.exited));
+    if (ownedElsewhere()) return false;
+    const previous = links.get(paneId) || (pane.provisional ? paneIdValue(rawPanes.find(p => p.pane_id === paneId) || {}) : null) || null;
+    const anotherPaneHoldsPrevious = previous && (listPanes?.() || []).some(other => other.pane_id !== paneId && !other.exited
+      && (paneIdValue(other) === previous || links.get(other.pane_id) === previous));
+    let previousSessionId = previous !== sessionId && anotherPaneHoldsPrevious ? null : previous;
+    const changed = previousSessionId !== sessionId;
+    if (!pane.provisional) await enrich(sessionId, pane);
+    if (closed) return false;
+    if (changed && !pane.provisional && !alreadyNamed && annotateSessionIdentity) {
       try {
         await annotateSessionIdentity(paneId, { agent: pane.agent, agentSession: sessionId });
       } catch (error) {
@@ -288,32 +415,36 @@ function createProviderSessionLinker(options = {}) {
         return false;
       }
     }
-    if (rememberLink) {
-      const metadata = identityMeta.get(sessionId) || {};
-      await rememberLink({
-        id: sessionId,
-        provider: pane.agent,
-        cwd: pane.cwd || null,
-        paneId,
-        profileId: metadata.profileId || null,
-        configHome: metadata.configHome || null,
-        transcriptPath: metadata.transcriptPath || null,
-      });
-    }
+    if (closed) return false;
+    const unchangedDurable = !pane.provisional && await remember(paneId, sessionId, pane);
+    const current = (listPanes?.() || []).find(item => item.pane_id === paneId);
+    const currentId = typeof current?.agent_session === 'string' ? current.agent_session : current?.agent_session?.value;
+    if (closed || !current || current.exited || ownedElsewhere() || (!pane.titlePrefix && currentId && currentId !== sessionId)
+      || (pane.titlePrefix && current.codex_title?.prefix !== pane.titlePrefix)) return false;
+    if (!changed) return false;
     links.set(paneId, sessionId);
-    emitter.emit('link', {
+    // Annotation and metadata writes can yield. A newly arrived pane may now
+    // own the old key, so validate the rename again at the publication boundary.
+    if (previousSessionId && previousSessionId !== sessionId && (listPanes?.() || []).some(other => other.pane_id !== paneId && !other.exited
+      && (paneIdValue(other) === previousSessionId || links.get(other.pane_id) === previousSessionId))) previousSessionId = null;
+    // Restore the route and any provisional windows without refreshing history
+    // or rewriting unchanged durable metadata.
+    const event = {
       paneId,
       sessionId,
+      previousSessionId,
       provider: pane?.agent || null,
       cwd: pane?.cwd || null,
       workspaceId: rawPanes.find((item) => item.pane_id === paneId)?.workspace_id || null,
-    });
+    };
+    if (!previous && alreadyNamed && currentId === sessionId && unchangedDurable) emitter.emit('restore', event);
+    else emitter.emit('link', event);
     return true;
   };
 
-  const resolveOnce = async () => {
+  const resolveOnce = async (titleOnly = false) => {
     const panes = (listPanes?.() || []).filter((pane) => (
-      ['codex', 'cursor'].includes(pane?.agent) && !pane?.agent_session
+      ['codex', 'cursor'].includes(pane?.agent) && !pane.exited
     ));
     // A link outlives neither its pane nor its agent: a stale one would keep a
     // dead session green in the rail and route the next send at it.
@@ -322,10 +453,70 @@ function createProviderSessionLinker(options = {}) {
     for (const paneId of [...links.keys()]) {
       if (!alive.has(paneId)) { links.delete(paneId); changed = true; }
     }
+    for (const paneId of titleChecks.keys()) if (!alive.has(paneId)) titleChecks.delete(paneId);
+    for (const paneId of handledTitles.keys()) if (!alive.has(paneId)) handledTitles.delete(paneId);
+    // A user can switch again before history indexes the previous rollout.
+    // Finish that metadata write without recreating its pane link or window.
+    for (const [id, pending] of pendingMetadata) {
+      let indexed;
+      try { indexed = await lookupSessionMeta?.(id); } catch { continue; }
+      if (!indexed?.path) continue;
+      await enrich(id, pending.pane);
+      await remember(pending.paneId, id, pending.pane);
+    }
     if (!panes.length) return changed;
 
     const withStart = [];
     for (const pane of panes) {
+      if (pane.agent === 'codex' && pane.codex_title) {
+        const prefix = pane.codex_title.prefix;
+        const row = titleRow(pane), nativeId = paneIdValue(pane), argvId = sessionIdFromArgv(pane.argv);
+        // Resume identity is already evidence. A lagging index, old lineage or
+        // an absent/unrecognized title must not take that identity away.
+        const knownId = [nativeId, argvId].find(id => matchesPrefix(id, prefix));
+        const indexedRoot = row?.lineage && ['cli', 'exec', 'vscode', 'mcp'].includes(row.lineage.kind) && !row.lineage.parentThreadId;
+        const id = knownId || (prefix && indexedRoot && matchesPrefix(row.id, prefix) ? row.id : null);
+        const peers = panes.filter(p => p.agent === 'codex' && sameDisplayedThread(pane, p));
+        const owner = peers.find(p => UUID_RE.test(links.get(p.pane_id) || '') && matchesPrefix(links.get(p.pane_id), prefix));
+        if (owner && owner.pane_id !== pane.pane_id) continue;
+        if (!owner && peers.length > 1) {
+          const writers = [];
+          for (const peer of peers) if ((await screenEvidence(peer, !titleOnly, true)).writer) writers.push(peer.pane_id);
+          if (writers.length !== 1 || writers[0] !== pane.pane_id) continue;
+        }
+        if (id) {
+          const check = links.get(pane.pane_id) !== id && readPaneText ? await screenEvidence(pane, !titleOnly) : null;
+          if (check && ((!check.available && !knownId) || check.notice === 'writer' || check.view)) continue;
+          if (row?.id === id) identityMeta.set(id, { profileId: row.profileId, configHome: pane.provider_home, transcriptPath: row.path });
+          if (await record(pane.pane_id, id, { paneId: pane.pane_id, agent: pane.agent,
+            cwd: pane.cwd, providerHome: pane.provider_home, titlePrefix: prefix }, panes, nativeId === id)) changed = true;
+          if (!check || knownId || check.writer || check.view || check.notice) handledTitles.set(pane.pane_id, titleSignature(pane));
+          continue;
+        }
+        if (prefix) {
+          const child = row?.lineage?.parentThreadId || /^(subagent|guardian)/.test(row?.lineage?.kind || '');
+          const check = !child && readPaneText ? await screenEvidence(pane, !titleOnly) : null;
+          if (check?.writer) {
+            // An ordinary new composer can accept its first Harbor prompt
+            // before Codex creates a rollout. Move the window, never guess a UUID.
+            const indexedId = matchesPrefix(row?.id, prefix) ? row.id : null;
+            if (indexedId) identityMeta.set(indexedId, { profileId: row.profileId, configHome: pane.provider_home, transcriptPath: row.path });
+            if (await record(pane.pane_id, indexedId || `pane:${pane.pane_id}`, { paneId: pane.pane_id, agent: 'codex',
+              cwd: pane.cwd, providerHome: pane.provider_home, titlePrefix: prefix, provisional: !indexedId }, panes)) changed = true;
+          }
+          if (child || check?.writer || check?.view || check?.notice) handledTitles.set(pane.pane_id, titleSignature(pane));
+          continue;
+        }
+        // No recognized title: fd0e90a's argv/history path remains available
+        // on the full timer pass, never on an event-driven title pass.
+      }
+      if (titleOnly) continue;
+      const nativeId = typeof pane.agent_session === 'string' ? pane.agent_session : pane.agent_session?.value;
+      if (UUID_RE.test(nativeId || '')) {
+        if (await record(pane.pane_id, nativeId, { paneId: pane.pane_id, agent: pane.agent,
+          cwd: pane.cwd, providerHome: pane.provider_home }, panes, true)) changed = true;
+        continue;
+      }
       const info = await paneAgentProcess(pane.pane_id).catch(() => null);
       if (!info || !Number.isFinite(info.startedMs)) continue;
       withStart.push({
@@ -336,6 +527,7 @@ function createProviderSessionLinker(options = {}) {
         cwd: info.cwd || pane.cwd || null,
         startedMs: info.startedMs,
         argv: info.argv || [],
+        providerHome: pane.provider_home || null,
       });
     }
     if (!withStart.length) return changed;
@@ -390,18 +582,19 @@ function createProviderSessionLinker(options = {}) {
     return changed;
   };
 
-  const tick = async () => {
+  const tick = async (titleOnly = false) => {
     if (running || closed) return false;
     running = true;
     try {
-      const changed = await resolveOnce();
+      const changed = await resolveOnce(titleOnly);
       if (changed) emitter.emit('changed');
       return changed;
     } catch (error) {
-      emitter.emit('error', error);
+      if (!closed && emitter.listenerCount('error')) emitter.emit('error', error);
       return false;
     } finally {
       running = false;
+      for (const resolve of idleWaiters.splice(0)) resolve();
     }
   };
 
@@ -411,10 +604,15 @@ function createProviderSessionLinker(options = {}) {
     // pane looks exactly like a claude pane the daemon named itself, so the rail
     // row, the window key, and every ownership test downstream work unchanged.
     apply(panes) {
-      if (!links.size) return panes;
       return (panes || []).map((pane) => {
         const sessionId = links.get(pane?.pane_id);
-        if (!sessionId || pane.agent_session) return pane;
+        const nativeId = typeof pane.agent_session === 'string' ? pane.agent_session : pane.agent_session?.value;
+        if (!(pane.agent === 'codex' && pane.codex_title) && nativeId) return pane;
+        const duplicate = nativeId && [...links].some(([owner, id]) => owner !== pane.pane_id && id === nativeId);
+        const ambiguous = !sessionId && (panes || []).filter(p => p.agent === 'codex' && !p.exited && sameDisplayedThread(pane, p)).length > 1;
+        if (!sessionId && titleChecks.get(pane.pane_id)?.notice === 'writer') return { ...pane, agent_session: null };
+        if (!duplicate && !ambiguous && matchesPrefix(nativeId, pane.codex_title?.prefix) && !String(sessionId).startsWith('pane:')) return pane;
+        if (!sessionId || sessionId.startsWith('pane:')) return duplicate || ambiguous || pane.codex_title ? { ...pane, agent_session: null } : pane;
         return {
           ...pane,
           agent_session: {
@@ -425,7 +623,17 @@ function createProviderSessionLinker(options = {}) {
     },
     get(paneId) { return links.get(paneId) || null; },
     all() { return Object.fromEntries(links); },
-    resolveNow: tick,
+    resolveNow: () => tick(false),
+    resolveTitlesNow: () => hasPendingTitles() ? tick(true) : Promise.resolve(false),
+    async recheckTitle(paneId) {
+      if (running) await new Promise(resolve => idleWaiters.push(resolve));
+      if (closed) return false;
+      const check = titleChecks.get(paneId);
+      if (check?.notice === 'writer') check.attempts = 0;
+      else titleChecks.delete(paneId);
+      handledTitles.delete(paneId);
+      return tick(true);
+    },
     start() {
       if (timer || closed) return;
       timer = setInterval(tick, intervalMs);
@@ -436,11 +644,13 @@ function createProviderSessionLinker(options = {}) {
       closed = true;
       clearInterval(timer);
       timer = null;
+      return running ? new Promise(resolve => idleWaiters.push(resolve)) : Promise.resolve();
     },
   };
 }
 
 module.exports = {
+  codexTitleIndex,
   createProviderSessionLinker,
   readCodexHistory,
   findCodexRollout,

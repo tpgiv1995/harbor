@@ -53,7 +53,11 @@ async function pruneCorruptBackups(file) {
 // which branch answered and what it answered with, and a load whose profile
 // order disagrees with the raw bytes it just read records the contradiction.
 // One line per boot; keep it cheap and never let it throw.
+// Never from the Node test runner (2026-11-09): every config spec wrote here,
+// so 97% of the real log's 44k lines (and all 286 discovery-default alarms)
+// were test noise burying the boots this log exists to explain.
 function logConfigLoad(entry) {
+  if (process.env.NODE_TEST_CONTEXT) return;
   try {
     const os = require('node:os');
     const fsSync = require('node:fs');

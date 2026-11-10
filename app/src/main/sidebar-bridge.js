@@ -5,7 +5,7 @@ const fsp = require('node:fs/promises');
 const { createControlClient } = require('./session-daemon/factory.js');
 const { createHistoryProvider } = require('./providers/history.js');
 const { createProviderHistory } = require('./providers/provider-history.js');
-const { createProviderSessionLinker } = require('./providers/provider-session-link.js');
+const { createProviderSessionLinker, codexTitleIndex } = require('./providers/provider-session-link.js');
 const { mergeSidebarModel, sleptSince } = require('../shared/sidebar-model.cjs');
 const { parseLocalDateTime } = require('../shared/date-roll.cjs');
 const { freshWorking } = require('../shared/claude-turn-state.cjs');
@@ -255,6 +255,7 @@ function createSidebarBridge(options = {}) {
   // Agent detection names a codex/cursor pane's agent but not its session, so those
   // windows had no transcript and fell back to the raw terminal. The linker
   // resolves the id from the CLI's own argv and files.
+  let lookupCodexTitle = () => null;
   const providerLinker = options.providerSessionLinker === null ? null : (
     options.providerSessionLinker || createProviderSessionLinker({
       profiles: options.profiles,
@@ -291,6 +292,9 @@ function createSidebarBridge(options = {}) {
         return daemonClient.annotateSessionIdentity(paneId, identity);
       },
       rememberLink: (fact) => providerHistory?.rememberLink(fact),
+      lookupSessionMeta: id => providerHistory?.metaFor?.(id) || null,
+      lookupRememberedLink: id => providerHistory?.rememberedLinkFor?.(id) || null,
+      lookupTitle: (prefix, home) => lookupCodexTitle(prefix, home),
     })
   );
 
@@ -425,6 +429,7 @@ function createSidebarBridge(options = {}) {
       }
     }
     historySessions = [...claudeRows, ...providerRows];
+    lookupCodexTitle = codexTitleIndex(providerRows);
     historyById = new Map(historySessions.map((row) => [row.id, row]));
     claudeHistoryCount = claudeRows.length;
     homes = homeMap;
@@ -445,6 +450,7 @@ function createSidebarBridge(options = {}) {
     };
     publish();
     emitter.emit('history-refreshed');
+    providerLinker?.resolveTitlesNow?.();
   });
 
   // A refresh that failed is retried on the bridge's own clock. The fs watcher
@@ -540,6 +546,7 @@ function createSidebarBridge(options = {}) {
               interactivePanes.delete(event.data?.pane_id || event.data?.pane?.pane_id);
             }
             liveState = applyPaneEvent(liveState, event);
+            if (event?.event === 'pane.created' || event?.event === 'pane.updated') providerLinker?.resolveTitlesNow?.();
             publish();
           }
         },
@@ -549,6 +556,7 @@ function createSidebarBridge(options = {}) {
       subscription.on('close', () => { if (!closed) scheduleReconnect(); });
       liveState = extractLiveState(boot.snapshot);
       publish();
+      providerLinker?.resolveTitlesNow?.();
       {
         dormantTimer = setInterval(() => { if (dormantSupported) refreshDormant(); refreshInteractivePanes(); }, DORMANT_POLL_MS);
         dormantTimer.unref?.();
@@ -576,6 +584,7 @@ function createSidebarBridge(options = {}) {
       });
       providerLinker.emitter.on('changed', publish);
       providerLinker.emitter.on('error', (error) => emitter.emit('error', error));
+      providerLinker.emitter.on('restore', link => emitter.emit('provider-session-restored', link));
       providerLinker.start();
     }
     // Two independent halves, each degrading on its own. A history failure at
@@ -622,10 +631,11 @@ function createSidebarBridge(options = {}) {
     providerHistory?.close();
     delegationIndex?.close();
     providerLinker?.emitter.removeAllListeners();
-    providerLinker?.close();
+    const linkDrained = providerLinker?.close();
     subscription?.close?.();
     subscription = null;
     daemonClient = null;
+    return linkDrained;
   };
 
   return {
@@ -716,6 +726,7 @@ function createSidebarBridge(options = {}) {
     // A send is the moment a codex pane's first prompt hits disk; resolving
     // right then names the session in seconds instead of at the next tick.
     resolveProviderSessions: () => providerLinker?.resolveNow() ?? false,
+    recheckProviderTitle: paneId => providerLinker?.recheckTitle?.(paneId) ?? false,
     providerSessionForPane: (paneId) => providerLinker?.get(paneId) ?? null,
     getLivePaneIds: () => liveState.panes.map((pane) => pane.pane_id),
     // The team chart (providers/team.js): live agent panes with the linker's

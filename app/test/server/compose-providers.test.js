@@ -153,6 +153,24 @@ function baseProviders(root, transcriptPath) {
   };
 }
 
+test('phone restore publishes provisional upgrades without renaming real-id windows', async (t) => {
+  const isolated = await fixture(t), providers = baseProviders(isolated.root, null);
+  const composed = await composeServer({ ...isolated, ...providers,
+    sessionSend: { emitter: new EventEmitter() },
+    terminalBridge: { emitter: new EventEmitter(), start() {}, close() {} },
+  });
+  t.after(() => composed.close());
+  const launches = [];
+  composed.router.onPush((channel, payload) => { if (channel === 'session:launched') launches.push(payload); });
+  providers.sidebar.emitter.emit('provider-session-restored', {
+    paneId: 'p', workspaceId: 'w', sessionId: 'restored-root', previousSessionId: 'history-root', provider: 'codex', cwd: isolated.root,
+  });
+  assert.deepEqual(launches.map(e => e.replacesKey), ['pane:p', 'live:p']);
+  assert(launches.every(e => e.sessionId === 'restored-root' && e.paneId === 'p'));
+  const links = await composed.router.call('links:get');
+  assert.equal(links['restored-root'].paneId, 'p');
+});
+
 // The phone gets its own projection (phone-rail.js, 2026-10-11): a whole
 // snapshot of what its drawer shows, never desktop deltas and never all
 // history. Before this the push was the full model (3.96 MB live).

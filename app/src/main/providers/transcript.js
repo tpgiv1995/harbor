@@ -21,6 +21,7 @@ const { readSessionBeacon, readOwnerProcessAlive } = require('./session-owner.js
 const { processAliveFromEvidence } = require('../../shared/session-run-state.cjs');
 const { pastTense, progressive } = require('./plain-english.js');
 const { imageStore } = require('./image-store.js');
+const { readCodexInheritedHistory } = require('./codex-inherited-history.js');
 
 
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
@@ -2685,6 +2686,22 @@ function createTranscriptProvider(options = {}) {
   const open = new Map(); // sessionId -> entry
   let closed = false;
 
+  const seedCodexInheritance = async (entry, size) => {
+    if (entry.provider !== 'codex' || size >= MAX_INITIAL_BYTES) return;
+    entry.missingParents ||= new Set();
+    const inherited = await readCodexInheritedHistory(entry.path, { maxBytes: MAX_INITIAL_BYTES - size, missingParents: entry.missingParents });
+    const snapshot = new TranscriptParser('codex');
+    for (const record of inherited.records) snapshot.applyLine(record);
+    if (inherited.unavailable) entry.parser.push({ kind: 'note', text: 'Some earlier messages from the original chat are unavailable.' });
+    for (const block of snapshot.blocks) {
+      const { key, ...copy } = block;
+      // A tool pending at the fork point is a historical snapshot, never a
+      // running tool of this child. Keep its row without a live spinner.
+      if (copy.status === 'run') copy.status = 'inherited';
+      entry.parser.push(copy);
+    }
+  };
+
   // Pushed BEFORE the prefix images and before the tail, so the opening prompt
   // is the first row in the tile, where it belongs. Returned so the image
   // seeder can recognise it: when the first message is small enough to sit
@@ -2841,12 +2858,17 @@ function createTranscriptProvider(options = {}) {
         entry.lineBuffer = new LineBuffer();
         entry.needsReplace = true;
         entry.skipFirstPartial = false;
+        entry.inheritanceSeeded = false;
         if (stat.size > MAX_INITIAL_BYTES) {
           entry.offset = await initialTailOffset(entry.path, stat.size);
           entry.tailStartOffset = entry.offset;
           entry.skipFirstPartial = false;
           await seedPrefixImages(entry, await seedOpeningBlock(entry));
         }
+      }
+      if (!entry.inheritanceSeeded && stat.size > 0) {
+        await seedCodexInheritance(entry, stat.size);
+        entry.inheritanceSeeded = true;
       }
       // L1 ground truth: trust the statusline tee while the transcript has not
       // grown past it. An idle transcript leaves an old tee authoritative; only

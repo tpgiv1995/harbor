@@ -15,6 +15,14 @@ const AI = path.join(__dirname, '../../../bin/ai');
 const CLAUDE_SESSIONS = path.join(__dirname, '../../../bin/claude-sessions');
 const DAEMON = path.join(__dirname, '../../src/daemon/daemon.js');
 
+test('Codex 0.167 panes publish their current thread through a process-only title pin', () => {
+  const { codexPaneControls } = require('../../../bin/harbor-bin.cjs');
+  const pin = 'tui.terminal_title=["thread-id"]';
+  assert(codexPaneControls({ version: [0, 167, 0] }).includes(pin));
+  assert(!codexPaneControls({ version: [0, 166, 0] }).includes(pin));
+  assert(!codexPaneControls({ version: null }).includes(pin));
+});
+
 // Read the command bin/ai WOULD run, without running it.
 //
 // EVERY invocation names a config file, because bin/ai resolves the app's real
@@ -250,7 +258,8 @@ test('codex >= 0.156.0 panes run without the shared server and keep the inline t
   for (const [version, migrations] of [
     ['0.156.0', ''], ['0.157.0', ''], ['0.158.0', bundledAcks],
     ['0.163.0', ' -c features.cli_daybreak=false' + bundledAcks],
-    ['1.0.0', ' -c features.cli_daybreak=false -c check_for_update_on_startup=false' + bundledAcks],
+    ['0.167.0', ' -c features.cli_daybreak=false -c check_for_update_on_startup=false -c \'tui.terminal_title=["thread-id"]\'' + bundledAcks],
+    ['1.0.0', ' -c features.cli_daybreak=false -c check_for_update_on_startup=false -c \'tui.terminal_title=["thread-id"]\'' + bundledAcks],
   ]) {
     assert.equal(
       argv(['--provider', 'codex', '--model', 'gpt-6-sol', '--effort', 'high'], { HARBOR_CODEX_VERSION: version }),

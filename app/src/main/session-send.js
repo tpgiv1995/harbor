@@ -420,6 +420,21 @@ function codexReadOnlyNotice(screen) {
   if (CODEX_PROVIDER_NOTICE_RE.test(tail)) return 'provider';
   return CODEX_WRITER_NOTICE_RE.test(tail) ? 'writer' : null;
 }
+function codexThreadView(screen) {
+  const lines = String(screen || '').trimEnd().split('\n').filter(line => line.trim()).slice(-10);
+  const prompt = lines.filter(line => /^\s*[›»❯]\s*/u.test(line)).at(-1) || '';
+  if (/^\s*[›»❯]\s*Viewing sub-agent\b.*direct input is disabled\s*$/iu.test(prompt)) return 'child';
+  const footer = lines.slice(Math.max(lines.lastIndexOf(prompt) + 1, lines.length - 3));
+  if (/\bSide from\b/i.test(footer.join(' '))) return 'side';
+  return null;
+}
+function codexWritableComposer(screen) {
+  if (codexThreadView(screen) || codexReadOnlyNotice(screen)) return false;
+  const lines = String(screen || '').trimEnd().split('\n');
+  if (/^\s*⚠\s*\d+/u.test(lines.at(-1) || '')) lines.pop();
+  const last = lines.filter(line => line.trim()).at(-1) || '';
+  return (CODEX_FOOTER_RE.test(last) || CODEX_HINT_FOOTER_RE.test(last)) && codexBoxState(screen) !== 'noprompt';
+}
 // A FRESH CODEX TAKES ITS FIRST MESSAGE BEFORE IT HAS A BOX AGAIN (measured on
 // 0.166.0, 2026-11-01): Enter moves the message into the conversation as
 // "› <message>" with "Waiting for startup · esc cancel" under it, and no box
@@ -800,6 +815,7 @@ function createSessionSend(deps) {
   // directory still gets it, because env is unset there.
   const captureDir = process.env.HARBOR_UNRECOGNIZED_DIR
     || suppliedCaptureDir
+    || (process.env.NODE_TEST_CONTEXT && deps.sendLogFile ? path.join(path.dirname(deps.sendLogFile), 'unrecognized-dialogs') : null)
     || path.join(os.homedir(), '.cache/harbor/unrecognized-dialogs');
   // ONE SCREEN READ PER ASK, NOT SIX, INSIDE A MENU POLL (2026-11-06). A window's
   // menu poll walks readMenu (recent, then visible), readFallback (recent again)
@@ -878,7 +894,7 @@ function createSessionSend(deps) {
   const sendLogFile = deps.sendLogFile
     ?? path.join(os.homedir(), '.cache/harbor/send-log.jsonl');
   const logSend = (record) => {
-    if (process.env.HARBOR_NO_SEND_LOG === '1') return;
+    if (process.env.HARBOR_NO_SEND_LOG === '1' || (process.env.NODE_TEST_CONTEXT && !deps.sendLogFile)) return;
     (async () => {
       try {
         await fs.mkdir(path.dirname(sendLogFile), { recursive: true });
@@ -1621,6 +1637,7 @@ function createSessionSend(deps) {
   // scrollback hours later. Bounded; a write failure never breaks the send.
   const SEND_CAPTURES_KEPT = 40;
   const captureSendScreen = async (paneId, reason, screen) => {
+    if (process.env.NODE_TEST_CONTEXT && !deps.sendLogFile) return;
     try {
       const dir = path.join(path.dirname(sendLogFile), 'send-captures');
       await fs.mkdir(dir, { recursive: true });
@@ -1900,7 +1917,14 @@ function createSessionSend(deps) {
   // down the claude path: wrong readiness test, wrong composer guard, and a
   // Claude chip on a gpt-5.6-sol session. Callers resolve it explicitly.
   // `onWait(detail)` lets a caller say why a send is taking minutes.
-  const deliver = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null } = {}) => {
+  const deliver = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null, exactDraftOnly = false } = {}) => {
+    const assertExactDraft = screen => {
+      if (exactDraftOnly && !ownsCodexBox(paneId, screen, { text })) {
+        const error = new Error('Codex\'s prepared draft changed before it could be sent. Harbor typed nothing. Your text is kept. Check the draft in the >_ terminal and send again.');
+        error.code = 'CODEX_DRAFT_CHANGED';
+        throw error;
+      }
+    };
     // Lease the pane's control for the whole keystroke sequence: a renderer
     // blur mid-send defers until the lease drops instead of yanking control.
     terminalBridge.holdControl?.(paneId);
@@ -1978,6 +2002,7 @@ function createSessionSend(deps) {
           throw codexNoPromptError(ready.screen);
         }
         const draft = codexBoxDraft(ready.screen);
+        assertExactDraft(ready.screen);
         // Enter-only for an earlier try needs proof it is ours: exact visible text,
         // or a pasted block of its shape that this Harbor itself typed (ownsCodexBox).
         const ownEarlierTry = Boolean(text) && !images.length && ownsCodexBox(paneId, ready.screen, { text });
@@ -2105,6 +2130,10 @@ function createSessionSend(deps) {
       // Typed earlier and never shown: wait for THAT, type nothing new.
       const awaitEarlier = Boolean(gated && text && !lastImageMarker && earlier && !alreadyInPrompt);
       if (awaitEarlier) logSend({ paneId, phase: 'awaiting-earlier-typing' });
+      if (exactDraftOnly) {
+        assertExactDraft(await readScreen(paneId, CODEX_READ_LINES));
+        alreadyInPrompt = true; // this delivery is Enter-only, never keyboard text
+      }
       // Slash command tokens must be typed raw so the CLI parses them. The
       // trailing space closes its popup; any remainder keeps the normal
       // single-line/raw or multi-line/bracketed-paste behavior.
@@ -2193,6 +2222,7 @@ function createSessionSend(deps) {
       } else {
         await sleep(160);
       }
+      if (exactDraftOnly) assertExactDraft(await readScreen(paneId, CODEX_READ_LINES));
       await typeInto(paneId, workspaceId, '\r');
       if (codexGated) noteCodexEnter(paneId, sent);
       deliveredPanes.add(paneId);
@@ -2282,6 +2312,7 @@ function createSessionSend(deps) {
   const FALLBACK_SCREEN_LINES = 14;
   const capturedScreens = new Set();
   const captureUnrecognized = async (paneId, screen) => {
+    if (process.env.NODE_TEST_CONTEXT && !deps.sendLogFile && !suppliedCaptureDir && !process.env.HARBOR_UNRECOGNIZED_DIR) return;
     try {
       const hash = crypto.createHash('sha1').update(screen).digest('hex').slice(0, 12);
       if (capturedScreens.has(hash)) return;
@@ -3087,7 +3118,28 @@ function createSessionSend(deps) {
       return candidate; // daemon hiccup; the send path will surface a real failure
     }
     if (pane) {
-      if (String(sessionId).startsWith('pane:')) return candidate;
+      // A raw-terminal child view or ephemeral /side chat is not the bound
+      // root. Do not submit that root's message into a different composer.
+      // Keep the link: returning to the root makes it usable again.
+      const displayed = pane.codex_title?.prefix;
+      const different = displayed && /^[0-9a-f-]{36}$/i.test(String(sessionId))
+        && !String(sessionId).toLowerCase().startsWith(displayed);
+      if (pane.agent === 'codex' && displayed && (different || /^(pane|live):/.test(String(sessionId)))) {
+        const screen = await readScreen(candidate.paneId, CODEX_READ_LINES);
+        const view = codexThreadView(screen);
+        if (different || view) {
+          if (!view) {
+            void Promise.resolve().then(() => deps.recheckProviderTitle?.(candidate.paneId)).catch(() => {});
+          }
+          const instruction = view === 'side' ? 'Open the >_ terminal and press Ctrl+C to close the side chat.'
+            : view === 'child' ? 'Open the >_ terminal, use /subagents and select Main.'
+              : 'This terminal is showing another chat. Harbor is checking its link; send again after the window updates.';
+          const error = new Error(`${instruction} Your text is kept.`);
+          error.code = 'CODEX_THREAD_VIEW_CHANGED';
+          throw error;
+        }
+      }
+      if (/^(pane|live):/.test(String(sessionId))) return candidate;
       const owner = pane.agent_session?.kind === 'id' ? (pane.agent_session.value || null) : null;
       if (!owner || owner === sessionId) return candidate;
     }
@@ -3145,10 +3197,16 @@ function createSessionSend(deps) {
     // (confirming the original instead reported a delivered send as failed;
     // Astra's round-2 review). A removal that would turn the message into a
     // Codex command ("✓/exit" -> "/exit") or into nothing sends nothing.
+    const target = await resolvePane(sessionId, pane);
     let normalizedNote = null;
+    let exactDraftOnly = false;
     if (provider === 'codex' && platform === 'win32' && trimmed && !slash) {
       const safe = codexSafeText(trimmed);
-      if (safe.text !== trimmed) {
+      // Native continuation drafts can contain punctuation which keyboard
+      // input would lose. If that exact text is already drawn, Enter submits
+      // it as-is; normalizing it would make our own exact-match guard refuse.
+      if (safe.text !== trimmed) exactDraftOnly = Boolean(!imagePaths.length && target && ownsCodexBox(target.paneId, await readScreen(target.paneId, CODEX_READ_LINES), { text: trimmed }));
+      if (safe.text !== trimmed && !exactDraftOnly) {
         const wire = safe.text.trim();
         const shown = safe.dropped.length ? [...new Set(safe.dropped)].join(' ') : '';
         if (!wire || isSlashCommand(wire)) {
@@ -3164,7 +3222,6 @@ function createSessionSend(deps) {
       }
     }
     const waitNotice = (detail) => status(sessionId, 'sending', detail);
-    const target = await resolvePane(sessionId, pane);
     debug('resolved target', JSON.stringify(target), 'link was', JSON.stringify(links.get(sessionId)));
     logSend({
       sessionId,
@@ -3204,7 +3261,7 @@ function createSessionSend(deps) {
         // message inside preSize and guaranteeing a false timeout.
         const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
         try {
-          const enterState = await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
+          const enterState = await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly });
           if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && enterState === 'unconfirmed') {
             if (!trimmed || !confirmation || confirmation.skip) throw codexUnconfirmedError();
             status(sessionId, 'sending', 'checking that Codex took it');
@@ -3270,7 +3327,7 @@ function createSessionSend(deps) {
         return { ok: true, paneId: providerFresh.paneId, resumed: true };
       }
       status(sessionId, 'sending');
-      const freshEnter = await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
+      const freshEnter = await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly });
       if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && freshEnter === 'unconfirmed') throw codexUnconfirmedError();
       status(sessionId, 'sent', normalizedNote || undefined);
       return { ok: true, paneId: providerFresh.paneId, resumed: true, delivery: 'delivered' };
@@ -3682,6 +3739,9 @@ module.exports = {
   providerTranscriptDirs,
   composerSendState,
   codexBoxState,
+  codexReadOnlyNotice,
+  codexThreadView,
+  codexWritableComposer,
   codexBoxMatch,
   codexBoxDraft,
   codexStartupEcho,
