@@ -19,7 +19,10 @@
 // visual viewport together (standalone mode on recent iOS); OVERLAY keeps the
 // layout viewport full height and shrinks only window.visualViewport (Safari's
 // classic behaviour). The visible area is 552px tall in both, measured off Pat's
-// 2026-10-21 screenshot (keyboard plus accessory bar start at 59% of 932).
+// 2026-10-21 screenshot (keyboard plus accessory bar start at 59% of 932). A
+// third, PANNED, is overlay plus the visual viewport scrolled down (offsetTop
+// 338, Pat's 2026-11-09 screenshot), which is what Safari really does when the
+// tapped field sits low on the screen; see typingPanned.
 //
 // Run from app (needs a built bundle): node scripts/drive-phone-ux-win.js [distDir] [evidenceDir] [--only=a,b]
 
@@ -48,6 +51,8 @@ const DIST = path.resolve(positional[0] || path.join(APP_ROOT, 'dist-web'));
 const EVIDENCE = path.resolve(positional[1] || path.join(realTmpDir(), 'harbor-drive-phone-ux'));
 const PHONE = { width: 430, height: 932 };
 const VISIBLE_WITH_KEYBOARD = 552;
+// How far Safari scrolled the visual viewport down in Pat's 2026-11-09 screenshot.
+const PANNED_OFFSET = 338;
 const SAFE = { top: 47, bottom: 34 };
 const LIVE_ID = '11111111-1111-4111-8111-111111111111';
 const ASK_ID = '22222222-2222-4222-8222-222222222222';
@@ -298,6 +303,46 @@ async function assertTypingVisible(page, label) {
   return g;
 }
 
+// Safari's visual viewport over a full-height layout, scrolled down by `offsetTop`.
+async function panKeyboard(page, offsetTop) {
+  await page.evaluate(({ visible, top }) => {
+    const vv = window.visualViewport;
+    Object.defineProperty(vv, 'height', { configurable: true, get: () => visible });
+    Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => top });
+    vv.dispatchEvent(new Event('resize'));
+    vv.dispatchEvent(new Event('scroll'));
+  }, { visible: VISIBLE_WITH_KEYBOARD, top: offsetTop });
+  await page.waitForTimeout(300);
+}
+
+// Each selector must sit inside the visible band [offsetTop, offsetTop + visible]
+// and actually be hit at three points down its visible part. Hit-testing honours
+// clipping; a bounding box does not.
+async function assertPannedVisible(page, label, selectors) {
+  const report = await page.evaluate(({ selectors: list, top, visible }) => list.map((selector) => {
+    const el = document.querySelector(selector);
+    if (!el) return { selector, missing: true };
+    const r = el.getBoundingClientRect();
+    const from = Math.max(r.top, top) + 6;
+    const to = Math.min(r.bottom, top + visible) - 6;
+    const xs = r.left + Math.min(24, r.width / 2);
+    const misses = [from, (from + to) / 2, to].filter((y) => {
+      const hit = document.elementFromPoint(xs, y);
+      return !(hit && hit.closest(selector));
+    }).map((y) => {
+      const hit = document.elementFromPoint(xs, y);
+      return `${Math.round(y)}:${hit ? (hit.id ? `#${hit.id}` : hit.className || hit.tagName) : 'nothing'}`;
+    });
+    return { selector, top: Math.round(r.top), bottom: Math.round(r.bottom), misses };
+  }), { selectors, top: PANNED_OFFSET, visible: VISIBLE_WITH_KEYBOARD });
+  console.log(`${label} geometry: ${JSON.stringify(report)}`);
+  for (const entry of report) {
+    assert.ok(!entry.missing, `${label}: ${entry.selector} is on the page`);
+    assert.ok(entry.top >= PANNED_OFFSET - 1 && entry.bottom <= PANNED_OFFSET + VISIBLE_WITH_KEYBOARD + 1, `${label}: ${entry.selector} ${entry.top}..${entry.bottom} sits inside the visible band ${PANNED_OFFSET}..${PANNED_OFFSET + VISIBLE_WITH_KEYBOARD}`);
+    assert.deepEqual(entry.misses, [], `${label}: ${entry.selector} is drawn, not clipped or covered`);
+  }
+}
+
 async function openChat(page, title) {
   await page.getByRole('button', { name: 'Switch session' }).click();
   await page.locator('.session-row', { hasText: title }).first().click();
@@ -349,6 +394,32 @@ const STATES = {
     await page.waitForTimeout(300);
     await assertTypingVisible(page, 'keyboard (overlay)');
     await shot(page, '03-typing-keyboard-overlay', { clip: { x: 0, y: 0, width: PHONE.width, height: VISIBLE_WITH_KEYBOARD } });
+  },
+  // THE PANNED KEYBOARD (Pat's phone, 2026-11-09). Safari does not only shrink
+  // the visual viewport: it also SCROLLS it down the full-height layout so the
+  // field you tapped sits above the keyboard. visualViewport.offsetTop was 338 in
+  // Pat's screenshot, and the shell follows it (top: --app-offset-top). The
+  // Lighthouse reskin made #root a positioned box, so the shell was positioned
+  // inside #root, which is only --app-h tall and clips: everything below 552
+  // vanished, the composer with it, and the bare ground showed through. Neither
+  // mode above pans, which is how it shipped. Asserted by hit-testing, because a
+  // clipped element still reports its full rectangle.
+  async typingPanned(page) {
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    await page.locator('.composer-field .composer-input').click();
+    await page.locator('.composer-field .composer-input').fill(LONG_DRAFT);
+    await panKeyboard(page, PANNED_OFFSET);
+    await assertPannedVisible(page, 'keyboard (panned)', ['.composer-field', '.conv-pane']);
+    await shot(page, '03b-typing-keyboard-panned', { clip: { x: 0, y: PANNED_OFFSET, width: PHONE.width, height: VISIBLE_WITH_KEYBOARD } });
+  },
+  async noteEditorPanned(page) {
+    await page.getByRole('button', { name: 'Notes' }).click();
+    await page.locator('.notes-mobile').getByText('Reply to the carrier').first().click();
+    await page.waitForTimeout(400);
+    await page.locator('.ne-body').click();
+    await panKeyboard(page, PANNED_OFFSET);
+    await assertPannedVisible(page, 'note editor (panned)', ['.ne-body', '.ne-tags']);
+    await shot(page, '19b-note-editing-keyboard-panned', { clip: { x: 0, y: PANNED_OFFSET, width: PHONE.width, height: VISIBLE_WITH_KEYBOARD } });
   },
   async reconnecting(page, { link }) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');

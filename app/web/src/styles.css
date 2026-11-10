@@ -13,11 +13,19 @@ body,
 }
 
 /* Everything in the app sits above the fixed ground (tokens.css body::before,
-   z-index 0): a positioned layer paints over non-positioned content, so the root
-   must be a positioned layer of its own. */
+   z-index 0). `isolation` makes the root a stacking context, which paints at the
+   ground's level and after it in tree order, so the app is on top.
+
+   NEVER `position` here (2026-11-09, Pat's phone: "mobile got fucked"). A
+   positioned #root becomes the containing block of .app-shell, and #root is only
+   --app-h tall with overflow hidden. When Safari scrolls the visual viewport down
+   to keep the message box above the keyboard (offsetTop 338 on Pat's phone), the
+   shell moves to top: --app-offset-top INSIDE #root and everything below #root's
+   bottom edge is clipped: the conversation stopped a third of the way down and
+   the message box vanished. Unpositioned, the shell is placed against the page
+   as it always was. Proof: scripts/drive-phone-ux-win.js --only=typingPanned. */
 #root {
-  position: relative;
-  z-index: 1;
+  isolation: isolate;
 }
 
 /* dvh, not vh: on a phone browser vh includes the retracting chrome, so a
