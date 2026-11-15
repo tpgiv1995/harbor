@@ -61,7 +61,14 @@ const RESUME_PROFILES = [
 ];
 const DEFAULT_ID = RESUME_PROFILES.find((p) => p.isDefault).id;
 
-test('resume argv matrix: each home routes to itself, unattributed falls back to the default', async () => {
+// A resume that does not know the plan names NONE (2026-11-15). This test used
+// to pin "unattributed falls back to the default", and that default was sent as
+// an explicit `--home <default>`, which outranks claude-sessions' own lookup of
+// the session's recorded home. The phone's composer never sends the plan, so a
+// work session woken from the phone ran on the default (personal) plan for
+// five hours. With no flag, claude-sessions resumes on the home the index
+// recorded, and uses the default only when the index has none either.
+test('resume argv matrix: each home routes to itself, a resume that names no plan names none', async () => {
   const { execFile, calls } = makeExecRecorder();
   const launch = createLaunchActions({ execFile, profiles: RESUME_PROFILES });
   const P = RESUME_PROFILES;
@@ -71,9 +78,21 @@ test('resume argv matrix: each home routes to itself, unattributed falls back to
       '--resume-id', `${id}-id`, '--home', id,
     ], `${id} must route to its own home`);
   }
-  assert.deepEqual(buildResumeArgv({ id: 'unknown-id', detectedHome: null, profiles: P }), [
-    '--resume-id', 'unknown-id', '--home', DEFAULT_ID,
-  ]);
+  for (const missing of [null, undefined, '']) {
+    assert.deepEqual(buildResumeArgv({ id: 'unknown-id', detectedHome: missing, profiles: P }), [
+      '--resume-id', 'unknown-id',
+    ], `${JSON.stringify(missing)} must not become the default plan (${DEFAULT_ID})`);
+  }
+  assert.deepEqual(buildResumeArgv({ id: 'unknown-id', detectedHome: 'not-a-plan', profiles: P }), [
+    '--resume-id', 'unknown-id',
+  ], 'an id no profile has must not become the default plan either');
+  assert.deepEqual(buildResumeArgv({ id: 'path-id', detectedHome: '/home/example/.claude-team', profiles: P }), [
+    '--resume-id', 'path-id', '--home', 'team',
+  ], 'a plan named by its config home routes to that plan');
+  const withCodex = [...P, { id: 'codex-personal', provider: 'codex', configHome: '/home/example/.codex' }];
+  assert.deepEqual(buildResumeArgv({ id: 'codex-id', detectedHome: 'codex-personal', profiles: withCodex }), [
+    '--resume-id', 'codex-id',
+  ], 'a Codex plan is never a Claude resume home');
 
   await launch.resumeSession({ id: 'team-id', detectedHome: 'team' });
   await launch.resumeSession({ id: 'unknown-id', detectedHome: null });
@@ -81,7 +100,7 @@ test('resume argv matrix: each home routes to itself, unattributed falls back to
   assert.equal(calls.length, 2);
   assert.equal(calls[0].command, CLAUDE_SESSIONS);
   assert.deepEqual(calls[0].argv, ['--resume-id', 'team-id', '--home', 'team']);
-  assert.deepEqual(calls[1].argv, ['--resume-id', 'unknown-id', '--home', DEFAULT_ID]);
+  assert.deepEqual(calls[1].argv, ['--resume-id', 'unknown-id']);
 });
 
 test('resume argv adds --live-ok only when explicitly requested', () => {

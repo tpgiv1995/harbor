@@ -8,13 +8,6 @@ const { scriptExecArgs } = require('../script-exec.js');
 const CLAUDE_SESSIONS = path.resolve(__dirname, '../../../../bin/claude-sessions');
 const AI_BIN = path.resolve(__dirname, '../../../../bin/ai');
 
-function resolveProfile(profiles, id) {
-  return profiles.find((profile) => profile.id === id)
-    || profiles.find((profile) => profile.isDefault)
-    || profiles[0]
-    || null;
-}
-
 function resolveProviderProfile(profiles, id, provider = 'claude') {
   const matching = profiles.filter((profile) => (profile.provider || 'claude') === provider);
   return matching.find((profile) => profile.id === id)
@@ -30,8 +23,24 @@ function resolveProviderProfile(profiles, id, provider = 'claude') {
 // resume. `resolveProfileHome` in bin/harbor-bin.cjs now accepts either, but the
 // id remains the wire form because it is also what the index records per
 // session, and one representation is better than two that can disagree.
+//
+// A RESUME THAT DOES NOT KNOW THE PLAN NAMES NONE (2026-11-15). This used to
+// run through a resolveProfile whose fallback was the DEFAULT profile, so a
+// caller that simply did not say (the phone's composer never sends the plan)
+// got an explicit `--home personal`, which outranks claude-sessions' own
+// `--home auto` lookup of the session's recorded home. Vox slept on work, Pat
+// woke it from the phone at 16:56Z, and it ran on his personal plan for five
+// hours while the badge said S. Only a claude profile named by id or by
+// configHome travels now; anything else emits no flag, and claude-sessions
+// resumes the session on the home the index recorded for it (the default only
+// when the index has none either).
 function resolveResumeHome(detectedHome, profiles = legacyConfig().profiles) {
-  return resolveProfile(profiles, detectedHome)?.id || null;
+  if (!detectedHome) return null;
+  const profile = profiles.find((item) => (
+    (item.provider || 'claude') === 'claude'
+    && (item.id === detectedHome || item.configHome === detectedHome)
+  ));
+  return profile?.id || null;
 }
 
 // This used to hold an allowlist of four literal names, because bin/claude-sessions

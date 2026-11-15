@@ -333,10 +333,16 @@ function createHistoryIndex(options = {}) {
   function historyCounts(root) {
     const file = path.join(root, 'history.jsonl');
     const key = `${root}\nhistory.jsonl`;
+    // Per session: how many prompts this home recorded, and when the latest
+    // one was. The value is replaced, never mutated, because the cached map is
+    // copied shallowly on every read.
     const countLines = (text, into) => {
       for (const line of splitLines(text)) {
         const obj = jsonObject(line);
-        if (obj && obj.sessionId) into.set(obj.sessionId, (into.get(obj.sessionId) || 0) + 1);
+        if (!obj || !obj.sessionId) continue;
+        const prev = into.get(obj.sessionId);
+        const at = Number.isFinite(obj.timestamp) ? obj.timestamp : 0;
+        into.set(obj.sessionId, { count: (prev?.count || 0) + 1, last: Math.max(prev?.last || 0, at) });
       }
     };
     let fd = null;
@@ -406,6 +412,23 @@ function createHistoryIndex(options = {}) {
     }
     homeInputs.set(key, { stamp, ids });
     return ids;
+  }
+  // When a session first started in this home: Claude Code creates the empty
+  // `session-env/<id>` folder at startup and never touches it again. Asked only
+  // for a session found in SEVERAL homes (235 of 28,238 on Pat's machine,
+  // 2026-11-15) with prompts in at least one, and only for a home whose
+  // history has no prompt of it yet, and remembered until that home's
+  // session-env listing changes,
+  // because folderIds replaces the entry (and so drops these answers) whenever
+  // it re-lists the folder.
+  function sessionEnvStartMs(root, id) {
+    const entry = homeInputs.get(`${root}\nsession-env`);
+    if (entry && !entry.starts) entry.starts = new Map();
+    if (entry?.starts.has(id)) return entry.starts.get(id);
+    let ms = 0;
+    try { ms = Number(fsImpl.statSync(path.join(root, 'session-env', id)).mtimeMs) || 0; } catch { ms = 0; }
+    entry?.starts.set(id, ms);
+    return ms;
   }
   let titlesCheckedAt = -Infinity;
   let homesCheckedAt = -Infinity;
@@ -843,21 +866,66 @@ function createHistoryIndex(options = {}) {
     const stamp = homes.map(([, root, id]) => [id, root, ...HOME_MAP_INPUTS.map((name) => inputStamp(path.join(root, name)))].join('|')).join('\n');
     if (homeMapMemo && homeMapMemo.stamp === stamp) return homeMapMemo.map;
     homeMapRetry = false;
+    // A SESSION BELONGS TO THE HOME IT RAN IN MOST RECENTLY, not the one with
+    // the most traces (2026-11-15). A session can move between plans (Harbor's
+    // plan move, or a resume on another home), and every home it ever ran in
+    // keeps its traces. Scoring by count kept a session on the plan where it
+    // had MORE prompts: Vox ran on work from 04:07Z to 11:11Z (31 prompts),
+    // was relaunched on personal at 16:56Z, and the rail badge still said S
+    // for five hours while every turn billed personal. The same map answers
+    // `meta.home`, which is what an unattributed resume launches on, so a
+    // count winner could also put a session that had moved OFF a plan back
+    // onto it. Recency is the latest prompt in that home's history.jsonl or
+    // the session's first start there (its session-env folder), whichever is
+    // later; the count rule stands only when no home has a time to offer.
     const scores = new Map();
+    const lasts = new Map();
     const score = (id, index, amount) => {
       if (!scores.has(id)) scores.set(id, Array(homes.length).fill(0));
       scores.get(id)[index] += amount;
     };
+    const envHomes = new Map();
     for (const [index, root] of homes) {
-      for (const [id, count] of historyCounts(root)) score(id, index, 2 * count);
+      for (const [id, { count, last }] of historyCounts(root)) {
+        score(id, index, 2 * count);
+        if (last > 0) {
+          if (!lasts.has(id)) lasts.set(id, Array(homes.length).fill(0));
+          lasts.get(id)[index] = last;
+        }
+      }
       for (const directory of ['session-env', 'file-history']) {
-        for (const id of folderIds(root, directory)) score(id, index, 1);
+        for (const id of folderIds(root, directory)) {
+          score(id, index, 1);
+          if (directory === 'session-env') {
+            if (!envHomes.has(id)) envHomes.set(id, []);
+            envHomes.get(id).push(index);
+          }
+        }
       }
     }
+    const uniqueTop = (values) => {
+      const top = Math.max(...values);
+      return top > 0 && values.filter((value) => value === top).length === 1 ? values.indexOf(top) : -1;
+    };
     const result = {};
     for (const [id, values] of scores) {
-      const top = Math.max(...values);
-      if (top > 0 && values.filter((value) => value === top).length === 1) result[id] = homes[values.indexOf(top)][2];
+      let winner = -1;
+      // Only a session with prompts somewhere is compared by time. Headless
+      // runs write no history at all, and they are most of the sessions found
+      // in several homes (about 490 stats a cold build would spend on them,
+      // measured 2026-11-15); they keep the count rule.
+      if (lasts.has(id) && values.filter((value) => value > 0).length > 1) {
+        const recency = [...lasts.get(id)];
+        // A start only says something about a home with no prompt yet (a
+        // relaunch whose first prompt has not landed): anywhere else the
+        // latest prompt already comes after the start, so no stat is spent.
+        for (const index of envHomes.get(id) || []) {
+          if (!recency[index]) recency[index] = sessionEnvStartMs(homes[index][1], id);
+        }
+        winner = uniqueTop(recency);
+      }
+      if (winner < 0) winner = uniqueTop(values);
+      if (winner >= 0) result[id] = homes[winner][2];
     }
     // A map built while an input would not read is served, but not memoized:
     // the next call reads that input again.
