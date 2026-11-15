@@ -13,6 +13,7 @@ import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
 import { terminalView, windowClickArms, headerKeepsKeys } from './terminal-view.cjs';
 import { CopySessionId } from './CopySessionId.jsx';
+import RenameField, { PencilIcon } from '../RenameField.jsx';
 import { runStateCue } from '../../shared/session-run-state.cjs';
 import { createPortal } from 'react-dom';
 
@@ -252,6 +253,10 @@ export const SessionTile = memo(forwardRef(function SessionTile({
   // a real transcript id lands.
   const sessionIdStr = String(session.id);
   const canCopyId = !sessionIdStr.startsWith('pane:') && !sessionIdStr.startsWith('live:');
+  // Rename in place (RenameField, main/session-names.js): the same rule as the
+  // rail row, a lasting id and not a read-only worker window.
+  const [renaming, setRenaming] = useState(false);
+  const canRename = canCopyId && !readOnly && !session.isChildTask && !session.isWindowsEra;
   // The + button says WHICH plan it will launch on, resolved the same way the
   // launch itself resolves it: a session with no home of its own (a codex or
   // cursor window, a provisional pane) falls back to the default profile, so
@@ -373,7 +378,31 @@ export const SessionTile = memo(forwardRef(function SessionTile({
             </button>
           </div>
         </div>
-        <div className="ti" title={title}>{title}</div>
+        {renaming ? (
+          <div className="ti ti-editing">
+            <RenameField
+              className="ti-input"
+              initial={title}
+              onSave={(next) => window.harbor.session.rename({ sessionId: session.id, title: next })}
+              onDone={() => setRenaming(false)}
+            />
+          </div>
+        ) : (
+          <div className="ti-row">
+            <div className="ti" title={title}>{title}</div>
+            {canRename ? (
+              <button
+                type="button"
+                className="ti-rn"
+                title="Rename this session"
+                aria-label="Rename session"
+                onClick={(event) => { event.stopPropagation(); setRenaming(true); }}
+              >
+                <PencilIcon />
+              </button>
+            ) : null}
+          </div>
+        )}
         {/* One status line: the run state (ready / working / blocked) folded in
             with the model and context chips. The old separate "live" chip and the
             window attention pip both said the same thing as this and were dropped

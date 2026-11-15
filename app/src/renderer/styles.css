@@ -1418,6 +1418,69 @@ button { font-family: inherit; }
 }
 .sr-wrap.archived .sr-x:hover { background: rgb(var(--accent-rgb) / 30%); color: #fff; }
 
+/* Rename a session in place (RenameField.jsx, 2026-11-15). The pencil sits
+   beside the archive button and shows the same way, on hover or focus. */
+.sr-rn {
+  position: absolute;
+  top: 50%;
+  right: 28px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--sub);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease, background 0.1s ease, color 0.1s ease;
+}
+.sr-wrap:hover .sr-rn,
+.sr-wrap:focus-within .sr-rn { opacity: 1; pointer-events: auto; }
+.sr-rn:hover { background: rgb(var(--ac-rgb) / 24%); color: #fff; }
+/* The pencil takes the time label's place while it shows, so the two never
+   draw over each other. */
+.sr-wrap.can-rename:hover .sr-tm,
+.sr-wrap.can-rename:focus-within .sr-tm { visibility: hidden; }
+/* Both hover buttons are solid, so the plan badge under the archive button
+   never shows through as a different letter (a P under the x read as R). */
+.sr-x,
+.sr-rn { background: var(--glass-2); }
+
+/* The shared editor: the task list's rename field, sized to the line it edits. */
+.rename-field {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 0 6px;
+  border: 1px solid rgb(var(--ac-rgb) / 55%);
+  border-radius: 6px;
+  background: var(--glass-2);
+  color: var(--tx);
+  outline: none;
+}
+.rename-field:focus { border-color: rgb(var(--ac-rgb) / 85%); box-shadow: 0 0 0 2px rgb(var(--ac-rgb) / 22%); }
+.rename-field::placeholder { color: var(--fnt); }
+.rename-field::selection { background: rgb(var(--ac-rgb) / 45%); color: #fff; }
+.rename-field.has-error { border-color: rgb(255 90 90 / 80%); box-shadow: 0 0 0 2px rgb(255 90 90 / 18%); }
+.rename-field:disabled { opacity: 0.7; }
+
+/* In the rail it covers the title, from where the title starts to the row end. */
+.sr-rename {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  left: 42px;
+  right: 6px;
+  z-index: 1;
+  font: 400 11px var(--font-ui);
+}
+.sr-wrap.renaming .sr-x { display: none; }
+
 /* Right-click session options menu (portal to body). */
 .sr-menu {
   position: fixed;
@@ -2147,6 +2210,34 @@ button { font-family: inherit; }
 }
 
 .win2.rest .wh .ti { color: var(--sub); }
+
+/* The title row: the title, then its rename pencil (shown on header hover or
+   focus, so a resting header gives the title its whole width). Editing swaps
+   the title for the editor in the same .ti box, so every grid density's title
+   size applies to the text being typed. */
+.wh .ti-row { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.wh .ti-row > .ti { flex: 0 1 auto; min-width: 0; }
+.wh .ti-rn {
+  flex: none;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fnt);
+  cursor: pointer;
+}
+.wh:hover .ti-rn,
+.wh:focus-within .ti-rn { display: inline-flex; }
+.wh .ti-rn:hover { background: rgb(var(--ac-rgb) / 18%); color: var(--tx); }
+.wh .ti.ti-editing { overflow: visible; }
+/* Its text starts where the title text did, and the header keeps its height. */
+.wh .ti-input { display: block; width: calc(100% + 7px); height: 1.7em; margin: -3px 0 -3px -7px; font: inherit; letter-spacing: inherit; }
 
 /* Per-window run-state chip (selection pill is separate) */
 .runstate {

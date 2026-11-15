@@ -7,6 +7,9 @@ const { createHistoryProvider } = require('./providers/history.js');
 const { createProviderHistory } = require('./providers/provider-history.js');
 const { createProviderSessionLinker, codexTitleIndex } = require('./providers/provider-session-link.js');
 const { mergeSidebarModel, sleptSince } = require('../shared/sidebar-model.cjs');
+const { readSessionNames, setSessionName: saveSessionName, applySessionNames } = require('./session-names.js');
+const { watchPath: watchSessionNames } = require('./watch-path.js');
+const { basename: fileBasename, dirname: fileDirname } = require('node:path');
 const { parseLocalDateTime } = require('../shared/date-roll.cjs');
 const { freshWorking } = require('../shared/claude-turn-state.cjs');
 const { createDelegationIndex, buildDelegationGroups, ageDelegationGroups, delegationSummaries, mergeDelegationLinks } = require('./providers/delegations.js');
@@ -164,6 +167,13 @@ function createSidebarBridge(options = {}) {
   let liveState = { workspaces: [], panes: [] };
   let historySessions = [];
   let historyById = new Map();
+  // CUSTOM NAMES (session-names.js). `baseHistory` is the last history pass as
+  // the index answered it; `historySessions` is the same rows with each named
+  // session's title swapped in, derived again whenever either one changes.
+  let baseHistory = [];
+  const sessionNamesFile = options.sessionNamesFile || null;
+  let sessionNames = readSessionNames(sessionNamesFile);
+  let sessionNamesWatcher = null;
   const delegationIndex = options.delegationIndex === null ? null : options.delegationIndex || createDelegationIndex(options.ownerOptions, { cacheFile: options.delegationScanCacheFile || null });
   let delegationGroups = [];
   // Identity outlives the 48h evidence window. Keep only child -> parent ids,
@@ -428,7 +438,8 @@ function createSidebarBridge(options = {}) {
         emitter.emit('error', error);
       }
     }
-    historySessions = [...claudeRows, ...providerRows];
+    baseHistory = [...claudeRows, ...providerRows];
+    historySessions = applySessionNames(baseHistory, sessionNames);
     lookupCodexTitle = codexTitleIndex(providerRows);
     historyById = new Map(historySessions.map((row) => [row.id, row]));
     claudeHistoryCount = claudeRows.length;
@@ -569,8 +580,29 @@ function createSidebarBridge(options = {}) {
     }
   };
 
+  const reapplySessionNames = (names) => {
+    sessionNames = names;
+    historySessions = applySessionNames(baseHistory, sessionNames);
+    historyById = new Map(historySessions.map((row) => [row.id, row]));
+    publish();
+  };
+  // The app and the phone server each build a rail from the same names file,
+  // so each watches it: a rename made in one shows in the other.
+  const watchNames = () => {
+    if (!sessionNamesFile || sessionNamesWatcher) return;
+    const base = fileBasename(sessionNamesFile);
+    try {
+      sessionNamesWatcher = watchSessionNames(fileDirname(sessionNamesFile), {}, (_event, filename) => {
+        if (closed || (filename && String(filename) !== base)) return;
+        const next = readSessionNames(sessionNamesFile);
+        if (JSON.stringify(next) !== JSON.stringify(sessionNames)) reapplySessionNames(next);
+      });
+    } catch { sessionNamesWatcher = null; }
+  };
+
   const start = async () => {
     history.on('history-changed', scheduleRefresh);
+    watchNames();
     if (providerHistory) {
       providerHistory.emitter.on('changed', scheduleRefresh);
       providerHistory.start();
@@ -618,6 +650,8 @@ function createSidebarBridge(options = {}) {
 
   const close = () => {
     closed = true;
+    sessionNamesWatcher?.close?.();
+    sessionNamesWatcher = null;
     clearTimeout(refreshTimer);
     clearTimeout(statusPublishTimer);
     clearTimeout(reconnectTimer);
@@ -665,6 +699,17 @@ function createSidebarBridge(options = {}) {
       }).projects.flatMap((p) => p.sessions).find((s) => s.id === id) || null;
     },
     getHistoryRows: () => historySessions,
+    // A person's own name for a session; an empty title removes it.
+    setSessionName: (sessionId, title) => {
+      try {
+        const { names, title: saved } = saveSessionName(sessionNamesFile, sessionId, title);
+        watchNames();
+        reapplySessionNames(names);
+        return { ok: true, title: saved };
+      } catch (error) {
+        return { ok: false, reason: String(error?.message || error) };
+      }
+    },
     getSessionLabel: (id) => {
       const row = historyById.get(id);
       return row ? { title: row.title, project: row.project } : null;

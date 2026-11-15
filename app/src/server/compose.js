@@ -8,7 +8,7 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { createRouter } = require('../main/rpc/router.js');
 const { METHOD_CHANNELS } = require('../main/rpc/channels.js');
-const { createConfigStore } = require('../main/config/store.js');
+const { createConfigStore, resolveConfigFile } = require('../main/config/store.js');
 const { createSidebarBridge } = require('../main/sidebar-bridge.js');
 const { createTerminalBridge } = require('../main/terminal-bridge.js');
 const { createControlClient, pingDaemonOnce, resolveSessionBackend } = require('../main/session-daemon/factory.js');
@@ -199,6 +199,9 @@ async function composeServer(options = {}) {
   const sidebar = options.sidebar || createSidebarBridge({
     ownerOptions: { contextCacheDir: contextDir, homes: env.HARBOR_BEACON_HOMES?.split(path.delimiter).filter(Boolean) },
     delegationLinksFile: env.HARBOR_DELEGATIONS_FILE || path.join(config.paths.cacheDir, 'delegation-links.json'),
+    // The SAME names file the app writes (session-names.js), so a session
+    // renamed on the desktop shows its name on the phone.
+    sessionNamesFile: env.HARBOR_SESSION_NAMES_FILE || path.join(path.dirname(resolveConfigFile({ file: options.configFile, env, app })), 'session-names.json'),
     daemonOptions: { env, sessionStorePolicy },
     // The SAME labeller index.js passes. Without it the bridge's provider
     // history fell back to naming a cwd by its last segment alone, so a codex

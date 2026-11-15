@@ -1348,6 +1348,13 @@ function registerIpc() {
     deleteSessionTranscript({ sessionId, isLive })
   ));
 
+  // A person's own name for a session (session-names.js): the rail row's and
+  // the window header's pencil. The bridge owns the file and the publish, so
+  // every surface that shows the title changes at once.
+  ipcMain.handle('session:rename', (_event, { sessionId, title } = {}) => (
+    sidebarBridge.setSessionName(sessionId, title)
+  ));
+
   // Capability menu: fs-only enumeration (renderer stays fs-free), plus the two
   // pty-touching permission-mode operations (scrape + shift+tab cycle).
   ipcMain.handle('capabilities:get', async (_event, { sessionId }) => {
@@ -2715,6 +2722,8 @@ app.whenReady().then(async () => {
     providerFactsCacheFile: e2eMode ? null : path.join(harborConfig.paths.cacheDir, 'provider-row-facts.json'),
     delegationScanCacheFile: e2eMode ? null : path.join(harborConfig.paths.cacheDir, 'background-fold.json'),
     delegationLinksFile: process.env.HARBOR_DELEGATIONS_FILE || path.join(harborConfig.paths.cacheDir, 'delegation-links.json'),
+    // A person's own session names live beside config.json: state, not a cache.
+    sessionNamesFile: process.env.HARBOR_SESSION_NAMES_FILE || path.join(path.dirname(resolveConfigFile({ app })), 'session-names.json'),
   });
   terminalBridge = createTerminalBridge({
     env: process.env,

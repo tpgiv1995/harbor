@@ -60,6 +60,7 @@ const api = {
     cancelSend: (payload) => ipcRenderer.invoke('session:cancel-send', payload),
     interrupt: (payload) => ipcRenderer.invoke('session:interrupt', payload),
     remove: (payload) => ipcRenderer.invoke('session:delete', payload),
+    rename: (payload) => ipcRenderer.invoke('session:rename', payload),
     runWorkflow: (payload) => ipcRenderer.invoke('workflow:run', payload),
     workflowRuns: (payload) => ipcRenderer.invoke('session:workflow-runs', payload),
     onLaunched: (listener) => {

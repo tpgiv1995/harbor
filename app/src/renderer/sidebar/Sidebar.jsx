@@ -15,6 +15,7 @@ import { ViewSwitch } from '../ViewSwitch.jsx';
 import { resetBadge, resetTooltip } from './usage-reset.cjs';
 import { collapseForView, planCollapseAll } from './collapse-policy.cjs';
 import { railStatus } from './rail-status.cjs';
+import RenameField, { PencilIcon } from '../RenameField.jsx';
 import {
   SORT_MODES, SORT_LABELS, normalizeRailSort, sortHint, sortLabel, sortSidebarModel,
 } from './rail-sort.cjs';
@@ -141,16 +142,25 @@ function VirtualList({ rows, renderRow }) {
   );
 }
 
-const SessionRailRow = React.memo(function SessionRailRow({ session, clock, profiles, grouping, isOpen, isSelected, isArchived, attentionState, copied, onOpen, onContextMenu, archiveSession, unarchiveSession }) {
+// A row can be renamed once it has a lasting id (a provisional pane or an
+// unnamed live pane has none yet), never an orchestration worker's read-only
+// row, and never a row from a previous machine.
+function canRenameSession(session) {
+  const id = String(session?.id || '');
+  return Boolean(id) && !id.startsWith('pane:') && !id.startsWith('live:') && !session.isWindowsEra && !subSessionReadOnly(session);
+}
+
+const SessionRailRow = React.memo(function SessionRailRow({ session, clock, profiles, grouping, isOpen, isSelected, isArchived, attentionState, copied, onOpen, onContextMenu, archiveSession, unarchiveSession, isRenaming, onRenameStart, onRenameSave, onRenameEnd }) {
       const provider = providerIdentity(session.provider);
       const disabled = session.isWindowsEra;
       const isChild = subSessionReadOnly(session);
       const runState = runStateCue(session, undefined, undefined, clock);
       const displayTitle = isChild && session.childTitle ? session.childTitle : session.title;
       const status = railStatus({ runState, attention: attentionState, dormant: session.dormant });
+      const renamable = canRenameSession(session);
       return (
         <div
-          className={`sr-wrap${isArchived ? ' archived' : ''}`}
+          className={`sr-wrap${isArchived ? ' archived' : ''}${renamable ? ' can-rename' : ''}${isRenaming ? ' renaming' : ''}`}
           onContextMenu={(event) => onContextMenu(event, session)}
         >
           <button
@@ -187,6 +197,28 @@ const SessionRailRow = React.memo(function SessionRailRow({ session, clock, prof
               </span>
             ) : null}
           </button>
+          {/* Rename in place (RenameField): the editor covers the title while
+              it is open, and the pencil sits beside the archive button. */}
+          {isRenaming ? (
+            <RenameField
+              className="sr-rename"
+              initial={displayTitle}
+              onSave={(title) => onRenameSave(session.id, title)}
+              onDone={() => onRenameEnd(session.id)}
+            />
+          ) : null}
+          {renamable && !isRenaming ? (
+            <button
+              type="button"
+              className="sr-rn"
+              data-session-id={session.id}
+              title="Rename"
+              aria-label="Rename session"
+              onClick={(event) => { event.stopPropagation(); onRenameStart(session.id); }}
+            >
+              <PencilIcon />
+            </button>
+          ) : null}
           <button
             type="button"
             className="sr-x"
@@ -445,6 +477,12 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
   const [archived, setArchived] = useState(restoreArchived);
   const [showArchived, setShowArchived] = useState(false);
   const [menu, setMenu] = useState(null); // { session, x, y, armedDelete }
+  // The row whose name is being edited (RenameField). Ending an edit names
+  // the row it was for, so a save that finishes late never closes the editor
+  // a click on another row's pencil has just opened.
+  const [renamingId, setRenamingId] = useState(null);
+  const renameSession = useCallback((sessionId, title) => window.harbor.session.rename({ sessionId, title }), []);
+  const endRename = useCallback((sessionId) => setRenamingId((current) => (current === sessionId ? null : current)), []);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [projectMenuQuery, setProjectMenuQuery] = useState('');
@@ -877,7 +915,8 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
       isOpen={openSessionIds?.has(row.session.id)} isSelected={selectedSessionId === row.session.id}
       isArchived={archived.has(row.session.id)} attentionState={attention?.get?.(row.session.id) || null}
       copied={copiedSessionId === row.session.id} onOpen={openRailSession} onContextMenu={handleSessionContextMenu}
-      archiveSession={archiveSession} unarchiveSession={unarchiveSession} />;
+      archiveSession={archiveSession} unarchiveSession={unarchiveSession}
+      isRenaming={renamingId === row.session.id} onRenameStart={setRenamingId} onRenameSave={renameSession} onRenameEnd={endRename} />;
 
     if (row.kind === 'older') {
       return (
@@ -1211,12 +1250,27 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
           className="sr-menu"
           role="menu"
           style={{ left: menu.x, top: menu.y }}
+          // Kept inside the window: opened near the bottom or right edge, the menu
+          // used to run off-screen and hide its lower items (Rename among them).
+          ref={(node) => {
+            if (!node) return;
+            const box = node.getBoundingClientRect();
+            const left = Math.max(8, Math.min(menu.x, window.innerWidth - box.width - 8));
+            const top = Math.max(8, Math.min(menu.y, window.innerHeight - box.height - 8));
+            if (left !== menu.x) node.style.left = `${left}px`;
+            if (top !== menu.y) node.style.top = `${top}px`;
+          }}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <span className="sr-menu-title">{menu.session.childTitle || menu.session.title || 'Session'}</span>
           {!menu.session.isWindowsEra ? (
             <button type="button" role="menuitem" className="sr-menu-item" onClick={() => copyResumeCommand(menu.session)}>
               Copy resume command
+            </button>
+          ) : null}
+          {canRenameSession(menu.session) ? (
+            <button type="button" role="menuitem" className="sr-menu-item" onClick={() => { setMenu(null); setRenamingId(menu.session.id); }}>
+              Rename
             </button>
           ) : null}
           {archived.has(menu.session.id) ? (
