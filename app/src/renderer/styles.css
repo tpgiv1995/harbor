@@ -2740,6 +2740,21 @@ button { font-family: inherit; }
   font-variant-numeric: tabular-nums;
 }
 
+/* When a prompt or reply was written, in the machine's time zone (2026-11-16).
+   Under a prompt it leads the turn line; under a reply it is its own quiet line.
+   The hover title carries the full date and zone. */
+.conv-time {
+  color: var(--fnt);
+  white-space: nowrap;
+  cursor: default;
+}
+.conv-time-reply {
+  display: block;
+  margin-top: 2px;
+  font: 500 10.5px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .conv-images {
   display: flex;
   flex-direction: column;

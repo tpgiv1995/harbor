@@ -1,17 +1,52 @@
-import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { Markdown } from './md.jsx';
 import turnMeta from './turn-meta.cjs';
+import messageTimes from './message-time.cjs';
+import { useConversationScroll } from './use-conversation-scroll.js';
 import { clipboardImageDataURL } from '../image-clipboard.js';
 import './conversation-image-copy.css';
 
 const { turnMetaLabel, queueStateLabel, subagentLabel } = turnMeta;
+const { messageTime, localDayKey } = messageTimes;
 
 // The designed conversation surface (Slate): user bubbles, assistant prose,
 // tool-action rows, and the working shimmer. Pure presentation; blocks arrive
-// parsed from the main-process transcript tailer.
+// parsed from the main-process transcript tailer. Where the window stays
+// scrolled is use-conversation-scroll.js; every top-level row carries a
+// `data-anchor` so a window reading history can be put back on its message.
 
-const STICK_THRESHOLD_PX = 56;
+// The machine's calendar day, shared by every window through one timer armed
+// for the next local midnight, so a time label gains its "Yesterday" when the
+// day turns instead of when the session next writes.
+const dayListeners = new Set();
+let dayKey = localDayKey();
+let dayTimer = 0;
+function armDayTimer() {
+  clearTimeout(dayTimer);
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5);
+  dayTimer = setTimeout(() => {
+    dayKey = localDayKey();
+    for (const listener of dayListeners) listener();
+    armDayTimer();
+  }, next.getTime() - now.getTime());
+}
+function subscribeDay(listener) {
+  dayListeners.add(listener);
+  if (dayListeners.size === 1) armDayTimer();
+  return () => {
+    dayListeners.delete(listener);
+    if (dayListeners.size === 0) clearTimeout(dayTimer);
+  };
+}
+const readDay = () => dayKey;
+
+function MessageTime({ ts, className = 'conv-time' }) {
+  const time = messageTime(ts);
+  if (!time) return null;
+  return <time className={className} dateTime={time.iso} title={time.title}>{time.label}</time>;
+}
 
 function ImageLightbox({ src, alt, onClose }) {
   const copyRun = useRef(0);
@@ -102,10 +137,10 @@ function ConvImages({ images, onImageLoad }) {
   );
 }
 
-const ActionBlock = memo(function ActionBlock({ block }) {
+const ActionBlock = memo(function ActionBlock({ block, anchor }) {
   const sub = subagentLabel(block.sub);
   return (
-    <div className={`conv-act status-${block.status}`}>
+    <div className={`conv-act status-${block.status}`} data-anchor={anchor}>
       <div className="conv-act-row">
         <span className={`conv-act-k ${block.status}`} aria-hidden="true" />
         {/* A described command reads as Claude's own sentence ("Installed
@@ -231,6 +266,7 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   return (
     <div
       className={`conv-act-group${expanded ? ' expanded' : ''}`}
+      data-anchor={groupKey}
       data-group-key={groupKey}
       data-expanded={expanded ? 'true' : 'false'}
     >
@@ -266,22 +302,24 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   );
 });
 
-const Block = memo(function Block({ block, onImageLoad }) {
+// `day` is only there to re-render a block's time label when the date turns.
+const Block = memo(function Block({ block, onImageLoad, day: _day }) {
   if (block.kind === 'note') {
-    return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`}>{block.text}</div>;
+    return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`} data-anchor={block.key}>{block.text}</div>;
   }
   if (block.kind === 'progress') {
     // The model's between-tool-call notes (see transcript.js): quiet, so a
     // long turn shows what is happening without reading as a reply.
-    return <div className="conv-progress">{block.text}</div>;
+    return <div className="conv-progress" data-anchor={block.key}>{block.text}</div>;
   }
   if (block.kind === 'user') {
     const meta = turnMetaLabel(block.turnMeta);
     const queueLabel = queueStateLabel(block);
     const waiting = block.queued && block.queueState === 'waiting';
+    const sent = messageTime(block.ts);
     return (
       <>
-      <div className={`conv-user${block.command ? ' command' : ''}${block.peer ? ' peer' : ''}${waiting ? ' queued-waiting' : ''}`}>
+      <div className={`conv-user${block.command ? ' command' : ''}${block.peer ? ' peer' : ''}${waiting ? ' queued-waiting' : ''}`} data-anchor={block.key}>
         {/* Another session wrote this, not Pat: say which (transcript.js peerMessageParts). */}
         {block.peer ? <span className="conv-peer-from">{block.peerFrom ? `Message from ${block.peerFrom}` : 'Message from another session'}</span> : null}
         {/* Composed formatting reads back formatted (2026-07-26). A command
@@ -294,37 +332,43 @@ const Block = memo(function Block({ block, onImageLoad }) {
         ) : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
       </div>
-      {/* What this task spent: output tokens across every reply it produced and
-          the time from the prompt to the latest reply, growing while it runs. */}
-      {meta ? <div className={`conv-turn-meta${block.peer ? ' peer' : ''}`} title="Output tokens and time this task has used so far">{meta}</div> : null}
+      {/* When it was sent (the machine's time zone), then what this task spent:
+          output tokens across every reply it produced and the time from the
+          prompt to the latest reply, growing while it runs. */}
+      {sent || meta ? (
+        <div className={`conv-turn-meta${block.peer ? ' peer' : ''}`} data-anchor={`${block.key}:meta`}>
+          {sent ? <MessageTime ts={block.ts} /> : null}
+          {sent && meta ? <span className="conv-meta-sep" aria-hidden="true"> · </span> : null}
+          {meta ? <span title="Output tokens and time this task has used so far">{meta}</span> : null}
+        </div>
+      ) : null}
       {/* Whether Claude has read a queued message yet (turn-meta queueStateLabel). */}
-      {queueLabel ? <div className={`conv-queue-state${waiting ? ' waiting' : ''}${block.peer ? ' peer' : ''}`}>{queueLabel}</div> : null}
+      {queueLabel ? <div className={`conv-queue-state${waiting ? ' waiting' : ''}${block.peer ? ' peer' : ''}`} data-anchor={`${block.key}:queue`}>{queueLabel}</div> : null}
       </>
     );
   }
   if (block.kind === 'assistant') {
     return (
-      <div className="conv-assistant">
+      <div className="conv-assistant" data-anchor={block.key}>
         {block.text ? <Markdown text={block.text} /> : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
+        <MessageTime ts={block.ts} className="conv-time conv-time-reply" />
       </div>
     );
   }
-  if (block.kind === 'action') return <ActionBlock block={block} />;
+  if (block.kind === 'action') return <ActionBlock block={block} anchor={block.key} />;
   return null;
 });
 
-function distFromBottom(node) {
-  return node.scrollHeight - node.scrollTop - node.clientHeight;
-}
-
 export const Conversation = memo(function Conversation({
-  blocks, header, empty, emptyAction = null,
+  sessionId, blocks, header, empty, emptyAction = null,
 }) {
-  const scrollRef = useRef(null);
-  const contentRef = useRef(null);
-  const stickRef = useRef(true);
-  const programmaticScrollRef = useRef(false);
+  const day = useSyncExternalStore(subscribeDay, readDay);
+  const { scrollRef, contentRef, onScroll, onImageLoad } = useConversationScroll({
+    sessionId,
+    hasBlocks: blocks.length > 0,
+    layoutDeps: [blocks, header?.working],
+  });
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
 
   const toggleGroup = useCallback((groupKey) => {
@@ -356,55 +400,11 @@ export const Conversation = memo(function Conversation({
     });
   }, [items]);
 
-  const scrollToTail = useCallback(() => {
-    const node = scrollRef.current;
-    if (!node || !stickRef.current) return;
-    programmaticScrollRef.current = true;
-    stickRef.current = true;
-    node.scrollTop = node.scrollHeight;
-    // Content can grow in the same frame (markdown wrap, working shimmer); a
-    // second pass after layout settles keeps the tail pinned.
-    requestAnimationFrame(() => {
-      const el = scrollRef.current;
-      if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-      programmaticScrollRef.current = false;
-    });
-  }, []);
-
-  // Track whether the reader is pinned to the tail; new content only
-  // auto-scrolls when they are (scrolling up to read history must hold).
-  const onScroll = () => {
-    if (programmaticScrollRef.current) return;
-    const node = scrollRef.current;
-    if (!node) return;
-    stickRef.current = distFromBottom(node) < STICK_THRESHOLD_PX;
-  };
-
-  useLayoutEffect(() => {
-    scrollToTail();
-  }, [blocks, header?.working, scrollToTail]);
-
-  useEffect(() => {
-    scrollToTail();
-  }, [scrollToTail]);
-
-  // Streamed blocks can grow the scroll height without a new blocks reference
-  // (same key, longer text). ResizeObserver on the content column re-pins.
-  useEffect(() => {
-    const node = contentRef.current;
-    if (!node || typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver(() => {
-      if (stickRef.current) scrollToTail();
-    });
-    ro.observe(node);
-    return () => ro.disconnect();
-  }, [scrollToTail]);
-
   return (
     <div className="conv" ref={scrollRef} onScroll={onScroll}>
       <div className="conv-body" ref={contentRef}>
         {blocks.length === 0 ? (
-          <div className="conv-empty">
+          <div className="conv-empty" data-anchor="empty">
             <span>{empty || 'No conversation yet.'}</span>
             {emptyAction}
           </div>
@@ -425,13 +425,14 @@ export const Conversation = memo(function Conversation({
               <Block
                 key={item.block.key}
                 block={item.block}
-                onImageLoad={scrollToTail}
+                onImageLoad={onImageLoad}
+                day={day}
               />
             );
           })
         )}
         {header?.working ? (
-          <div className="conv-working">
+          <div className="conv-working" data-anchor="working">
             <span className="conv-spinner" aria-hidden="true" />
             <span className="conv-working-text">{header.workingText || header.text || 'Working…'}</span>
           </div>

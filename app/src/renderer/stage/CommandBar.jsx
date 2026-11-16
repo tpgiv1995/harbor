@@ -391,6 +391,10 @@ export function CommandBar({
       return;
     }
     submittingRef.current = true;
+    // Pat just sent to this window: it goes back to its latest message and
+    // follows from there, so he sees his message land and the reply arrive
+    // (use-conversation-scroll.js; scrolling up again stops it).
+    if (sentSessionId) window.dispatchEvent(new CustomEvent('harbor-conv-follow', { detail: { sessionId: sentSessionId } }));
     setAttachmentSendState(submittedAttachments.length ? 'sending' : null);
     let ok = false;
     try {

@@ -5,9 +5,16 @@ import { ErrorBoundary } from '../ErrorBoundary.jsx';
 import { CommandBar } from './CommandBar.jsx';
 import { useProfiles, profileStyle } from '../providers.js';
 import gridNav from './grid-nav.cjs';
+import conversationScroll from './conversation-scroll.cjs';
 import { siblingSessionRequest } from '../new-session-defaults.cjs';
 
 const { gridDimensions } = gridNav;
+const { scrollsWithin, wheelPixels } = conversationScroll;
+
+const isEditable = (el) => Boolean(el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)));
+// Hand a scroll to a conversation window as Pat's own (use-conversation-scroll.js).
+const routeScroll = (conv, detail) => conv?.dispatchEvent(new CustomEvent('harbor-conv-scroll', { detail }));
+const byId = (a, b) => (a.session.id < b.session.id ? -1 : a.session.id > b.session.id ? 1 : 0);
 
 // One button per configured profile, in the order the user put them in, coloured
 // from the profile itself. These were three hardcoded buttons naming Pat's own
@@ -113,6 +120,16 @@ export function Stage({
     .sort((a, b) => a.slot - b.slot);
   const count = resolved.length;
   const maxSlot = resolved.reduce((m, r) => Math.max(m, r.slot), -1);
+  // Slot order numbers the windows (^1, ^2 ...). The PAGE order is by session id
+  // and never changes when windows are rearranged: every tile is placed by its
+  // own grid row and column, so page order decides nothing on screen, but a
+  // keyed list re-sorted by slot made React MOVE tiles in the page on every
+  // rearrange, and a browser puts a scroll box that is moved at its top. That
+  // was Pat's "windows scroll to the top of the chat" (2026-11-16): idle windows
+  // sat on their first prompt until the session next wrote
+  // (scripts/drive-conversation-scroll-win.js, step "reorder").
+  const rankById = new Map(resolved.map((r, i) => [r.session.id, i]));
+  const pageOrder = [...resolved].sort(byId);
   // Focus mode: one window takes the full stage; the rest stay MOUNTED (their
   // pty streams and scroll positions survive) but hidden via CSS.
   const focusActive = Boolean(focusedId && resolved.some((r) => r.session.id === focusedId));
@@ -190,6 +207,49 @@ export function Stage({
     if (!columnsLayout || !selectedId) return;
     tileRefs.current.get(selectedId)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [columnsLayout, selectedId]);
+
+  // The mouse wheel and PageUp/PageDown scroll a conversation from anywhere on
+  // the stage (Pat, 2026-11-16: "if i have a chat/window selected ... the scroll
+  // wheel on my mouse will scroll the chat"). Over a conversation the browser
+  // scrolls it as always. Over a window's header, that window. Over the command
+  // bar, the gaps or an empty slot, the selected window. Anything that scrolls
+  // itself (a long draft, a menu, the raw terminal) keeps its own wheel.
+  // PageUp/PageDown move the selected window a page with the cursor in the
+  // message box, as in Discord and Slack; a terminal or another text field keeps them.
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return undefined;
+    const selectedConv = () => wrap.querySelector('.win2.sel:not(.focus-hidden) .conv') || wrap.querySelector('.win2.focused .conv');
+    const onWheel = (event) => {
+      if (event.ctrlKey || event.defaultPrevented || !event.deltaY) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || target.closest('.conv, .tile-tty, .terminal-pane')) return;
+      if (scrollsWithin(target, wrap, event.deltaY, (el) => getComputedStyle(el))) return;
+      const tile = target.closest('.win2[data-session-id]');
+      const conv = tile ? tile.querySelector('.conv') : selectedConv();
+      if (conv) routeScroll(conv, { by: wheelPixels(event, conv.clientHeight) });
+    };
+    const onKey = (event) => {
+      if (event.key !== 'PageUp' && event.key !== 'PageDown') return;
+      if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      const active = document.activeElement;
+      const inComposer = Boolean(active?.closest?.('.ubar-input'));
+      if (!inComposer && active && active !== document.body) {
+        if (!wrap.contains(active) || isEditable(active) || active.closest('.tile-tty, .terminal-pane')) return;
+      }
+      const conv = selectedConv();
+      if (!conv) return;
+      event.preventDefault();
+      routeScroll(conv, { page: event.key === 'PageUp' ? -1 : 1 });
+    };
+    wrap.addEventListener('wheel', onWheel, { passive: true });
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      wrap.removeEventListener('wheel', onWheel);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, []);
 
   const onHeaderPointerDown = useCallback((event, fromSlot, sessionId) => {
     const diag = (k, extra) => window.__harborDiag?.push({
@@ -295,7 +355,7 @@ export function Stage({
   }, [endDrag, hitTestIndex, onSelect]);
 
   return (
-    <div className="stagewrap">
+    <div className="stagewrap" ref={wrapRef}>
       {count === 0 ? (
         <div className="stage-empty">
           <div className="stage-empty-inner">
@@ -317,7 +377,8 @@ export function Stage({
             gridTemplateRows: `repeat(${rows}, 1fr)`,
           }}
         >
-          {resolved.map(({ tile, session, slot }, rank) => {
+          {pageOrder.map(({ tile, session, slot }) => {
+            const rank = rankById.get(session.id);
             const pane = resolvePane(session);
             const isDragging = drag?.sessionId === session.id;
             const cellStyle = focusActive ? undefined : {

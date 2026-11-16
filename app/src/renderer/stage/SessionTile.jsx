@@ -477,6 +477,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
         </div>
       ) : (
         <Conversation
+          sessionId={session.id}
           blocks={blocks}
           header={header}
           empty={data && !data.missing

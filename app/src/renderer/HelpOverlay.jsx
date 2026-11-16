@@ -50,7 +50,8 @@ export function HelpOverlay({ onClose }) {
             <h3>Session windows</h3>
             <ul>
               <li>Up to four sessions tile on the stage. Click one (or <Key>Ctrl+1–4</Key>) to make it <em>active</em>; it raises, the rest recess.</li>
-              <li>Each window is the conversation itself: your prompts, Claude&rsquo;s replies, and what it did (edits, commands, tests) as action rows.</li>
+              <li>Each window is the conversation itself: your prompts, Claude&rsquo;s replies, and what it did (edits, commands, tests) as action rows. Every prompt and reply shows the time it was written; hover the time for the full date.</li>
+              <li>A window at its latest message stays there as replies arrive. Scroll up and it holds your place until you scroll back to the bottom or send it a message.</li>
               <li>A session waiting on a question or permission prompt shows an amber <em>needs your answer</em> cue and an in-window card; click an option to answer in place (Dismiss cancels it).</li>
               <li><strong>&gt;_</strong> flips a live window to the raw terminal for anything the card cannot answer. Flip back any time.</li>
               <li>× removes a window from the stage; the session itself keeps running.</li>
@@ -78,6 +79,7 @@ export function HelpOverlay({ onClose }) {
             <h3>Keyboard</h3>
             <ul>
               <li><Key>Ctrl+1–4</Key> select window · <Key>Alt</Key>+arrows move between windows · <Key>Alt+Enter</Key> make the selected window fill the stage, and back · <Key>Ctrl+K</Key> search · <Key>F1</Key> this guide · <Key>F11</Key> whole app full screen</li>
+              <li>The mouse wheel scrolls the active window from anywhere on the stage, including the message box; over a window, it scrolls that window. <Key>PageUp</Key>/<Key>PageDown</Key> scroll the active window a page while you type.</li>
               <li><Key>Ctrl+Shift+B</Key> hide/show the rail · <Key>Ctrl+Shift+R</Key> reload the UI · <Key>Ctrl+Shift+Q</Key> quit · <Key>Ctrl</Key>+<Key>+</Key>/<Key>-</Key>/<Key>0</Key> zoom</li>
               <li>Formatting the message: <Key>Ctrl+B</Key> bold · <Key>Ctrl+I</Key> italic · <Key>Ctrl+U</Key> underline · <Key>Ctrl+Shift+X</Key> strikethrough · <Key>Ctrl+E</Key> code · <Key>Ctrl+Shift+8</Key> bullets · <Key>Ctrl+Shift+7</Key> numbering. What you see is what you get; it is sent as markdown.</li>
               <li><Key>Enter</Key> always sends, including inside a list. <Key>Shift+Enter</Key> is a new line, and makes the next bullet when you are in one.</li>

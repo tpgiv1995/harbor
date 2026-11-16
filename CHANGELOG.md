@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Conversation windows stay where you left them. A window at its latest
+  message keeps following new replies through windows opening and closing,
+  rearranging, full-stage toggles and minimizing; a window you scrolled up
+  holds your place until you scroll back down or send it a message. A
+  rearrange no longer sends untouched windows to the top of their chat.
+- The mouse wheel scrolls the active conversation from anywhere on the stage,
+  including the message box, and PageUp/PageDown scroll it a page while you
+  type.
+- Every prompt and reply shows the time it was written, in your own time
+  zone; hover it for the full date.
+
 - Harbor has a new look on desktop and phone: a dark coastal night scene behind
   glass panels, the Inter typeface, plan usage shown as bars, and a roomier
   message box with its buttons on the right. Everything works the way it did,
