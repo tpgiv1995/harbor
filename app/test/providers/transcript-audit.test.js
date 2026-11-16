@@ -100,6 +100,45 @@ for (const [name,records,expected] of [
   assert.deepEqual(updates.find(u=>u.replace).replace.filter(b=>b.kind==='user').map(b=>b.text),expected);
 });
 
+// 2026-11-15, Pat after a restart: "im now missing messages ... i was literally
+// in the middle of reading a reply". The CLI's bookkeeping records (the padding
+// below stands for api-request-blob) fill the 1 MB tail, so Claude's replies
+// just before it were only in the file. Two-sided: before the fix no "reply N"
+// row was drawn at all; the prompts were.
+test("Claude's replies above the tail window are drawn, newest MAX_PREFIX_PROSE_BLOCKS, without tool rows or queue damage", async t => {
+  const { MAX_PREFIX_PROSE_BLOCKS } = require('../../src/main/providers/transcript.js');
+  const reply = (text, extra = {}) => ({ type: 'assistant', timestamp: ts, ...extra, message: { model: 'claude-opus-5-5', content: [{ type: 'text', text }] } });
+  const records = [user('opening')];
+  for (let i = 0; i < 100; i += 1) {
+    records.push(user(`question ${i}`));
+    records.push({ type: 'assistant', timestamp: ts, message: { content: [{ type: 'tool_use', id: `t${i}`, name: 'Bash', input: { command: `echo prefix-tool-${i}` } }] } });
+    records.push(user([{ type: 'tool_result', tool_use_id: `t${i}`, content: 'ok' }]));
+    records.push(reply(`reply ${i}`));
+  }
+  records.push(reply('sidechain chatter', { isSidechain: true }));
+  records.push(queue('enqueue', 'crossing'));
+  records.push(reply('reply while queued'));
+  records.push({ type: 'api-request-blob', data: 'x'.repeat(1100000) });
+  records.push(queue('remove', 'crossing'), attachment('crossing'), user('tail question'), reply('tail reply'));
+  const { dir, file } = fixture(t, records);
+  const provider = createTranscriptProvider({ home: dir, contextCacheDir: dir, getSessionMeta: async () => ({ path: file }), watchFactory: () => ({ on() {}, close() {} }) });
+  t.after(() => provider.closeAll());
+  const updates = []; provider.emitter.on('update', u => updates.push(u));
+  await provider.open('synthetic');
+  const blocks = updates.find(u => u.replace).replace;
+  const texts = blocks.map(b => b.text);
+  const firstKept = 101 - MAX_PREFIX_PROSE_BLOCKS; // 100 turn replies plus "reply while queued", newest 80 kept
+  assert.ok(texts.includes(`reply ${firstKept}`) && texts.includes('reply 99') && texts.includes('reply while queued'));
+  assert.ok(!texts.includes(`reply ${firstKept - 1}`), 'bounded to the newest MAX_PREFIX_PROSE_BLOCKS');
+  assert.equal(blocks.filter(b => b.kind === 'assistant' && b.text !== 'tail reply').length, MAX_PREFIX_PROSE_BLOCKS);
+  assert.ok(texts.indexOf('question 99') < texts.indexOf('reply 99') && texts.indexOf('reply 99') < texts.indexOf('reply while queued') && texts.indexOf('reply while queued') < texts.indexOf('tail question'), 'in file order');
+  assert.equal(blocks.filter(b => b.kind === 'action').length, 0, 'no tool row comes back from the skipped part');
+  assert.ok(!texts.includes('sidechain chatter'));
+  assert.equal(blocks.filter(b => b.text === 'crossing').length, 1);
+  assert.equal(blocks.find(b => b.text === 'crossing').queueState, 'delivered', 'a reply between enqueue and remove leaves the queue state alone');
+  assert.equal(blocks[0].text, 'opening');
+});
+
 test('evicted queued bubbles release their parser references as well as their screen slots', () => {
   const p = new TranscriptParser();
   for (let i=0;i<300;i++) {

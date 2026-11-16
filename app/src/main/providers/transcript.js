@@ -2036,14 +2036,31 @@ async function readPrefixImageBlocks(filePath, endOffset, provider = 'claude') {
 // same pass now also picks out the user's prompts and mid-turn (queued)
 // messages, parsed in file order by one real parser so an enqueue and its
 // remove pair up, and seeds the most recent MAX_PREFIX_USER_BLOCKS of them.
-// Tool output and Claude's prose stay out: the 240-block trim protects user
-// turns, so seeding prose would only be evicted again, while seeding Pat's own
-// messages is what was missing. A cap keeps a chatty session from filling the
-// window with prompts and starving the live rows (the peer-message lesson).
+// A cap keeps a chatty session from filling the window with prompts and
+// starving the live rows (the peer-message lesson).
+//
+// CLAUDE'S REPLIES ABOVE THE WINDOW COME BACK TOO (2026-11-15, Pat, after
+// restarting Harbor mid-read: "im now missing messages from session 3156e3c0...
+// i was literally in the middle of reading a reply when i restarted it and now
+// its gone"). The 11-04 fix left Claude's prose out on the theory that the
+// 240-block trim would evict it again. That holds only when the tail is full of
+// rows, and the CLI now writes about 1 MB of bookkeeping (api-request-blob,
+// prompt_snapshot, instructions, skill listings) every few minutes: on that
+// orchestrator session (90 MB) the 1 MB tail at the restart began after 21:21,
+// so the window showed Pat's 21:06 prompt (seeded) and then the 21:23 reply,
+// and the three replies between them (one of 4,546 characters he was reading)
+// were only in the file. The same scan now keeps the newest MAX_PREFIX_PROSE_BLOCKS
+// of Claude's text replies in a list of their own (an assistant line must never
+// reach the prompt parser: it clears the dequeue state the seed hands over).
+// Tool rows stay out. When the tail does hold a full window, the trim drops
+// these first (they are the oldest non-prompt rows), which costs nothing.
 const MAX_PREFIX_USER_BLOCKS = 40;
+const MAX_PREFIX_PROSE_BLOCKS = 80;
 const PREFIX_USER_LINE = /"type"\s*:\s*"user"/;
 const PREFIX_QUEUE_LINE = /"type"\s*:\s*"queue-operation"|"queued_command"/;
 const PREFIX_IMAGE_LINE = /"type"\s*:\s*"image"/;
+const PREFIX_ASSISTANT_LINE = /"type"\s*:\s*"assistant"/;
+const PREFIX_TEXT_PART = /"type"\s*:\s*"text"/;
 const SOURCE_RECORD = Symbol('source-record');
 
 // THE SKIPPED PREFIX IS SCANNED ONCE PER FILE, NOT ONCE PER WINDOW OPEN
@@ -2092,6 +2109,7 @@ function newPrefixScan(provider) {
     order: new WeakMap(), // block -> the line number that created it
     source: new WeakMap(), // conversation block -> `${line}:${index}` (the opening-prompt match key)
     images: [], // image blocks outside a prompt, newest last, at most MAX_PREFIX_IMAGE_BLOCKS
+    prose: [], // Claude's text replies, newest last, at most MAX_PREFIX_PROSE_BLOCKS
     lineNo: 0,
     opening: null,
   };
@@ -2114,9 +2132,29 @@ async function advancePrefixScan(state, filePath, from, to) {
     const prompt = PREFIX_USER_LINE.test(line) && !line.includes('"tool_result"');
     const queued = !prompt && PREFIX_QUEUE_LINE.test(line);
     const image = !prompt && !queued && PREFIX_IMAGE_LINE.test(line);
-    if (!prompt && !queued && !image) continue;
+    const reply = !prompt && !queued && !image && PREFIX_ASSISTANT_LINE.test(line) && PREFIX_TEXT_PART.test(line);
+    if (!prompt && !queued && !image && !reply) continue;
     let obj;
     try { obj = JSON.parse(line); } catch { continue; } // the line the tail start cut in half
+    if (reply) {
+      // A throwaway parser per line (as for images) so the text gets exactly
+      // the live window's treatment, fed only the line's text parts so no tool
+      // row is born; the prompt parser never sees it.
+      if (obj?.type !== 'assistant' || obj.isSidechain || !Array.isArray(obj.message?.content)) continue;
+      const parts = obj.message.content.filter((part) => part?.type === 'text');
+      if (!parts.length) continue;
+      const parser = new TranscriptParser(provider);
+      applyLineDeferred(parser, { ...obj, message: { ...obj.message, content: parts } });
+      state.prose ||= [];
+      for (const block of parser.blocks) {
+        if (block.kind !== 'assistant' || !block.text) continue;
+        const { key: _key, ...retained } = block;
+        order.set(retained, lineNo);
+        state.prose.push(retained);
+        if (state.prose.length > MAX_PREFIX_PROSE_BLOCKS) state.prose.shift();
+      }
+      continue;
+    }
     if (image) {
       // Images outside a prompt (a tool's screenshot): per line, as before.
       const parser = new TranscriptParser(provider);
@@ -2198,6 +2236,7 @@ function snapshotPrefixScan(state, maxUserBlocks) {
     kept.push(copy);
   }
   for (const block of images) kept.push(copyBlock(block));
+  for (const block of state.prose || []) kept.push(copyBlock(block));
   const ordered = kept.sort((a, b) => copyOrder.get(a) - copyOrder.get(b));
   // Seed at most MAX_PREFIX_IMAGE_BLOCKS image blocks, the most recent. An older
   // prompt keeps its words (the image goes, its text never does); an older
@@ -2231,7 +2270,7 @@ function snapshotPrefixScan(state, maxUserBlocks) {
 }
 
 function prefixScanBytes(state) {
-  try { return JSON.stringify(state.conversation.blocks).length + JSON.stringify(state.images).length; } catch { return PREFIX_CACHE_MAX_BYTES; }
+  try { return JSON.stringify(state.conversation.blocks).length + JSON.stringify(state.images).length + JSON.stringify(state.prose || []).length; } catch { return PREFIX_CACHE_MAX_BYTES; }
 }
 
 function trimPrefixCache() {
@@ -3420,5 +3459,6 @@ module.exports = {
   MAX_BLOCKS,
   MAX_IMAGE_BLOCKS,
   MAX_PREFIX_IMAGE_BLOCKS,
+  MAX_PREFIX_PROSE_BLOCKS,
   MAX_INITIAL_BYTES,
 };
