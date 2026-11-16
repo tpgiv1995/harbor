@@ -12,6 +12,9 @@
   type.
 - Every prompt and reply shows the time it was written, in your own time
   zone; hover it for the full date.
+- Harbor Mobile gets the same: each chat keeps your place (a fling, a new
+  reply or the keyboard never moves it), each session remembers where you
+  were, and every prompt and reply shows its time.
 
 - Harbor has a new look on desktop and phone: a dark coastal night scene behind
   glass panels, the Inter typeface, plan usage shown as bars, and a roomier

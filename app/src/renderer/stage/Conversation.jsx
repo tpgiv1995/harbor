@@ -8,39 +8,15 @@ import { clipboardImageDataURL } from '../image-clipboard.js';
 import './conversation-image-copy.css';
 
 const { turnMetaLabel, queueStateLabel, subagentLabel } = turnMeta;
-const { messageTime, localDayKey } = messageTimes;
+// `currentDay` turns at local midnight (one shared timer), so a time label
+// gains its "Yesterday" when the day turns instead of when the session next writes.
+const { messageTime, subscribeDay, currentDay } = messageTimes;
 
 // The designed conversation surface (Slate): user bubbles, assistant prose,
 // tool-action rows, and the working shimmer. Pure presentation; blocks arrive
 // parsed from the main-process transcript tailer. Where the window stays
 // scrolled is use-conversation-scroll.js; every top-level row carries a
 // `data-anchor` so a window reading history can be put back on its message.
-
-// The machine's calendar day, shared by every window through one timer armed
-// for the next local midnight, so a time label gains its "Yesterday" when the
-// day turns instead of when the session next writes.
-const dayListeners = new Set();
-let dayKey = localDayKey();
-let dayTimer = 0;
-function armDayTimer() {
-  clearTimeout(dayTimer);
-  const now = new Date();
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5);
-  dayTimer = setTimeout(() => {
-    dayKey = localDayKey();
-    for (const listener of dayListeners) listener();
-    armDayTimer();
-  }, next.getTime() - now.getTime());
-}
-function subscribeDay(listener) {
-  dayListeners.add(listener);
-  if (dayListeners.size === 1) armDayTimer();
-  return () => {
-    dayListeners.delete(listener);
-    if (dayListeners.size === 0) clearTimeout(dayTimer);
-  };
-}
-const readDay = () => dayKey;
 
 function MessageTime({ ts, className = 'conv-time' }) {
   const time = messageTime(ts);
@@ -363,7 +339,7 @@ const Block = memo(function Block({ block, onImageLoad, day: _day }) {
 export const Conversation = memo(function Conversation({
   sessionId, blocks, header, empty, emptyAction = null,
 }) {
-  const day = useSyncExternalStore(subscribeDay, readDay);
+  const day = useSyncExternalStore(subscribeDay, currentDay);
   const { scrollRef, contentRef, onScroll, onImageLoad } = useConversationScroll({
     sessionId,
     hasBlocks: blocks.length > 0,

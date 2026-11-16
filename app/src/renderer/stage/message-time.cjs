@@ -62,4 +62,33 @@ function localDayKey(now = Date.now(), timeZone) {
   return String(dayNumber(now, undefined, timeZone));
 }
 
-module.exports = { messageTime, localDayKey };
+// One timer for every conversation view (desktop windows and the phone), armed
+// for the next local midnight while anyone listens: subscribeDay/currentDay fit
+// React's useSyncExternalStore.
+const dayListeners = new Set();
+let dayKey = null;
+let dayTimer = null;
+function armDayTimer() {
+  clearTimeout(dayTimer);
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 5);
+  dayTimer = setTimeout(() => {
+    dayKey = localDayKey();
+    for (const listener of dayListeners) listener();
+    armDayTimer();
+  }, next.getTime() - now.getTime());
+}
+function subscribeDay(listener) {
+  dayListeners.add(listener);
+  if (dayListeners.size === 1) armDayTimer();
+  return () => {
+    dayListeners.delete(listener);
+    if (dayListeners.size === 0) clearTimeout(dayTimer);
+  };
+}
+function currentDay() {
+  if (dayKey === null || dayListeners.size === 0) dayKey = localDayKey();
+  return dayKey;
+}
+
+module.exports = { messageTime, localDayKey, subscribeDay, currentDay };

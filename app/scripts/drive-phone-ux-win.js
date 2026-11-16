@@ -71,6 +71,50 @@ async function shot(page, name, { clip } = {}) {
 
 function minutesAgo(minutes) { return Date.now() - minutes * 60_000; }
 
+// A real touch scroll on the chat, through Chromium's own touch input (pointer
+// and touch events reach the page as from a finger). A script setting scrollTop
+// is not Pat scrolling, and the chat rightly puts that back (2026-11-16,
+// use-conversation-scroll.js). Positive dy scrolls toward older messages.
+async function touchScroll(page, dy, { fling = false } = {}) {
+  const box = await page.locator('.conv').boundingBox();
+  const x = Math.round(box.x + box.width / 2);
+  const cdp = await page.context().newCDPSession(page);
+  const touch = (type, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: y === null ? [] : [{ x, y: Math.round(y), id: 1, radiusX: 4, radiusY: 4, force: 1 }] });
+  try {
+    // Finger strokes of at most 360px, inside the chat's own box.
+    for (let left = dy; Math.abs(left) > 0;) {
+      const stroke = Math.sign(left) * Math.min(360, Math.abs(left));
+      left -= stroke;
+      const fromY = stroke > 0 ? box.y + box.height * 0.25 : box.y + box.height * 0.75;
+      const steps = fling ? 6 : 20;
+      await touch('touchStart', fromY);
+      for (let i = 1; i <= steps; i += 1) {
+        await touch('touchMove', fromY + (stroke * i) / steps);
+        await new Promise((resolve) => setTimeout(resolve, fling ? 8 : 16));
+      }
+      // A plain scroll holds still before lifting, so nothing coasts; a fling lifts at speed.
+      if (!fling) await new Promise((resolve) => setTimeout(resolve, 180));
+      await touch('touchEnd', null);
+    }
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
+// Where the chat is: distance from the bottom, and the first message at its top edge.
+function convPlace(page) {
+  return page.locator('.conv').evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    const row = [...el.querySelectorAll('.conv-body > [data-anchor]')].find((r) => r.getBoundingClientRect().bottom > top + 1);
+    return {
+      dist: Math.round(el.scrollHeight - el.scrollTop - el.clientHeight),
+      anchor: row ? row.getAttribute('data-anchor') : null,
+      offset: row ? Math.round(row.getBoundingClientRect().top - top) : null,
+    };
+  });
+}
+const samePlace = (a, b) => Boolean(a && b && a.anchor && a.anchor === b.anchor && Math.abs(a.offset - b.offset) <= 4);
+
 // A synthetic 320x200 PNG put in the server process's image store, the way the
 // transcript provider stores every image since 2026-11-05: blocks carry the
 // reference, the phone fetches /transcript-images/<id> when it draws it.
@@ -239,7 +283,7 @@ async function makeFixture(root) {
     accounts: { readEmails: async () => ({}) },
   });
   const address = await composed.listen({ host: '127.0.0.1', port: 0 });
-  return { composed, sends, baseUrl: `http://127.0.0.1:${address.port}` };
+  return { composed, sends, transcriptEmitter, baseUrl: `http://127.0.0.1:${address.port}` };
 }
 
 // The insets an installed iOS web app gets on a notched phone. Chromium reports
@@ -393,7 +437,10 @@ const STATES = {
   async images(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
     const img = page.locator('.conv-img').first();
-    await img.scrollIntoViewIfNeeded();
+    // Scroll up to it by touch, as a person would (the image is lazy-loaded).
+    for (let i = 0; i < 6 && !(await img.isVisible().catch(() => false) && await img.evaluate((el) => { const r = el.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })); i += 1) {
+      await touchScroll(page, 500);
+    }
     await expect.poll(() => img.evaluate((el) => el.complete && el.naturalWidth), { timeout: 10000 }).toBe(320);
     const src = await img.getAttribute('src');
     assert.ok(src.startsWith('/transcript-images/'), `the phone image loads from the image route (${src})`);
@@ -670,7 +717,7 @@ const STATES = {
   async jump(page) {
     await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
     await expect(page.locator('.conv-jump')).toHaveCount(0);
-    await page.locator('.conv').evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+    await touchScroll(page, 1400);
     await expect(page.locator('.conv-jump')).toBeVisible();
     await shot(page, '17-scrolled-up-latest-pill');
     await page.locator('.conv-jump').click();
@@ -678,6 +725,72 @@ const STATES = {
     const gap = await page.locator('.conv').evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
     assert.ok(gap < 60, `Latest returns to the bottom (gap ${gap})`);
     await expect(page.locator('.conv-jump')).toHaveCount(0);
+  },
+  // Where the chat stays (2026-11-16, the desktop fix carried to the phone).
+  async scrollHolds(page, { fx }) {
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    assert.ok((await convPlace(page)).dist <= 2, 'opens at the latest message');
+    // A fling up: the glide after the finger lifts is Pat's too, so it is
+    // never yanked back while it coasts or after it stops.
+    await touchScroll(page, 700, { fling: true, speed: 3000 });
+    await page.waitForTimeout(2500);
+    const read = await convPlace(page);
+    assert.ok(read.dist > 300, `the fling left the chat up in its history (dist ${read.dist})`);
+    // A reply lands while reading: the same message stays at the same spot.
+    fx.transcriptEmitter.emit('update', { sessionId: LIVE_ID, append: [{ key: 'live1', kind: 'assistant', text: 'A reply that landed while you were reading further up.', ts: new Date().toISOString() }] });
+    await expect(page.locator('.conv-pane')).toContainText('A reply that landed while you were reading');
+    await page.waitForTimeout(300);
+    const afterReply = await convPlace(page);
+    assert.ok(samePlace(read, afterReply), `a new reply did not move the reader (${JSON.stringify(read)} -> ${JSON.stringify(afterReply)})`);
+    // The keyboard comes up and goes down (the chat's box shrinks and grows).
+    await page.setViewportSize({ width: PHONE.width, height: VISIBLE_WITH_KEYBOARD });
+    await page.waitForTimeout(300);
+    await page.setViewportSize(PHONE);
+    await page.waitForTimeout(400);
+    const afterKeyboard = await convPlace(page);
+    assert.ok(samePlace(read, afterKeyboard), `the keyboard did not move the reader (${JSON.stringify(read)} -> ${JSON.stringify(afterKeyboard)})`);
+    await shot(page, '17b-reading-holds');
+  },
+  async follows(page, { fx }) {
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    for (let n = 1; n <= 3; n += 1) {
+      fx.transcriptEmitter.emit('update', { sessionId: LIVE_ID, append: [{ key: `follow${n}`, kind: 'assistant', text: `Streaming reply ${n}. ${'More of the answer arrives here. '.repeat(6)}`, ts: new Date().toISOString() }] });
+      await expect(page.locator('.conv-pane')).toContainText(`Streaming reply ${n}.`);
+      await page.waitForTimeout(250);
+      const place = await convPlace(page);
+      assert.ok(place.dist <= 2, `following through reply ${n} (dist ${place.dist})`);
+    }
+    // The keyboard opening keeps a following chat on its latest message.
+    await page.setViewportSize({ width: PHONE.width, height: VISIBLE_WITH_KEYBOARD });
+    await page.waitForTimeout(400);
+    assert.ok((await convPlace(page)).dist <= 2, 'still at the latest message with the keyboard up');
+  },
+  async sessionSwitch(page) {
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    await touchScroll(page, 900);
+    await page.waitForTimeout(900);
+    const readA = await convPlace(page);
+    assert.ok(readA.dist > 300, `scrolled up in the first session (dist ${readA.dist})`);
+    await openChat(page, 'Kill and resume queued Claude sessions');
+    await page.waitForTimeout(500);
+    const b = await convPlace(page);
+    assert.ok(b.dist <= 2, `another session opens at its own latest message, not where the last one was (dist ${b.dist})`);
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    await page.waitForTimeout(500);
+    const backA = await convPlace(page);
+    assert.ok(samePlace(readA, backA), `coming back finds the same message (${JSON.stringify(readA)} -> ${JSON.stringify(backA)})`);
+  },
+  async times(page) {
+    await openChat(page, 'Orchestrating cdt-app push 16 kickoff');
+    const labels = await page.locator('.conv-time').evaluateAll((els) => els.map((el) => ({ text: el.textContent.trim(), title: el.getAttribute('title') || '', reply: el.classList.contains('conv-time-reply') })));
+    const prompts = labels.filter((l) => !l.reply);
+    const replies = labels.filter((l) => l.reply);
+    assert.ok(prompts.length >= 13 && replies.length >= 13, `every prompt and reply has a time (${prompts.length} prompts, ${replies.length} replies)`);
+    const want = new Date(minutesAgo(12)).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago' });
+    const last = prompts[prompts.length - 1];
+    assert.ok([want, `Yesterday ${want}`].includes(last.text), `the latest prompt reads ${want} in Central time (got ${last.text})`);
+    assert.match(last.title, /20\d\d.*C[SD]T/, 'the hover title has the date and zone');
+    await shot(page, '17c-times');
   },
   async noteEditor(page) {
     await page.getByRole('button', { name: 'Notes' }).click();
@@ -766,7 +879,7 @@ async function main() {
       if (ONLY.length && !ONLY.includes(name)) continue;
       // A fresh context per state, so one state's storage, focus and socket can
       // never leak into the next.
-      const context = await browser.newContext({ viewport: PHONE, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce' });
+      const context = await browser.newContext({ viewport: PHONE, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce', timezoneId: 'America/Chicago', locale: 'en-US' });
       const page = await context.newPage();
       const errors = [];
       page.on('pageerror', (error) => errors.push(error.message));

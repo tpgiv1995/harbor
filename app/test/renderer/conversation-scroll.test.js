@@ -173,6 +173,47 @@ test('what counts as Pat: a held pointer, a routed smooth scroll, and a grace pe
   assert.equal(keeper.isUser(), false);
 });
 
+test('a touch fling keeps counting as Pat while it glides, long after the finger lifted', () => {
+  const c = clock();
+  const win = makeWindow();
+  const keeper = createPlaceKeeper({ now: c.now });
+  restore(win, keeper);
+  keeper.hold(true);
+  keeper.hold(false); // the browser cancels the pointer once it takes the pan
+  // Two seconds of momentum, one scroll event a frame, moving up.
+  for (let t = 0; t < 2000; t += 16) {
+    c.t += 16;
+    win.scrollTop -= 3;
+    const result = keeper.scrolled({ top: win.scrollTop, dist: win.dist, readAnchor: () => win.anchor() });
+    assert.notEqual(result, 'restore', `glide at ${t} ms was put back`);
+  }
+  assert.equal(keeper.place.follow, false, 'the fling left him reading');
+  c.t += USER_SCROLL_GRACE_MS + 1;
+  assert.equal(keeper.isUser(), false, 'and it ends when the glide does');
+});
+
+test("the window's own corrections are 'ours' and never stretch Pat's grace while replies stream", () => {
+  const c = clock();
+  const win = makeWindow();
+  const keeper = createPlaceKeeper({ now: c.now });
+  restore(win, keeper);
+  keeper.markIntent(); // one wheel notch
+  for (let n = 0; n < 6; n += 1) {
+    c.t += 400; // a reply every 400 ms, well inside the grace each time
+    win.rows.push({ key: `r${n}`, chars: 300 });
+    win.layout();
+    restore(win, keeper);
+    keeper.expect(win.scrollTop);
+    assert.equal(keeper.scrolled({ top: win.scrollTop, dist: win.dist, readAnchor: () => win.anchor() }), 'ours');
+  }
+  assert.equal(keeper.isUser(), false, 'the grace ran out after the notch, replies or not');
+  // So a reflow nudge now is the browser's, and is put back.
+  win.width = 250;
+  win.layout();
+  assert.equal(keeper.scrolled({ top: win.scrollTop, dist: win.dist, readAnchor: () => win.anchor() }), 'restore');
+  assert.equal(keeper.place.follow, true);
+});
+
 test('a message that left a loaded window turns the window to following; one still loading is waited for', () => {
   const reading = { follow: false, key: 'gone', offset: -20 };
   const loading = restoreTarget({ place: reading, scrollTop: 0, scrollHeight: 0, clientHeight: 300, anchorTop: null, hasBlocks: false });

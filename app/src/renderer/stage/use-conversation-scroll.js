@@ -113,7 +113,10 @@ export function useConversationScroll({ sessionId, hasBlocks, layoutDeps = [] })
       hasBlocks: hasBlocksRef.current,
     });
     if (plan.place !== place) keep(plan.place);
-    if (plan.top !== null) node.scrollTop = plan.top;
+    if (plan.top !== null) {
+      node.scrollTop = plan.top;
+      keeper.expect(node.scrollTop);
+    }
     keeper.noteTop(node.scrollTop);
   }, [keep]);
 
@@ -123,7 +126,7 @@ export function useConversationScroll({ sessionId, hasBlocks, layoutDeps = [] })
     const top = node.scrollTop;
     const result = keeperRef.current.scrolled({ top, dist: node.scrollHeight - top - node.clientHeight, readAnchor });
     if (result === 'restore') restore();
-    else memory.set(sessionIdRef.current, result);
+    else if (result !== 'ours') memory.set(sessionIdRef.current, result);
   }, [readAnchor, restore]);
 
   const starting = useCallback((dy) => {
@@ -224,14 +227,20 @@ export function useConversationScroll({ sessionId, hasBlocks, layoutDeps = [] })
     };
   }, [follow, restore, scrollByUser, starting]);
 
-  // A window whose session id changes (a provisional window becoming its real
-  // session) keeps its place under the new id.
-  useEffect(() => { memory.set(sessionId, keeperRef.current.place); }, [sessionId]);
+  // A view reused for another session (the phone keeps one conversation view)
+  // takes that session's own place, never the previous session's.
+  const shownIdRef = useRef(sessionId);
+  useEffect(() => {
+    if (shownIdRef.current === sessionId) return;
+    shownIdRef.current = sessionId;
+    keeperRef.current.set(memory.get(sessionId) || FOLLOW);
+    restore();
+  }, [sessionId, restore]);
 
   // New or changed blocks: put the window back on its place before paint.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useLayoutEffect(() => { restore(); }, layoutDeps);
 
-  return { scrollRef, contentRef, onScroll, onImageLoad: restore };
+  return { scrollRef, contentRef, onScroll, onImageLoad: restore, follow };
 }
 

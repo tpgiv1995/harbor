@@ -93,12 +93,20 @@ const readingPlace = (anchor) => (anchor && anchor.key ? { follow: false, key: a
 // One window's place and whether a scroll movement is Pat's. `now` is a clock
 // in ms. Pat's input marks a grace period; a pointer held down (scrollbar drag,
 // selecting text past the edge) and a routed smooth scroll in flight also count.
+// A scroll Pat started keeps counting as his while it keeps moving: a touch
+// fling glides on for a second or two after the finger lifts (and the browser
+// cancels the pointer as soon as it takes the pan over), so each of his scroll
+// events extends the grace. The window's OWN corrections (restore setting
+// scrollTop) are announced with expect() and recognised as 'ours': they never
+// extend the grace, or a stream of replies landing every half second would keep
+// "Pat is scrolling" alive forever and let a browser nudge through as his.
 function createPlaceKeeper({ initial = FOLLOW, now = () => Date.now(), graceMs = USER_SCROLL_GRACE_MS } = {}) {
   let place = initial || FOLLOW;
   let intentUntil = 0;
   let held = false;
   let smoothing = false;
   let lastTop = Number.NaN;
+  let expected = null;
   const keeper = {
     get place() { return place; },
     set(next) { place = next || FOLLOW; },
@@ -107,10 +115,22 @@ function createPlaceKeeper({ initial = FOLLOW, now = () => Date.now(), graceMs =
     smoothing(on) { smoothing = Boolean(on); if (!smoothing) keeper.markIntent(); },
     isUser() { return held || smoothing || now() < intentUntil; },
     noteTop(top) { lastTop = top; },
-    // A scroll event. The browser's own movement answers 'restore' (put the
-    // window back); Pat's movement answers his new place and keeps it.
+    // The window just set scrollTop to `top` itself.
+    expect(top) { expected = top; },
+    // A scroll event. The window's own correction answers 'ours' (nothing to
+    // do); the browser's own movement answers 'restore' (put the window back);
+    // Pat's movement answers his new place and keeps it.
     scrolled({ top, dist, readAnchor }) {
+      if (expected !== null) {
+        const mine = Math.abs(top - expected) < 1;
+        expected = null;
+        if (mine) {
+          lastTop = top;
+          return 'ours';
+        }
+      }
       if (!keeper.isUser()) return 'restore';
+      keeper.markIntent();
       const follow = followAfterUserScroll({ prevTop: lastTop, top, dist });
       lastTop = top;
       place = follow ? FOLLOW : readingPlace(readAnchor());

@@ -102,6 +102,25 @@
   margin: 0;
 }
 
+/* When a prompt or reply was written, in the phone's own time zone
+   (2026-11-16, as on the desktop): tucked under a prompt on its side, a quiet
+   line under a reply. The full date is in the element's title. */
+.conv-time-row {
+  align-self: flex-end;
+  margin-top: -6px;
+  padding-right: 4px;
+}
+.conv-time {
+  color: var(--fnt);
+  font: 500 11px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.conv-time-reply {
+  display: block;
+  margin-top: var(--space-1);
+}
+
 .conv-assistant {
   align-self: stretch;
   max-width: 100%;

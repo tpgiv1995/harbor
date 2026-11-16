@@ -1,7 +1,17 @@
-import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { Markdown } from '../md/index.jsx';
+import { useConversationScroll } from '../../../src/renderer/stage/use-conversation-scroll.js';
+import messageTimes from '../../../src/renderer/stage/message-time.cjs';
 import './conversation.css';
+
+const { messageTime, subscribeDay, currentDay } = messageTimes;
+
+function MessageTime({ ts, className = 'conv-time' }) {
+  const time = messageTime(ts);
+  if (!time) return null;
+  return <time className={className} dateTime={time.iso} title={time.title}>{time.label}</time>;
+}
 
 // The phone's conversation surface: prompt bubbles, assistant prose, and
 // tool-action rows, parsed by the server's transcript provider and delivered
@@ -9,9 +19,11 @@ import './conversation.css';
 // src/renderer/stage/Conversation.jsx (same block shapes, same grouping
 // rules) but drops the per-account ProfileBadge chrome the desktop needs and
 // nothing here does, and is laid out for a single 430px-wide column instead
-// of a resizable grid tile.
-
-const STICK_THRESHOLD_PX = 56;
+// of a resizable grid tile. Where it stays scrolled is the desktop's own rule
+// (use-conversation-scroll.js): only Pat's own scrolling moves it, a touch
+// fling included, and every other movement puts it back; each top-level row
+// carries `data-anchor` for that. Each prompt and reply shows its time in the
+// phone's own zone (message-time.cjs), as on the desktop.
 // How far above the tail before the "Latest" pill appears: about a screenful
 // of reading, so it never flickers in for a small nudge.
 const JUMP_SHOW_PX = 480;
@@ -86,9 +98,9 @@ function ConvImages({ images, onImageLoad }) {
   );
 }
 
-const ActionBlock = memo(function ActionBlock({ block }) {
+const ActionBlock = memo(function ActionBlock({ block, anchor }) {
   return (
-    <div className={`conv-act status-${block.status}`}>
+    <div className={`conv-act status-${block.status}`} data-anchor={anchor}>
       <div className="conv-act-row">
         <span className={`conv-act-k ${block.status}`} aria-hidden="true" />
         {/* A described command reads as Claude's own sentence, the command
@@ -197,6 +209,7 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   return (
     <div
       className={`conv-act-group${expanded ? ' expanded' : ''}`}
+      data-anchor={groupKey}
       data-group-key={groupKey}
       data-expanded={expanded ? 'true' : 'false'}
     >
@@ -221,17 +234,19 @@ const ActionGroup = memo(function ActionGroup({ groupKey, blocks, expanded, onTo
   );
 });
 
-const Block = memo(function Block({ block, onImageLoad }) {
+// `day` is only there to re-render a block's time label when the date turns.
+const Block = memo(function Block({ block, onImageLoad, day: _day }) {
   if (block.kind === 'note') {
-    return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`}>{block.text}</div>;
+    return <div className={`conv-note${block.tone === 'warn' ? ' warn' : ''}`} data-anchor={block.key}>{block.text}</div>;
   }
   if (block.kind === 'progress') {
     // Between-tool-call notes from the model; same meaning as the desktop tile.
-    return <div className="conv-progress">{block.text}</div>;
+    return <div className="conv-progress" data-anchor={block.key}>{block.text}</div>;
   }
   if (block.kind === 'user') {
     return (
-      <div className={`conv-user${block.command ? ' command' : ''}`}>
+      <>
+      <div className={`conv-user${block.command ? ' command' : ''}`} data-anchor={block.key}>
         {block.text ? (
           block.command
             ? <span className="conv-user-text">{block.text}</span>
@@ -239,6 +254,10 @@ const Block = memo(function Block({ block, onImageLoad }) {
         ) : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
       </div>
+      {messageTime(block.ts) ? (
+        <div className="conv-time-row" data-anchor={`${block.key}:time`}><MessageTime ts={block.ts} /></div>
+      ) : null}
+      </>
     );
   }
   if (block.kind === 'assistant') {
@@ -246,27 +265,26 @@ const Block = memo(function Block({ block, onImageLoad }) {
     // names the model, "no reason to repeat"). This supersedes the 2026-10 rule
     // that drew the attribution once per turn: it is drawn nowhere now.
     return (
-      <div className="conv-assistant">
+      <div className="conv-assistant" data-anchor={block.key}>
         {block.text ? <Markdown text={block.text} /> : null}
         <ConvImages images={block.images} onImageLoad={onImageLoad} />
+        <MessageTime ts={block.ts} className="conv-time conv-time-reply" />
       </div>
     );
   }
-  if (block.kind === 'action') return <ActionBlock block={block} />;
+  if (block.kind === 'action') return <ActionBlock block={block} anchor={block.key} />;
   return null;
 });
 
-function distFromBottom(node) {
-  return node.scrollHeight - node.scrollTop - node.clientHeight;
-}
-
 export const Conversation = memo(function Conversation({
-  blocks, header, empty, emptyAction = null, topAction = null,
+  sessionId, blocks, header, empty, emptyAction = null, topAction = null,
 }) {
-  const scrollRef = useRef(null);
-  const contentRef = useRef(null);
-  const stickRef = useRef(true);
-  const programmaticScrollRef = useRef(false);
+  const day = useSyncExternalStore(subscribeDay, currentDay);
+  const { scrollRef, contentRef, onScroll: keepPlace, onImageLoad, follow } = useConversationScroll({
+    sessionId,
+    hasBlocks: blocks.length > 0,
+    layoutDeps: [blocks, header?.working],
+  });
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
 
   const toggleGroup = useCallback((groupKey) => {
@@ -280,19 +298,6 @@ export const Conversation = memo(function Conversation({
 
   const items = useMemo(() => groupConversationBlocks(blocks), [blocks]);
 
-  const scrollToTail = useCallback(() => {
-    const node = scrollRef.current;
-    if (!node || !stickRef.current) return;
-    programmaticScrollRef.current = true;
-    stickRef.current = true;
-    node.scrollTop = node.scrollHeight;
-    requestAnimationFrame(() => {
-      const el = scrollRef.current;
-      if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-      programmaticScrollRef.current = false;
-    });
-  }, []);
-
   // A WAY BACK TO THE LATEST (2026-10-21 review). A reader scrolled up is left
   // in place, which is right, but nothing offered the way back down through a
   // long coding run. Well above the tail, a "Latest" pill appears with how many
@@ -300,41 +305,20 @@ export const Conversation = memo(function Conversation({
   const [away, setAway] = useState(false);
   const awayBaseRef = useRef(0);
   const onScroll = () => {
-    if (programmaticScrollRef.current) return;
+    keepPlace();
     const node = scrollRef.current;
-    if (!node) return;
-    stickRef.current = distFromBottom(node) < STICK_THRESHOLD_PX;
-    const nextAway = distFromBottom(node) > JUMP_SHOW_PX;
+    if (!node || node.clientHeight === 0) return;
+    const nextAway = node.scrollHeight - node.scrollTop - node.clientHeight > JUMP_SHOW_PX;
     if (nextAway !== away) {
       if (nextAway) awayBaseRef.current = blocks.length;
       setAway(nextAway);
     }
   };
   const jumpToLatest = useCallback(() => {
-    stickRef.current = true;
     setAway(false);
-    scrollToTail();
-  }, [scrollToTail]);
+    follow();
+  }, [follow]);
   const unseen = away ? Math.max(0, blocks.length - awayBaseRef.current) : 0;
-
-  useLayoutEffect(() => {
-    scrollToTail();
-  }, [blocks, header?.working, scrollToTail]);
-
-  useEffect(() => {
-    scrollToTail();
-  }, [scrollToTail]);
-
-  useEffect(() => {
-    const node = contentRef.current;
-    if (!node || typeof ResizeObserver === 'undefined') return undefined;
-    const ro = new ResizeObserver(() => {
-      if (stickRef.current) scrollToTail();
-    });
-    ro.observe(node);
-    if (scrollRef.current) ro.observe(scrollRef.current);
-    return () => ro.disconnect();
-  }, [scrollToTail]);
 
   return (
     <div className="conv-glass">
@@ -342,7 +326,7 @@ export const Conversation = memo(function Conversation({
         <div className="conv-body" ref={contentRef}>
           {topAction}
           {blocks.length === 0 ? (
-            <div className="conv-empty">
+            <div className="conv-empty" data-anchor="empty">
               <span>{empty || 'No conversation yet.'}</span>
               {emptyAction}
             </div>
@@ -363,13 +347,14 @@ export const Conversation = memo(function Conversation({
                 <Block
                   key={item.block.key}
                   block={item.block}
-                  onImageLoad={scrollToTail}
+                  onImageLoad={onImageLoad}
+                  day={day}
                 />
               );
             })
           )}
           {header?.working ? (
-            <div className="conv-working">
+            <div className="conv-working" data-anchor="working">
               <span className="conv-spinner" aria-hidden="true" />
               <span className="conv-working-text">{header.workingText || header.text || 'Working…'}</span>
             </div>

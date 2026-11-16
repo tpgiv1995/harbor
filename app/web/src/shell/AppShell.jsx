@@ -213,7 +213,11 @@ function SessionScreen({
     <section className="conv-pane shell-screen shell-screen-sessions">
       {/* Background work ("7 tasks running") is a status in the header strip
           now, not a row of its own above the conversation. */}
+      {/* One view per session (keyed): a reused view carried the last session's
+          scroll into the next, and each keeps its own place to come back to. */}
       <Conversation
+        key={session.id}
+        sessionId={session.id}
         blocks={blocks}
         header={header}
         empty={empty}
