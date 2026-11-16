@@ -358,6 +358,63 @@ async function spawnSessiond({ argv, cwd, env, agent, agentSession }) {
   }
 }
 
+// ONE CONVERSATION, ONE PANE (2026-11-15, Pat: "what caused a second vox
+// session? ... i dont even see a second one anywhere"). The 90-second
+// transcript guard in claudeSessions is a proxy for "something is writing this
+// conversation", and an IDLE live session fails it: Vox (5894c81a) sat in pane
+// e08b9799 waiting on its team for six minutes, another session sent it a note
+// naming only its session id, the send found no pane of its own and resumed,
+// and this command started a second claude on the same transcript in pane
+// 19c7be11. Both ran for 45 minutes on one file, each acting on its own
+// background-task wakes, and the rail (one row per conversation) gave one of
+// them no row at all. The daemon knows the real answer, so it is asked: a
+// live pane recorded as holding this session refuses the resume, WITH OR
+// WITHOUT --live-ok, because no caller ever wants two writers (adopt-on-send
+// kills an outside owner that has no pane, and a plan change waits for the old
+// claude to exit, so neither is refused). A record whose process is gone is not a holder, and neither is a
+// Codex pane whose title shows another thread (docs/claude/providers.md,
+// thread-following). Nor is a pane that hosts a SHELL: its pid is the shell's,
+// which outlives a crashed agent, so it proves nothing, and the send path's
+// dead-shell check (docs/claude/conversation.md, "A pane is not a session")
+// resumes exactly that case on purpose. A daemon that cannot be asked proves
+// nothing either way; the spawn that follows reports its own error.
+const SHELL_LAUNCHERS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'cmd', 'powershell', 'pwsh']);
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return true; // unknown pid: assume live, refuse rather than guess
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+
+async function liveSessiondHolder(sessionId) {
+  if (!sessionId) return null;
+  const client = new SessionClient(process.env.HARBOR_SESSIOND_SOCKET ? { socketPath: process.env.HARBOR_SESSIOND_SOCKET } : {});
+  let records;
+  try {
+    records = (await client.request('list'))?.sessions || [];
+  } catch {
+    return null;
+  } finally {
+    client.close();
+  }
+  const wanted = String(sessionId).toLowerCase();
+  return records.find((record) => {
+    if (!record || record.exit) return false;
+    if (String(record.agent_session || '').toLowerCase() !== wanted) return false;
+    const shown = record.codex_title?.prefix;
+    if (shown && !wanted.startsWith(String(shown).toLowerCase())) return false;
+    const launcher = path.basename(String(record.argv?.[0] || '').replace(/\\/g, '/')).toLowerCase().replace(/\.exe$/, '');
+    if (SHELL_LAUNCHERS.has(launcher)) return false;
+    return pidAlive(record.pid);
+  }) || null;
+}
+
+function alreadyLiveRefusal(sessionId, holder) {
+  const since = holder.created_at ? `, open since ${holder.created_at}` : '';
+  return `session ${sessionId} is already running in Harbor (pane ${holder.id}${since}). `
+    + 'A second copy would write the same conversation file from two places. '
+    + 'Send to that pane instead, or close it before resuming.';
+}
+
 // Who owns the systemd unit (live-caught 2026-07-29). The default unit belongs
 // to the REAL herdr installation, and `startClean` manages it by STOPPING it
 // first, which kills its whole cgroup: the daemon, every pane it forked and
@@ -771,6 +828,10 @@ async function ai(args) {
     process.stdout.write(`${commandString(parsed.argv)}\n`);
     return 0;
   }
+  if (parsed.resumeId) {
+    const holder = await liveSessiondHolder(parsed.resumeId);
+    if (holder) throw new Error(alreadyLiveRefusal(parsed.resumeId, holder));
+  }
   // Against the home the CHILD will read, which is the one just decided above.
   if (parsed.provider === 'claude') preacceptFolderTrust(childEnv.CLAUDE_CONFIG_DIR || null, process.cwd());
   const launchArgv = resolveWindowsLaunch(parsed.argv, { env: childEnv });
@@ -921,7 +982,9 @@ async function claudeSessions(args) {
     if (slotRefusal) throw new Error(slotRefusal);
     preacceptFolderTrust(resumeEnv.CLAUDE_CONFIG_DIR || null, meta.cwd);
     if (!meta.path || !fs.existsSync(meta.path)) throw new Error(`transcript no longer exists (pruned?): ${meta.path || ''}`);
-    const age = Math.floor(Date.now() / 1000 - fs.statSync(meta.path).mtimeMs / 1000);
+    const holder = await liveSessiondHolder(resumeId);
+    if (holder) throw new Error(alreadyLiveRefusal(resumeId, holder));
+    const age =Math.floor(Date.now() / 1000 - fs.statSync(meta.path).mtimeMs / 1000);
     if (!liveOk && age < 90) throw new Error(`session ${resumeId} looks LIVE right now (its transcript was written ${age}s ago). Resuming would attach a second Claude to the same conversation file. Close the original first, or re-run with --live-ok if you are sure.`);
     // The same Windows resolution a launch gets: a bare `claude` is npm's
     // claude.cmd, which sessiond's CreateProcess cannot start. A full path (what

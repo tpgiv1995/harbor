@@ -3104,47 +3104,83 @@ function createSessionSend(deps) {
   // 60-150s), and deliver()'s shell-prompt refusal is what catches the
   // crashed-to-bash case. Provisional pane-keyed ids skip the ownership test:
   // the pane IS their identity.
+  //
+  // A SEND THAT NAMES ONLY A SESSION FINDS THAT SESSION'S LIVE PANE (2026-11-15,
+  // Pat: "what caused a second vox session?"). Every caller used to bring the
+  // pane (the window's, or a link this process recorded), and a send with
+  // neither went straight to resume. That was right for the renderer and wrong
+  // for everyone else: the phone server is its own process with its own links,
+  // and a session messaging another by id carries no pane at all. Vox sat idle
+  // in pane e08b9799, a peer sent it a note by session id through the phone
+  // server, and the resume opened a SECOND claude on the same conversation in
+  // pane 19c7be11 that ran for 45 minutes. The daemon's own list says which
+  // live pane holds the session, so it is asked before any resume. A Codex
+  // pane counts only while its title still shows this thread.
+  const livePaneHolding = (sessionId, panes, excludePaneId) => {
+    if (/^(pane|live):/.test(String(sessionId))) return null;
+    const wanted = String(sessionId).toLowerCase();
+    const holding = (panes || []).filter((p) => (
+      p.pane_id !== excludePaneId && !p.exited
+      && p.agent_session?.kind === 'id' && String(p.agent_session.value || '').toLowerCase() === wanted
+      && (!p.codex_title?.prefix || wanted.startsWith(String(p.codex_title.prefix).toLowerCase()))
+    ));
+    holding.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    return holding[0] || null;
+  };
+
   const resolvePane = async (sessionId, modelPane) => {
     // Queued payloads preserve the renderer's pane as it existed when Enter
     // was pressed. A resume completed by an earlier queue item updates this
     // registry, so that link is newer than the captured payload and must win.
-    const candidate = links.get(sessionId) || (modelPane?.paneId ? modelPane : null);
-    if (!candidate) return null;
-    let pane = null;
+    const offered = links.get(sessionId) || (modelPane?.paneId ? modelPane : null);
+    let panes;
     try {
-      const snap = await snapshot();
-      pane = (snap.panes || []).find((p) => p.pane_id === candidate.paneId) || null;
+      panes = (await snapshot()).panes || [];
     } catch {
-      return candidate; // daemon hiccup; the send path will surface a real failure
+      return offered; // daemon hiccup; the send path will surface a real failure
     }
-    if (pane) {
-      // A raw-terminal child view or ephemeral /side chat is not the bound
-      // root. Do not submit that root's message into a different composer.
-      // Keep the link: returning to the root makes it usable again.
-      const displayed = pane.codex_title?.prefix;
-      const different = displayed && /^[0-9a-f-]{36}$/i.test(String(sessionId))
-        && !String(sessionId).toLowerCase().startsWith(displayed);
-      if (pane.agent === 'codex' && displayed && (different || /^(pane|live):/.test(String(sessionId)))) {
-        const screen = await readScreen(candidate.paneId, CODEX_READ_LINES);
-        const view = codexThreadView(screen);
-        if (different || view) {
-          if (!view) {
-            void Promise.resolve().then(() => deps.recheckProviderTitle?.(candidate.paneId)).catch(() => {});
-          }
-          const instruction = view === 'side' ? 'Open the >_ terminal and press Ctrl+C to close the side chat.'
-            : view === 'child' ? 'Open the >_ terminal, use /subagents and select Main.'
-              : 'This terminal is showing another chat. Harbor is checking its link; send again after the window updates.';
-          const error = new Error(`${instruction} Your text is kept.`);
-          error.code = 'CODEX_THREAD_VIEW_CHANGED';
-          throw error;
+    if (offered) {
+      const pane = panes.find((p) => p.pane_id === offered.paneId) || null;
+      if (pane && await paneServes(sessionId, offered, pane)) return offered;
+      links.dropPane(offered.paneId);
+    }
+    const holding = livePaneHolding(sessionId, panes, offered?.paneId);
+    if (!holding) return null;
+    const found = { paneId: holding.pane_id, workspaceId: holding.workspace_id || null };
+    if (!await paneServes(sessionId, found, holding)) return null;
+    links.set(sessionId, found);
+    return found;
+  };
+
+  // True when this live pane may take this session's message; false when the
+  // snapshot says another session owns it. Throws when a Codex pane shows a
+  // different chat or a child view, because typing there would be wrong and
+  // resuming would be wrong too.
+  const paneServes = async (sessionId, candidate, pane) => {
+    // A raw-terminal child view or ephemeral /side chat is not the bound
+    // root. Do not submit that root's message into a different composer.
+    // Keep the link: returning to the root makes it usable again.
+    const displayed = pane.codex_title?.prefix;
+    const different = displayed && /^[0-9a-f-]{36}$/i.test(String(sessionId))
+      && !String(sessionId).toLowerCase().startsWith(displayed);
+    if (pane.agent === 'codex' && displayed && (different || /^(pane|live):/.test(String(sessionId)))) {
+      const screen = await readScreen(candidate.paneId, CODEX_READ_LINES);
+      const view = codexThreadView(screen);
+      if (different || view) {
+        if (!view) {
+          void Promise.resolve().then(() => deps.recheckProviderTitle?.(candidate.paneId)).catch(() => {});
         }
+        const instruction = view === 'side' ? 'Open the >_ terminal and press Ctrl+C to close the side chat.'
+          : view === 'child' ? 'Open the >_ terminal, use /subagents and select Main.'
+            : 'This terminal is showing another chat. Harbor is checking its link; send again after the window updates.';
+        const error = new Error(`${instruction} Your text is kept.`);
+        error.code = 'CODEX_THREAD_VIEW_CHANGED';
+        throw error;
       }
-      if (/^(pane|live):/.test(String(sessionId))) return candidate;
-      const owner = pane.agent_session?.kind === 'id' ? (pane.agent_session.value || null) : null;
-      if (!owner || owner === sessionId) return candidate;
     }
-    links.dropPane(candidate.paneId);
-    return null;
+    if (/^(pane|live):/.test(String(sessionId))) return true;
+    const owner = pane.agent_session?.kind === 'id' ? (pane.agent_session.value || null) : null;
+    return !owner || owner === sessionId;
   };
 
   const debug = (...args) => {
