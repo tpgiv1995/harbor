@@ -723,6 +723,20 @@ button { font-family: inherit; }
   padding: 0 3px;
 }
 
+/* Nine or more (eight Claude plans and "+O" since 2026-11-15, the gold H plan):
+   one step tighter again. At nine, the crowded row needed a 296px rail and hung
+   "+O" 17.5px past Pat's 278px one. Keyed on the row's own child count (only the
+   launch buttons live in it), so it needs no new attribute. Measured in an
+   isolated Harbor (scripts/drive-plan-surfaces-win.js). */
+.rail-head:has(.rail-new-split[data-crowded] > :nth-child(9)) .rail-eyebrow { letter-spacing: 0.04em; }
+.rail-new-split[data-crowded]:has(> :nth-child(9)),
+.sidebar-project-actions[data-crowded]:has(> :nth-child(9)) { gap: 1px; }
+.rail-new-split[data-crowded]:has(> :nth-child(9)) .sidebar-global-new,
+.sidebar-project-actions[data-crowded]:has(> :nth-child(9)) .sidebar-proj-new {
+  min-width: 20px;
+  padding: 0 2px;
+}
+
 .rail-setup-hint,
 .rail-setup-banner {
   font: 500 10px var(--font-ui);
