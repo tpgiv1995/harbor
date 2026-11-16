@@ -121,6 +121,23 @@ function childEnv(extra = {}) {
   return env;
 }
 
+// A HUNG TEST FAILS WITH ITS NAME; IT NEVER FREEZES THE GATE (2026-11-15).
+// Three gate runs in a row that evening (six live sessions on the Legion) sat
+// for 16+ minutes on test/server/client-lifetime.test.js (and once also
+// test/providers/startup-scan-caches.test.js), with the log frozen at whatever
+// file precedes them, because node --test prints results in file order and no
+// test or wait had a deadline. Both files pass alone and with 24 copies at
+// once; the hang needs a loaded machine and was not reproducible on demand.
+// So every test gets a ceiling: --test-timeout fails a stuck test by name
+// ("test timed out after ..."), and --test-force-exit ends a file whose timed-out
+// test left a socket or server open, which otherwise kept the file alive with
+// the timeout alone (measured on a throwaway fixture: timeout only, still hung
+// at 40 s; both flags, exit 1 in 2 s naming the test). The ceiling is ten
+// minutes because the slowest HEALTHY test under that evening's load took
+// 119 s (the lane fingerprint test); HARBOR_TEST_TIMEOUT_MS overrides it.
+const TEST_TIMEOUT_MS = Number(process.env.HARBOR_TEST_TIMEOUT_MS) > 0 ? Number(process.env.HARBOR_TEST_TIMEOUT_MS) : 10 * 60 * 1000;
+const HANG_FLAGS = [`--test-timeout=${TEST_TIMEOUT_MS}`, '--test-force-exit'];
+
 const SERIAL_PTY = ['test/daemon', 'test/main/session-daemon-live.test.js'];
 const isSerialPty = (f) => SERIAL_PTY.some((needle) => matchesExclude(f, needle));
 const serialFiles = selected.filter(isSerialPty);
@@ -134,7 +151,7 @@ for (const f of selected) {
 
 let status = 0;
 if (parallelFiles.length > 0) {
-  const result = spawnSync(process.execPath, ['--test', ...parallelFiles], { stdio: 'inherit', env: childEnv() });
+  const result = spawnSync(process.execPath, ['--test', ...HANG_FLAGS, ...parallelFiles], { stdio: 'inherit', env: childEnv() });
   status = result.status == null ? 1 : result.status;
 }
 if (serialFiles.length > 0) {
@@ -165,7 +182,7 @@ if (serialFiles.length > 0) {
   console.log(`serial pty pass: ${serialFiles.length} file(s), one at a time`);
   const result = spawnSync(
     process.execPath,
-    ['--test', '--test-concurrency=1', ...serialFiles],
+    ['--test', '--test-concurrency=1', ...HANG_FLAGS, ...serialFiles],
     {
       stdio: 'inherit',
       // A lone pty file still shares the machine with whatever the parallel

@@ -71,23 +71,40 @@ async function harness(t, { metaGate = null, ...options } = {}) {
   return { composed, url: `ws://127.0.0.1:${address.port}/ws?token=${composed.token}`, dir };
 }
 
-const connect = (url, opts) => new Promise((resolve, reject) => {
+// EVERY WAIT HERE HAS A DEADLINE THAT NAMES ITS STEP (2026-11-15). This file
+// hung three full gate runs in a row on a loaded machine (16+ minutes each,
+// the log frozen at an earlier file) and passed alone and 24 copies at once:
+// none of its waits could fail, so a lost reply was silence. A healthy step
+// here takes milliseconds; thirty seconds is a hang, and the failure says
+// which one. scripts/test.js adds the per-test ceiling for every other file.
+const STEP_MS = 30_000;
+function within(promise, what, ms = STEP_MS) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what}: nothing after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+const connect = (url, opts) => within(new Promise((resolve, reject) => {
   const ws = new WebSocket(url, opts);
   ws.once('open', () => resolve(ws));
   ws.once('error', reject);
-});
+}), 'websocket connect');
 
 let nextRpcId = 0;
 function rpc(ws, method, payload) {
   const id = ++nextRpcId;
-  return new Promise((resolve) => {
-    const onMessage = (bytes) => {
+  let onMessage;
+  const reply = new Promise((resolve) => {
+    onMessage = (bytes) => {
       const message = JSON.parse(bytes);
-      if (message.type === 'response' && message.id === id) { ws.off('message', onMessage); resolve(message); }
+      if (message.type === 'response' && message.id === id) resolve(message);
     };
     ws.on('message', onMessage);
     ws.send(JSON.stringify({ id, method, payload }));
   });
+  return within(reply, `rpc ${method} (id ${id}) response`).finally(() => ws.off('message', onMessage));
 }
 
 const settle = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -153,7 +170,7 @@ test('a client that stops answering is reaped, and a healthy one is left alone',
   const silent = await connect(url, { autoPong: false });
   await rpc(silent, 'transcript:open', { sessionId: SESSION_A });
   assert.equal(composed.transcript.openCount(), 1);
-  await new Promise((resolve) => silent.once('close', resolve));
+  await within(new Promise((resolve) => silent.once('close', resolve)), 'the heartbeat reaping the silent client');
   await settle();
   assert.equal(composed.transcript.openCount(), 0, 'a silent client must be reaped and its holds released');
 
@@ -275,7 +292,7 @@ test('a client that leaves while its open is still in flight leaves nothing open
   const { composed, url } = await harness(t, { metaGate: () => { entered(); return gate; } });
   const ws = await connect(url);
   ws.send(JSON.stringify({ id: 1, method: 'transcript:open', payload: { sessionId: SESSION_A } }));
-  await reached; // the server is inside the open, waiting on the transcript's metadata
+  await within(reached, 'the server entering the gated open'); // the server is inside the open, waiting on the transcript's metadata
   ws._socket.destroy();
   await settle();
   release();
