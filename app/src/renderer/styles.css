@@ -737,6 +737,18 @@ button { font-family: inherit; }
   padding: 0 2px;
 }
 
+/* Ten or more (nine Claude plans and "+O" since 2026-11-18, the red Z plan):
+   at ten, the nine-button tier needed a 288px rail and hung "+O" 9px past Pat's
+   278px one, every button sitting at its 20px floor. The floor drops to 18px
+   (a 10px "+G" is about 13px of ink, so nothing clips) and the eyebrow tracks
+   tighter. Measured in an isolated Harbor (scripts/drive-plan-surfaces-win.js). */
+.rail-head:has(.rail-new-split[data-crowded] > :nth-child(10)) .rail-eyebrow { letter-spacing: 0.02em; }
+.rail-new-split[data-crowded]:has(> :nth-child(10)) .sidebar-global-new,
+.sidebar-project-actions[data-crowded]:has(> :nth-child(10)) .sidebar-proj-new {
+  min-width: 18px;
+  padding: 0 1px;
+}
+
 .rail-setup-hint,
 .rail-setup-banner {
   font: 500 10px var(--font-ui);
