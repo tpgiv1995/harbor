@@ -1,0 +1,11 @@
+  - The second check is green at 174 seconds, down from about 375.
+
+  About USD 228 of the 750 is still unallocated.
+
+✻ Worked for 57s · done 7:13 PM
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Gate decision G-107 test declaration conditions ─
+❯ please confirm the build plan for the second lane before noon
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  gordon  ·  Fable 5.2  ·  carrier-bridge  ·  ctx 60%  ·  5h --  ·  wk --  ·  $72.58
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

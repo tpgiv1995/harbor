@@ -1,6 +1,9 @@
 'use strict';
 const { subSessionReadOnly } = require('../shared/sub-sessions.cjs');
 
+// Sends and screen reads run here; never below the batch work sessions start
+// (daemon/interactive-priority.js).
+require('../daemon/interactive-priority.js').raiseToInteractive();
 const { app, crashReporter, BrowserWindow, Menu, ipcMain: electronIpcMain, dialog, clipboard, nativeImage, Notification, powerMonitor, protocol, session, shell } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');

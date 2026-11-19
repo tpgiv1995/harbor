@@ -31,7 +31,9 @@ function windowsPtyCompat() {
 // dim (one typed character means it is a draft, not a suggestion). A fresh
 // session's empty composer draws a dim `Try "…"` hint the same way, which is a
 // placeholder, not a prediction, so it is dropped. Measured against CLI 2.1.289.
-const DIVIDER_RE = /^\s*─{8,}\s*$/;
+// A named session's top edge carries its title ("──── Gate decision G-107 ─",
+// CLI 2.1.321; shared/divider isPromptEdgeLine): the suggestion sits under it too.
+const DIVIDER_RE = /^\s*(?:─{8,}|─+ \S.*? ─+)\s*$/;
 // The glyph is followed by a NO-BREAK SPACE (U+00A0) in the real CLI; JS \s covers both.
 const COMPOSER_RE = /^(\s*)❯\s/;
 const PLACEHOLDER_RE = /^Try ".*"$/;

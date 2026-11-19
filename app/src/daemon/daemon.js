@@ -8,6 +8,8 @@ require('./win-hide-children.js').install();
 const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
+// Never below the batch work its sessions start (interactive-priority.js).
+require('./interactive-priority.js').raiseToInteractive();
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn, execFile } = require('node:child_process');

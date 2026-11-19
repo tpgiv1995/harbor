@@ -3,6 +3,9 @@
 
 const util = require('node:util');
 const { composeServer } = require('./compose.js');
+// Its scheduled task starts it below normal; agents' sends run through here
+// (daemon/interactive-priority.js).
+require('../daemon/interactive-priority.js').raiseToInteractive();
 
 async function main() {
   const composed = await composeServer();

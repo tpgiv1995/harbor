@@ -4,6 +4,9 @@
 // FIRST, before node-pty loads: its ConPTY kill() forks a bare node.exe, which draws a console window from
 // this console-less process (see win-hide-children.js).
 require('./win-hide-children.js').install();
+// Above the batch work its session starts (interactive-priority.js).
+const { raiseToInteractive } = require('./interactive-priority.js');
+raiseToInteractive();
 
 const fs = require('node:fs');
 const net = require('node:net');
@@ -212,6 +215,9 @@ function startSession() {
     cols: config.cols,
     rows: config.rows,
   });
+  // The CLI itself, explicitly: a keeper that could not raise itself still
+  // must not hand below normal to the agent (interactive-priority.js).
+  raiseToInteractive(terminal.pid);
 
   const persistCodexTitle = coalesceTitleWrites(() => { if (exit === null) persist(); });
   const observeCodexTitle = createCodexTitleIdentity({

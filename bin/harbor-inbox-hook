@@ -1,0 +1,42 @@
+#!/usr/bin/env node
+'use strict';
+
+// harbor-inbox-hook: SessionStart and UserPromptSubmit, every config home.
+//
+// Records this session's cross-session inbox (the named pipe Claude Code binds
+// for it, and the per-session token a poster must open with) in
+// ~/.harbor/inboxes/<session id>.json, so bin/harbor-msg can deliver another
+// session's message straight into it instead of typing into its terminal.
+// Claude exports both to hooks as CLAUDE_CODE_MESSAGING_SOCKET and
+// CLAUDE_CODE_MESSAGING_TOKEN. UserPromptSubmit as well as SessionStart, so a
+// session started before this hook existed is recorded at its next prompt.
+// Writes only when something changed; never prints (no context is added) and
+// always exits 0, so a fault here can never block a prompt.
+// Why and how: app/src/shared/peer-inbox.cjs.
+
+const path = require('node:path');
+
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  try {
+    const socket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+    const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
+    if (!socket || !token) process.exit(0);
+    const hook = JSON.parse(input || '{}');
+    const inbox = require(path.join(path.dirname(__dirname), 'app', 'src', 'shared', 'peer-inbox.cjs'));
+    inbox.writeRecord({
+      sessionId: hook.session_id,
+      socket,
+      token,
+      transcriptPath: hook.transcript_path || null,
+      cwd: hook.cwd || process.cwd(),
+      home: process.env.CLAUDE_CONFIG_DIR || null,
+      pid: process.ppid,
+    });
+    if (hook.hook_event_name === 'SessionStart') inbox.pruneRecords();
+  } catch { /* never block a session */ }
+  process.exit(0);
+});
+setTimeout(() => process.exit(0), 5000).unref();

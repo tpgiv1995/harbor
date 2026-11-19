@@ -12,6 +12,7 @@ const {
   claudeProjectDir,
   providerTranscriptDirs,
   composerSendState,
+  composerBox,
   codexBoxState,
   codexBoxMatch,
   codexBoxDraft,
@@ -400,9 +401,76 @@ test('image attach is confirmed even when a prior turn\'s markers scroll off (ma
   ]);
 });
 
+// One typist per pane across processes (withPaneLock): the desktop app and the
+// phone server both type into the same panes.
+test('a pane locked by another live Harbor process makes the send wait, then it goes in once released', async () => {
+  const { spawn } = require('node:child_process');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h);
+  const lockDir = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks');
+  fs.mkdirSync(lockDir, { recursive: true });
+  const lockFile = path.join(lockDir, 'pane-1.lock');
+  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore', windowsHide: true });
+  try {
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: holder.pid, token: 'other', at: Date.now() }));
+    const send = createSessionSend(h.deps);
+    const details = [];
+    send.emitter.on('status', (st) => { if (st.detail) details.push(st.detail); });
+    const pending = send.send({ sessionId: 's-lock', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    await new Promise((r) => setTimeout(r, 2200));
+    assert.deepEqual(typed(h), [], 'nothing typed while the other process holds the pane');
+    assert.ok(details.some((d) => /another Harbor window is typing/.test(d)), 'the bar says why');
+    fs.rmSync(lockFile);
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.deepEqual(typed(h), ['hello there', '\r']);
+    assert.equal(pane.draft, '');
+    assert.equal(fs.existsSync(lockFile), false, 'the lock is removed after the send');
+  } finally {
+    holder.kill();
+  }
+});
+
+test('a pane lock left by a process that no longer exists is taken over at once', async () => {
+  const { spawn } = require('node:child_process');
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h);
+  const lockDir = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks');
+  fs.mkdirSync(lockDir, { recursive: true });
+  const gone = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true });
+  await new Promise((r) => gone.once('exit', r));
+  fs.writeFileSync(path.join(lockDir, 'pane-1.lock'), JSON.stringify({ pid: gone.pid, token: 'dead', at: Date.now() }));
+  const send = createSessionSend(h.deps);
+  const started = Date.now();
+  const result = await send.send({ sessionId: 's-lock-dead', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.ok(Date.now() - started < 1500, 'no wait behind a dead holder');
+  assert.deepEqual(typed(h), ['hello there', '\r']);
+});
+
+test('a picture whose chip wraps behind a long message is still seen as attached (2026-11-18, Vox)', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { imagesBefore: 429, wrapImageChips: true });
+  const send = createSessionSend(h.deps);
+  const result = await send.send({ sessionId: 's-wrap', text: 'look at this', images: ['/cache/one.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.equal(typed(h)[0], IMAGE_PASTE);
+  assert.equal(pane.draft, '');
+});
+
+test('a Claude that draws nothing after the image chord is waited on, not refused at 12 s', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { renderDelayReads: 400 });
+  const send = createSessionSend(h.deps);
+  const result = await send.send({ sessionId: 's-img-stall', text: 'look at this', images: ['/cache/one.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.equal(pane.draft, '');
+});
+
 test('image marker timeout is an honest send error and text is never typed', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  h.deps.readPane = async () => 'conversation\n❯';
+  let tick = 0;
+  h.deps.readPane = async () => `✻ Working… (${tick++}s)\nconversation\n❯`;
   const realNow = Date.now;
   let now = realNow();
   h.deps.sleep = async () => { now += 500; };
@@ -463,7 +531,10 @@ const IMAGE_FILE = /\.(png|jpe?g|gif|webp)$/i;
 // 2026-11-04): a run typed without paste markers is read in 1,024-character
 // pieces and only the LAST piece reaches the prompt.
 const lastTypedPiece = (text) => (text.length > 1024 ? text.slice(-(text.length % 1024 || 1024)) : text);
-function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0, drawAfter = null, dropTypings = 0, cutsLongTyping = false } = {}) {
+// `alive`: the CLI redraws on every read (a working spinner), so an unshown
+// typing is LOST rather than queued behind a stall (waitForPromptToHold).
+// `wrapImageChips`: the chip wraps at its space, as behind a long message.
+function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0, drawAfter = null, dropTypings = 0, cutsLongTyping = false, alive = false, wrapImageChips = false } = {}) {
   let draft = initialDraft;
   let dropped = 0;
   const state = { reads: 0 };
@@ -500,7 +571,8 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
     const shown = typedShown && drawAfter ? `${typedShown}${drawAfter(typedShown)}` : typedShown;
     if (hideReads > 0) hideReads -= 1;
     const above = echoed.map((line) => `❯ ${line}`).join('\n');
-    return `conversation\n${above}\n${divider}\n❯ ${shown}\n${divider}\n  personal  ·  Opus 5.5\n  ⏵⏵ auto mode on`;
+    const spinner = alive ? `✻ Working… (${state.reads}s)\n` : '';
+    return `${spinner}conversation\n${above}\n${divider}\n❯ ${shown}\n${divider}\n  personal  ·  Opus 5.5\n  ⏵⏵ auto mode on`;
   };
   const sendInput = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => {
@@ -510,7 +582,7 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
       else if (draft) { echoed.push(draft); draft = ''; }
     } else if (text === IMAGE_PASTE) {
       images += 1;
-      draft += `[Image #${images}] `;
+      draft += wrapImageChips ? `[Image\n  #${images}] ` : `[Image #${images}] `;
     } else if (dropped < dropTypings) {
       dropped += 1;
     } else if (text.startsWith('\x1b[200~')) {
@@ -888,7 +960,7 @@ test('a pane that has taken a message keeps the short wait', async () => {
   h.deps.readPane = async (...args) => {
     if (!deaf) return composed(...args);
     reads += 1;
-    return `conversation\n${PROMPT_EMPTY}`;
+    return `✻ Working… (${reads}s)\nconversation\n${PROMPT_EMPTY}`;
   };
   const send = createSessionSend(h.deps);
   await send.send({ sessionId: 's-short', text: 'first one lands', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
@@ -914,7 +986,7 @@ test('a pane the daemon started long ago is not treated as starting, even by a H
       promptEchoes: false,
     });
     let reads = 0;
-    h.deps.readPane = async () => { reads += 1; return `conversation\n${PROMPT_EMPTY}`; };
+    h.deps.readPane = async () => { reads += 1; return `✻ Working… (${reads}s)\nconversation\n${PROMPT_EMPTY}`; };
     const send = createSessionSend(h.deps);
     const details = [];
     send.emitter.on('status', (s) => { if (s.phase === 'sending' && s.detail) details.push(s.detail); });
@@ -932,11 +1004,28 @@ test('a pane the daemon started long ago is not treated as starting, even by a H
   }
 });
 
+test('a Claude that draws nothing for minutes after the typing gets the message once it shows: typed once, one Enter, no refusal', async () => {
+  // 2026-11-18: starved panes drew nothing for minutes; the 7.5 s wait refused,
+  // the next send pasted again, and the copies stacked when Claude woke.
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { renderDelayReads: 1300 });
+  const send = createSessionSend(h.deps);
+  const details = [];
+  send.emitter.on('status', (s) => { if (s.phase === 'sending' && s.detail) details.push(s.detail); });
+
+  const result = await send.send({ sessionId: 's-stalled', text: NEW_SESSION_MESSAGE, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(typed(h), [NEW_SESSION_MESSAGE, '\r'], 'typed once, submitted once');
+  assert.equal(pane.draft, '');
+  assert.ok(details.some((d) => /has not drawn anything since Harbor typed/.test(d)), 'the bar says why it is waiting');
+});
+
 test('a second send after a refusal waits for the first typing instead of typing the message again', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  // Longer than the whole first wait, so the first send is refused and the
-  // buffer lets go during the second.
-  const pane = composerPane(h, { renderDelayReads: 1300 });
+  // Drawing all along (alive) but slower than the whole first wait, so the
+  // first send is refused and the typing lands during the second.
+  const pane = composerPane(h, { renderDelayReads: 1300, alive: true });
   const send = createSessionSend(h.deps);
   const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
 
@@ -981,6 +1070,8 @@ test('a long message that showed up after the refusal is submitted by the resend
 
 test('typing that never shows even after the second wait is typed fresh by the send after that', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false, readFrames: [PROMPT_EMPTY] });
+  let tick = 0;
+  h.deps.readPane = async () => `✻ Working… (${tick++}s)\n${PROMPT_EMPTY}`; // drawing all along: the keys are lost, not queued
   const send = createSessionSend(h.deps);
   const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
   const lost = 'these keys are truly lost';
@@ -997,7 +1088,7 @@ test('typing that never shows even after the second wait is typed fresh by the s
 
 test('a different message after a refusal is not typed on top of the earlier one when that one shows up', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  const pane = composerPane(h, { renderDelayReads: 1300 });
+  const pane = composerPane(h, { renderDelayReads: 1300, alive: true });
   const send = createSessionSend(h.deps);
   const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
 
@@ -1036,6 +1127,23 @@ const GHOST_MESSAGE = 'Not sure I quite loved the back of the card (with the nam
   + 'through each of the three cards? Send it to me via /dm';
 const endsInSlashWord = (draft) => (/(?:^|\s)\/[\w:.-]*$/.test(draft) ? 'l-log +3' : '');
 const LONG_AGO = () => new Date(Date.now() - 12 * 60 * 60_000).toISOString();
+
+test('a named session draws its title in the prompt box top edge, and the box is still found (2.1.321 layout)', () => {
+  // 2026-11-18: the Navigator's prompt edge read "─(143) Gate decision G-107 ... ─";
+  // with no plain top edge Harbor found no box and every send into it failed.
+  const screen = enterFixture('titled-border-2.1.321.txt');
+  const found = composerBox(screen);
+  assert.ok(found, 'the box is found under a titled top edge');
+  assert.equal(found.inside, 'pleaseconfirmthebuildplanforthesecondlanebeforenoon');
+  assert.equal(composerSendState(screen, { text: 'please confirm the build plan for the second lane before noon' }), 'holds');
+  const empty = screen.replace(/❯ .*\n/, '❯ \n');
+  assert.equal(composerSendState(empty, { text: 'please confirm the build plan for the second lane before noon' }), 'pending');
+  // Prose is still never an edge: a title needs box-drawing on both ends.
+  const { isPromptEdgeLine, isDividerLine } = require('../../src/shared/divider.cjs');
+  assert.equal(isPromptEdgeLine('── note ──'), false);
+  assert.equal(isPromptEdgeLine('Some prose ─ here ─'), false);
+  assert.equal(isDividerLine(screen.split('\n')[6]), false, 'dialog parsers keep the strict edge');
+});
 
 test('a prompt that draws the rest of a trailing slash word after the message holds the message (real 2.1.316 layout)', () => {
   const screen = enterFixture('slash-ghost-2.1.316.txt');
@@ -1101,7 +1209,7 @@ test('sends after a refused one never type a second copy behind the text already
 
 test('after a refusal, an empty prompt in a Claude that has been running a while gets the message typed fresh at once', async () => {
   const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: LONG_AGO() }], controlled: 'pane-1' });
-  const pane = composerPane(h, { dropTypings: 1 });
+  const pane = composerPane(h, { dropTypings: 1, alive: true });
   const send = createSessionSend(h.deps);
   const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
   const message = 'these keys were lost the first time';

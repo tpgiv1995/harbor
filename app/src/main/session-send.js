@@ -17,7 +17,7 @@ const { StringDecoder } = require('node:string_decoder');
 const { parseMenu, menuArrowToward, MENU_KEYS } = require('./menu-parse.js');
 const { parseGenericList, locateRow } = require('./generic-list.js');
 const { parseWorkMeter } = require('./work-meter.js');
-const { isDividerLine } = require('../shared/divider.cjs');
+const { isDividerLine, isPromptEdgeLine } = require('../shared/divider.cjs');
 const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFromStrip, CHAT_ROW_RE } = require('./ask-question.js');
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
@@ -146,7 +146,7 @@ function isComposerLine(lines, i) {
   if (!/^\s*❯(?:\s|$)/.test(line)) return false;
   if (NUMBERED_ROW_RE.test(line)) return false;        // a menu row, not a prompt
   if (/^\s*❯\s*$/.test(line)) return true;             // an empty composer
-  return isDividerLine(lines[i - 1]);                 // else require the box edge
+  return isPromptEdgeLine(lines[i - 1]);             // else require the box edge
 }
 
 // A DRAFT THAT STARTS WITH A NUMBER IS STILL A DRAFT (2026-10-13, Pat: "whats
@@ -332,7 +332,7 @@ function composerBox(screen) {
   let bottom = -1;
   let top = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (!isDividerLine(lines[i])) continue;
+    if (!isPromptEdgeLine(lines[i])) continue;
     if (bottom < 0) { bottom = i; continue; }
     top = i;
     break;
@@ -1442,19 +1442,38 @@ function createSessionSend(deps) {
   // number instead: the freshly pasted image is always the highest #N in the
   // session, so a strictly-greater max is the robust "a new image landed"
   // signal, immune to older markers scrolling out of view.
-  const maxImageMarker = (screen) => (String(screen || '').match(/\[Image #(\d+)\]/g) || [])
+  // How long a send waits on a Claude that has drawn NOTHING since Harbor typed
+  // (see waitForPromptToHold): its input is queued, not lost.
+  const STALLED_WAIT_MS = 10 * 60_000;
+  // A MARKER CAN WRAP (2026-11-18, Pat's screenshot into Vox: "Claude never
+  // confirmed the image attachment ... no marker beyond #0"). Behind a long
+  // message the chip lands at the end of the prompt and Claude wraps it at its
+  // own space, "...when done.[Image" over "#430]", so a per-line match never
+  // saw an attachment that was sitting right there. Whitespace is dropped
+  // first, the same way the prompt checks read the box.
+  const maxImageMarker = (screen) => (String(screen || '').replace(/\s+/g, '').match(/\[Image#(\d+)\]/g) || [])
     .reduce((max, marker) => Math.max(max, Number(marker.match(/\d+/)[0])), 0);
 
-  const waitForImageMarker = async (paneId, beforeMax, { timeoutMs = 12000 } = {}) => {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
+  // The base wait counts only while Claude is drawing: a screen unchanged
+  // since the chord means Claude has not read the key yet (stalled or starved
+  // of CPU, see STALLED_POLLS), so the wait goes on until it does.
+  const waitForImageMarker = async (paneId, beforeMax, { timeoutMs = 12000, baseline = null, onStalled = null } = {}) => {
+    const basePolls = Math.ceil(timeoutMs / 100);
+    const stallPolls = Math.ceil(STALLED_WAIT_MS / 100);
+    let changed = baseline == null;
+    let noticed = false;
+    for (let poll = 0; poll < basePolls || (!changed && poll < stallPolls); poll += 1) {
       await sleep(100);
       let screen = '';
       try { screen = await readPane(paneId); } catch { continue; }
+      if (!changed && screen && screen !== baseline) changed = true;
       const max = maxImageMarker(screen);
       if (max > beforeMax) return max;
+      if (!changed && !noticed && poll + 1 >= basePolls && onStalled) { noticed = true; try { onStalled(); } catch { /* status only */ } }
     }
-    throw new Error(`Claude never confirmed the image attachment; image and text were NOT sent (no marker beyond #${beforeMax} within ${timeoutMs}ms)`);
+    throw new Error(changed
+      ? `Claude never confirmed the image attachment; image and text were NOT sent (no marker beyond #${beforeMax} within ${timeoutMs}ms)`
+      : `Claude drew nothing for ${Math.round(STALLED_WAIT_MS / 60000)} minutes after Harbor pasted the image, so nothing more was typed or sent. Your text is kept. Check the >_ terminal`);
   };
 
   // CODEX ATTACHES A PASTED PATH ITSELF (Codex 0.165.0, 2026-10-29): a paste
@@ -1608,15 +1627,48 @@ function createSessionSend(deps) {
   const PROMPT_HOLD_POLLS = 50;
   const PROMPT_HOLD_STARTUP_POLLS = 1200;
   const PROMPT_HOLD_NOTICE_POLLS = 20;
-  const waitForPromptToHold = async (paneId, sent, { polls = PROMPT_HOLD_POLLS, onWait = null } = {}) => {
+  // TYPED TEXT IS QUEUED, NOT LOST, WHILE CLAUDE DRAWS NOTHING (2026-11-18,
+  // Pat: "this has been a constant problem ... solving symptoms and not
+  // causes"). A pty's input is a queue: bytes written to a live CLI wait until
+  // it reads them. Every pane had been starved of CPU (daemon/interactive-
+  // priority.js), Claude drew nothing for minutes, and this wait gave up after
+  // 7.5 s of wall time on text that was only waiting in line. The next send saw
+  // an empty prompt, called the first try lost and pasted again, and when
+  // Claude woke the copies stacked and every later send was refused. A live
+  // Claude draws typed text within a frame, so a screen that has not changed
+  // since the typing means Claude has not read it yet. The wait is therefore
+  // counted only from the first redraw after the typing (and needs a few
+  // redraws before it calls the text missing); while nothing redraws it goes
+  // on, up to STALLED_WAIT_MS, and the Enter goes in the moment the text shows.
+  // `baseline` is the screen read just before the typing; without one (a slash
+  // command, an image send) the old wall-time count applies.
+  const STALLED_REDRAWS = 3;
+  const STALLED_NOTICE = 'Claude has not drawn anything since Harbor typed your message (it is busy or short of CPU). Your message is typed and goes in the moment Claude shows it';
+  const waitForPromptToHold = async (paneId, sent, { polls = PROMPT_HOLD_POLLS, onWait = null, baseline = null, onStalled = null } = {}) => {
     let state = 'nobox';
     let screen = '';
-    for (let poll = 0; poll < polls; poll += 1) {
+    let previous = baseline;
+    let redraws = 0;
+    let livePolls = 0;
+    let noticed = false;
+    const stallPolls = Math.ceil(STALLED_WAIT_MS / PROMPT_HOLD_POLL_MS);
+    for (let poll = 0; ; poll += 1) {
+      const waitedOut = baseline == null
+        ? poll >= polls
+        : (livePolls >= polls && redraws >= STALLED_REDRAWS) || poll >= Math.max(polls, stallPolls);
+      if (waitedOut) break;
+      if (baseline != null && !noticed && redraws === 0 && poll >= polls && onStalled) {
+        noticed = true;
+        try { onStalled(); } catch { /* a status line must never break a send */ }
+      }
       if (poll === PROMPT_HOLD_NOTICE_POLLS && onWait) {
         try { onWait(); } catch { /* a status line must never break a send */ }
       }
       await sleep(PROMPT_HOLD_POLL_MS);
       screen = await readScreen(paneId, MENU_READ_LINES);
+      if (screen && previous != null && screen !== previous) redraws += 1;
+      if (screen) previous = screen;
+      if (redraws > 0) livePolls += 1;
       if (!screen) { state = 'nobox'; continue; }
       if (isFleetView(screen)) return { state: 'fleet', screen };
       if (classifyBlocked(screen)) return { state: 'blocked', screen };
@@ -1626,7 +1678,7 @@ function createSessionSend(deps) {
       if (state === 'holds' && await dimSuggestion(paneId)) state = 'pending';
       if (state === 'holds') return { state, screen };
     }
-    return { state, screen };
+    return { state, screen, stalled: baseline != null && redraws === 0 };
   };
   const dimSuggestion = async (paneId) => {
     try { return await readSuggestion(paneId); } catch { return null; }
@@ -1917,7 +1969,7 @@ function createSessionSend(deps) {
   // down the claude path: wrong readiness test, wrong composer guard, and a
   // Claude chip on a gpt-5.6-sol session. Callers resolve it explicitly.
   // `onWait(detail)` lets a caller say why a send is taking minutes.
-  const deliver = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null, exactDraftOnly = false } = {}) => {
+  const deliverUnlocked = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null, exactDraftOnly = false } = {}) => {
     const assertExactDraft = screen => {
       if (exactDraftOnly && !ownsCodexBox(paneId, screen, { text })) {
         const error = new Error('Codex\'s prepared draft changed before it could be sent. Harbor typed nothing. Your text is kept. Check the draft in the >_ terminal and send again.');
@@ -2047,10 +2099,14 @@ function createSessionSend(deps) {
         if (codexGated) { lastImageMarker = await pasteCodexImage(paneId, workspaceId, imagePath); continue; }
         if (!canPaste) { pathOnlyImages.push(imagePath); continue; }
         let beforeMax = 0;
-        try { beforeMax = maxImageMarker(await readPane(paneId)); } catch { /* polling still verifies an increase */ }
+        let beforeScreen = null;
+        try { beforeScreen = await readPane(paneId); beforeMax = maxImageMarker(beforeScreen); } catch { /* polling still verifies an increase */ }
         await setXClipboardImage(imagePath);
         await typeInto(paneId, workspaceId, imagePasteChord);
-        lastImageMarker = `[Image #${await waitForImageMarker(paneId, beforeMax)}]`;
+        lastImageMarker = `[Image #${await waitForImageMarker(paneId, beforeMax, {
+          baseline: beforeScreen,
+          onStalled: onWait ? () => onWait(STALLED_NOTICE) : null,
+        })}]`;
       }
       if (pathOnlyImages.length) {
         // Claude: one quoted path per line, nothing else on it, so each
@@ -2070,6 +2126,7 @@ function createSessionSend(deps) {
       let codexSlashShown = false;
       const sent = { text, pasted: mayCollapseToPlaceholder(text), imageMarker: lastImageMarker };
       let alreadyInPrompt = false;
+      let baseline = null; // the screen just before typing (waitForPromptToHold)
       let earlier = unshownTyped.get(paneId) || null;
       if (earlier && clock() - earlier.at > UNSHOWN_TYPED_MS) {
         unshownTyped.delete(paneId);
@@ -2077,6 +2134,7 @@ function createSessionSend(deps) {
       }
       if (gated && text && !lastImageMarker) {
         const screen = await readScreen(paneId, MENU_READ_LINES);
+        baseline = screen || null;
         const suggestion = composerBox(screen) ? await dimSuggestion(paneId) : null;
         // The prompt draws only the last ~25 lines of a long message, so no
         // long message can match exactly; it ending like this one is the
@@ -2113,7 +2171,11 @@ function createSessionSend(deps) {
             if (!showsEarlier) throw promptHoldsUnmatchedError();
             throw squashSpace(earlier.sent.text) === squashSpace(text) ? promptHoldsMoreError() : earlierLandedError();
           }
-          if (deliveredPanes.has(paneId) || await paneIsPastStartup(paneId)) {
+          // A Claude that has drawn nothing since that typing has not read it
+          // yet: the record stands and this send waits for it (STALLED_WAIT_MS).
+          const stillStalled = Boolean(earlier.stalled && earlier.screen && screen === earlier.screen);
+          if (stillStalled) logSend({ paneId, phase: 'earlier-typing-stalled' });
+          else if (deliveredPanes.has(paneId) || await paneIsPastStartup(paneId)) {
             logSend({ paneId, phase: 'earlier-typing-lost' });
             unshownTyped.delete(paneId);
             earlier = null;
@@ -2163,18 +2225,22 @@ function createSessionSend(deps) {
         const held = await waitForPromptToHold(paneId, awaitEarlier ? earlier.sent : sent, {
           polls: startup ? PROMPT_HOLD_STARTUP_POLLS : PROMPT_HOLD_POLLS,
           onWait: startup && onWait ? () => onWait(awaitEarlier ? EARLIER_WAIT_NOTICE : STARTUP_WAIT_NOTICE) : null,
+          baseline: awaitEarlier ? (earlier.screen || null) : (alreadyInPrompt ? null : baseline),
+          onStalled: onWait ? () => onWait(STALLED_NOTICE) : null,
         });
         if (held.state !== 'holds') {
-          logSend({ paneId, phase: 'prompt-never-held', state: held.state, awaitedEarlier: awaitEarlier });
+          logSend({ paneId, phase: 'prompt-never-held', state: held.state, awaitedEarlier: awaitEarlier, stalled: Boolean(held.stalled) });
           await captureSendScreen(paneId, held.state, held.screen);
           if (awaitEarlier) {
             // Text in the prompt after the full wait is not "never shown": it
             // is something Harbor cannot read as the earlier try. Dropping the
             // record would let the next send type a copy behind it.
             if (held.state === 'pending' && await promptDraft(paneId, held.screen)) throw promptHoldsUnmatchedError();
-            unshownTyped.delete(paneId);
+            // Still drawing nothing: the earlier typing is still queued.
+            if (held.stalled) unshownTyped.set(paneId, { ...earlier, at: clock() });
+            else unshownTyped.delete(paneId);
           } else if ((held.state === 'pending' || held.state === 'nobox') && text && !alreadyInPrompt && !lastImageMarker) {
-            unshownTyped.set(paneId, { sent, at: clock() });
+            unshownTyped.set(paneId, { sent, at: clock(), stalled: Boolean(held.stalled), screen: held.stalled ? held.screen : null });
           }
           throw promptNeverHeldError(held.state, { awaitedEarlier: awaitEarlier });
         }
@@ -2839,6 +2905,69 @@ function createSessionSend(deps) {
     }
     return !sameQuestion(after, before);
   };
+
+  // ONE TYPIST PER PANE, ACROSS PROCESSES (2026-11-18). Two Harbor processes
+  // type into the same panes: the desktop app (Pat's command bar) and the phone
+  // server, which carries every agent's harbor-send. Each kept its own queue and
+  // its own record of typing it had not yet seen drawn, so neither knew the
+  // other's paste was still waiting inside a stalled Claude: Pat's screenshot
+  // went into Vox behind an agent's unsent 2,034-character message, and both
+  // sat in one prompt. A lock file per pane (beside the send log, so every
+  // process on the machine sees the same one) makes the second typist wait
+  // until the first has seen its text shown and pressed Enter, or given up. A
+  // holder whose process is gone, or that has held longer than any wait can
+  // run, is stale and taken over; a lock that cannot be made never blocks a send.
+  const PANE_LOCK_STALE_MS = STALLED_WAIT_MS + 5 * 60_000;
+  const PANE_LOCK_NOTICE = 'another Harbor window is typing into this session; this message goes in right after it';
+  const paneLockDir = process.env.NODE_TEST_CONTEXT && !deps.sendLogFile ? null : path.join(path.dirname(sendLogFile), 'pane-locks');
+  const lockPidAlive = (pid) => {
+    try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+  };
+  const withPaneLock = async (paneId, fn, onWait) => {
+    if (!paneLockDir) return fn();
+    const file = path.join(paneLockDir, `${String(paneId).replace(/[^\w-]/g, '_')}.lock`);
+    const token = `${process.pid}-${crypto.randomUUID()}`;
+    const started = Date.now();
+    let noticed = false;
+    try { await fs.mkdir(paneLockDir, { recursive: true }); } catch { return fn(); }
+    for (;;) {
+      try {
+        const handle = await fs.open(file, 'wx');
+        try { await handle.writeFile(JSON.stringify({ pid: process.pid, token, at: Date.now() })); } finally { await handle.close(); }
+        break;
+      } catch (error) {
+        if (error?.code !== 'EEXIST') return fn();
+        let holder = null;
+        try { holder = JSON.parse(await fs.readFile(file, 'utf8')); } catch { /* mid-write, or damaged */ }
+        let stale = false;
+        if (holder) stale = !lockPidAlive(holder.pid) || Date.now() - holder.at > PANE_LOCK_STALE_MS;
+        else { try { stale = Date.now() - (await fs.stat(file)).mtimeMs > 5000; } catch { stale = true; } }
+        if (stale) { await fs.rm(file, { force: true }).catch(() => {}); continue; }
+        // This process's own sends are already ordered by its queues.
+        if (holder && holder.pid === process.pid) return fn();
+        if (Date.now() - started > PANE_LOCK_STALE_MS) return fn();
+        if (!noticed && Date.now() - started > 1500 && onWait) {
+          noticed = true;
+          try { onWait(PANE_LOCK_NOTICE); } catch { /* status only */ }
+        }
+        // Real time, not the injected sleep: the holder is another process.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    try {
+      return await fn();
+    } finally {
+      try {
+        const holder = JSON.parse(await fs.readFile(file, 'utf8'));
+        if (holder.token === token) await fs.rm(file, { force: true });
+      } catch { /* already gone or taken over */ }
+    }
+  };
+  const deliver = (paneId, workspaceId, text, images = [], provider = 'claude', options = {}) => withPaneLock(
+    paneId,
+    () => deliverUnlocked(paneId, workspaceId, text, images, provider, options),
+    options?.onWait || null,
+  );
 
   const deliverSheet = async (paneId, workspaceId, action, ask) => {
     const answers = Array.isArray(action.answers) ? [...action.answers] : [];
@@ -3558,7 +3687,7 @@ function createSessionSend(deps) {
             throw new Error('The session is not at an idle composer. Nothing was stopped.');
           }
           const lines = screen.split('\n');
-          const edges = lines.map((line, i) => isDividerLine(line) ? i : -1).filter(i => i >= 0);
+          const edges = lines.map((line, i) => isPromptEdgeLine(line) ? i : -1).filter(i => i >= 0);
           const box = lines.slice(edges.at(-2) + 1, edges.at(-1)).join('\n').replace(/^\s*❯/, '').trim();
           if (box) throw new Error('Clear or send the terminal draft before changing plans. Nothing was stopped.');
           await deliver(pane.paneId, pane.workspaceId, '/exit', [], 'claude');
