@@ -1395,7 +1395,15 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
                 onClick={pickOther}
               >
                 <span className="rail-menu-mark" aria-hidden="true" />
-                <span className="plan-pick-badge" aria-hidden="true">O</span>
+                {/* A drawn "more" mark, not a letter: a Claude plan can own O
+                    (Ocean does since 2026-11-19), and two O badges read as one plan. */}
+                <span className="plan-pick-badge" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" width="12" height="12" focusable="false">
+                    <circle cx="3.5" cy="8" r="1.4" fill="currentColor" />
+                    <circle cx="8" cy="8" r="1.4" fill="currentColor" />
+                    <circle cx="12.5" cy="8" r="1.4" fill="currentColor" />
+                  </svg>
+                </span>
                 <span className="rail-menu-label">Other: Codex, Cursor…</span>
               </button>
             </>
