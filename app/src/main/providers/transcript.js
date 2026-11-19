@@ -929,8 +929,17 @@ function userTextFor(raw) {
   if (!text) return null;
   const peer = peerMessageParts(text);
   if (peer) {
-    const inner = userTextFor(peer.body);
-    return inner ? { ...inner, peerFrom: peer.from } : null;
+    // Another session's words are drawn as written (Sol's review, 2026-11-18):
+    // read as typed input, a body opening with a command or caveat tag became a
+    // command chip or vanished. Two layers are still undone: Claude stores the
+    // wrapper's own closing tag inside a body as "<\/cross-session-message"
+    // (shared/peer-inbox.cjs), and a message Harbor typed into a pane comes back
+    // in the CLI's <pasted_content> pair.
+    const body = peer.body
+      .replace(/<\\\/(?=cross-session-message)/gi, '</')
+      .replace(/<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content(?: id="\1")?>\n?/g, '$2')
+      .trim();
+    return body ? { text: clipProse(body), command: false, peerFrom: peer.from } : null;
   }
   if (text.startsWith('<local-command-caveat>')) return null;
   if (text.startsWith('<local-command-stdout>')) return null;

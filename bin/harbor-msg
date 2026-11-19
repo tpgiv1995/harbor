@@ -3,137 +3,161 @@
 
 // harbor-msg: send a message from one agent session to another.
 //
-//   node C:/dev/harbor/bin/harbor-msg send --to <session id> (--file <path> | --text <text>) [--from <name>] [--no-fallback]
+//   node C:/dev/harbor/bin/harbor-msg send --to <session id> (--file <path> | --text <text>) [--from <name>] [--reply-to <session id>] [--no-fallback]
+//   node C:/dev/harbor/bin/harbor-msg confirm --receipt <id>
 //   node C:/dev/harbor/bin/harbor-msg status --to <session id>
 //
-// Prints one JSON line. Routes, best first (app/src/shared/peer-inbox.cjs has the why):
+// Prints one JSON line. `ok` is true (delivered, or typed and being
+// confirmed), "unconfirmed" (handed over but not proven: do NOT resend; ask
+// later with `confirm --receipt <id>`), or false (nothing was sent; `why` says
+// why). Exit 0 unless ok is false.
+//
+// Routes (app/src/shared/peer-inbox.cjs has the measured why):
 //   1. inbox   a Claude session (TUI pane or headless -p worker, any config
 //              home) whose inbox bin/harbor-inbox-hook recorded: the message
 //              goes into Claude's own cross-session inbox and arrives as
 //              "Message from @<from>", idle or mid-turn, never typed. Proven
 //              delivered from the recipient's transcript.
-//   2. codex   a Codex session: `codex queue --thread <id> --message <text>`,
-//              Codex's own queue for a running session.
-//   3. harbor  anything else (Cursor, a Claude session that has not had a
-//              prompt since the hook was installed): Harbor's session:send,
-//              which types into the pane the way Pat would. Skipped with
-//              --no-fallback.
-// Exit 0 when the message was delivered or queued, 1 when it was not.
-// No child process opens a window (windowsHide on the one codex spawn).
+//   2. harbor  anything with no inbox (a Codex or Cursor pane, a Claude session
+//              that has not had a prompt since the hook was installed):
+//              Harbor's session:send, which types into the pane. Skipped with
+//              --no-fallback, and NEVER taken after an inbox send that may have
+//              landed, so one message is never delivered twice.
+// Codex has no native route for Harbor's panes: `codex queue` only reaches a
+// session attached to Codex's app-server daemon, and Harbor runs every Codex
+// pane with --no-daemon (bin/harbor-bin.cjs). Measured 2026-11-18: queued into
+// a --no-daemon pane, the message never arrived, not in 90 s, not on resume,
+// not at the next turn, while `codex queue` printed "Queued message".
+// No child process is spawned.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
 
-const inbox = require(path.join(path.dirname(__dirname), 'app', 'src', 'shared', 'peer-inbox.cjs'));
+const shared = path.join(path.dirname(__dirname), 'app', 'src', 'shared');
+const inbox = require(path.join(shared, 'peer-inbox.cjs'));
+const { withLock } = require(path.join(shared, 'os-lock.cjs'));
 
 const SESSION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CODEX_ARG_MAX = 24_000;
+const BUSY_CODES = new Set(['EBUSY', 'EAGAIN', 'ECONNREFUSED']);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--no-fallback') out.noFallback = true;
-    else if (arg === '--json') out.json = true;
     else if (arg.startsWith('--')) { out[arg.slice(2)] = argv[i + 1]; i += 1; }
     else out._.push(arg);
   }
   return out;
 }
 
-// --- route 1: Claude's own inbox -------------------------------------------
-async function viaInbox(sessionId, text, { from, env = process.env, confirmMs = 15_000 } = {}) {
-  const record = inbox.readRecord(sessionId, env);
-  if (!record) return { ok: false, route: 'inbox', why: 'no inbox recorded for this session' };
-  const content = inbox.wrapMessage(text, { fromName: from });
-  const since = inbox.transcriptSize(record);
-  const posted = await inbox.postMessage(record, content);
-  if (!posted.ok) {
-    if (posted.code === 'ENOENT') inbox.dropRecord(sessionId, env); // the session ended
-    return { ok: false, route: 'inbox', why: `inbox post failed: ${posted.code}${posted.message ? ` (${posted.message})` : ''}` };
-  }
-  const proof = await inbox.confirmDelivery(record, content, { since, timeoutMs: confirmMs });
-  if (proof.confirmed) return { ok: true, route: 'inbox', delivered: true, via: proof.via };
-  // Written to the pipe but not in the transcript yet: a session that holds
-  // messages for approval, or a slow disk. Not a failure to retry blindly.
-  return { ok: true, route: 'inbox', delivered: 'unconfirmed', why: proof.reason };
+// --- replies ----------------------------------------------------------------
+// Claude's SendMessage answers a peer only through an inbox registered under
+// its OWN config home (measured 2026-11-18: same plan, the reply arrived; across
+// plans it was refused, "refusing to send to an unvouched pipe ... the peer
+// process may have restarted", which reads as if the sender were gone). Most
+// agent seats run on different plans, so a message that cannot be answered
+// natively carries one plain line saying how to answer it.
+function configHome(dir) {
+  const resolved = path.resolve(dir || path.join(os.homedir(), '.claude'));
+  try { return fs.realpathSync.native(resolved).toLowerCase(); } catch { return resolved.toLowerCase(); }
 }
 
-// --- route 2: Codex's own queue ------------------------------------------------
-function codexHomes(env = process.env) {
-  const homes = [];
-  for (const name of (() => { try { return fs.readdirSync(os.homedir()); } catch { return []; } })()) {
-    if (name === '.codex' || name.startsWith('.codex-')) homes.push(path.join(os.homedir(), name));
-  }
-  if (env.CODEX_HOME && !homes.includes(env.CODEX_HOME)) homes.unshift(env.CODEX_HOME);
-  return homes;
-}
-
-// Which Codex home holds this thread (its rollout file names end in the id).
-function findCodexHome(sessionId, env = process.env) {
-  const id = sessionId.toLowerCase();
-  for (const home of codexHomes(env)) {
-    const root = path.join(home, 'sessions');
-    let years = [];
-    try { years = fs.readdirSync(root).sort().reverse(); } catch { continue; }
-    for (const y of years) {
-      for (const m of (() => { try { return fs.readdirSync(path.join(root, y)).sort().reverse(); } catch { return []; } })()) {
-        for (const d of (() => { try { return fs.readdirSync(path.join(root, y, m)).sort().reverse(); } catch { return []; } })()) {
-          let files = [];
-          try { files = fs.readdirSync(path.join(root, y, m, d)); } catch { continue; }
-          if (files.some((f) => f.toLowerCase().includes(id))) return home;
-        }
-      }
-    }
+// The sender's own session, for the reply line: --reply-to, else the Claude or
+// Codex session harbor-msg is running inside.
+function senderSession(replyTo, env = process.env) {
+  for (const id of [replyTo, env.CLAUDE_CODE_SESSION_ID, env.CODEX_THREAD_ID]) {
+    if (SESSION_RE.test(String(id || ''))) return String(id).toLowerCase();
   }
   return null;
 }
 
-function codexExe() {
-  const npmRoot = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'npm', 'node_modules', '@openai', 'codex');
-  const vendored = path.join(npmRoot, 'node_modules', '@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe');
-  return fs.existsSync(vendored) ? vendored : 'codex';
+function replyLine(fromSession) {
+  return fromSession
+    ? `\n\n(To reply: node C:/dev/harbor/bin/harbor-msg send --to ${fromSession} --from <your name> --file <your reply file>)`
+    : '';
 }
 
-function viaCodex(sessionId, text, { from, env = process.env } = {}) {
-  const home = findCodexHome(sessionId, env);
-  if (!home) return Promise.resolve({ ok: false, route: 'codex', why: 'not a Codex session on this machine' });
-  let body = from ? `[from: ${inbox.cleanName(from)}]\n${text}` : text;
-  // The message rides on the command line, which Windows caps near 32,767
-  // characters: a longer one is saved whole and Codex gets where it is.
-  if (body.length > CODEX_ARG_MAX) {
-    const dir = path.join(os.homedir(), '.harbor', 'outbox');
-    fs.mkdirSync(dir, { recursive: true });
-    const sha = crypto.createHash('sha256').update(text).digest('hex');
-    const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}Z-${sha.slice(0, 12)}.txt`);
-    fs.writeFileSync(file, text);
-    const firstLine = (text.split(/\r?\n/).find((l) => l.trim()) || '').trim().slice(0, 600);
-    body = `${from ? `[from: ${inbox.cleanName(from)}]\n` : ''}${firstLine}\n\nTHE WHOLE MESSAGE IS IN A FILE (${text.length} characters, too long for Codex's queue command): ${file}\nRead that file whole before you act on it.`;
-  }
-  return new Promise((resolve) => {
-    const child = spawn(codexExe(), ['queue', '--thread', sessionId, '--message', body], {
-      env: { ...env, CODEX_HOME: home },
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let out = '';
-    child.stdout.on('data', (c) => { out += c; });
-    child.stderr.on('data', (c) => { out += c; });
-    const timer = setTimeout(() => child.kill(), 60_000);
-    child.on('error', (error) => { clearTimeout(timer); resolve({ ok: false, route: 'codex', why: error.message }); });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      resolve(code === 0
-        ? { ok: true, route: 'codex', delivered: 'queued', home }
-        : { ok: false, route: 'codex', why: `codex queue exited ${code}: ${out.trim().slice(0, 300)}` });
-    });
+// The wrapped text for this recipient: the return address only where
+// SendMessage can use it (a sender inside a Claude session on the recipient's
+// own plan), the reply line everywhere else.
+function contentFor(record, text, { from, replyTo, env }) {
+  const me = inbox.senderIdentity(env);
+  const fromSession = senderSession(replyTo, env);
+  const native = Boolean(me.fromAddress) && me.fromSession === fromSession && configHome(record.home) === configHome(env.CLAUDE_CONFIG_DIR);
+  // A fresh id on every attempt (the wrapper's hop-chain field), so the
+  // transcript record that proves delivery can only be THIS send's.
+  return inbox.wrapMessage(native ? text : text + replyLine(fromSession), {
+    fromName: from,
+    fromSession,
+    fromAddress: native ? me.fromAddress : null,
+    messageId: inbox.newMessageId(),
   });
 }
 
-// --- route 3: Harbor's typing path --------------------------------------------
+function clearedResult(found) {
+  return {
+    ok: false,
+    route: 'inbox',
+    final: true,
+    clearedInto: found.clearedInto,
+    why: `that session was cleared (/clear)${found.at ? ` at ${found.at}` : ''}; its process now runs session ${found.clearedInto}. Nothing was sent: send to the new session if the message still applies.`,
+  };
+}
+
+// --- route 1: Claude's own inbox -------------------------------------------
+async function viaInbox(sessionId, text, { from, replyTo = null, env = process.env, confirmMs = 15_000, lockWaitMs = 120_000 } = {}) {
+  const first = inbox.lookup(sessionId, env);
+  if (!first) return { ok: false, route: 'inbox', definite: true, why: 'no inbox recorded for this session' };
+  if (first.clearedInto) return clearedResult(first);
+  // One send at a time per recipient, through its delivery check: two sends of
+  // the same text must not both be credited with one transcript record (Claude
+  // drops an identical repeat).
+  try {
+    return await withLock(`harbor-msg-inbox-${sessionId.toLowerCase()}`, () => postAndConfirm(sessionId, text, { from, replyTo, env, confirmMs }), { waitMs: lockWaitMs });
+  } catch (error) {
+    if (error?.code !== 'LOCK_TIMEOUT') throw error;
+    return { ok: false, route: 'inbox', final: true, why: 'another message to this session has been in flight for 2 minutes; nothing was sent, try again shortly' };
+  }
+}
+
+async function postAndConfirm(sessionId, text, { from, replyTo, env, confirmMs }) {
+  let record = inbox.lookup(sessionId, env);
+  if (!record) return { ok: false, route: 'inbox', definite: true, why: 'no inbox recorded for this session' };
+  if (record.clearedInto) return clearedResult(record);
+  let renewed = false;
+  for (let busy = 0; ; ) {
+    const content = contentFor(record, text, { from, replyTo, env });
+    const since = inbox.transcriptSize(record);
+    const posted = await inbox.postMessage(record, content);
+    if (posted.ok || !posted.definite) {
+      const proof = posted.ok
+        ? await inbox.confirmDelivery(record, content, { since, timeoutMs: confirmMs })
+        : { confirmed: false, reason: `the connection failed after it opened (${posted.code}), so it may have landed` };
+      if (proof.confirmed) return { ok: true, route: 'inbox', delivered: true, via: proof.via };
+      const receipt = inbox.writeReceipt({ sessionId: record.sessionId, transcriptPath: record.transcriptPath, since, content }, env);
+      return { ok: 'unconfirmed', route: 'inbox', delivered: posted.ok ? 'unconfirmed' : 'unknown', receipt, why: `${proof.reason}; do not resend, check with: harbor-msg confirm --receipt ${receipt}` };
+    }
+    if (BUSY_CODES.has(posted.code) && busy < 5) { busy += 1; await sleep(400 * busy); continue; }
+    if (posted.code === 'TOO_LARGE') {
+      return { ok: false, route: 'inbox', final: true, why: `the message is ${posted.size.toLocaleString('en-US')} characters once serialized; Claude takes at most 1,048,576. Put the bulk in a file and send its path.` };
+    }
+    if (posted.code === 'ENOENT') {
+      await inbox.dropRecord(sessionId, env, { socket: record.socket });
+      // A resume publishes a fresh record on a new pipe; try that once.
+      const fresh = inbox.lookup(sessionId, env);
+      if (!renewed && fresh && !fresh.clearedInto && fresh.socket !== record.socket) { renewed = true; record = fresh; continue; }
+      if (fresh?.clearedInto) return clearedResult(fresh);
+      return { ok: false, route: 'inbox', definite: true, why: 'that session\'s inbox is gone (the session ended or restarted and has not had a prompt since)' };
+    }
+    return { ok: false, route: 'inbox', definite: true, why: `inbox post failed: ${posted.code}${posted.message ? ` (${posted.message})` : ''}` };
+  }
+}
+
+// --- route 2: Harbor's typing path --------------------------------------------
 function harborToken() {
   const roots = [process.env.HARBOR_USER_DATA_DIR, path.join(process.env.APPDATA || '', 'harbor'), path.join(os.homedir(), 'AppData', 'Roaming', 'harbor')];
   for (const root of roots) {
@@ -143,13 +167,14 @@ function harborToken() {
   return null;
 }
 
-function viaHarbor(sessionId, text, { from, url = process.env.HARBOR_SERVER_WS || 'ws://127.0.0.1:8787/ws' } = {}) {
+function viaHarbor(sessionId, text, { from, replyTo = null, env = process.env, url = process.env.HARBOR_SERVER_WS || 'ws://127.0.0.1:8787/ws' } = {}) {
   const token = harborToken();
   if (!token || typeof WebSocket !== 'function') return Promise.resolve({ ok: false, route: 'harbor', why: 'Harbor server not reachable' });
-  const body = from ? `[from: ${inbox.cleanName(from)}]\n${text}` : text;
+  const body = (from ? `[from: ${inbox.cleanName(from)}]\n${text}` : text) + replyLine(senderSession(replyTo, env));
   return new Promise((resolve) => {
     const ws = new WebSocket(`${url}?token=${encodeURIComponent(token)}`);
-    const finish = (result) => { try { ws.close(1000); } catch { /* closed */ } resolve(result); };
+    let settled = false;
+    const finish = (result) => { if (settled) return; settled = true; try { ws.close(1000); } catch { /* closed */ } resolve(result); };
     const call = (method, payload, ms) => new Promise((done) => {
       const id = crypto.randomInt(1, 2 ** 31);
       const timer = setTimeout(() => done({ timeout: true }), ms);
@@ -161,55 +186,74 @@ function viaHarbor(sessionId, text, { from, url = process.env.HARBOR_SERVER_WS |
       ws.addEventListener('message', on);
       ws.send(JSON.stringify({ id, method, payload }));
     });
-    ws.addEventListener('error', () => finish({ ok: false, route: 'harbor', why: 'Harbor server not reachable' }));
+    // Once session:send has gone out, a dropped connection is NOT a failure:
+    // Harbor may be typing it (Sol's review, round two). Before that, it is.
+    let dispatched = false;
+    const lost = () => finish(dispatched
+      ? { ok: 'unconfirmed', route: 'harbor', delivered: 'unknown', why: 'the connection to Harbor dropped after it took the message; it may have been typed, so do not resend' }
+      : { ok: false, route: 'harbor', why: 'Harbor server not reachable' });
+    ws.addEventListener('error', lost);
+    ws.addEventListener('close', lost);
     ws.addEventListener('open', async () => {
       const st = await call('sidebar:get-state', {}, 20_000);
+      if (st.timeout) { finish({ ok: false, route: 'harbor', why: 'Harbor did not answer the pane lookup in 20 s' }); return; }
       const projects = st.result?.model?.projects || st.result?.projects || [];
       let pane = null;
       for (const p of projects) for (const s of (p.sessions || [])) if (s.id === sessionId && s.paneId) pane = s.paneId;
       if (!pane) { finish({ ok: false, route: 'harbor', why: 'no open Harbor pane holds this session' }); return; }
-      const r = await call('session:send', { sessionId, text: body, images: [], pane: { paneId: pane }, resumeOnly: false }, 60_000);
-      if (r.timeout) { finish({ ok: true, route: 'harbor', delivered: 'unconfirmed', why: 'no answer in 60 s (a busy pane queues it)' }); return; }
-      const ok = !r.error && r.result?.ok !== false;
-      finish(ok ? { ok: true, route: 'harbor', delivered: true } : { ok: false, route: 'harbor', why: r.error || r.result?.reason || 'refused', code: r.result?.code || null });
+      dispatched = true;
+      const r = await call('session:send', { sessionId, text: body, images: [], pane: { paneId: pane }, resumeOnly: false, strictTarget: true }, 60_000);
+      if (r.timeout) { finish({ ok: 'unconfirmed', route: 'harbor', delivered: 'unknown', why: 'Harbor did not answer in 60 s and may still be typing it (a stalled pane queues it); do not resend' }); return; }
+      if (r.result?.code === 'SESSION_CLEARED') {
+        finish({ ok: false, route: 'harbor', final: true, clearedInto: r.result.clearedInto || null, why: r.result.reason || 'that session ran /clear', code: 'SESSION_CLEARED' });
+        return;
+      }
+      if (r.result?.submission === 'unknown') {
+        finish({ ok: 'unconfirmed', route: 'harbor', delivered: 'unknown', why: `${r.result.reason || 'Harbor could not confirm the keys'}; it may have been submitted, so do not resend`, code: r.result.code || null });
+        return;
+      }
+      if (r.error || r.result?.ok === false) {
+        finish({ ok: false, route: 'harbor', why: r.error || r.result?.reason || 'refused', code: r.result?.code || null });
+        return;
+      }
+      // 'confirming': typed and Enter pressed; Harbor checks the transcript after.
+      const delivery = r.result?.delivery || 'delivered';
+      finish({ ok: true, route: 'harbor', delivered: delivery === 'delivered' ? true : delivery });
     });
   });
 }
 
-async function send({ to, text, from = null, noFallback = false, env = process.env }) {
+async function send({ to, text, from = null, replyTo = null, noFallback = false, env = process.env }) {
   if (!SESSION_RE.test(String(to || ''))) return { ok: false, why: `--to must be a session id, got ${to}` };
   if (!String(text || '').trim()) return { ok: false, why: 'the message is empty' };
-  const tried = [];
-  const first = await viaInbox(to, text, { from, env });
-  if (first.ok) return { ...first, session: to };
-  tried.push(first);
-  const codex = await viaCodex(to, text, { from, env });
-  if (codex.ok) return { ...codex, session: to, tried };
-  if (!/not a Codex session/.test(codex.why || '')) tried.push(codex);
-  if (noFallback) return { ok: false, session: to, tried };
-  const typed = await viaHarbor(to, text, { from });
-  return { ...typed, session: to, tried };
+  const first = await viaInbox(to, text, { from, replyTo, env });
+  // Delivered, maybe delivered, or refused for a reason typing cannot fix: done.
+  if (first.ok || first.final || !first.definite) return { ...first, session: to };
+  if (noFallback) return { ...first, session: to };
+  const typed = await viaHarbor(to, text, { from, replyTo, env });
+  return { ...typed, session: to, tried: [first] };
 }
 
 function status(to, env = process.env) {
-  const record = inbox.readRecord(to, env);
-  return { session: to, inbox: record ? { socket: record.socket, at: record.at, home: record.home, transcript: record.transcriptPath } : null, codexHome: findCodexHome(to, env) };
+  const found = SESSION_RE.test(String(to || '')) ? inbox.lookup(to, env) : null;
+  if (found?.clearedInto) return { session: to, clearedInto: found.clearedInto, at: found.at };
+  return { session: to, inbox: found ? { socket: found.socket, at: found.at, home: found.home, transcript: found.transcriptPath } : null };
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const verb = args._[0];
-  const print = (obj, code) => { process.stdout.write(`${JSON.stringify(obj)}\n`); process.exit(code); };
-  if (verb === 'status') print(status(args.to), 0);
-  if (verb !== 'send') print({ ok: false, why: 'usage: harbor-msg send --to <session id> (--file <path> | --text <text>) [--from <name>] [--no-fallback] | harbor-msg status --to <session id>' }, 2);
+  const print = (obj) => { process.stdout.write(`${JSON.stringify(obj)}\n`); process.exit(obj.ok === false ? 1 : 0); };
+  if (verb === 'status') print(status(args.to));
+  if (verb === 'confirm') print(inbox.checkReceipt(args.receipt));
+  if (verb !== 'send') print({ ok: false, why: 'usage: harbor-msg send --to <session id> (--file <path> | --text <text>) [--from <name>] [--reply-to <session id>] [--no-fallback] | harbor-msg confirm --receipt <id> | harbor-msg status --to <session id>' });
   let text = args.text;
   if (args.file) {
-    try { text = fs.readFileSync(args.file, 'utf8'); } catch (error) { print({ ok: false, why: `cannot read ${args.file}: ${error.message}` }, 2); }
+    try { text = fs.readFileSync(args.file, 'utf8'); } catch (error) { print({ ok: false, why: `cannot read ${args.file}: ${error.message}` }); }
   }
-  const result = await send({ to: args.to, text, from: args.from || null, noFallback: Boolean(args.noFallback) });
-  print(result, result.ok ? 0 : 1);
+  print(await send({ to: args.to, text, from: args.from || null, replyTo: args['reply-to'] || null, noFallback: Boolean(args.noFallback) }));
 }
 
 if (require.main === module) main();
 
-module.exports = { send, status, viaInbox, viaCodex, viaHarbor, findCodexHome };
+module.exports = { send, status, viaInbox, viaHarbor, senderSession, replyLine, configHome, contentFor };

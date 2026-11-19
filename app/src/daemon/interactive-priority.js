@@ -30,4 +30,27 @@ function raiseToInteractive(pid = 0, { platform = process.platform, os = require
   }
 }
 
-module.exports = { raiseToInteractive };
+// A LAUNCHER KEEPS THE BOOST TO ITSELF (2026-11-18, Sol's review, then
+// measured: a process raised to ABOVE NORMAL starts its children at NORMAL;
+// only IDLE and BELOW NORMAL are inherited). Claude's pane runs claude.exe
+// directly, but a Codex pane runs the npm shim (node codex.js), which starts
+// the real codex.exe, so the keeper's raise reached only the shim. So the
+// keeper also raises any DIRECT child of the process it spawned whose program
+// is a known agent CLI, and nothing deeper: the CLI's own tools and servers
+// stay at NORMAL. A child that predates its parent is a recycled-pid stranger.
+const path = require('node:path');
+const AGENT_CLI_RE = /^(codex|claude|cursor-agent)\.exe$/i;
+function raiseLaunchedCli(rootPid, { table, platform = process.platform, os = require('node:os') } = {}) {
+  if (platform !== 'win32' || !table || !table.get) return [];
+  const root = table.get(rootPid);
+  if (!root) return [];
+  const raised = [];
+  for (const row of table.values()) {
+    if (row.ppid !== rootPid || !AGENT_CLI_RE.test(path.win32.basename(row.name || ''))) continue;
+    if (root.created !== undefined && row.created !== undefined && row.created < root.created) continue;
+    if (raiseToInteractive(row.pid, { platform, os })) raised.push(row.pid);
+  }
+  return raised;
+}
+
+module.exports = { raiseToInteractive, raiseLaunchedCli };

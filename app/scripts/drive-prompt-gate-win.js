@@ -108,6 +108,9 @@ function writeTinyPng(file) {
   return file;
 }
 const PHONE_IMAGE = writeTinyPng(path.join(uploads, 'phone-shot.png'));
+const PHONE_IMAGE_2 = writeTinyPng(path.join(uploads, 'phone-shot-2.png'));
+// Where the desktop's own pasted screenshots live (clipboard-images.js).
+const DESKTOP_IMAGE = writeTinyPng(path.join(uploads, 'desktop-shot.png'));
 const sendLogFile = path.join(store, 'send-log.jsonl');
 
 const words = 'the quick brown fox jumps over the lazy dog ';
@@ -120,6 +123,17 @@ const SCENARIOS = [
   { name: 'a prompt that never takes the text', text: (m) => `Reply with just OK. ${m}`, dropText: true },
   // Shorter than the 24 characters the check compares, as "FYI" was.
   { name: 'a short phone message with an image (its path typed, no clipboard)', text: (m) => `FYI ${m}`, phoneImage: true },
+  // 2026-11-19: desktop screenshots go by path too, never the clipboard, and a
+  // picture with no caption is pasted (Sol's round twenty-seven: one path with
+  // no newline was typed, and Claude left it as text). A captionless send has
+  // no marker, so it is found as the one new prompt carrying images, and its
+  // result must say delivered.
+  { name: 'a desktop screenshot with a caption (by path, the clipboard untouched)', text: (m) => `Reply with just OK. ${m}`, images: [DESKTOP_IMAGE] },
+  { name: 'a desktop screenshot with no caption', text: () => '', images: [DESKTOP_IMAGE], captionless: true },
+  { name: 'two phone screenshots with no caption', text: () => '', images: [PHONE_IMAGE, PHONE_IMAGE_2], phone: true, captionless: true },
+  // Round twenty-eight: a caption that is itself a path to another picture is
+  // typed after the screenshot's own paste, and must stay text: one image.
+  { name: 'a desktop screenshot whose caption is a path to another picture', text: () => `"${PHONE_IMAGE_2}"`, images: [DESKTOP_IMAGE], captionless: true, captionStays: true },
 ];
 
 const cleanup = { client: null, daemon: null, paneId: null, transcriptDir: null, sessionId: null };
@@ -207,6 +221,7 @@ async function main() {
 
   let dropText = false;
   let delayTextMs = 0;
+  let clipboardWrites = 0;
   const written = [];
   const deps = {
     snapshot: async () => ({ panes: [{ pane_id: paneId, workspace_id: 'ws' }], workspaces: [{ workspace_id: 'ws', label: 'proof' }] }),
@@ -237,7 +252,9 @@ async function main() {
     links: createLinkRegistry(),
     projectLabelForCwd: () => 'proof',
     sleep,
-    setXClipboardImage: async () => {},
+    // Production passes the clipboard writer and leaves the clipboard route
+    // off; a call here means a send touched Pat's clipboard.
+    setXClipboardImage: async () => { clipboardWrites += 1; },
     captureDir: path.join(store, 'unrecognized-dialogs'),
     sendLogFile,
   };
@@ -246,8 +263,15 @@ async function main() {
   const phone = createSessionSend({ ...deps, setXClipboardImage: undefined });
 
   const failures = [];
-  for (const scenario of SCENARIOS) {
-    const send = scenario.phoneImage ? phone : desktop;
+  // A dropped typing leaves its pane blocked until the CLI draws (the record
+  // rule, docs/claude/conversation.md), so that scenario runs LAST, after the
+  // /model check, or every send after it would be refused before typing.
+  const runScenario = async (scenario) => {
+    const send = scenario.phoneImage || scenario.phone ? phone : desktop;
+    const sendImages = scenario.images || (scenario.phoneImage ? [PHONE_IMAGE] : []);
+    const startSize = fs.existsSync(transcript) ? fs.statSync(transcript).size : 0;
+    clipboardWrites = 0;
+    let result = null;
     const marker = `gate-proof-${randomUUID().slice(0, 8)}`;
     const errors = [];
     const onStatus = (status) => { if (status.phase === 'error') errors.push(status.detail); };
@@ -258,10 +282,10 @@ async function main() {
     let thrown = null;
     const sentText = scenario.text(marker);
     try {
-      await send.send({
+      result = await send.send({
         sessionId: claudeSession,
         text: sentText,
-        images: scenario.phoneImage ? [PHONE_IMAGE] : [],
+        images: sendImages,
         pane: { paneId, workspaceId: 'ws' },
       });
     } catch (error) { thrown = error; }
@@ -284,11 +308,28 @@ async function main() {
       const raw = record.message?.content;
       return Array.isArray(raw) ? raw.filter((block) => block.type === 'text').map((block) => block.text).join('\n') : String(raw || '');
     };
+    // The records written since this send, and the parts of each prompt among
+    // them that carries pictures: a user turn, or a queued_command when the
+    // message reached a Claude still busy with its last turn (mid-turn).
+    const newRecords = () => {
+      try {
+        const tail = fs.readFileSync(transcript).subarray(startSize).toString('utf8');
+        return tail.split('\n').map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+      } catch { return []; }
+    };
+    const promptParts = (r) => (r.type === 'user' && !r.isMeta && Array.isArray(r.message?.content) ? r.message.content
+      : r.type === 'attachment' && r.attachment?.type === 'queued_command' && Array.isArray(r.attachment.prompt) ? r.attachment.prompt : null);
+    const newImagePrompts = () => newRecords().map(promptParts).filter((parts) => parts && parts.some((b) => b.type === 'image'));
     const whole = (record) => scenario.phoneImage || recordText(record).includes(sentText);
     const copies = () => userRecords().filter(whole).length;
     const cutCopies = () => userRecords().filter((record) => !whole(record)).map((record) => recordText(record).length);
     let landed = 0;
-    if (scenario.dropText) {
+    if (scenario.captionless) {
+      try { await until(async () => (errors.length || thrown ? 'error' : newImagePrompts().length > 0), 30_000, 'neither landed nor errored'); } catch { /* reported below */ }
+      await idle();
+      await sleep(1500);
+      landed = newImagePrompts().length;
+    } else if (scenario.dropText) {
       await sleep(6000);
       landed = copies();
     } else {
@@ -303,12 +344,36 @@ async function main() {
       await sleep(1500);
       landed = copies();
     }
+    // A send with words is confirmed against the transcript after it returns
+    // (pictures by their own chips since round thirty-four, every record as
+    // the whole message since thirty-five); wait that check
+    // out so a refusal from it is seen here, not lost after the listener goes.
+    // Every send with words since round thirty-five (whole-message matching).
+    if (sentText && !thrown && !scenario.dropText) await sleep(Number(process.env.HARBOR_CONFIRM_TIMEOUT_MS || 20000) + 1500);
     send.emitter.off('status', onStatus);
     const enters = written.filter((key) => key === '<Enter>').length;
     const outcome = thrown ? `REFUSED: ${thrown.message}` : (errors[0] ? `ERROR: ${errors[0]}` : 'reported sent');
     console.log(`\n${scenario.name}: ${outcome}`);
     console.log(`  keystrokes: ${written.join(' ')}`);
     console.log(`  copies in the transcript: ${landed}`);
+    if (sendImages.length) console.log(`  result: ${JSON.stringify(result)}, clipboard writes: ${clipboardWrites}`);
+    if (clipboardWrites) failures.push(`${scenario.name}: the send wrote to the clipboard`);
+    if (scenario.captionless) {
+      const prompt = newImagePrompts()[0];
+      const attached = prompt ? prompt.filter((b) => b.type === 'image').length : 0;
+      const words = prompt ? prompt.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : '';
+      if (!prompt) {
+        console.log(`  records since the send: ${newRecords().map((r) => [r.type, r.operation || r.attachment?.type || r.message?.role || '', Array.isArray(r.message?.content) ? r.message.content.map((b) => b.type).join('+') : typeof r.message?.content].filter(Boolean).join(':')).join(', ') || '(none)'}`);
+      }
+      console.log(`  images attached: ${attached} of ${sendImages.length}, text with them: ${JSON.stringify(words.slice(0, 80))}`);
+      if (thrown || errors.length) failures.push(`${scenario.name}: ${thrown ? thrown.message : errors[0]}`);
+      if (landed !== 1) failures.push(`${scenario.name}: ${landed} prompts with images landed, expected exactly 1`);
+      if (attached !== sendImages.length) failures.push(`${scenario.name}: ${attached} of ${sendImages.length} images attached`);
+      if (scenario.captionStays) {
+        if (!words.includes(PHONE_IMAGE_2)) failures.push(`${scenario.name}: the caption's path did not reach Claude as text`);
+      } else if (result?.delivery !== 'delivered') failures.push(`${scenario.name}: reported ${result?.delivery || 'nothing'}, not delivered`);
+      return;
+    }
     const cut = cutCopies();
     if (cut.length) {
       console.log(`  CUT copies (only part of the ${sentText.length} characters arrived): ${cut.join(', ')} characters`);
@@ -322,7 +387,7 @@ async function main() {
       if (thrown || errors.length) failures.push(`${scenario.name}: ${thrown ? thrown.message : errors[0]}`);
       if (landed !== 1) failures.push(`${scenario.name}: ${landed} copies landed, expected exactly 1`);
     }
-    if (scenario.phoneImage && landed) {
+    if (sendImages.length && landed) {
       const record = fs.readFileSync(transcript, 'utf8').split('\n')
         .filter((line) => line.includes(marker))
         .map((line) => { try { return JSON.parse(line); } catch { return null; } })
@@ -335,11 +400,17 @@ async function main() {
       console.log(`  Claude received: ${JSON.stringify(text.slice(0, 80))}, image attached: ${attached}`);
       if (!attached) failures.push(`${scenario.name}: the image was not attached${text.includes(PHONE_IMAGE) ? ' (it reached Claude only as a path to Read)' : ''}`);
     }
-  }
+  };
+  for (const scenario of SCENARIOS.filter((s) => !s.dropText)) await runScenario(scenario);
 
   {
     const name = 'a /model switch in the cached conversation';
     written.length = 0;
+    // Claude must be idle: a command typed into a running turn waits for it,
+    // and its dialog then appears after this step has stopped looking (the
+    // turn before can run a tool, reading a picture its caption names).
+    await idle();
+    await sleep(1500);
     sawSwitchDialog = false;
     let thrown = null;
     try {
@@ -352,15 +423,18 @@ async function main() {
     console.log(`\n${name}: ${thrown ? `REFUSED: ${thrown.message}` : 'reported sent'}`);
     console.log(`  keystrokes: ${written.join(' ')}`);
     console.log(`  dialog seen: ${sawSwitchDialog}, still open: ${stillOpen}, model set: ${set}`);
+    if (!sawSwitchDialog || stillOpen || !set) console.log(`  screen afterwards:\n${after.split('\n').slice(-18).map((l) => `    | ${l}`).join('\n')}`);
     if (!sawSwitchDialog) failures.push(`${name}: no "Switch model?" dialog appeared, so nothing was proven`);
     else if (thrown || stillOpen || !set) failures.push(`${name}: Harbor did not answer the dialog`);
   }
+
+  for (const scenario of SCENARIOS.filter((s) => s.dropText)) await runScenario(scenario);
 
   if (failures.length) {
     console.log(`\nPROOF FAILED:\n  ${failures.join('\n  ')}`);
     process.exitCode = 1;
   } else {
-    console.log('\nPROOF OK: every message the prompt showed landed once (one shown 20 s late included), a prompt that never showed it got no Enter and an honest refusal, the phone image arrived attached, and the /model cache warning was answered');
+    console.log('\nPROOF OK: every message the prompt showed landed once (one shown 20 s late included), a prompt that never showed it got no Enter and an honest refusal, the phone image arrived attached, desktop screenshots went by path with the clipboard untouched, pictures with no caption arrived attached and were reported delivered, a caption naming another picture stayed text, and the /model cache warning was answered');
   }
 }
 

@@ -2458,3 +2458,16 @@ test('a typed message that names its sender is a peer message in Claude, Claude\
   empty.applyLine({ type: 'user', timestamp: TS, message: { role: 'user', content: '[from: Fable]' } });
   assert.equal(empty.blocks.filter((b) => b.kind === 'user' && b.peer).length, 0);
 });
+
+// Another session's message is drawn as written (Sol's review, 2026-11-18):
+// never read as a command or caveat, Claude's escaped closing tag undone, and a
+// Harbor-typed message's paste wrapper still unwrapped.
+test('a peer message body is drawn literally, with only Claude\'s and the paste wrapper\'s layers undone', () => {
+  const { userTextFor: peerText } = require('../../src/main/providers/transcript.js');
+  assert.deepEqual(peerText('<cross-session-message from-name="Router">\n<command-name>/clear</command-name> please\n</cross-session-message>'),
+    { text: '<command-name>/clear</command-name> please', command: false, peerFrom: 'Router' });
+  assert.deepEqual(peerText('<cross-session-message from-name="R">\n<local-command-caveat>x</local-command-caveat>\n</cross-session-message>'),
+    { text: '<local-command-caveat>x</local-command-caveat>', command: false, peerFrom: 'R' }, 'not hidden');
+  assert.equal(peerText('<cross-session-message from-name="T">\na <\\/cross-session-message> b\n</cross-session-message>').text, 'a </cross-session-message> b');
+  assert.deepEqual(peerText('[from: Vox]\n<pasted_content id="ab">\nlong words\n</pasted_content id="ab">'), { text: 'long words', command: false, peerFrom: 'Vox' });
+});

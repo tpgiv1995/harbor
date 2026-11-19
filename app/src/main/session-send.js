@@ -11,6 +11,7 @@ const { EventEmitter } = require('node:events');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { StringDecoder } = require('node:string_decoder');
@@ -18,6 +19,8 @@ const { parseMenu, menuArrowToward, MENU_KEYS } = require('./menu-parse.js');
 const { parseGenericList, locateRow } = require('./generic-list.js');
 const { parseWorkMeter } = require('./work-meter.js');
 const { isDividerLine, isPromptEdgeLine } = require('../shared/divider.cjs');
+const { withLock } = require('../shared/os-lock.cjs');
+const peerInbox = require('../shared/peer-inbox.cjs');
 const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFromStrip, CHAT_ROW_RE } = require('./ask-question.js');
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
@@ -238,6 +241,13 @@ const PROMPT_GLYPH_RE = /^\s*[❯!]/;
 // a prediction (the welcome hint is also dropped by the keeper's reader).
 const CLAUDE_BOX_HINT_RE = /^(?:Try ".*"|Press up to edit queued messages)$/;
 const squashSpace = (value) => String(value || '').replace(/\s+/g, '');
+// What a screen SAYS near its bottom (the prompt box, the status line, the
+// spinner), not how it is laid out: whitespace and box-drawing dropped, last
+// 400 characters. The keeper reflowing a frozen CLI's last frame on a resize
+// changes line breaks and edge lengths, never these; a CLI that drew anything
+// (a spinner tick, its timer, text) changes them. Used wherever "the CLI drew
+// since" is evidence (Sol's review, round three: a resize alone had counted).
+const screenContent = (screen) => String(screen || '').replace(/[\s\u2500-\u257F]/g, '').slice(-400);
 
 // CLAUDE DRAWS A PASTED IMAGE PATH AS AN IMAGE CHIP (2026-10-14, Pat from the
 // phone: "FYI" with a screenshot refused after three minutes, and the next
@@ -277,7 +287,8 @@ function textAfterImageChips(text) {
     .filter((segment) => segment.trim());
   const imageCount = segments.filter(isImagePathSegment).length;
   if (!imageCount) return null;
-  return { rest: squashSpace(segments.filter((segment) => !isImagePathSegment(segment)).join('\n')), imageCount };
+  const words = segments.filter((segment) => !isImagePathSegment(segment)).join('\n');
+  return { rest: squashSpace(words), words, imageCount };
 }
 // CLAUDE DRAWS THE REST OF A SLASH WORD AFTER THE CURSOR (2026-11-04, Pat from
 // the phone: "I'm in a death loop on this mobile session where it won't let me
@@ -304,6 +315,10 @@ const SLASH_GHOST_TAIL_RE = /([\w:.-]*)( \+\d+)?$/;
 // none when `text` does not end in a slash word. `raw` is the box's own text
 // (composerBox `raw`), line breaks and single spaces intact.
 function slashGhostRests(raw, text) {
+  return slashGhostDrafts(raw, text).map(squashSpace);
+}
+// The same readings as drawn, spaces kept (drawnSpacingAgrees).
+function slashGhostDrafts(raw, text) {
   const value = String(text || '');
   if (/^\s*!/.test(value) || !SLASH_WORD_END_RE.test(value)) return [];
   const box = String(raw || '').replace(/\s+$/, '');
@@ -315,7 +330,7 @@ function slashGhostRests(raw, text) {
     // The completion touches the typed word: never a space in front of it.
     const before = base + word.slice(0, typed);
     if (!before || /\s$/.test(before)) continue;
-    rests.push(squashSpace(before));
+    rests.push(before);
   }
   return rests;
 }
@@ -342,6 +357,64 @@ function composerBox(screen) {
   const shell = /^\s*!/.test(box[0]);
   const raw = box.join('\n').replace(PROMPT_GLYPH_RE, '');
   return { lines, top, bottom, box, shell, raw, inside: squashSpace(raw) };
+}
+// A DRAFT IS THIS SEND ONLY WITH THIS SEND'S SPACES (Sol's review, round
+// thirty-eight). The box is compared with whitespace dropped because the
+// prompt wraps a message wherever it likes; but a draft that differs from the
+// send only in its spaces is another message ("releasenotes.txt" is not
+// "release notes.txt"), and an Enter-only retry would send it. Inside a drawn
+// row the spaces must be the text's own, run for run; where the prompt broke
+// a row the text may hold a space run, nothing (a word cut in two), or one
+// line break per row break. What a screen cannot settle (a tab, an indented
+// line) is never this send on the screen's word alone.
+function drawnSpacingAgrees(raw, text) {
+  const typed = String(text || '').replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim();
+  if (/\t/.test(typed) || /\n[ \t]/.test(typed)) return false;
+  const rows = String(raw || '').split('\n').map((row) => row.trim());
+  while (rows.length && !rows[0]) rows.shift();
+  while (rows.length && !rows.at(-1)) rows.pop();
+  let at = 0;
+  for (let r = 0; r < rows.length;) {
+    if (typed.slice(at, at + rows[r].length) !== rows[r]) return false;
+    at += rows[r].length;
+    r += 1;
+    if (r === rows.length) break;
+    let breaks = 1;
+    while (r < rows.length && !rows[r]) { breaks += 1; r += 1; }
+    const run = /^[ \n]*/.exec(typed.slice(at))[0];
+    const newlines = run.split('\n').length - 1;
+    if (newlines ? newlines !== breaks : breaks !== 1) return false;
+    at += run.length;
+  }
+  return at === typed.length;
+}
+// A screen settles a draft alone only when no row of it runs on into the next
+// (round thirty-nine): at such a break "release" / "notes.txt" reads as
+// "releasenotes.txt" cut in two just as well as "release notes.txt" wrapped at
+// its space. A BLANK row between two rows is no wrap (a wrap never draws one),
+// so paragraphs each on one row, as Codex's own continuation draft is drawn,
+// are settled; chips never are, since a chip never says which picture it is.
+const drawnWithoutWraps = (raw) => {
+  const rows = String(raw || '').split('\n').map((row) => row.trim());
+  while (rows.length && !rows[0]) rows.shift();
+  while (rows.length && !rows.at(-1)) rows.pop();
+  return rows.length > 0 && rows.every((row, n) => n === 0 || !row || !rows[n - 1]);
+};
+// Picture chips out of a drawn draft: a row of nothing but chips goes whole.
+const draftWords = (draft) => String(draft || '').split('\n')
+  .filter((row) => !/^\s*(?:\[Image\s*#\d+\]\s*)+$/.test(row))
+  .map((row) => row.replace(/\[Image\s*#\d+\]\s?/g, ''))
+  .join('\n');
+// The same draft in two frames (round thirteen): the box text is unchanged,
+// whitespace dropped (a reflow is not a change), allowing only Claude's drawn
+// completion of the send's last slash word to come or go.
+function sameComposerDraft(a, b, text) {
+  const x = composerBox(a);
+  const y = composerBox(b);
+  if (!x || !y) return false;
+  if (x.inside === y.inside) return true;
+  const xs = new Set([x.inside, ...slashGhostRests(x.raw, text)]);
+  return [y.inside, ...slashGhostRests(y.raw, text)].some((rest) => xs.has(rest));
 }
 function composerSendState(screen, { text = '', pasted = false, imageMarker = null } = {}) {
   const found = composerBox(screen);
@@ -510,6 +583,7 @@ function codexPromptBox(screen) {
     while (headEnd < end && lines[headEnd].trim()) headEnd += 1;
     return {
       inside: squashSpace(lines.slice(i, end).join('\n').replace(CODEX_PROMPT_RE, '')),
+      raw: lines.slice(i, end).join('\n').replace(CODEX_PROMPT_RE, ''),
       head: squashSpace(lines.slice(i, headEnd).join('\n').replace(CODEX_PROMPT_RE, '')),
       clipped,
     };
@@ -800,6 +874,15 @@ function createSessionSend(deps) {
     links,
     projectLabelForCwd,
     setXClipboardImage,
+    // Off by default since 2026-11-19: Claude images go by path (see the
+    // image routes in deliver). The clipboard route stays, switched off, as
+    // the fallback should a CLI stop converting a pasted path again.
+    pasteClaudeImagesFromClipboard = false,
+    // async (path) => true when the picture is still a non-empty file
+    // (round twenty-eight: Harbor prunes saved pictures after 14 days).
+    imageFileReady = async (imagePath) => {
+      try { const stat = await fs.stat(imagePath); return stat.isFile() && stat.size > 0; } catch { return false; }
+    },
     sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
     // The clock waitForProviderReady budgets against; a harness passes a fake
     // one that its sleep advances.
@@ -861,6 +944,13 @@ function createSessionSend(deps) {
     const poll = pollReads.getStore();
     if (poll) { poll.sharing = false; poll.reads.clear(); }
     return terminalBridge.sendInput(paneId, payload);
+  };
+  const sendPaneInputAcked = async (paneId, payload) => {
+    if (typeof terminalBridge.sendInputAcked !== 'function') return sendPaneInput(paneId, payload);
+    paneInputGen.set(paneId, (paneInputGen.get(paneId) || 0) + 1);
+    const poll = pollReads.getStore();
+    if (poll) { poll.sharing = false; poll.reads.clear(); }
+    return terminalBridge.sendInputAcked(paneId, payload);
   };
   const emitter = new EventEmitter();
   const inFlight = new Set(); // session ids currently draining one item
@@ -940,10 +1030,17 @@ function createSessionSend(deps) {
         const wsIds = new Set((snap.workspaces || [])
           .filter((w) => !label || w.label === label)
           .map((w) => w.workspace_id));
-        const fresh = (snap.panes || []).find(
-          (p) => !preIds.has(p.pane_id) && wsIds.has(p.workspace_id)
-            && (!sessionId || (p.agent_session?.value || p.agent_session) === sessionId),
-        );
+        // A resume names its session to the daemon at spawn (bin/harbor-bin.cjs
+        // passes agentSession: the resume id, for Claude and for bin/ai), so
+        // the resumed pane carries it from its first moment, and only that
+        // pane is ours (rounds four and five of the review: a pane naming
+        // nobody yet could be a New Session someone opened meanwhile).
+        const fresh = (snap.panes || []).find((p) => {
+          if (preIds.has(p.pane_id) || !wsIds.has(p.workspace_id)) return false;
+          if (!sessionId) return true;
+          const owner = p.agent_session?.value ?? (typeof p.agent_session === 'string' ? p.agent_session : null);
+          return Boolean(owner) && String(owner).toLowerCase() === String(sessionId).toLowerCase();
+        });
         if (fresh) return { paneId: fresh.pane_id, workspaceId: fresh.workspace_id };
       } catch { /* daemon hiccup; keep polling */ }
     }
@@ -1156,8 +1253,10 @@ function createSessionSend(deps) {
     // ONE read answers every question below. Reading twice is not just slower:
     // a pane repaints between reads, so the guard would be judging one frame
     // and the composer test another.
+    // Returns the frame it judged, so a later check before the first write
+    // (the slash command's busy test) reads the same frame, not a second one.
     const screen = await readScreen(paneId, MENU_READ_LINES);
-    if (!screen) return; // unreadable: no evidence to refuse on
+    if (!screen) return ''; // unreadable: no evidence to refuse on
     if (isFleetView(screen)) throw fleetViewError();
     if (classifyBlocked(screen)) {
       // When the blocker parses as an answerable question, the window shows
@@ -1172,13 +1271,14 @@ function createSessionSend(deps) {
       throw new Error('the session is showing a prompt Harbor cannot fully read; use the answer panel in its window. Your text is kept');
     }
     const bottom = screen.split('\n').slice(-10).join('\n');
-    if (COMPOSER_RE.test(bottom)) return;
+    if (COMPOSER_RE.test(bottom)) return screen;
     // A bare shell prompt at the tail means the CLI exited and anything typed
     // would RUN IN THE SHELL; refuse, never pass through. runSend catches the
     // DEAD_SHELL code and falls through to resume-then-send for resumable
     // sessions. (Other unrecognized screens still pass: an unreadable or
     // exotic frame is not evidence of a shell.)
     await assertNotDeadShell(paneId, screen);
+    return screen;
   };
 
   // A leading-slash send is a slash COMMAND, not a message, and the current
@@ -1194,9 +1294,25 @@ function createSessionSend(deps) {
   // any byte is sent); the real proof it took effect is the header model chip
   // flipping / the next effort stamp, both observed by the renderer.
   const isSlashCommand = (text) => String(text ?? '').trimStart().startsWith('/');
-  const confirmNeedle = (text) => {
+  // A line of the message's own that is nothing but image paths becomes a
+  // picture when Claude reads the message from a paste (round twenty-nine;
+  // Sol, round thirty: the transcript then holds the other lines and the
+  // pictures, not the path text, and a delivered send read unconfirmed). The
+  // converted form: the other lines, and how many pictures the lines name.
+  const ownPathLineForm = (text) => {
+    const segmentsOf = (line) => line.split(/ (?=\/|[A-Za-z]:\\)/).filter((segment) => segment.trim());
+    const isPathLine = (line) => { const segments = segmentsOf(line); return segments.length > 0 && segments.every(isImagePathSegment); };
+    const lines = String(text ?? '').split('\n');
+    const pathLines = lines.filter(isPathLine);
+    if (!pathLines.length) return null;
+    return { rest: lines.filter((line) => !isPathLine(line)).join('\n').trim(), count: pathLines.reduce((n, line) => n + segmentsOf(line).length, 0) };
+  };
+  // asCommand: the send was typed as a command (round thirty-one: a picture's
+  // caption that starts with "/" is a message, and was searched for as a
+  // command tag).
+  const confirmNeedle = (text, asCommand = isSlashCommand(text)) => {
     const trimmed = String(text ?? '').trimStart();
-    if (trimmed.startsWith('/')) {
+    if (asCommand && trimmed.startsWith('/')) {
       const base = trimmed.split(/\s+/, 1)[0]; // '/model'
       return `<command-name>${base}</command-name>`;
     }
@@ -1214,24 +1330,65 @@ function createSessionSend(deps) {
   // Pat's screenshot to this session). Leading chips are set aside only when
   // the send attached exactly that many images; the rest must still be equal.
   const LEADING_IMAGE_CHIPS_RE = /^((?:\[Image #\d+\]\s*)+)/;
-  const queuedTextMatches = (content, expected, images = 0) => {
-    const got = String(content ?? '').replace(/\s+/g, ' ').trim();
-    if (got === expected) return true;
-    if (!(images > 0)) return false;
-    const chips = got.match(LEADING_IMAGE_CHIPS_RE);
-    return Boolean(chips) && (chips[1].match(/\[Image #\d+\]/g) || []).length === images
-      && got.slice(chips[1].length).trim() === expected;
+  // THE WORDS A RECORD HOLDS, EXACTLY (Sol's review, rounds thirty-six and
+  // thirty-seven). Line endings are unified and trailing spaces and the two
+  // ends trimmed; nothing inside a line changes: dropping whitespace made
+  // "releasenotes.txt" match "release notes.txt", and collapsing it made two
+  // snippets that differ only in indentation one message.
+  // One picture by its path: slashes either way, and a Windows path in any case.
+  const samePicturePath = (recorded, sent) => {
+    if (typeof recorded !== 'string' || typeof sent !== 'string') return false;
+    const norm = (p) => p.trim().replace(/^"(.*)"$/, '$1').replace(/[\\/]+/g, '/');
+    const [x, y] = [norm(recorded), norm(sent)];
+    return /^[A-Za-z]:\//.test(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
   };
+  const exactWords = (value) => String(value ?? '').replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim();
+  // The readings of a record that may be the typed message: its literal
+  // words first (a message may itself hold any tag), then, only from what
+  // the CLI adds, a reminder or notification that is a part of its own left
+  // out and Claude's own paste pair (2.1.27x: the id on BOTH tags) unwrapped,
+  // as the window's own reader shows them (providers/transcript.js).
+  const CLI_PART_RE = /^\s*<(system-reminder|task-notification)>[\s\S]*<\/\1>\s*$/;
+  const PASTED_PAIR_RE = /<pasted_content id="([^"]+)">\n?([\s\S]*?)\n?<\/pasted_content id="\1">\n?/g;
+  const typedReadings = (content) => {
+    const parts = Array.isArray(content)
+      ? content.filter((b) => b && (b.type === 'text' || b.type === 'input_text')).map((b) => String(b.text || ''))
+      : [String(content ?? '')];
+    const literal = exactWords(parts.join('\n'));
+    const read = exactWords(parts.filter((part) => !CLI_PART_RE.test(part)).join('\n').replace(PASTED_PAIR_RE, '$2'));
+    return read === literal ? [literal] : [literal, read];
+  };
+  // A reading equals the message, or (a send with pictures) is exactly that
+  // many leading chips and then the message.
+  const readingIs = (reading, want, images = 0) => {
+    if (reading === want) return true;
+    const lead = images > 0 ? reading.match(LEADING_IMAGE_CHIPS_RE) : null;
+    return Boolean(lead) && (lead[1].match(/\[Image #\d+\]/g) || []).length === images && reading.slice(lead[1].length).trim() === want;
+  };
+  // A native-inbox peer message is Claude's WHOLE <cross-session-message>
+  // envelope; prose that only names the tag is somebody's typed words.
+  const isPeerEnvelope = (said) => /^<cross-session-message\b[^>]*>[\s\S]*<\/cross-session-message>$/.test(String(said ?? '').trim());
+  const queuedTextMatches = (content, expected, images = 0) => {
+    if (isPeerEnvelope(content)) return false;
+    return typedReadings(content).some((reading) => readingIs(reading, expected, images));
+  };
+  const ONLY_IMAGE_CHIPS_RE = /^(?:\[Image #\d+\]\s*)+$/;
   const confirmsQueuedDelivery = (chunk, text, images = 0) => {
-    const expected = String(text ?? '').replace(/\s+/g, ' ').trim();
-    if (!expected) return false;
+    const expected = exactWords(text);
+    // Nothing but pictures (every line was a path Claude converted): the
+    // queued prompt is exactly that many chips.
+    const chipsOnly = (content) => {
+      const got = String(content ?? '').replace(/\s+/g, ' ').trim();
+      return ONLY_IMAGE_CHIPS_RE.test(got) && (got.match(/\[Image #\d+\]/g) || []).length === images;
+    };
+    if (!expected && !(images > 0)) return false;
     for (const line of String(chunk || '').split('\n')) {
       if (!line.trim()) continue;
       try {
         const obj = JSON.parse(line);
         if (obj.type === 'queue-operation'
           && obj.operation === 'enqueue'
-          && queuedTextMatches(obj.content, expected, images)) return true;
+          && (expected ? queuedTextMatches(obj.content, expected, images) : chipsOnly(obj.content))) return true;
       } catch { /* an incomplete/non-JSON line cannot confirm delivery */ }
     }
     return false;
@@ -1255,7 +1412,7 @@ function createSessionSend(deps) {
   const confirmDelivery = async (
     sessionId,
     text,
-    { timeoutMs, optional = false, prepared = null, images = 0 } = {},
+    { timeoutMs, optional = false, prepared = null, images = 0, chips = null, paths = null } = {},
   ) => {
     if (prepared?.skip) return true;
     if (process.env.HARBOR_SKIP_DELIVERY_CONFIRM === '1') return true;
@@ -1278,7 +1435,8 @@ function createSessionSend(deps) {
     if (preSize == null) {
       try { preSize = (await fs.stat(transcriptPath)).size; } catch { preSize = 0; }
     }
-    const scan = transcriptScanner(transcriptPath, preSize, text, images);
+    // Only a command confirms by its command tag; anything else is a message.
+    const scan = transcriptScanner(transcriptPath, preSize, text, images, { asCommand: optional && isSlashCommand(text), chips, paths });
     const deadline = Date.now() + budget;
     while (Date.now() < deadline) {
       await sleep(500);
@@ -1300,7 +1458,12 @@ function createSessionSend(deps) {
   // carried into the next read so a record split across reads is still whole,
   // and the decoder keeps a multi-byte character split across reads intact.
   const SCAN_SLICE_BYTES = 1024 * 1024;
-  const SCAN_CARRY_MAX = 64 * 1024; // only a giant line (an image) ever exceeds this
+  // The longest line kept whole (round thirty-four). Picture bytes are dropped
+  // as they stream (createDataStripper), so only words make a line this long;
+  // up to here a line is parsed and judged whole, and past it the line never
+  // confirms (judged by its head, a matching 60-character start confirmed a
+  // different message, and a tool result's tail its caption).
+  const SCAN_CARRY_MAX = 8 * 1024 * 1024;
   // WHICH RECORD MAY CONFIRM A SEND (Astra's round 4, 2026-11-01): a match
   // inside the assistant's reply or a tool's output is not the user's message
   // arriving (Codex answering "hello" confirmed a "hello" that never left the
@@ -1312,30 +1475,187 @@ function createSessionSend(deps) {
   // been kept whole (an image) falls back to the old needle test.
   const recordText = (content) => (typeof content === 'string' ? content
     : Array.isArray(content) ? content.map((b) => (b && (b.type === 'text' || b.type === 'input_text') ? b.text || '' : '')).join('\n') : '');
-  const recordConfirms = (rec, line, needle, text, images = 0) => {
-    const whole = squashSpace(text);
-    if (!rec || typeof rec !== 'object') return line.includes(needle);
+  const recordConfirms = (rec, line, needle, text, images = 0, { strict = false, chips = null, paths = null } = {}) => {
+    const want = exactWords(text);
+    // ONLY A RECOGNIZED DELIVERY RECORD, AND IT MUST BE THE MESSAGE (Sol's
+    // review, rounds thirty-five and thirty-six). A peer's "Please continue
+    // with the next part" confirmed a typed "continue", a session summary
+    // holding the words confirmed an unsent one, and a body with its spaces
+    // dropped matched another file's name. So: a record that did not parse,
+    // an isMeta note, a native-inbox peer envelope, or a shape not named
+    // below never confirms, and a Claude or Cursor record must BE the
+    // message, compared as typedWords (a picture send's own leading chips set
+    // aside), not merely hold it.
+    if (!rec || typeof rec !== 'object' || rec.isMeta) return false;
+    const sameBody = (content) => typedReadings(content).some((reading) => readingIs(reading, want, images));
+    // STRICT: a picture send, or the converted form (ownPathLineForm), confirms
+    // only on one record that STARTS with exactly the attachment chips its
+    // verified draft showed, in order, then its words (or nothing, when every
+    // line was a path), and carries that many pictures (rounds thirty-one to
+    // thirty-four). Attachments lead; a label in the words is only words.
+    if (strict) {
+      if (!Array.isArray(chips)) return false;
+      // Blank lines aside: Claude joins a converted paste's remaining lines
+      // without them.
+      const lined = (value) => exactWords(value).split('\n').filter((l) => l.trim()).join('\n');
+      const wanted = lined(want);
+      const chipsThenWords = (content) => {
+        if (isPeerEnvelope(Array.isArray(content) ? recordText(content) : content)) return false;
+        return typedReadings(content).some((reading) => {
+          let rest = reading;
+          for (const chip of chips) {
+            const label = rest.match(/^\[Image\s*#(\d+)\]\s*/);
+            if (!label || `[Image#${label[1]}]` !== chip) return false;
+            rest = rest.slice(label[0].length);
+          }
+          return lined(rest) === wanted;
+        });
+      };
+      if (rec.type === 'queue-operation') return rec.operation === 'enqueue' && chipsThenWords(rec.content);
+      const parts = rec.type === 'user' ? rec.message?.content : rec.type === 'attachment' && rec.attachment?.type === 'queued_command' ? rec.attachment.prompt : null;
+      if (!Array.isArray(parts) || parts.some((b) => b?.type === 'tool_result')) return false;
+      if (parts.filter((b) => b?.type === 'image').length !== images) return false;
+      return chipsThenWords(parts);
+    }
+    if (!want) return false;
     if (rec.type === 'queue-operation') return confirmsQueuedDelivery(line, text, images);
     if (rec.type === 'assistant' || rec.message?.role === 'assistant' || rec.role === 'assistant') return false;
+    // Codex: the whole user_message, or ONE input item that is the message
+    // (round thirty-seven: its instruction items, AGENTS.md included, sit
+    // beside the typed text, and the words inside them confirmed a send).
+    // The same record must carry exactly the send's pictures (round
+    // thirty-eight: a text-only turn with the caption confirmed a screenshot
+    // Codex never took). Codex 0.17x keeps each as an input_image item beside
+    // the typed text item.
+    // And they must be THE send's pictures (round thirty-nine: an older
+    // screenshot turn with the same caption and count confirmed a new one):
+    // Codex 0.167 heads each with <image name=[Image #N] path="...">, the
+    // path as Harbor pasted it, so the paths must be the sent ones, in order.
+    const samePictures = (recorded) => (images === 0 ? recorded.length === 0
+      : Array.isArray(paths) && paths.length === images && recorded.length === images
+        && recorded.every((one, n) => samePicturePath(one, paths[n])));
     if (rec.type === 'event_msg') {
-      return rec.payload?.type === 'user_message' && Boolean(whole) && squashSpace(rec.payload.message).includes(whole);
+      if (rec.payload?.type !== 'user_message') return false;
+      // Encoded images carry no path: never this send's pictures.
+      if (Array.isArray(rec.payload.images) && rec.payload.images.length) return false;
+      if (!samePictures(Array.isArray(rec.payload.local_images) ? rec.payload.local_images.map((one) => (typeof one === 'string' ? one : one?.path)) : [])) return false;
+      return readingIs(exactWords(rec.payload.message), want, images);
     }
     if (rec.type === 'response_item') {
-      return rec.payload?.type === 'message' && rec.payload.role === 'user' && Boolean(whole) && squashSpace(recordText(rec.payload.content)).includes(whole);
+      if (rec.payload?.type !== 'message' || rec.payload.role !== 'user' || !Array.isArray(rec.payload.content)) return false;
+      const items = rec.payload.content;
+      const recorded = [];
+      for (let n = 0; n < items.length; n += 1) {
+        if (items[n]?.type !== 'input_image') continue;
+        const head = items[n - 1]?.type === 'input_text' ? /^<image name=\[Image #\d+\] path="([^"]*)">$/.exec(String(items[n - 1].text).trim()) : null;
+        recorded.push(head ? head[1] : null);
+      }
+      if (!samePictures(recorded)) return false;
+      return rec.payload.content.some((item) => item && (item.type === 'input_text' || item.type === 'text') && readingIs(exactWords(item.text), want, images));
     }
     if (rec.type === 'user') {
       const content = rec.message?.content;
       if (Array.isArray(content) && content.some((b) => b?.type === 'tool_result')) return false;
-      return line.includes(needle) || (Boolean(whole) && squashSpace(recordText(content)).includes(whole));
+      const said = recordText(content);
+      if (isPeerEnvelope(said)) return false;
+      // A real slash command is logged as its <command-name> form (confirmNeedle).
+      if (String(needle || '').startsWith('<command-name>')) return said.includes(needle);
+      return sameBody(content);
     }
     // The prompt is a LIST of parts (text, then each image) on 2.1.316; reading
     // it as one string never matched an image send.
-    if (rec.type === 'attachment') return rec.attachment?.type === 'queued_command' && Boolean(whole) && squashSpace(recordText(rec.attachment.prompt)).includes(whole);
-    // A shape this does not know (another provider's store): the old rule.
-    return line.includes(needle);
+    if (rec.type === 'attachment') {
+      if (rec.attachment?.type !== 'queued_command') return false;
+      return !isPeerEnvelope(recordText(rec.attachment.prompt)) && sameBody(rec.attachment.prompt);
+    }
+    // Cursor's agent transcript: {"role":"user","message":{...}} with no type,
+    // the typed words framed in <user_query> after a <timestamp>.
+    if (!rec.type && rec.role === 'user') {
+      const said = recordText(rec.message?.content);
+      const framed = said.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/i);
+      return exactWords(framed ? framed[1] : said) === want;
+    }
+    return false;
   };
-  const transcriptScanner = (transcriptPath, from, text, images = 0) => {
-    const needle = confirmNeedle(text);
+  // PICTURE BYTES ARE DROPPED AS THE TRANSCRIPT STREAMS IN (Sol's review,
+  // round thirty-one): a record carrying a screenshot can run to megabytes and
+  // straddle reads, and the carry below kept only its tail, losing the words.
+  // Every "data":"..." string value is emptied in place, escapes respected,
+  // so each record stays whole, small and parseable, its image blocks still
+  // there to count. Base64 holds no quote or backslash, and a quoted "data"
+  // inside someone's words is escaped (\"data\"), so it never matches.
+  // Encoded pictures are emptied as they stream: Claude's "data" values and
+  // Codex's "image_url" data URLs (round thirty-nine: a 10 MB Codex receipt
+  // passed SCAN_CARRY_MAX and a delivered screenshot stayed unconfirmed). The
+  // item itself stays, so the picture still counts.
+  const createDataStripper = () => {
+    const KEYS = [{ find: '"data":"', keep: '"data":"' }, { find: '"image_url":"data:', keep: '"image_url":"' }];
+    const longest = Math.max(...KEYS.map((key) => key.find.length));
+    let inData = false;
+    let escaped = false;
+    let held = '';
+    return (text) => {
+      const input = held + text;
+      held = '';
+      let out = '';
+      let i = 0;
+      while (i < input.length) {
+        if (inData) {
+          for (; i < input.length; i += 1) {
+            const c = input[i];
+            if (escaped) { escaped = false; continue; }
+            if (c === '\\') { escaped = true; continue; }
+            if (c === '"') { inData = false; out += '"'; i += 1; break; }
+          }
+          continue;
+        }
+        let next = null;
+        for (const key of KEYS) {
+          const at = input.indexOf(key.find, i);
+          if (at >= 0 && (!next || at < next.at)) next = { at, key };
+        }
+        if (!next) {
+          // A key cut by the read boundary waits for the next piece.
+          let hold = 0;
+          for (let k = Math.min(longest - 1, input.length - i); k > 0 && !hold; k -= 1) {
+            const tail = input.slice(input.length - k);
+            if (KEYS.some((key) => key.find.startsWith(tail))) hold = k;
+          }
+          out += input.slice(i, input.length - hold);
+          held = input.slice(input.length - hold);
+          break;
+        }
+        out += input.slice(i, next.at) + next.key.keep;
+        i = next.at + next.key.find.length;
+        inData = true;
+      }
+      return out;
+    };
+  };
+  const transcriptScanner = (transcriptPath, from, text, images = 0, { asCommand = isSlashCommand(text), chips = null, paths = null } = {}) => {
+    const needle = confirmNeedle(text, asCommand);
+    // The converted form only when the verified draft SHOWED the conversion
+    // (more chips than pictures sent), and then only with those very chips
+    // (round thirty-two: an earlier send's picture with the same words, taken
+    // in late, confirmed one Claude never took).
+    // The first `attached` chips of the draft are its attachments (pictures are
+    // pasted first, and Claude puts converted chips at the front of a paste);
+    // any later label is the message's own words.
+    const pathForm = ownPathLineForm(text);
+    const attached = images + (pathForm?.count || 0);
+    const form = pathForm && Array.isArray(chips) && chips.length > images && chips.length >= attached ? pathForm : null;
+    // A send that carried pictures, with its draft's chips known, is held to
+    // them as the converted form is (round thirty-four: an older queued
+    // screenshot with the same caption, taken in late, or the caption alone,
+    // confirmed a new screenshot send).
+    const ownChips = images > 0 && Array.isArray(chips) && chips.length >= images ? chips.slice(0, images).map(squashSpace) : null;
+    const forms = [{ text, images, needle, paths, ...(ownChips ? { strict: true, chips: ownChips } : {}) }];
+    if (form) forms.push({ text: form.rest, images: attached, needle: form.rest ? confirmNeedle(form.rest, false) : null, strict: true, chips: chips.slice(0, attached).map(squashSpace) });
+    const strip = createDataStripper();
+    // Set once a line past SCAN_CARRY_MAX has been let go: the rest of it, up
+    // to its newline, is skipped, never judged as a line of its own.
+    let skipTail = false;
+    const nearby = (line) => forms.some((one) => one.needle && line.includes(one.needle));
     const decoder = new StringDecoder('utf8');
     let offset = from;
     let carry = '';
@@ -1351,21 +1671,22 @@ function createSessionSend(deps) {
           await handle.close();
         }
         offset += length;
-        const chunk = carry + decoder.write(buffer);
+        const chunk = carry + strip(decoder.write(buffer));
         const cut = chunk.lastIndexOf('\n');
         const complete = cut >= 0 ? chunk.slice(0, cut) : '';
         carry = cut >= 0 ? chunk.slice(cut + 1) : chunk;
-        for (const line of complete.split('\n')) {
-          if (!line.trim() || (!line.includes(needle) && !line.includes('queue-operation') && !line.includes('user_message') && !line.includes('"user"'))) continue;
+        let lines = cut >= 0 ? complete.split('\n') : [];
+        if (skipTail && cut >= 0) { lines = lines.slice(1); skipTail = false; }
+        for (const line of lines) {
+          if (!line.trim() || (!nearby(line) && !line.includes('queue-operation') && !line.includes('user_message') && !line.includes('"user"') && !line.includes('queued_command'))) continue;
           let rec = null;
-          try { rec = JSON.parse(line); } catch { rec = null; } // the cut tail of a giant line
-          if (recordConfirms(rec, line, needle, text, images)) return true;
+          try { rec = JSON.parse(line); } catch { rec = null; } // never confirms (recordConfirms)
+          if (forms.some((one) => recordConfirms(rec, line, one.needle, one.text, one.images, { strict: Boolean(one.strict), chips: one.chips, paths: one.paths }))) return true;
         }
         if (carry.length > SCAN_CARRY_MAX) {
-          // A line too large to keep whole (an image): judge what is held of it
-          // by the old needle test before its head is let go.
-          if (carry.includes(needle)) return true;
-          carry = carry.slice(-SCAN_CARRY_MAX);
+          // Too long to judge whole: it never confirms.
+          carry = '';
+          skipTail = true;
         }
       }
       return false;
@@ -1423,13 +1744,28 @@ function createSessionSend(deps) {
     }
   };
 
+  // Typing waits for the keeper to say it wrote the keys (sendInputAcked), so
+  // keys that never reached the pane fail here instead of being waited on as
+  // if Claude had them queued (Sol's review, 2026-11-18).
+  // Only a DEFINITE refusal (not the controlling client, the session exited)
+  // is retried: the keys were never written. A timeout or a dropped daemon
+  // connection can come after the keeper wrote them, so typing them again
+  // could paste twice or press a second Enter into whatever came next (Sol's
+  // review, round two); that send stops, and its pending record (written
+  // before the keys went out) makes the next send wait for the text instead.
   const typeInto = async (paneId, workspaceId, payload) => {
-    let result = sendPaneInput(paneId, payload);
-    if (result?.ok === false) {
+    let result = await sendPaneInputAcked(paneId, payload);
+    if (result?.ok === false && !result.ambiguous) {
       await acquireControl(paneId, workspaceId);
-      result = sendPaneInput(paneId, payload);
+      result = await sendPaneInputAcked(paneId, payload);
     }
-    if (result?.ok === false) throw new Error(result.reason || 'input refused');
+    if (result?.ok === false) throw result.ambiguous ? inputUnconfirmedError(result.reason) : new Error(result.reason || 'input refused');
+  };
+  const inputUnconfirmedError = (reason) => {
+    const error = new Error(`Harbor could not confirm the session took the keys (${reason}), so nothing more was typed. Your text is kept; if it shows up in the prompt, the next send presses Enter for it instead of typing it again`);
+    error.code = 'INPUT_UNCONFIRMED';
+    error.submission = 'unknown';
+    return error;
   };
 
   // Claude numbers pasted images cumulatively per session (#1, #2, #3…), and a
@@ -1444,7 +1780,9 @@ function createSessionSend(deps) {
   // signal, immune to older markers scrolling out of view.
   // How long a send waits on a Claude that has drawn NOTHING since Harbor typed
   // (see waitForPromptToHold): its input is queued, not lost.
-  const STALLED_WAIT_MS = 10 * 60_000;
+  // Three minutes of REAL time (the clock, not a poll count a slow screen read
+  // stretches), so a send ends before the phone's four-minute call deadline.
+  const STALLED_WAIT_MS = 3 * 60_000;
   // A MARKER CAN WRAP (2026-11-18, Pat's screenshot into Vox: "Claude never
   // confirmed the image attachment ... no marker beyond #0"). Behind a long
   // message the chip lands at the end of the prompt and Claude wraps it at its
@@ -1457,18 +1795,45 @@ function createSessionSend(deps) {
   // The base wait counts only while Claude is drawing: a screen unchanged
   // since the chord means Claude has not read the key yet (stalled or starved
   // of CPU, see STALLED_POLLS), so the wait goes on until it does.
-  const waitForImageMarker = async (paneId, beforeMax, { timeoutMs = 12000, baseline = null, onStalled = null } = {}) => {
+  // A first redraw that comes late (after the base window) gets a full window
+  // of its own from then: the redraw may be Claude just waking, about to read
+  // the chord (Sol's review, 2026-11-18).
+  // The newest image chip IN THE COMPOSER BOX, or null when no box is drawn.
+  // A chip in the conversation above (an earlier message's, or one the model
+  // printed) says nothing about this chord (Sol's review, round seven).
+  const composerImageMax = (screen) => {
+    const box = composerBox(screen);
+    return box ? maxImageMarker(box.raw) : null;
+  };
+  const waitForImageMarker = async (paneId, beforeMax, { timeoutMs = 12000, baseline = null, onStalled = null, literal = null } = {}) => {
+    // A pasted path Claude could not read stays in the box as text (round
+    // twenty-eight). Seen there with no new chip on 15 reads in a row (at
+    // least 1.5 s), it is not converting: the paste was read, so nothing is
+    // owed, and it is refused. Counted in reads, like every wait here.
+    let literalReads = 0;
     const basePolls = Math.ceil(timeoutMs / 100);
     const stallPolls = Math.ceil(STALLED_WAIT_MS / 100);
+    const startedAt = clock();
     let changed = baseline == null;
+    let changedAt = changed ? 0 : null;
+    let changedAtTime = startedAt;
     let noticed = false;
-    for (let poll = 0; poll < basePolls || (!changed && poll < stallPolls); poll += 1) {
+    const more = (poll) => (poll < basePolls && clock() - startedAt < timeoutMs)
+      || (!changed && poll < stallPolls && clock() - startedAt < STALLED_WAIT_MS)
+      || (changed && changedAt !== null && poll < changedAt + basePolls && clock() - changedAtTime < timeoutMs);
+    for (let poll = 0; more(poll); poll += 1) {
       await sleep(100);
       let screen = '';
-      try { screen = await readPane(paneId); } catch { continue; }
-      if (!changed && screen && screen !== baseline) changed = true;
-      const max = maxImageMarker(screen);
-      if (max > beforeMax) return max;
+      // The wide read (round nine: the desktop's default 16 lines lost the
+      // composer's top edge once the chip made the box one line taller).
+      try { screen = await readPane(paneId, MENU_READ_LINES); } catch { continue; }
+      if (!changed && screen && screenContent(screen) !== screenContent(baseline)) { changed = true; changedAt = poll; changedAtTime = clock(); }
+      const max = composerImageMax(screen);
+      if (max !== null && max > beforeMax) return max;
+      if (literal && (composerBox(screen)?.inside || '').includes(literal)) {
+        literalReads += 1;
+        if (literalReads >= 15) throw imageLeftAsTextError();
+      } else literalReads = 0;
       if (!changed && !noticed && poll + 1 >= basePolls && onStalled) { noticed = true; try { onStalled(); } catch { /* status only */ } }
     }
     throw new Error(changed
@@ -1518,18 +1883,90 @@ function createSessionSend(deps) {
   // model change stopped on the open dialog. Both endings and the real title
   // are accepted now (fixtures claude-2.1.312-model-sonnet-*.txt).
   const SWITCH_COMMAND_RE = /^\/(model|effort)(?:\s|$)/i;
-  const SWITCH_CONFIRM_RE = /Switching to .*? means the full history gets re-read(?: on your next message)?\..{0,240}?1\.\s*Yes.{0,120}?2\.\s*No|(?:Change effort level|Switch model|Change model)\?.{0,600}?1\.\s*Yes, switch to.{0,120}?2\.\s*No, go back/i;
-  const showsSwitchConfirm = (screen) => SWITCH_CONFIRM_RE.test(String(screen || '').replace(/\s+/g, ' '));
+  // Only an OPEN switch dialog, read as ONE dialog (Sol's review, rounds forty
+  // to forty-two). Every real capture (2.1.303, 2.1.312, and 2.1.321 live) is
+  // drawn the same way: an edge (a run of ─ or ▔) directly above the title,
+  // then the warning, then "1. Yes, switch to …" and "2. No, go back" as the
+  // last thing on screen (the dialog takes the prompt's place). So the block
+  // under the last edge must be exactly that dialog, with one answer pair:
+  // prose quoting it has a prompt under it, and an older warning above a
+  // DIFFERENT open dialog (an edit confirmation ending "2. No") once got "1"
+  // and Enter. With no edge in view the whole screen must be the dialog.
+  const SWITCH_EDGE_RE = /^\s*(?:─{10,}|▔{10,})/;
+  const SWITCH_TITLE_FORM_RE = /^(?:Change effort level|Switch model|Change model)\? .{0,600}?(?:❯ )?1\. Yes, switch to .{1,120}? (?:❯ )?2\. No, go back$/i;
+  const SWITCH_SENTENCE_FORM_RE = /^(?:Your next response will be slower and use more tokens )?(?:This conversation is cached for the current (?:model|effort level)\. )?Switching to .{1,120}? means the full history gets re-read(?: on your next message)?\. (?:❯ )?1\. Yes(?:, switch to .{1,120}?)? (?:❯ )?2\. No(?:, go back)?$/i;
+  const showsSwitchConfirm = (screen) => {
+    const lines = String(screen || '').split('\n');
+    let end = lines.length - 1;
+    while (end >= 0 && !lines[end].trim()) end -= 1;
+    if (end < 0 || !/^\s*(?:❯\s*)?2\.\s*No\b/.test(lines[end])) return false;
+    let top = end - 1;
+    while (top >= 0 && !SWITCH_EDGE_RE.test(lines[top])) top -= 1;
+    const block = lines.slice(top + 1, end + 1);
+    if (block.filter((line) => /^\s*(?:❯\s*)?1\.\s/.test(line)).length !== 1) return false;
+    if (block.filter((line) => /^\s*(?:❯\s*)?2\.\s/.test(line)).length !== 1) return false;
+    const read = block.join(' ').replace(/\s+/g, ' ').trim();
+    return SWITCH_TITLE_FORM_RE.test(read) || SWITCH_SENTENCE_FORM_RE.test(read);
+  };
 
-  const resolveClaudeSwitchConfirm = async (paneId, workspaceId, text, provider) => {
+  // THE DIALOG CAN COME LATE (2026-11-19, CLI 2.1.321, four of seven live
+  // drives): after Enter the CLI drew only the echoed "❯ /model …", no box
+  // and no result, for longer than the old 4.5-second watch, then opened
+  // "Switch model?", which stayed open and refused the next send ("a prompt
+  // appeared in the session"). The watch now lasts until the command has an
+  // answer: the dialog, or its own result drawn under its echo ("⎿ Set model
+  // to …", the no-dialog case), up to 20 seconds.
+  const SWITCH_WATCH_READS = 40; // 500 ms apart
+  // And ONE wall-clock deadline that bounds every read too (round forty-one:
+  // reads that each took six seconds to fail held the pane's lock 259 s).
+  const SWITCH_WATCH_MS = Number(process.env.HARBOR_SWITCH_WATCH_MS) > 0 ? Number(process.env.HARBOR_SWITCH_WATCH_MS) : 20_000;
+  const readPaneWithin = (paneId, ms) => new Promise((resolve, reject) => {
+    if (!(ms > 0)) { reject(new Error('switch watch deadline passed')); return; }
+    const timer = setTimeout(() => reject(new Error('switch watch read timed out')), ms);
+    timer.unref?.();
+    Promise.resolve().then(() => readPane(paneId)).then(
+      (screen) => { clearTimeout(timer); resolve(screen); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+  // The command's own echo lines; a result counts only under a NEW one (round
+  // forty: the same command's earlier echo and result, still on screen, ended
+  // the watch before this one's echo was drawn, and its late dialog stayed).
+  // Above the prompt box only: the command typed into the box, before its
+  // Enter, is drawn exactly like its echo.
+  const switchEchoes = (screen, text) => {
+    const echo = `❯ ${String(text || '').trim()}`;
+    const lines = String(screen || '').split('\n');
+    const box = composerBox(screen);
+    const at = [];
+    for (let n = 0; n < (box ? box.top : lines.length); n += 1) if (lines[n].trim() === echo) at.push(n);
+    return at;
+  };
+  // The count before the Enter, only from a screen that shows the prompt box
+  // (the command sits in it then); a blank or partial read leaves it unknown
+  // (round forty-one: a blank read counted zero, and the older result then
+  // read as new).
+  const switchBaseline = (screen, text) => (composerBox(screen) ? switchEchoes(screen, text).length : Infinity);
+  const switchSettled = (screen, text, echoesBefore) => {
+    const at = switchEchoes(screen, text);
+    if (at.length <= echoesBefore) return false;
+    return String(screen || '').split('\n').slice(at.at(-1) + 1).some((line) => /^\s*⎿/.test(line));
+  };
+  // `echoesBefore`: how many echoes of this command the screen showed before
+  // its Enter (Infinity when unknown, so only the dialog or the 20 s ends it).
+  const resolveClaudeSwitchConfirm = async (paneId, workspaceId, text, provider, echoesBefore = Infinity) => {
     if (provider !== 'claude' || !SWITCH_COMMAND_RE.test(String(text || '').trim())) return false;
 
+    const deadline = clock() + SWITCH_WATCH_MS;
     let dialogSeen = false;
-    for (let attempt = 0; attempt < 10; attempt += 1) {
+    for (let attempt = 0; attempt < SWITCH_WATCH_READS && clock() < deadline; attempt += 1) {
       if (attempt > 0) await sleep(500);
       let screen = '';
-      try { screen = await readPane(paneId); } catch { continue; }
-      if (!showsSwitchConfirm(screen)) continue;
+      try { screen = await readPaneWithin(paneId, deadline - clock()); } catch { continue; }
+      if (!showsSwitchConfirm(screen)) {
+        if (switchSettled(screen, text, echoesBefore)) break;
+        continue;
+      }
       dialogSeen = true;
       await typeInto(paneId, workspaceId, '1');
       await typeInto(paneId, workspaceId, '\r');
@@ -1537,11 +1974,14 @@ function createSessionSend(deps) {
     }
     if (!dialogSeen) return false;
 
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    const closedBy = clock() + 5000;
+    for (let attempt = 0; attempt < 8 && clock() < closedBy; attempt += 1) {
       if (attempt > 0) await sleep(250);
       try {
-        const screen = await readPane(paneId);
-        if (!showsSwitchConfirm(screen)) return true;
+        // Closed only on a readable frame (round forty-two: one blank frame
+        // reported a dialog that was still open as answered).
+        const screen = await readPaneWithin(paneId, closedBy - clock());
+        if (String(screen || '').trim() && !showsSwitchConfirm(screen)) return true;
       } catch { /* keep verifying until the bounded retry is exhausted */ }
     }
     throw new Error('could not confirm the Claude model/effort switch; answer the open dialog via the >_ terminal');
@@ -1567,7 +2007,19 @@ function createSessionSend(deps) {
   const ENTER_POLL_MS = 350;
   const ENTER_WATCH_POLLS = 24;
   const ENTER_SPARES = 2;
-  const watchEnterTaken = async (paneId, workspaceId, sent) => {
+  // A spare Enter is pressed only while the prompt still SHOWS the message.
+  // If the first Enter is still queued in a frozen CLI, the spare is queued
+  // right behind it and both are read in one batch: the first submits, the
+  // second meets an empty prompt, where Enter does nothing. Nothing the first
+  // one causes (a permission dialog, a picker) can be drawn before the second
+  // is read, since it needs a model round trip first. A live CLI that
+  // silently ignored an Enter draws nothing either, and needs the spare
+  // (2026-09-23), so "drew since" cannot gate it.
+  // `stillOurs(screen)` is the first Enter's own draft test (round fourteen):
+  // a spare goes only on a frame that passes it, and a frame that ends with
+  // the message but no longer is that draft (a chip or text drawn in front)
+  // gets no Enter; what it was is left to confirmDelivery.
+  const watchEnterTaken = async (paneId, workspaceId, sent, checkTarget = async () => {}, stillOurs = () => true) => {
     let spares = 0;
     let held = 0;
     for (let poll = 0; poll < ENTER_WATCH_POLLS; poll += 1) {
@@ -1578,10 +2030,20 @@ function createSessionSend(deps) {
       if (state === 'taken') return state;
       held = state === 'holds' ? held + 1 : 0;
       if (held < 2) continue;
-      if (spares >= ENTER_SPARES) return 'unconfirmed';
+      // 'not-taken': the prompt still holds the message on two reads after
+      // every spare, or a spare was withheld over a changed draft; either way
+      // it is still in the prompt (round twenty-six: a captionless screenshot
+      // in that state was reported delivered).
+      if (spares >= ENTER_SPARES) return 'not-taken';
+      if (!stillOurs(screen)) {
+        logSend({ paneId, phase: 'draft-changed-before-retry' });
+        await captureSendScreen(paneId, 'draft-changed-before-retry', screen);
+        return 'not-taken';
+      }
       spares += 1;
       held = 0;
       logSend({ paneId, phase: 'enter-retry', attempt: spares });
+      await checkTarget();
       await typeInto(paneId, workspaceId, '\r');
     }
     return 'unconfirmed';
@@ -1652,10 +2114,12 @@ function createSessionSend(deps) {
     let livePolls = 0;
     let noticed = false;
     const stallPolls = Math.ceil(STALLED_WAIT_MS / PROMPT_HOLD_POLL_MS);
+    const startedAt = clock();
     for (let poll = 0; ; poll += 1) {
       const waitedOut = baseline == null
         ? poll >= polls
-        : (livePolls >= polls && redraws >= STALLED_REDRAWS) || poll >= Math.max(polls, stallPolls);
+        : (livePolls >= polls && redraws >= STALLED_REDRAWS) || poll >= Math.max(polls, stallPolls)
+          || (poll >= polls && clock() - startedAt >= STALLED_WAIT_MS);
       if (waitedOut) break;
       if (baseline != null && !noticed && redraws === 0 && poll >= polls && onStalled) {
         noticed = true;
@@ -1666,7 +2130,7 @@ function createSessionSend(deps) {
       }
       await sleep(PROMPT_HOLD_POLL_MS);
       screen = await readScreen(paneId, MENU_READ_LINES);
-      if (screen && previous != null && screen !== previous) redraws += 1;
+      if (screen && previous != null && screenContent(screen) !== screenContent(previous)) redraws += 1;
       if (screen) previous = screen;
       if (redraws > 0) livePolls += 1;
       if (!screen) { state = 'nobox'; continue; }
@@ -1678,7 +2142,10 @@ function createSessionSend(deps) {
       if (state === 'holds' && await dimSuggestion(paneId)) state = 'pending';
       if (state === 'holds') return { state, screen };
     }
-    return { state, screen, stalled: baseline != null && redraws === 0 };
+    // Stalled unless the CLI drew enough distinct frames to count as alive
+    // (round five: one frame and then the clock used to count as "drew", and
+    // the record of a queued paste was dropped on it).
+    return { state, screen, stalled: baseline != null && redraws < STALLED_REDRAWS };
   };
   const dimSuggestion = async (paneId) => {
     try { return await readSuggestion(paneId); } catch { return null; }
@@ -1730,6 +2197,35 @@ function createSessionSend(deps) {
   const promptHoldsUnmatchedError = () => {
     const error = new Error('Claude\'s prompt already has text in it that Harbor cannot match to your message (probably Harbor\'s earlier try, drawn differently), so nothing was typed or sent. Your text is kept. Open the >_ terminal and send or clear what is in the prompt, then send again');
     error.code = 'PROMPT_HOLDS_UNMATCHED';
+    return error;
+  };
+  // A DRAFT HARBOR DID NOT TYPE IS NEVER TYPED BEHIND (round fourteen, the
+  // Claude twin of CODEX_BOX_BUSY): with no record of Harbor's own typing, a
+  // prompt holding text or an attachment is someone else's draft, and Enter
+  // would submit it with this message.
+  const imageMissingError = () => {
+    const error = new Error('A picture in this message is no longer on disk (Harbor clears saved pictures after 14 days), so nothing was typed or sent. Your text is kept. Remove the picture and attach it again');
+    error.code = 'IMAGE_MISSING';
+    return error;
+  };
+  const imagePromptUnreadableError = () => {
+    const error = new Error('Harbor could not read Claude\'s prompt to attach the picture, so nothing was typed or sent. Your text is kept. Check the >_ terminal, then send again');
+    error.code = 'IMAGE_PROMPT_UNREADABLE';
+    return error;
+  };
+  const imageLeftAsTextError = () => {
+    const error = new Error('Claude did not attach the picture: its file path stayed in the prompt as text, so Harbor did not press Enter and nothing was sent. Clear the prompt in the >_ terminal, then attach the picture again');
+    error.code = 'IMAGE_NOT_ATTACHED';
+    return error;
+  };
+  const clipboardChangedError = () => {
+    const error = new Error('Something else was copied while Claude was taking the screenshot, so Harbor cannot be sure which picture is in Claude\'s prompt. Nothing was sent and your text is kept. Check the picture in the >_ terminal, then send or clear it');
+    error.code = 'CLIPBOARD_CHANGED';
+    return error;
+  };
+  const promptBusyError = () => {
+    const error = new Error('Claude\'s prompt already has text or an attachment in it that is not this message, so Harbor typed and sent nothing (Enter would have sent both). Your text is kept. Open the >_ terminal and send or clear what is in the prompt, then send again');
+    error.code = 'PROMPT_BUSY';
     return error;
   };
   // What a Claude prompt holds that someone TYPED: nothing when the box shows
@@ -1810,9 +2306,17 @@ function createSessionSend(deps) {
   // box held other text after Enter, or a dialog replaced it. With a
   // transcript to read, the send waits for it; without one (a pane: window, no
   // transcript yet) it says so instead of reporting sent.
+  const pictureNotTakenError = () => {
+    const error = new Error('Harbor pressed Enter three times, but Claude\'s prompt still shows the picture, so it has not gone. It is still in the prompt: press Enter in the >_ terminal, or clear it and send again');
+    error.code = 'NOT_TAKEN';
+    error.submission = 'unknown';
+    return error;
+  };
+  const PICTURE_UNCONFIRMED_NOTE = 'Harbor could not see Claude take the picture; check its window';
   const codexUnconfirmedError = () => {
     const error = new Error('Harbor pressed Enter, but Codex\'s box did not come back empty, so Harbor cannot tell whether your message went. Your text is kept. Check the >_ terminal before sending again');
     error.code = 'CODEX_UNCONFIRMED';
+    error.submission = 'unknown';
     return error;
   };
   const codexBoxChangedError = () => {
@@ -1850,7 +2354,7 @@ function createSessionSend(deps) {
   // "F[Pasted Content 1184 chars]" for 1,182 characters, matched nothing, and
   // was reported sent while it sat there. A box holding anything else after
   // Enter gets no further Enter (it may not be ours) and is not confirmed.
-  const watchCodexEnter = async (paneId, workspaceId, sent) => {
+  const watchCodexEnter = async (paneId, workspaceId, sent, checkTarget = async () => {}, stillOurs = () => true) => {
     for (let attempt = 0; ; attempt += 1) {
       let state = 'holds';
       let screen = '';
@@ -1873,7 +2377,14 @@ function createSessionSend(deps) {
         await captureSendScreen(paneId, 'codex-not-submitted', screen);
         throw codexNotSubmittedError();
       }
+      // The first Enter's draft test, on this frame (round fourteen).
+      if (!stillOurs(screen)) {
+        logSend({ paneId, phase: 'draft-changed-before-retry' });
+        await captureSendScreen(paneId, 'draft-changed-before-retry', screen);
+        return 'unconfirmed';
+      }
       logSend({ paneId, phase: 'enter-retry', attempt: 1 });
+      await checkTarget();
       await typeInto(paneId, workspaceId, '\r');
       noteCodexEnter(paneId, sent);
     }
@@ -1887,7 +2398,7 @@ function createSessionSend(deps) {
     error.code = 'CODEX_NOT_SUBMITTED';
     return error;
   };
-  const watchCodexSlashEnter = async (paneId, workspaceId, text) => {
+  const watchCodexSlashEnter = async (paneId, workspaceId, text, checkTarget = async () => {}) => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       let screen = '';
       for (let poll = 0; poll < CODEX_ENTER_POLLS; poll += 1) {
@@ -1900,7 +2411,16 @@ function createSessionSend(deps) {
         await captureSendScreen(paneId, 'codex-slash-not-submitted', screen);
         throw codexSlashNotSubmittedError();
       }
+      // A BARE command can open a picker locally on its first Enter (bare
+      // /model does, with no model round trip), so a spare written before
+      // Harbor sees the picker would choose its highlighted row (round five).
+      // Only a command with arguments, which runs without a picker, gets one.
+      if (!/\s/.test(String(text).trim())) {
+        logSend({ paneId, phase: 'codex-slash-no-spare' });
+        return 'unconfirmed';
+      }
       logSend({ paneId, phase: 'enter-retry', attempt: 1 });
+      await checkTarget();
       await typeInto(paneId, workspaceId, '\r');
     }
     return 'unconfirmed';
@@ -1913,7 +2433,42 @@ function createSessionSend(deps) {
   // submitted (or, if the new send differs, refused with the prompt left to the
   // user); still missing, the record is dropped and the send after that types
   // fresh, so a prompt that truly lost the keys is never a dead end.
-  const unshownTyped = new Map(); // paneId -> { sent, at }
+  // paneId -> { sent, at, stalled, screen }: typing Harbor did that the prompt
+  // has not shown yet. SHARED by every Harbor process (a file beside the pane
+  // locks), because the desktop and the phone server both type into the same
+  // panes: kept per process, the other one could not know a paste was still
+  // waiting inside a stalled Claude and typed a second message behind it
+  // (Sol's review, 2026-11-18). A harness with no send log keeps it in memory.
+  const unshownTyped = sharedPendingTyping();
+  // Same Map-shaped API (get/set/delete) as the per-process Map it replaced.
+  // Reads the lock directory at call time: it is defined further down.
+  function sharedPendingTyping() {
+    const memory = new Map();
+    const fileFor = (paneId) => path.join(paneLockDir, `${String(paneId).replace(/[^\w-]/g, '_')}.pending.json`);
+    return {
+      get(paneId) {
+        if (!paneLockDir) return memory.get(paneId);
+        try { return JSON.parse(fsSync.readFileSync(fileFor(paneId), 'utf8')); } catch { return undefined; }
+      },
+      // True when recorded. With a store, only the shared file counts: a
+      // record only this process could see is the bug this store exists for.
+      set(paneId, value) {
+        if (!paneLockDir) { memory.set(paneId, value); return true; }
+        try {
+          fsSync.mkdirSync(paneLockDir, { recursive: true });
+          const tmp = `${fileFor(paneId)}.${process.pid}.tmp`;
+          fsSync.writeFileSync(tmp, JSON.stringify(value));
+          fsSync.renameSync(tmp, fileFor(paneId));
+          return true;
+        } catch { return false; }
+      },
+      delete(paneId) {
+        memory.delete(paneId);
+        if (paneLockDir) { try { fsSync.rmSync(fileFor(paneId), { force: true }); } catch { /* gone */ } }
+        return true;
+      },
+    };
+  }
   // Codex messages this Harbor typed and has not seen submitted: paneId ->
   // { key, at }. A box whose match rests on a pasted block (codexBoxMatch
   // `opaque`) proves only the message's SHAPE, so pressing Enter on it without
@@ -1930,7 +2485,18 @@ function createSessionSend(deps) {
     const mine = Boolean(record && record.key === sent.text && clock() - record.at <= UNSHOWN_TYPED_MS);
     const match = codexBoxMatch(screen, { ...sent, extra: mine ? record.enters : 0 });
     if (match.state !== 'exact') return false;
-    if (!match.opaque) return true;
+    // Harbor's own record of typing exactly this text, or the box drawn with
+    // this send's spaces (round thirty-eight).
+    // A record of typing DIFFERENT text vetoes the screen (round thirty-nine),
+    // and the screen alone settles only a draft with no wrapped row.
+    if (!match.opaque) {
+      if (mine) return true;
+      const shared = unshownTyped.get(paneId);
+      const different = Boolean(record && record.key !== sent.text && clock() - record.at <= UNSHOWN_TYPED_MS)
+        || Boolean(shared && shared.provider === 'codex' && shared.sent?.text !== sent.text);
+      const raw = codexPromptBox(screen)?.raw || '';
+      return !different && drawnWithoutWraps(raw) && drawnSpacingAgrees(raw, sent.text);
+    }
     if (mine) sent.extra = record.enters;
     return mine;
   };
@@ -1940,8 +2506,204 @@ function createSessionSend(deps) {
     sent.extra = (sent.extra || 0) + 1;
     const record = codexTyped.get(paneId);
     if (record && record.key === sent.text) record.enters = sent.extra;
+    // The shared record carries the count too, for another Harbor process.
+    const shared = unshownTyped.get(paneId);
+    if (shared && shared.provider === 'codex' && shared.sent?.text === sent.text) unshownTyped.set(paneId, { ...shared, enters: sent.extra });
   };
   const UNSHOWN_TYPED_MS = 10 * 60_000;
+  // A record of unshown typing has NO age limit (Sol's review, rounds two and
+  // three: any expiry can drop it while a frozen pane still holds the keys).
+  // It is retired only on evidence: the prompt shows it, the pane's CLI was
+  // replaced, or the CLI visibly drew something since (screenContent below)
+  // and its prompt is still empty.
+  // The pane's current run (when the daemon spawned it): a record from an
+  // earlier run of the pane says nothing about this one.
+  const paneGeneration = async (paneId) => {
+    try {
+      const snap = await snapshot();
+      return (snap?.panes || []).find((candidate) => candidate.pane_id === paneId)?.created_at || null;
+    } catch { return null; }
+  };
+  // A CODEX PASTE IS QUEUED TOO (Sol's review, round three). A Codex the CPU
+  // starved reads nothing, its box stays empty, and a second send would paste
+  // behind the first. Its record is the same shared one as Claude's (written
+  // before the paste, provider 'codex'), and a send finding it waits while
+  // the screen has not changed since the paste; once Codex has drawn, a box
+  // holding the earlier text is judged by the box rules (Enter-only when it
+  // is this send's own text, refused otherwise), and an empty box ends the
+  // record (consumed or lost, never still queued in a CLI that is drawing).
+  const settleEarlierCodexPaste = async (paneId, screen, { onWait = null } = {}) => {
+    const earlier = unshownTyped.get(paneId);
+    if (!earlier || earlier.provider !== 'codex') return screen;
+    const generation = await paneGeneration(paneId);
+    if (earlier.generation && generation && earlier.generation !== generation) { unshownTyped.delete(paneId); return screen; }
+    if (earlier.phase === 'enter') {
+      const local = codexTyped.get(paneId);
+      if (await resolveEnterPhase(paneId, earlier, screen) && earlier.sent?.text && local?.key !== earlier.sent.text) {
+        codexTyped.set(paneId, { key: earlier.sent.text, at: clock(), enters: earlier.enters || 0 });
+      }
+      return screen;
+    }
+    const startedAt = clock();
+    let noticed = false;
+    // Three minutes, by the clock or by one-second polls, whichever ends first.
+    for (let poll = 0; earlier.screen && screenContent(screen) === screenContent(earlier.screen); poll += 1) {
+      if (clock() - startedAt >= STALLED_WAIT_MS || poll >= STALLED_WAIT_MS / 1000) {
+        logSend({ paneId, phase: 'codex-earlier-paste-stalled' });
+        throw codexEarlierStalledError();
+      }
+      if (!noticed && onWait) { noticed = true; onWait('waiting for Codex to show the text Harbor pasted earlier, so it is not pasted twice'); }
+      await sleep(1000);
+      screen = (await readScreen(paneId, CODEX_READ_LINES)) || screen;
+    }
+    // Three outcomes, never a stale frame (round six): no box drawn (a dialog,
+    // a blank or unreadable frame) refuses with the record kept; an empty box
+    // ends the record only if a second look still shows it drawn and empty;
+    // a box holding text goes to the box rules.
+    const draft = codexBoxDraft(screen);
+    if (draft === null) {
+      logSend({ paneId, phase: 'codex-earlier-paste-unresolved' });
+      throw codexEarlierUnresolvedError();
+    }
+    if (draft === '') {
+      if (!(await stillEmptyAfterAMoment(paneId, true))) {
+        logSend({ paneId, phase: 'codex-earlier-paste-unresolved' });
+        throw codexEarlierUnresolvedError();
+      }
+      logSend({ paneId, phase: 'codex-earlier-paste-gone' });
+      unshownTyped.delete(paneId);
+    } else if (earlier.sent?.text) {
+      codexTyped.set(paneId, { key: earlier.sent.text, at: clock(), enters: earlier.enters || 0 });
+    }
+    return screen;
+  };
+  // An "Enter pressed" record: kept (true) while the prompt still shows its
+  // text, so the same text gets Enter only and other text is refused; ended
+  // (false) once the text is gone (taken, or cleared). Never a wait.
+  const enterUnresolvedError = () => {
+    const error = new Error('Harbor already pressed Enter for this exact message and cannot read the window to see whether it went, so it was not typed again. Check the >_ terminal');
+    error.code = 'ENTER_UNRESOLVED';
+    error.submission = 'unknown';
+    return error;
+  };
+  const resolveEnterPhase = async (paneId, earlier, screen = null) => {
+    let now = screen;
+    if (now == null) { try { now = await readScreen(paneId, earlier.provider === 'codex' ? CODEX_READ_LINES : MENU_READ_LINES); } catch { now = null; } }
+    if (!now) return true; // unreadable: nothing proves the text is gone
+    const shows = earlier.provider === 'codex'
+      ? Boolean(codexBoxDraft(now))
+      : Boolean(composerBox(now) && composerSendState(now, earlier.sent) === 'holds');
+    if (shows) return true;
+    logSend({ paneId, phase: 'enter-phase-ended' });
+    unshownTyped.delete(paneId);
+    return false;
+  };
+  // Before ending a record on "the CLI drew and its prompt is empty", look
+  // once more a moment later (round four: a frame drawn in the instant before
+  // the CLI read the queued keys). True when the prompt is still empty.
+  // Only a fresh, readable frame with the composer drawn and EMPTY counts
+  // (round five: an unreadable frame or a dialog over the box had counted
+  // as empty).
+  const stillEmptyAfterAMoment = async (paneId, codex) => {
+    await sleep(1000);
+    let again = null;
+    try { again = await readScreen(paneId, codex ? CODEX_READ_LINES : MENU_READ_LINES); } catch { return false; }
+    if (!again) return false;
+    if (codex) return codexBoxDraft(again) === '';
+    if (!composerBox(again) || classifyBlocked(again)) return false;
+    return !(await promptDraft(paneId, again));
+  };
+  const earlierStalledError = (cli) => {
+    const error = new Error(`${cli} has drawn nothing for 3 minutes since text was typed into it earlier, so nothing new was typed (it would land behind that text). Your text is kept; check the >_ terminal`);
+    error.code = 'EARLIER_TYPING_STALLED';
+    return error;
+  };
+  // THE SAME GUARD FOR WRITES THAT SKIP THE TEXT PATH (round four): a
+  // clipboard image chord or a slash command typed into a Claude still
+  // holding earlier unshown typing would land behind it. Wait while nothing
+  // has been drawn since; then a prompt holding text refuses, and an empty
+  // prompt in an established Claude ends the record.
+  const settleEarlierClaudeTyping = async (paneId, { onWait = null } = {}) => {
+    const earlier = unshownTyped.get(paneId);
+    if (!earlier || earlier.provider === 'codex') return;
+    const generation = await paneGeneration(paneId);
+    if (earlier.generation && generation && earlier.generation !== generation) { unshownTyped.delete(paneId); return; }
+    let screen = await readScreen(paneId, MENU_READ_LINES);
+    if (earlier.phase === 'enter') {
+      if (await resolveEnterPhase(paneId, earlier, screen)) throw earlierLandedError();
+      return;
+    }
+    const startedAt = clock();
+    let noticed = false;
+    for (let poll = 0; earlier.screen && screenContent(screen) === screenContent(earlier.screen); poll += 1) {
+      if (clock() - startedAt >= STALLED_WAIT_MS || poll >= STALLED_WAIT_MS / 1000) {
+        logSend({ paneId, phase: 'earlier-typing-stalled' });
+        throw earlierStalledError('Claude');
+      }
+      if (!noticed && onWait) { noticed = true; onWait(EARLIER_WAIT_NOTICE); }
+      await sleep(1000);
+      screen = (await readScreen(paneId, MENU_READ_LINES)) || screen;
+    }
+    if (composerBox(screen) && await promptDraft(paneId, screen)) {
+      await captureSendScreen(paneId, 'holds-unmatched', screen);
+      throw composerSendState(screen, earlier.sent) === 'holds' ? earlierLandedError() : promptHoldsUnmatchedError();
+    }
+    if ((deliveredPanes.has(paneId) || await paneIsPastStartup(paneId)) && await stillEmptyAfterAMoment(paneId, false)) {
+      logSend({ paneId, phase: 'earlier-typing-lost' });
+      unshownTyped.delete(paneId);
+      return;
+    }
+    throw earlierStalledError('Claude');
+  };
+  const codexEarlierUnresolvedError = () => {
+    const error = new Error('Harbor cannot see whether the text it pasted into Codex earlier is still waiting there (no readable box), so nothing new was typed. Your text is kept; check the >_ terminal');
+    error.code = 'EARLIER_TYPING_UNRESOLVED';
+    return error;
+  };
+  const codexEarlierStalledError = () => {
+    const error = new Error('Codex has drawn nothing for 3 minutes since text was pasted into it earlier, so nothing new was typed (it would land behind that text). Your text is kept; check the >_ terminal');
+    error.code = 'EARLIER_TYPING_STALLED';
+    return error;
+  };
+  // strict (an agent's send, harbor-msg and harbor-send.mjs): a Claude pane
+  // keeps its launch id after /clear (the keeper rebinds only Codex and
+  // Cursor), so the pane check alone would type an agent's message for the old
+  // conversation into the new one. The inbox registry records the /clear
+  // (clearedInto); a strict send refuses it (round six). Pat's own sends
+  // address the window he is looking at, so they are not strict.
+  const verifyPaneServes = async (sessionId, target, { strict = false } = {}) => {
+    const current = ((await snapshot())?.panes || []).find((candidate) => candidate.pane_id === target.paneId);
+    if (!current || !await paneServes(sessionId, target, current)) throw targetChangedError();
+    if (strict) assertNotCleared(sessionId);
+  };
+  const assertNotCleared = (sessionId) => {
+    let cleared = null;
+    // The marker itself, even beside a live record (round twenty-two: a resume
+    // in another process does not make THIS pane, cleared away from the
+    // session but still advertising its id, hold it again).
+    try { cleared = peerInbox.clearedMarker(sessionId)?.clearedInto || null; } catch { /* no registry: nothing recorded */ }
+    if (!cleared) return;
+    const error = new Error(`That session ran /clear and is now ${cleared}; a message for the old conversation was not typed into the new one`);
+    error.code = 'SESSION_CLEARED';
+    error.clearedInto = cleared;
+    throw error;
+  };
+  const withResumeLaunch = (fn) => withLock(`harbor-resume-launch:${paneLockDir || process.pid}`, fn, { waitMs: 120_000 });
+  const draftChangedError = () => {
+    const error = new Error('The prompt no longer showed exactly this message when Harbor was about to press Enter, so it pressed nothing. Your text is kept; check the >_ terminal');
+    error.code = 'DRAFT_CHANGED';
+    return error;
+  };
+  const targetChangedError = () => {
+    const error = new Error('That session\'s window closed or started a different conversation just before this message was typed, so nothing was typed. Your text is kept; send again');
+    error.code = 'TARGET_CHANGED';
+    return error;
+  };
+  const pendingRecordError = () => {
+    const error = new Error('Harbor could not record this send in its state folder, so nothing was typed (an unrecorded send could be typed twice). Your text is kept');
+    error.code = 'PENDING_RECORD_FAILED';
+    return error;
+  };
   const STARTUP_WAIT_NOTICE = 'Claude is still starting up. Your message is typed and goes in as soon as its prompt shows it';
   const EARLIER_WAIT_NOTICE = 'waiting for Claude to show the message Harbor typed earlier, so it is not typed twice';
 
@@ -1950,26 +2712,37 @@ function createSessionSend(deps) {
   // send it twice. Only an exact match counts. A box that merely ENDS like the
   // message (two copies, or a paste placeholder) is refused in deliver():
   // pressing Enter there sends the extra, and typing again adds another copy.
-  const promptHoldsExactly = (screen, text) => {
+  // `recorded`: Harbor's own record says it typed exactly this text here, so
+  // the box only has to read like it (whitespace dropped, chips for paths).
+  // Without one the screen must settle it alone: no wrapped row, this send's spaces.
+  const promptHoldsExactly = (screen, text, { recorded = false } = {}) => {
     const found = composerBox(screen);
     if (!found || !text || isFleetView(screen)) return false;
     const shown = found.shell ? squashSpace(text).replace(/^!/, '') : squashSpace(text);
+    const typed = found.shell ? String(text).trim().replace(/^!/, '') : text;
     // Exactly this send, or this send with Claude's drawn completion of its
-    // last slash word after it (slashGhostFollows).
-    if (found.inside === shown || slashGhostFollows(found.raw, shown, text, { exact: true })) return true;
-    // Or exactly this send with its image paths drawn as chips, one per path.
-    const chipped = found.shell ? null : textAfterImageChips(text);
+    // last slash word after it (slashGhostFollows), drawn with this send's own
+    // spaces (round thirty-eight).
+    const drafts = [found.raw, ...slashGhostDrafts(found.raw, text)];
+    if (drafts.some((draft) => squashSpace(draft) === shown
+      && (recorded || (drawnWithoutWraps(draft) && drawnSpacingAgrees(draft, typed))))) return true;
+    // Or exactly this send with its image paths drawn as chips, one per path:
+    // only on the record's word, since a chip never says which picture it is.
+    const chipped = found.shell || !recorded ? null : textAfterImageChips(text);
     if (!chipped || countImageChips(found.inside) !== chipped.imageCount) return false;
-    const rest = found.inside.replace(IMAGE_CHIPS_RE, '');
-    return rest === chipped.rest
-      || slashGhostRests(found.raw, text).some((reading) => reading.replace(IMAGE_CHIPS_RE, '') === chipped.rest);
+    return drafts.some((draft) => squashSpace(draft).replace(IMAGE_CHIPS_RE, '') === chipped.rest);
   };
 
   // No default. A silent `= 'claude'` here is what let a codex pane be driven
   // down the claude path: wrong readiness test, wrong composer guard, and a
   // Claude chip on a gpt-5.6-sol session. Callers resolve it explicitly.
   // `onWait(detail)` lets a caller say why a send is taking minutes.
-  const deliverUnlocked = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null, exactDraftOnly = false } = {}) => {
+  const deliverUnlocked = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null, exactDraftOnly = false, verifyTarget = null, onVerified = null } = {}) => {
+    // The target is checked again at the input boundary (Sol's review, round
+    // eleven): the composer reads between the in-lock check and the first
+    // keystroke take long enough for a /clear typed in the raw terminal.
+    const checkTarget = typeof verifyTarget === 'function' ? verifyTarget : async () => {};
+    let enterWritten = false;
     const assertExactDraft = screen => {
       if (exactDraftOnly && !ownsCodexBox(paneId, screen, { text })) {
         const error = new Error('Codex\'s prepared draft changed before it could be sent. Harbor typed nothing. Your text is kept. Check the draft in the >_ terminal and send again.');
@@ -1984,8 +2757,8 @@ function createSessionSend(deps) {
       const t0 = Date.now();
       await acquireControl(paneId, workspaceId);
       debug('deliver: control after', Date.now() - t0, 'ms; controlled =', terminalBridge.getState().controlledPaneId);
-      if (provider === 'claude') await assertComposerSafe(paneId);
-      else await assertNotDeadShell(paneId);
+      const safeScreen = provider === 'claude' ? await assertComposerSafe(paneId) : '';
+      if (provider !== 'claude') await assertNotDeadShell(paneId);
 
       // A FRESH non-claude pane is still starting its TUI, and codex swallows
       // whatever arrives before it is listening. Live-caught 2026-08-08: a new
@@ -2053,14 +2826,18 @@ function createSessionSend(deps) {
           await captureSendScreen(paneId, 'codex-no-prompt', ready.screen);
           throw codexNoPromptError(ready.screen);
         }
-        const draft = codexBoxDraft(ready.screen);
-        assertExactDraft(ready.screen);
+        // An earlier paste into a frozen Codex is still queued, and its box
+        // looks empty: wait for Codex to draw before judging the box.
+        // Every Codex write: text, image paths and slash commands alike.
+        const readyScreen = await settleEarlierCodexPaste(paneId, ready.screen, { onWait });
+        const draft = codexBoxDraft(readyScreen);
+        assertExactDraft(readyScreen);
         // Enter-only for an earlier try needs proof it is ours: exact visible text,
         // or a pasted block of its shape that this Harbor itself typed (ownsCodexBox).
-        const ownEarlierTry = Boolean(text) && !images.length && ownsCodexBox(paneId, ready.screen, { text });
+        const ownEarlierTry = Boolean(text) && !images.length && ownsCodexBox(paneId, readyScreen, { text });
         if (draft && !ownEarlierTry) {
           logSend({ paneId, phase: 'codex-box-busy' });
-          await captureSendScreen(paneId, 'codex-box-busy', ready.screen);
+          await captureSendScreen(paneId, 'codex-box-busy', readyScreen);
           throw codexBoxBusyError(draft);
         }
       }
@@ -2081,72 +2858,288 @@ function createSessionSend(deps) {
       // threw. Nothing in the mobile gate caught it, because that gate stubs the
       // pty boundary and so never reaches this line.
       //
+      // DESKTOP SCREENSHOTS GO BY PATH TOO (2026-11-19, after Sol's review,
+      // rounds twenty-four and twenty-five). The clipboard is the whole
+      // machine's: any copy in Harbor or another app, or a Win+Shift+S, made
+      // before a slow Claude read the chord swapped the picture, and no lock or
+      // fingerprint can see a copy that is put back. Claude 2.1.299 and later
+      // turn a pasted image path into the same inline attachment, so the reason
+      // f71f39b left paths (a path reached Claude as a Read) no longer holds,
+      // and Pat's clipboard is never overwritten. Pat: "your call"; proven by
+      // scripts/drive-prompt-gate-win.js against the real CLI. The clipboard
+      // route below runs only with pasteClaudeImagesFromClipboard.
+      //
       // With no clipboard, the honest delivery is the path: Claude reads the
       // file, which is the same route `+ add files` already uses for every
       // non-image attachment. It is a Read rather than an inline attachment, so
       // it is deliberately NOT the desktop's behaviour, only the one that works
       // where a clipboard cannot exist.
-      const canPaste = typeof setXClipboardImage === 'function';
+      const canPaste = pasteClaudeImagesFromClipboard === true && typeof setXClipboardImage === 'function';
       // The paste CHORD is per-OS: the Claude CLI attaches a clipboard image on
       // Ctrl+V (0x16) on Linux, but on Windows it binds image paste to Alt+V
       // (ESC v) — proven against a live ConPTY session 2026-08-13: 0x16 did
       // nothing (no marker, 12s timeout, "Claude never confirmed the image
       // attachment" on every image send), \x1bv attached [Image #1] at once.
       const imagePasteChord = process.platform === 'win32' ? '\x1bv' : '\x16';
+      if (provider === 'claude' && (images.length || isSlashCommand(text))) await settleEarlierClaudeTyping(paneId, { onWait });
+      // A screenshot paste this pane has not read yet blocks every new write to
+      // it (round eleven): typed behind the queued chord, the next message
+      // would carry that screenshot.
+      if (provider === 'claude') await settleOwedChord(paneId, { onWait });
+      if (images.length) await checkTarget();
+      for (const imagePath of images) {
+        if (!(await imageFileReady(imagePath))) {
+          logSend({ paneId, phase: 'image-missing' });
+          throw imageMissingError();
+        }
+      }
       const pathOnlyImages = [];
       let lastImageMarker = null;
+      // Image chips the composer may show at Enter: the ones it held before
+      // this send, plus this send's own (round thirteen).
+      let chipsBefore = null;
+      let chipsPasted = 0;
+      // The markers this send's own pastes drew, in order (round sixteen: a
+      // count let a REPLACED chip through; identity is checked, not number).
+      const pastedMarkers = [];
       for (const imagePath of images) {
-        if (codexGated) { lastImageMarker = await pasteCodexImage(paneId, workspaceId, imagePath); continue; }
-        if (!canPaste) { pathOnlyImages.push(imagePath); continue; }
+        if (codexGated) { lastImageMarker = await pasteCodexImage(paneId, workspaceId, imagePath); if (lastImageMarker) pastedMarkers.push(lastImageMarker); continue; }
+        // EACH PICTURE BY ITSELF, ITS CHIP SEEN BEFORE ANYTHING ELSE IS TYPED
+        // (Sol's review, round twenty-eight). A Claude picture is its quoted
+        // path, pasted alone, and waited for like the clipboard chord: pasted
+        // together with the caption, a caption that was itself an image path
+        // became a second attachment. The caption then goes the text route.
+        // No Claude picture is ever prepended to the text any more (round
+        // twenty-nine: an unreadable screen fell back to that form, and its
+        // check accepted a path left as text). Cursor reads a labelled line.
+        if (provider !== 'claude') { pathOnlyImages.push(imagePath); continue; }
         let beforeMax = 0;
         let beforeScreen = null;
-        try { beforeScreen = await readPane(paneId); beforeMax = maxImageMarker(beforeScreen); } catch { /* polling still verifies an increase */ }
-        await setXClipboardImage(imagePath);
-        await typeInto(paneId, workspaceId, imagePasteChord);
-        lastImageMarker = `[Image #${await waitForImageMarker(paneId, beforeMax, {
-          baseline: beforeScreen,
-          onStalled: onWait ? () => onWait(STALLED_NOTICE) : null,
-        })}]`;
+        // ONE CLIPBOARD, MANY PANES (Sol's review, 2026-11-18): Claude reads the
+        // clipboard when it gets to the chord, not when Harbor sends it, so a
+        // stalled pane could attach the image another pane's send put there
+        // later. The clipboard is held from the write until the marker shows,
+        // and a paste Claude never read leaves it EMPTY, so a late read
+        // attaches nothing rather than someone else's screenshot.
+        // A pane that never read its chord still owes a clipboard read (round
+        // two of the review: clearing the clipboard could not stop it reading
+        // the NEXT image, and wiped whatever Pat had copied). Until that pane
+        // draws its own image chip or its CLI is gone, other images go by path
+        // (Claude attaches a pasted image path itself, the phone's route) and
+        // the clipboard keeps that pane's image. Checked INSIDE the clipboard
+        // lock (round three: checked before it, a send already waiting for the
+        // lock missed the debt the holder was about to record).
+        const pasteOne = async (viaClipboard) => {
+          if (viaClipboard && await clipboardOwed()) return null;
+          // The chip count to beat is read HERE, inside the lock, and must be
+          // readable (round six: a failed read left 0, and an old chip in the
+          // scrollback then "confirmed" a chord still queued, ending its debt).
+          // The SAME scope as the confirmation: the composer box (round eight:
+          // a chip quoted in the conversation above set the bar so high that a
+          // real attachment never cleared it). Read up to three times; still
+          // unreadable, or no box drawn, the send is refused before anything
+          // is written (round twenty-nine).
+          let composerChips = null;
+          for (let attempt = 0; attempt < 3 && composerChips === null; attempt += 1) {
+            if (attempt) await sleep(200);
+            try { beforeScreen = await readPane(paneId, MENU_READ_LINES); } catch { beforeScreen = null; }
+            composerChips = beforeScreen && String(beforeScreen).trim() ? composerImageMax(beforeScreen) : null;
+          }
+          if (composerChips === null) {
+            logSend({ paneId, phase: 'image-prompt-unreadable' });
+            throw imagePromptUnreadableError();
+          }
+          beforeMax = composerChips;
+          if (chipsBefore === null) {
+            // The first write of this send: the prompt must hold no draft
+            // (round fourteen; the chord would attach to someone else's).
+            if (await promptDraft(paneId, beforeScreen)) {
+              logSend({ paneId, phase: 'prompt-busy', before: 'image' });
+              await captureSendScreen(paneId, 'prompt-busy', beforeScreen);
+              throw promptBusyError();
+            }
+            chipsBefore = countImageChips(composerBox(beforeScreen)?.inside || '');
+          }
+          const written = viaClipboard ? await setXClipboardImage(imagePath) : null;
+          if (!owedChords.set(paneId, { beforeMax, generation: await paneGeneration(paneId) })) throw pendingRecordError();
+          let chordSent = false;
+          try {
+            await typeInto(paneId, workspaceId, viaClipboard ? imagePasteChord : asPaste(`"${imagePath}"`));
+            chordSent = true;
+            // The screen right after the chord, on the record at once (round
+            // thirteen): a Harbor that exits during the wait must leave the
+            // next one a "since" to judge from. Read AFTER the write, never
+            // before it (round four's rule: a frame drawn between a pre-write
+            // read and the write is no evidence the CLI read anything).
+            try {
+              const afterChord = await readPane(paneId, MENU_READ_LINES);
+              const owed = owedChords.get(paneId);
+              if (afterChord && String(afterChord).trim() && owed && !owed.unreadable) owedChords.set(paneId, { ...owed, screen: afterChord });
+            } catch { /* the next send takes its own first read as the baseline */ }
+            const marker = `[Image #${await waitForImageMarker(paneId, beforeMax, {
+              baseline: beforeScreen,
+              onStalled: onWait ? () => onWait(STALLED_NOTICE) : null,
+              literal: viaClipboard ? null : squashSpace(`"${imagePath}"`),
+            })}]`;
+            // The chip proves Claude read A clipboard image, not that it read
+            // THIS one: anything copied between the write and Claude's read
+            // replaced it (round twenty-four: Harbor's own Board "Copy as PNG"
+            // did, and the other picture was submitted). The clipboard must
+            // still hold exactly what was written; otherwise the chip in the
+            // prompt may be someone else's picture, so nothing is pressed and
+            // the pane stays blocked until that prompt is sent or cleared.
+            if (typeof written?.stillOnClipboard === 'function' && !(await written.stillOnClipboard())) {
+              const owed = owedChords.get(paneId);
+              if (owed && !owed.unreadable) owedChords.set(paneId, { ...owed, inPrompt: true });
+              logSend({ paneId, phase: 'clipboard-changed' });
+              throw clipboardChangedError();
+            }
+            owedChords.delete(paneId);
+            return marker;
+          } catch (error) {
+            // A chord the keeper definitely refused was never written: nothing
+            // is owed. A written or unconfirmed one may still be read, so its
+            // debt (recorded before the chord) stands.
+            if ((!chordSent && error?.code !== 'INPUT_UNCONFIRMED') || error?.code === 'IMAGE_NOT_ATTACHED') owedChords.delete(paneId);
+            else {
+              // The last screen this paste saw: only the CLI drawing after it
+              // can show the chord was read (see settleOwedChord).
+              let last = null;
+              try { last = await readPane(paneId, MENU_READ_LINES); } catch { /* none */ }
+              const debt = owedChords.get(paneId);
+              if (debt && !debt.unreadable) owedChords.set(paneId, { ...debt, screen: last || null });
+            }
+            throw error;
+          }
+        };
+        // With the clipboard route on, a pane owing another pane's clipboard
+        // read sends this picture by path instead.
+        let pasted = canPaste
+          ? await withLock(`harbor-clipboard:${paneLockDir || process.pid}`, () => pasteOne(true), { waitMs: 60_000, onWait: onWait ? () => onWait(CLIPBOARD_WAIT_NOTICE) : null })
+          : null;
+        if (pasted === null) pasted = await pasteOne(false);
+        lastImageMarker = pasted;
+        pastedMarkers.push(pasted);
+        chipsPasted += 1;
       }
       if (pathOnlyImages.length) {
-        // Claude: one quoted path per line, nothing else on it, so each
-        // converts to an attachment (see textAfterImageChips). Quoted, because a
-        // bare POSIX path would start the message with "/" and be typed as a
-        // slash command (isSlashCommand). Codex attaches its own
-        // (pasteCodexImage); cursor reads the label.
+        // Cursor reads a labelled line. Claude pastes each picture by itself
+        // (above); Codex attaches its own (pasteCodexImage).
         const prefix = pathOnlyImages.length === 1 ? 'Image:' : 'Images:';
-        const line = provider === 'claude' ? pathOnlyImages.map((p) => `"${p}"`).join('\n') : `${prefix} ${pathOnlyImages.join(' ')}`;
+        const line = `${prefix} ${pathOnlyImages.join(' ')}`;
         text = text ? `${line}\n${text}` : line;
       }
       // A Claude message (not a slash command: its picker draws over the box and
       // its delivery is best-effort) presses Enter only once the prompt SHOWS
       // the text; see waitForPromptToHold.
-      const gated = provider === 'claude' && !isSlashCommand(text);
+      // A Claude prompt holding a picture starts with its chip, so a caption
+      // that starts with "/" is a message, never a command (Sol's review,
+      // round thirty: it was typed and checked as one, and a caption Claude
+      // dropped went unseen, the picture submitted alone).
+      const typedAsSlash = isSlashCommand(text) && !(provider === 'claude' && images.length);
+      const gated = provider === 'claude' && !typedAsSlash;
       const codexSlash = provider === 'codex' && Boolean(text) && isSlashCommand(text);
       let codexSlashShown = false;
       const sent = { text, pasted: mayCollapseToPlaceholder(text), imageMarker: lastImageMarker };
       let alreadyInPrompt = false;
       let baseline = null; // the screen just before typing (waitForPromptToHold)
+      let verifiedScreen = null; // the frame that showed this send, before Enter
+      // A message that quotes a chip ("[Image #3]" in its own words) draws it
+      // as text in the box: those are this send's too.
+      const quotedChips = countImageChips(squashSpace(text));
+      // A line of the message's own that is nothing but an image path becomes a
+      // chip when Claude reads it from a paste, as it does for anyone pasting
+      // that text: those chips are the message's own words, allowed for text
+      // sends and captions alike (round twenty-nine, argued: refusing them
+      // would refuse every message that lists a picture's path on its own line).
+      const chipsAllowed = () => (chipsBefore || 0) + chipsPasted + (textAfterImageChips(text)?.imageCount || 0) + quotedChips;
+      // Every marker this send pasted must be shown, each by an occurrence of
+      // its own beyond any the message quotes (round seventeen: a caption
+      // quoting "[Image #1]" stood in for the chip it had lost). Hidden
+      // chips are allowed only on POSITIVE evidence that the box's front is
+      // out of view, which only Codex draws (its clipped mark); Claude draws
+      // none, so its chips must show (round seventeen: a short leftover of a
+      // caption read as a clipped long one). A caption long enough to push a
+      // chip out of Claude's box is far past the size Claude collapses a paste
+      // into a one-line placeholder, so the refusal costs nothing real.
+      const occurrences = (hay, needle) => hay.split(needle).length - 1;
+      // The message's own words as the box shows them: none when the box holds
+      // nothing but chips and ONE paste placeholder (Claude's or Codex's), since
+      // the caption then sits collapsed inside it and its quotes are hidden
+      // (round nineteen: a hidden quote was subtracted from the one visible
+      // chip, and a whole, correct screenshot send was refused).
+      const ONE_PASTE_RE = new RegExp(`^(?:${PASTE_PLACEHOLDER_RE.source}|${CODEX_PASTE_SEG_RE.source})$`);
+      const shownWords = (inside) => (ONE_PASTE_RE.test(inside.replace(IMAGE_CHIPS_RE, '')) ? '' : squashSpace(text));
+      const markersShown = (inside, clipped = false) => {
+        if (!pastedMarkers.length) return true;
+        const quoted = shownWords(inside);
+        const own = (marker) => occurrences(inside, squashSpace(marker)) > occurrences(quoted, squashSpace(marker));
+        if (pastedMarkers.every(own)) return true;
+        return clipped && countImageChips(inside) === 0;
+      };
+      const chipsWithin = (screen) => {
+        const inside = composerBox(screen)?.inside || '';
+        return countImageChips(inside) <= chipsAllowed() && markersShown(inside);
+      };
       let earlier = unshownTyped.get(paneId) || null;
-      if (earlier && clock() - earlier.at > UNSHOWN_TYPED_MS) {
+      if (earlier && earlier.provider === 'codex') earlier = null; // a Codex record is handled at the Codex box
+      const generation = (gated || codexGated) && text && !lastImageMarker ? await paneGeneration(paneId) : null;
+      if (earlier && earlier.generation && generation && earlier.generation !== generation) {
         unshownTyped.delete(paneId);
         earlier = null;
       }
+      if (earlier?.phase === 'enter' && !(await resolveEnterPhase(paneId, earlier))) earlier = null;
       if (gated && text && !lastImageMarker) {
         const screen = await readScreen(paneId, MENU_READ_LINES);
         baseline = screen || null;
+        if (chipsBefore === null) chipsBefore = countImageChips(composerBox(screen)?.inside || '');
         const suggestion = composerBox(screen) ? await dimSuggestion(paneId) : null;
         // The prompt draws only the last ~25 lines of a long message, so no
         // long message can match exactly; it ending like this one is the
         // evidence. That cannot be chance for a paste or anything longer than
         // the compared tail, but a short message can end a draft by chance
-        // ("blue blocks" ending "keep the blue blocks"), so those type as before.
+        // ("blue blocks" ending "keep the blue blocks"); such a draft is not
+        // this send, and the busy check below refuses it (round fourteen).
         const endsLikeIt = !suggestion && composerSendState(screen, sent) === 'holds'
           && (sent.pasted || squashSpace(text).length > SEND_TAIL_CHARS);
-        const sameAsEarlier = Boolean(earlier && squashSpace(earlier.sent.text) === squashSpace(text));
-        alreadyInPrompt = !suggestion && (promptHoldsExactly(screen, text) || (sameAsEarlier && endsLikeIt));
+        // The same message exactly (round thirty-eight: a draft differing only
+        // in its spaces is another message, and its Enter-only retry sent it).
+        const sameAsEarlier = Boolean(earlier && exactWords(earlier.sent.text) === exactWords(text));
+        // A record of a DIFFERENT draft vetoes the screen's word (round
+        // thirty-nine: an earlier "releasenotes.txt" wrapped between "release"
+        // and "notes.txt", and an earlier older.png drawn as the same chip, were
+        // both submitted for the new request).
+        const differentEarlier = Boolean(earlier) && !sameAsEarlier;
+        // Enter-only for an earlier try needs evidence of the WHOLE draft
+        // (round fifteen: "ends like it" took unrelated text drawn in front of
+        // a swallowed message as the earlier try, and submitted both): the
+        // frame its own Enter verified, which an "Enter pressed" record keeps;
+        // without one, everything the prompt shows must be this send: the
+        // message exactly, or a part of it that ends it (Claude draws only a
+        // long prompt's last lines, so text in front of a message that fits is
+        // visible and refused, the rule Codex's clipped box follows). A paste
+        // placeholder alone is not that evidence (round sixteen: any paste of
+        // the same shape draws one); without the record it is refused.
+        const earlierVerified = earlier?.phase === 'enter' && earlier.screen ? earlier.screen : null;
+        const visibleIsThisSend = () => {
+          const found = composerBox(screen);
+          if (!found?.inside) return false;
+          // Claude's drawn completion of a last slash word is not a draft.
+          return [found.inside, ...slashGhostRests(found.raw, text)].some((rest) => rest && squashSpace(text).endsWith(rest));
+        };
+        alreadyInPrompt = !suggestion && ((!differentEarlier && promptHoldsExactly(screen, text))
+          || (sameAsEarlier && promptHoldsExactly(screen, text, { recorded: true }))
+          || (sameAsEarlier && endsLikeIt && (earlierVerified
+            ? sameComposerDraft(earlierVerified, screen, text)
+            : visibleIsThisSend())));
         if (alreadyInPrompt) {
           logSend({ paneId, phase: 'already-in-prompt' });
+          // The draft here is this text-only send's earlier try, so the only
+          // chips it may carry are its own path images: a chip in front of it
+          // was drawn by someone else, and counting it as "held before" let
+          // the Enter-only retry submit it (round fourteen's follow-on: a
+          // spare refused over a foreign chip, then the same text resent).
+          if (!earlier?.sent?.imageMarker) chipsBefore = 0;
         } else if (endsLikeIt) {
           logSend({ paneId, phase: 'prompt-holds-more' });
           await captureSendScreen(paneId, 'holds-more', screen);
@@ -2169,17 +3162,38 @@ function createSessionSend(deps) {
             logSend({ paneId, phase: 'prompt-holds-unmatched', earlier: showsEarlier });
             await captureSendScreen(paneId, 'holds-unmatched', screen);
             if (!showsEarlier) throw promptHoldsUnmatchedError();
-            throw squashSpace(earlier.sent.text) === squashSpace(text) ? promptHoldsMoreError() : earlierLandedError();
+            throw exactWords(earlier.sent.text) === exactWords(text) ? promptHoldsMoreError() : earlierLandedError();
           }
           // A Claude that has drawn nothing since that typing has not read it
           // yet: the record stands and this send waits for it (STALLED_WAIT_MS).
-          const stillStalled = Boolean(earlier.stalled && earlier.screen && screen === earlier.screen);
+          const stillStalled = Boolean(earlier.stalled && earlier.screen && screenContent(screen) === screenContent(earlier.screen));
           if (stillStalled) logSend({ paneId, phase: 'earlier-typing-stalled' });
-          else if (deliveredPanes.has(paneId) || await paneIsPastStartup(paneId)) {
+          else if ((deliveredPanes.has(paneId) || await paneIsPastStartup(paneId)) && await stillEmptyAfterAMoment(paneId, false)) {
             logSend({ paneId, phase: 'earlier-typing-lost' });
             unshownTyped.delete(paneId);
             earlier = null;
           }
+        }
+        // No record of Harbor's own typing explains a draft: it is someone
+        // else's, and this message would be sent with it (round fourteen: an
+        // earlier draft holding text and a screenshot was submitted with an
+        // unrelated message). Refused before the first keystroke.
+        if (!alreadyInPrompt && composerBox(screen) && await promptDraft(paneId, screen)) {
+          logSend({ paneId, phase: 'prompt-busy', before: 'text' });
+          await captureSendScreen(paneId, 'prompt-busy', screen);
+          throw promptBusyError();
+        }
+      }
+      // A Claude slash command is typed raw at the end of whatever the prompt
+      // holds, so a draft there would be submitted as a message with the
+      // command glued on (round fourteen's sibling). No box (a picker or a
+      // dialog the command flow expects) is left as before.
+      if (provider === 'claude' && typedAsSlash) {
+        const screen = safeScreen;
+        if (composerBox(screen) && await promptDraft(paneId, screen)) {
+          logSend({ paneId, phase: 'prompt-busy', before: 'slash' });
+          await captureSendScreen(paneId, 'prompt-busy', screen);
+          throw promptBusyError();
         }
       }
       // A send whose earlier try is still sitting in Codex's box (the error
@@ -2190,7 +3204,14 @@ function createSessionSend(deps) {
         logSend({ paneId, phase: 'already-in-prompt' });
       }
       // Typed earlier and never shown: wait for THAT, type nothing new.
-      const awaitEarlier = Boolean(gated && text && !lastImageMarker && earlier && !alreadyInPrompt);
+      // An "Enter pressed" record never makes a send wait (it was resolved
+      // above; kept only while the text shows or the screen cannot be read).
+      // The SAME text is refused while it stands: its first Enter may land.
+      if (gated && text && earlier?.phase === 'enter' && !alreadyInPrompt && squashSpace(earlier.sent.text) === squashSpace(text)) {
+        logSend({ paneId, phase: 'enter-phase-unresolved' });
+        throw enterUnresolvedError();
+      }
+      const awaitEarlier = Boolean(gated && text && !lastImageMarker && earlier && earlier.phase !== 'enter' && !alreadyInPrompt);
       if (awaitEarlier) logSend({ paneId, phase: 'awaiting-earlier-typing' });
       if (exactDraftOnly) {
         assertExactDraft(await readScreen(paneId, CODEX_READ_LINES));
@@ -2199,8 +3220,22 @@ function createSessionSend(deps) {
       // Slash command tokens must be typed raw so the CLI parses them. The
       // trailing space closes its popup; any remainder keeps the normal
       // single-line/raw or multi-line/bracketed-paste behavior.
-      if (text && !alreadyInPrompt && !awaitEarlier) {
-        if (isSlashCommand(text)) {
+      // THE RECORD GOES DOWN BEFORE THE KEYS (Sol's review, round two): written
+      // after the wait, a sender that died mid-wait (or whose keys could not be
+      // confirmed) left nothing, and the next sender typed the message again
+      // behind keys still queued in a frozen Claude. Marked stalled against the
+      // screen read just before typing: until that screen changes, the keys
+      // count as queued. Unwritable means nothing is typed.
+      // The target first (round twelve: checked after the record, a refusal
+      // left a record of text that was never typed).
+      if (text && !alreadyInPrompt && !awaitEarlier) await checkTarget();
+      const provisional = Boolean((gated || codexGated) && text && !lastImageMarker && !alreadyInPrompt && !awaitEarlier && !typedAsSlash);
+      const before = provisional && codexGated ? await readScreen(paneId, CODEX_READ_LINES) : baseline;
+      if (provisional && !unshownTyped.set(paneId, { sent: { text: sent.text, pasted: sent.pasted, imageMarker: sent.imageMarker }, at: clock(), stalled: Boolean(before), screen: before || null, generation, provisional: true, provider: codexGated ? 'codex' : 'claude' })) {
+        throw pendingRecordError();
+      }
+      if (text && !alreadyInPrompt && !awaitEarlier) try {
+        if (typedAsSlash) {
           const trimmed = String(text).trim();
           const token = trimmed.split(/\s+/, 1)[0];
           const remainder = trimmed.slice(token.length).trimStart();
@@ -2216,6 +3251,22 @@ function createSessionSend(deps) {
           if (codexGated) codexTyped.set(paneId, { key: text, at: clock(), enters: 0 });
         }
         debug('deliver: text written');
+        // Judge "the CLI drew since" against a screen read AFTER the keys were
+        // written (round four: a frame drawn between the pre-typing read and
+        // the write was taken as the CLI having read them).
+        if (provisional) {
+          const afterWrite = await readScreen(paneId, codexGated ? CODEX_READ_LINES : MENU_READ_LINES).catch(() => null);
+          const current = unshownTyped.get(paneId);
+          if (afterWrite && current) unshownTyped.set(paneId, { ...current, screen: afterWrite, stalled: true });
+          // The prompt wait counts redraws from this screen too, not from the
+          // one read before typing (round five).
+          if (afterWrite && gated) baseline = afterWrite;
+        }
+      } catch (error) {
+        // Keys that were definitely never written leave no record; keys that may
+        // have been (INPUT_UNCONFIRMED) keep it.
+        if (provisional && error?.code !== 'INPUT_UNCONFIRMED') unshownTyped.delete(paneId);
+        throw error;
       }
       if (gated) {
         // A pane that has never taken a message from this Harbor may still be
@@ -2236,21 +3287,39 @@ function createSessionSend(deps) {
             // is something Harbor cannot read as the earlier try. Dropping the
             // record would let the next send type a copy behind it.
             if (held.state === 'pending' && await promptDraft(paneId, held.screen)) throw promptHoldsUnmatchedError();
-            // Still drawing nothing: the earlier typing is still queued.
-            if (held.stalled) unshownTyped.set(paneId, { ...earlier, at: clock() });
+            // Drew nothing during the whole wait: still queued, and the record
+            // stays against the LAST screen this wait saw (round four), so only
+            // the CLI drawing after this moment can end it. Drew repeatedly
+            // (the wait's own rule: three distinct frames over the window)
+            // without ever showing it: an event loop that ran that long has
+            // read its input, so the typing is lost and the record ends.
+            if (held.stalled) unshownTyped.set(paneId, { ...earlier, at: clock(), stalled: true, screen: held.screen || earlier.screen, generation: earlier.generation || generation });
             else unshownTyped.delete(paneId);
           } else if ((held.state === 'pending' || held.state === 'nobox') && text && !alreadyInPrompt && !lastImageMarker) {
-            unshownTyped.set(paneId, { sent, at: clock(), stalled: Boolean(held.stalled), screen: held.stalled ? held.screen : null });
+            unshownTyped.set(paneId, { sent, at: clock(), stalled: Boolean(held.stalled), screen: held.screen || null, generation, provider: 'claude' });
+          } else if (provisional) {
+            unshownTyped.delete(paneId);
           }
           throw promptNeverHeldError(held.state, { awaitedEarlier: awaitEarlier });
         }
         // The prompt now shows the earlier message, not this one: refused, and
         // the record stays while it sits there, so a resend cannot type behind it.
-        if (awaitEarlier && squashSpace(earlier.sent.text) !== squashSpace(text)) {
+        if (awaitEarlier && exactWords(earlier.sent.text) !== exactWords(text)) {
           logSend({ paneId, phase: 'earlier-typing-landed' });
           throw earlierLandedError();
         }
-        unshownTyped.delete(paneId);
+        verifiedScreen = held.screen;
+        // Every chip the verified draft shows, by number (round thirty-two:
+        // Claude numbers chips once per session, so they tie the delivery
+        // check to THIS draft's pictures, not another send's with the same words).
+        if (onVerified) { try { onVerified({ chips: (composerBox(held.screen)?.inside || '').match(IMAGE_CHIPS_RE) || [] }); } catch { /* evidence only */ } }
+        // An image chip this send did not put there (round thirteen: a late
+        // screenshot drawn in front of the message was submitted with it).
+        if (!chipsWithin(held.screen)) {
+          logSend({ paneId, phase: 'draft-has-foreign-chip' });
+          await captureSendScreen(paneId, 'foreign-chip', held.screen);
+          throw draftChangedError();
+        }
       } else if (codexGated) {
         const held = await waitForCodexBox(paneId, sent, (state) => state === 'exact' || state === 'holds', codexHoldPolls(text), {
           onWait: onWait ? () => onWait(codexHoldNotice(text)) : null,
@@ -2265,6 +3334,7 @@ function createSessionSend(deps) {
         // message. Unclipped, it means text in front arrived from someone else
         // or the start of the message never arrived, and Enter would send the
         // wrong thing either way (Astra's rounds 2 and 3).
+        verifiedScreen = held.screen;
         const heldMatch = codexBoxMatch(held.screen, sent);
         if (held.state === 'holds' && squashSpace(text) && !(heldMatch.clipped && squashSpace(text).endsWith(codexBoxDraft(held.screen) || '\u0000'))) {
           logSend({ paneId, phase: 'codex-box-changed-while-typing' });
@@ -2289,6 +3359,75 @@ function createSessionSend(deps) {
         await sleep(160);
       }
       if (exactDraftOnly) assertExactDraft(await readScreen(paneId, CODEX_READ_LINES));
+      // THE ENTER PHASE (Sol's review, round four). Before the Enter, the
+      // pane's record says "Enter pressed for this text"; it is retired when
+      // the CLI is seen taking the message. Until then a later send never
+      // types a copy: while the prompt still shows the text it presses Enter
+      // only for the same text and refuses other text; once the text is gone
+      // the record ends. Every exit after this point reports submission "unknown".
+      // An "Enter pressed" record never makes a send WAIT: it is resolved at
+      // once by what the prompt shows (see resolveEnterPhase).
+      const enterPhase = (gated || codexGated) && Boolean(text);
+      // A screenshot with no caption gets the same last look before its Enter
+      // (round fifteen: text drawn after its verified chip went in with it);
+      // the Enter-pressed record stays a text send's.
+      const finalCheck = enterPhase || ((gated || codexGated) && Boolean(lastImageMarker));
+      // A real Claude /model or /effort: its echoes before Enter, read with the
+      // same reader its watch uses, ahead of the last-moment checks.
+      const switchCommand = provider === 'claude' && typedAsSlash && SWITCH_COMMAND_RE.test(String(text || '').trim());
+      let switchEchoesBefore = Infinity;
+      if (switchCommand) { try { switchEchoesBefore = switchBaseline(await readPaneWithin(paneId, 3000), text); } catch { /* unknown: Infinity */ } }
+      const beforeEnter = finalCheck ? await readScreen(paneId, codexGated ? CODEX_READ_LINES : MENU_READ_LINES) : null;
+      // The draft is verified on this last read, and the target after it, so
+      // nothing awaited sits between the checks and the Enter (round twelve:
+      // a /clear and a new draft landing during the read were submitted).
+      // And it must be the SAME draft the hold verified, attachments included
+      // (round thirteen: "holds" only asks that the box END with the message,
+      // so a chip drawn in front of it between the two reads went in with it).
+      // The same test runs before every spare Enter, against the frame this
+      // one verified (round fourteen: a spare pressed on "ends with the
+      // message" submitted a chip drawn in front of it after the first Enter).
+      const draftStillOurs = (screen, verified) => {
+        if (!screen) return false;
+        // A screenshot with no caption (round fifteen): the box holds this
+        // send's chips and nothing else (it was empty before the first write),
+        // and they are the very markers its pastes drew, in order (round
+        // sixteen: a chip replaced by another, or one missing, passed a count).
+        if (!squashSpace(text)) {
+          const inside = codexGated ? squashSpace(codexBoxDraft(screen)) : (composerBox(screen)?.inside || '');
+          return pastedMarkers.length > 0 && inside === pastedMarkers.map(squashSpace).join('');
+        }
+        if (codexGated) {
+          // Codex's match strips chips before comparing text, so the chips are
+          // checked here: no more than this send's own, and its markers shown.
+          const codexInside = squashSpace(codexBoxDraft(screen));
+          if (countImageChips(codexInside) > pastedMarkers.length + quotedChips) return false;
+          if (!markersShown(codexInside, codexBoxMatch(screen, sent).clipped)) return false;
+          // Exact (or this Harbor's own paste of that shape) is the whole box,
+          // so it needs no comparison; Codex's own swallowed Enter changes the
+          // box (a pasted block's count goes up by one). A clipped box shows
+          // only the message's tail, so it must also be the box verified.
+          if (codexBoxState(screen, sent) === 'exact' || ownsCodexBox(paneId, screen, sent)) return true;
+          const now = codexBoxMatch(screen, sent);
+          return now.state === 'holds' && now.clipped && squashSpace(text).endsWith(codexBoxDraft(screen) || '\u0000')
+            && (!verified || squashSpace(codexBoxDraft(verified)) === squashSpace(codexBoxDraft(screen)));
+        }
+        return composerSendState(screen, sent) === 'holds'
+          && (!verified || sameComposerDraft(verified, screen, text))
+          && chipsWithin(screen);
+      };
+      if (finalCheck) {
+        const stillOurs = draftStillOurs(beforeEnter, verifiedScreen);
+        if (!stillOurs) {
+          logSend({ paneId, phase: 'draft-changed-before-enter' });
+          throw draftChangedError();
+        }
+      }
+      await checkTarget();
+      if (enterPhase && !unshownTyped.set(paneId, { sent: { text: sent.text, pasted: sent.pasted, imageMarker: sent.imageMarker }, at: clock(), stalled: true, screen: beforeEnter || null, generation, provider: codexGated ? 'codex' : 'claude', phase: 'enter' })) {
+        throw pendingRecordError();
+      }
+      enterWritten = true;
       await typeInto(paneId, workspaceId, '\r');
       if (codexGated) noteCodexEnter(paneId, sent);
       deliveredPanes.add(paneId);
@@ -2297,18 +3436,26 @@ function createSessionSend(deps) {
       // spare Enter as an answer, and a slash send is best-effort anyway.
       let enterState = 'unconfirmed';
       if (gated) {
-        enterState = await watchEnterTaken(paneId, workspaceId, sent);
+        enterState = await watchEnterTaken(paneId, workspaceId, sent, checkTarget, (screen) => draftStillOurs(screen, beforeEnter));
         logSend({ paneId, phase: 'enter-state', state: enterState });
       } else if (codexGated) {
-        enterState = await watchCodexEnter(paneId, workspaceId, sent);
+        enterState = await watchCodexEnter(paneId, workspaceId, sent, checkTarget, (screen) => draftStillOurs(screen, beforeEnter));
         logSend({ paneId, phase: 'enter-state', state: enterState });
         if (enterState === 'taken' || enterState === 'taken-after-retry') codexTyped.delete(paneId);
-      } else if (codexSlash && codexSlashShown) {
-        enterState = await watchCodexSlashEnter(paneId, workspaceId, text);
+      }
+      if (enterPhase && (enterState === 'taken' || enterState === 'taken-after-retry')) unshownTyped.delete(paneId); else if (codexSlash && codexSlashShown) {
+        enterState = await watchCodexSlashEnter(paneId, workspaceId, text, checkTarget);
         logSend({ paneId, phase: 'enter-state', state: enterState });
       }
-      await resolveClaudeSwitchConfirm(paneId, workspaceId, text, provider);
+      // Only for an actual slash command (round forty: a screenshot captioned
+      // "/model sonnet" is words, and its watch typed "1" as a message).
+      if (switchCommand) await resolveClaudeSwitchConfirm(paneId, workspaceId, text, provider, switchEchoesBefore);
       return enterState;
+    } catch (error) {
+      // After the first Enter was written, nothing proves the message was NOT
+      // submitted: a caller must not send it another way (round four).
+      if (enterWritten && error && typeof error === 'object' && !error.submission) error.submission = 'unknown';
+      throw error;
     } finally {
       terminalBridge.releaseControlHold?.(paneId);
     }
@@ -2912,60 +4059,198 @@ function createSessionSend(deps) {
   // its own record of typing it had not yet seen drawn, so neither knew the
   // other's paste was still waiting inside a stalled Claude: Pat's screenshot
   // went into Vox behind an agent's unsent 2,034-character message, and both
-  // sat in one prompt. A lock file per pane (beside the send log, so every
-  // process on the machine sees the same one) makes the second typist wait
-  // until the first has seen its text shown and pressed Enter, or given up. A
-  // holder whose process is gone, or that has held longer than any wait can
-  // run, is stale and taken over; a lock that cannot be made never blocks a send.
-  const PANE_LOCK_STALE_MS = STALLED_WAIT_MS + 5 * 60_000;
+  // sat in one prompt. Every write into a pane (a message, an answer sheet, a
+  // mode key) now holds the pane's lock until it has seen its text shown and
+  // pressed Enter, or given up.
+  // The lock is OS-owned (shared/os-lock.cjs, a named pipe on Windows), never a
+  // file: the first version was a lock file, and Sol's review showed two
+  // waiters could both judge a dead holder stale and both take it, and a slow
+  // live holder could be evicted. The OS frees a pipe the moment its process
+  // dies, so neither can happen. A send that waits out the holder is REFUSED
+  // (PANE_BUSY), never typed without the lock. The name carries the store
+  // directory, so a harness on a relocated store never shares a real pane's lock.
+  // A minute: past that the holder is almost certainly a frozen Claude, and
+  // the refusal comes well inside the phone's four-minute call deadline.
+  const PANE_LOCK_WAIT_MS = 60_000;
+  // Panes whose image chord Claude never confirmed (see the image loop). A
+  // debt ends only on evidence tied to that chord: the pane's COMPOSER drew an
+  // image chip numbered past the ones it had (it read the clipboard), or its CLI is gone
+  // or was replaced (a new created_at). A redraw, a resize or a failed read
+  // proves nothing, so the debt stands (round three of the review). While any
+  // debt stands, images go by path, which costs only the inline attachment.
+  // Kept ON DISK in the pane-lock folder (round four: a desktop restart
+  // forgot an in-memory debt while the pane still held the chord), written
+  // BEFORE the chord goes out and removed when its chip shows.
+  const owedChords = (() => {
+    const memory = new Map();
+    const dir = () => (paneLockDir ? path.join(paneLockDir, 'clipboard-debts') : null);
+    const fileFor = (paneId) => path.join(dir(), `${String(paneId).replace(/[^A-Za-z0-9_.-]/g, '_')}.json`);
+    return {
+      set(paneId, debt) {
+        if (!dir()) { memory.set(paneId, debt); return true; }
+        try {
+          fsSync.mkdirSync(dir(), { recursive: true });
+          const tmp = `${fileFor(paneId)}.${process.pid}.tmp`;
+          fsSync.writeFileSync(tmp, JSON.stringify({ paneId, ...debt }));
+          fsSync.renameSync(tmp, fileFor(paneId));
+          return true;
+        } catch { return false; }
+      },
+      delete(paneId) {
+        if (!dir()) { memory.delete(paneId); return; }
+        try { fsSync.rmSync(fileFor(paneId), { force: true }); } catch { /* gone */ }
+      },
+      get(paneId) {
+        if (!dir()) return memory.get(paneId) || null;
+        try { return JSON.parse(fsSync.readFileSync(fileFor(paneId), 'utf8')); } catch (error) {
+          return error?.code === 'ENOENT' ? null : { unreadable: true };
+        }
+      },
+      // A missing folder is no debt; any other failure to read the folder or
+      // a record counts as a debt that cannot be retired (round five: a
+      // skipped unreadable record let another image overwrite the clipboard).
+      entries() {
+        if (!dir()) return [...memory];
+        let names = [];
+        try { names = fsSync.readdirSync(dir()).filter((name) => name.endsWith('.json')); } catch (error) {
+          return error?.code === 'ENOENT' ? [] : [['(unreadable)', { unreadable: true }]];
+        }
+        const out = [];
+        for (const name of names) {
+          try {
+            const debt = JSON.parse(fsSync.readFileSync(path.join(dir(), name), 'utf8'));
+            out.push(debt?.paneId ? [debt.paneId, debt] : [name, { unreadable: true }]);
+          } catch (error) {
+            if (error?.code !== 'ENOENT') out.push([name, { unreadable: true }]); // gone meanwhile: retired
+          }
+        }
+        return out;
+      },
+    };
+  })();
+  // A Claude pane that owes a screenshot read takes no new write (round
+  // eleven). While nothing has been drawn since the paste gave up, wait (3
+  // minutes, then refuse). Its chip in the composer: the screenshot is in the
+  // prompt now, so refuse until it is sent or cleared. Drawn since with the
+  // prompt drawn and empty on a second look: the chord was lost, the debt
+  // ends, and the send goes on. No box or an unreadable frame: refuse.
+  const settleOwedChord = async (paneId, { onWait = null } = {}) => {
+    const debt = owedChords.get(paneId);
+    if (!debt) return;
+    if (debt.unreadable) throw owedChordError('unresolved');
+    const generation = await paneGeneration(paneId);
+    if (debt.generation && generation && debt.generation !== generation) { owedChords.delete(paneId); return; }
+    let screen = '';
+    try { screen = await readPane(paneId, MENU_READ_LINES); } catch { screen = ''; }
+    // A debt with no screen after its chord (the Harbor that pasted exited
+    // first; round thirteen) takes this read as its baseline, on the record,
+    // and only a redraw after it counts: two identical frames from a frozen
+    // Claude never end it.
+    if (!debt.inPrompt && !debt.screen) {
+      if (!screen || !String(screen).trim()) throw owedChordError('unresolved');
+      debt.screen = screen;
+      owedChords.set(paneId, { ...debt });
+    }
+    const startedAt = clock();
+    let noticed = false;
+    // The chip in the composer is evidence on its own, redraw or not (round
+    // fourteen: a baseline that already showed it waited 3 minutes for a
+    // redraw an idle Claude never makes), so it is looked for before the wait
+    // and on every poll.
+    const chipShown = (frame) => {
+      const max = frame ? composerImageMax(frame) : null;
+      return max !== null && max > debt.beforeMax;
+    };
+    for (let poll = 0; !debt.inPrompt && debt.screen && screen && !chipShown(screen) && screenContent(screen) === screenContent(debt.screen); poll += 1) {
+      if (clock() - startedAt >= STALLED_WAIT_MS || poll >= STALLED_WAIT_MS / 1000) throw owedChordError('stalled');
+      if (!noticed && onWait) { noticed = true; onWait('waiting for Claude to read the screenshot Harbor pasted earlier, so nothing is typed behind it'); }
+      await sleep(1000);
+      try { screen = (await readPane(paneId, MENU_READ_LINES)) || screen; } catch { /* keep the last frame */ }
+    }
+    const chips = screen ? composerImageMax(screen) : null;
+    // Read: the clipboard is free (the debt is marked inPrompt, which the
+    // clipboard check ignores), but the pane stays blocked while its prompt
+    // holds that screenshot (round twelve: deleting the debt here let the
+    // next send type behind the screenshot and submit both). It ends when the
+    // prompt no longer shows the chip: sent or cleared.
+    if (chips !== null && chips > debt.beforeMax) {
+      if (!debt.inPrompt) owedChords.set(paneId, { ...debt, inPrompt: true });
+      throw owedChordError('in-prompt');
+    }
+    if (debt.inPrompt) {
+      if (chips === null) throw owedChordError('unresolved');
+      logSend({ paneId, phase: 'owed-chord-draft-gone' });
+      owedChords.delete(paneId);
+      return;
+    }
+    if (chips !== null && await stillEmptyAfterAMoment(paneId, false)) {
+      logSend({ paneId, phase: 'owed-chord-lost' });
+      owedChords.delete(paneId);
+      return;
+    }
+    throw owedChordError('unresolved');
+  };
+  const owedChordError = (why) => {
+    const text = why === 'in-prompt'
+      ? 'The screenshot from an earlier send is now in Claude\'s prompt, so nothing was typed behind it. Send or clear it in the >_ terminal first. Your text is kept'
+      : why === 'stalled'
+        ? 'Claude has drawn nothing for 3 minutes since Harbor pasted a screenshot into it, so nothing was typed behind that paste. Your text is kept; check the >_ terminal'
+        : 'Harbor cannot tell whether Claude read the screenshot it pasted earlier, so nothing was typed behind it. Your text is kept; check the >_ terminal';
+    const error = new Error(text);
+    error.code = why === 'in-prompt' ? 'EARLIER_IMAGE_IN_PROMPT' : 'EARLIER_IMAGE_UNRESOLVED';
+    return error;
+  };
+  const clipboardOwed = async () => {
+    const debts = owedChords.entries();
+    if (!debts.length) return false;
+    let panes = null;
+    try { panes = (await snapshot())?.panes || null; } catch { /* unknown: debts stand */ }
+    for (const [owedPane, debt] of debts) {
+      if (debt.unreadable) return true;
+      if (panes) {
+        const live = panes.find((candidate) => candidate.pane_id === owedPane);
+        if (!live || (debt.generation && live.created_at && live.created_at !== debt.generation)) { owedChords.delete(owedPane); continue; }
+      }
+      let drawn = null;
+      try { drawn = composerImageMax(await readPane(owedPane, MENU_READ_LINES)); } catch { /* unknown: the debt stands */ }
+      if (debt.inPrompt) continue; // read already: the clipboard is free
+      if (drawn !== null && drawn > debt.beforeMax) { owedChords.set(owedPane, { ...debt, inPrompt: true }); continue; }
+      return true;
+    }
+    return false;
+  };
   const PANE_LOCK_NOTICE = 'another Harbor window is typing into this session; this message goes in right after it';
+  const CLIPBOARD_WAIT_NOTICE = 'another image is being pasted into a different session; this one goes in right after it';
   const paneLockDir = process.env.NODE_TEST_CONTEXT && !deps.sendLogFile ? null : path.join(path.dirname(sendLogFile), 'pane-locks');
-  const lockPidAlive = (pid) => {
-    try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+  const paneBusyError = () => {
+    const error = new Error('Another Harbor window has been typing into this session for several minutes (Claude is probably frozen), so nothing was typed or sent. Your text is kept. Check the >_ terminal');
+    error.code = 'PANE_BUSY';
+    return error;
   };
   const withPaneLock = async (paneId, fn, onWait) => {
     if (!paneLockDir) return fn();
-    const file = path.join(paneLockDir, `${String(paneId).replace(/[^\w-]/g, '_')}.lock`);
-    const token = `${process.pid}-${crypto.randomUUID()}`;
-    const started = Date.now();
-    let noticed = false;
-    try { await fs.mkdir(paneLockDir, { recursive: true }); } catch { return fn(); }
-    for (;;) {
-      try {
-        const handle = await fs.open(file, 'wx');
-        try { await handle.writeFile(JSON.stringify({ pid: process.pid, token, at: Date.now() })); } finally { await handle.close(); }
-        break;
-      } catch (error) {
-        if (error?.code !== 'EEXIST') return fn();
-        let holder = null;
-        try { holder = JSON.parse(await fs.readFile(file, 'utf8')); } catch { /* mid-write, or damaged */ }
-        let stale = false;
-        if (holder) stale = !lockPidAlive(holder.pid) || Date.now() - holder.at > PANE_LOCK_STALE_MS;
-        else { try { stale = Date.now() - (await fs.stat(file)).mtimeMs > 5000; } catch { stale = true; } }
-        if (stale) { await fs.rm(file, { force: true }).catch(() => {}); continue; }
-        // This process's own sends are already ordered by its queues.
-        if (holder && holder.pid === process.pid) return fn();
-        if (Date.now() - started > PANE_LOCK_STALE_MS) return fn();
-        if (!noticed && Date.now() - started > 1500 && onWait) {
-          noticed = true;
-          try { onWait(PANE_LOCK_NOTICE); } catch { /* status only */ }
-        }
-        // Real time, not the injected sleep: the holder is another process.
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
     try {
-      return await fn();
-    } finally {
-      try {
-        const holder = JSON.parse(await fs.readFile(file, 'utf8'));
-        if (holder.token === token) await fs.rm(file, { force: true });
-      } catch { /* already gone or taken over */ }
+      return await withLock(`harbor-pane:${paneLockDir}:${paneId}`, fn, {
+        waitMs: PANE_LOCK_WAIT_MS,
+        onWait: onWait ? () => onWait(PANE_LOCK_NOTICE) : null,
+      });
+    } catch (error) {
+      if (error?.code === 'LOCK_TIMEOUT') throw paneBusyError();
+      throw error;
     }
   };
+  // Every session-addressed send re-checks, INSIDE the lock, that the pane
+  // still serves its session (Sol's review, rounds two and three: between
+  // resolving the pane and taking the lock, another Harbor process can take
+  // and release the lock after starting a different conversation there, a
+  // Codex /new for one, so "I did not wait" proves nothing).
+  // options.verifyTarget throws if the pane changed.
   const deliver = (paneId, workspaceId, text, images = [], provider = 'claude', options = {}) => withPaneLock(
     paneId,
-    () => deliverUnlocked(paneId, workspaceId, text, images, provider, options),
+    async () => {
+      if (typeof options?.verifyTarget === 'function') await options.verifyTarget();
+      return deliverUnlocked(paneId, workspaceId, text, images, provider, options);
+    },
     options?.onWait || null,
   );
 
@@ -3122,7 +4407,10 @@ function createSessionSend(deps) {
     return performMenuAction(paneId, workspaceId, action);
   };
 
-  const answerMenu = (paneId, workspaceId, action = {}, ask = null) => serializeOnPane(paneId, async () => {
+  // Menu keystrokes take the pane's cross-process lock like a message does
+  // (withPaneLock): an answer typed behind another process's unshown paste
+  // lands in the wrong place (Sol's review, 2026-11-18).
+  const answerMenu = (paneId, workspaceId, action = {}, ask = null) => serializeOnPane(paneId, () => withPaneLock(paneId, async () => {
     terminalBridge.holdControl?.(paneId);
     try {
       await acquireControl(paneId, workspaceId);
@@ -3133,7 +4421,7 @@ function createSessionSend(deps) {
     } finally {
       terminalBridge.releaseControlHold?.(paneId);
     }
-  });
+  }));
 
   const waitForResumedClaudeReady = async (paneId, workspaceId, { timeoutMs = 30_000, compactingTimeoutMs = 180_000 } = {}) => {
     // Size the pane BEFORE settling, not during. A resize changes the wrap
@@ -3211,7 +4499,7 @@ function createSessionSend(deps) {
   // Cycle the permission mode the only way the CLI exposes it: shift+tab
   // (ESC [ Z). We do not fake a "set bypass" button (bypass can be
   // org-disabled); we cycle and re-scrape so the UI reports the landed mode.
-  const cyclePermissionMode = async (paneId, workspaceId) => {
+  const cyclePermissionMode = (paneId, workspaceId) => withPaneLock(paneId, async () => {
     const state = terminalBridge.getState();
     if (state.controlledPaneId !== paneId) {
       await terminalBridge.requestFocusPane({ paneId, workspaceId }).catch(() => {});
@@ -3220,7 +4508,7 @@ function createSessionSend(deps) {
     if (result?.ok === false) throw new Error(result.reason || 'input refused');
     await sleep(400);
     return readPermissionMode(paneId);
-  };
+  });
 
   // Trust but VERIFY every candidate pane; including the renderer's, whose
   // model/link state can lag a pane's death by minutes. A dead pane must fall
@@ -3344,7 +4632,11 @@ function createSessionSend(deps) {
     }
   };
 
-  const runSend = async ({ sessionId, text, images = [], pane, detectedHome, provider, resumeOnly = false }) => {
+  const runSend = async ({ sessionId, text, images = [], pane, detectedHome, provider, resumeOnly = false, strictTarget = false }) => {
+    // Before any pane lookup or resume (round seven: with the pane gone, the
+    // no-pane branch resumed the cleared id, and the resume's own hook would
+    // then have replaced the tombstone).
+    if (strictTarget) assertNotCleared(sessionId);
     provider = await resolveProvider(sessionId, provider);
     // Codex has no /effort (both effort menus send it for every provider); its
     // /model takes --reasoning=<level> and keeps the current model (Codex
@@ -3354,7 +4646,8 @@ function createSessionSend(deps) {
     let trimmed = codexEffort ? `/model --reasoning=${codexEffort[1].toLowerCase()}` : String(text ?? '').replace(/\r\n/g, '\n').trim();
     const imagePaths = Array.isArray(images) ? images.filter(Boolean) : [];
     if (!trimmed && imagePaths.length === 0 && !resumeOnly) throw new Error('nothing to send');
-    const slash = isSlashCommand(trimmed);
+    // A Claude send carrying a picture is a message (see deliver's typedAsSlash).
+    const slash = isSlashCommand(trimmed) && !((provider || 'claude') === 'claude' && imagePaths.length);
     // CODEX ON WINDOWS DROPS SMART PUNCTUATION AND SYMBOLS (codexSafeText), so
     // a phone's "didn’t…" never matched the box and was never sent (Pat,
     // 2026-11-01). The ASCII version is THE message from here on: typed,
@@ -3387,6 +4680,18 @@ function createSessionSend(deps) {
       }
     }
     const waitNotice = (detail) => status(sessionId, 'sending', detail);
+    // A Claude send with pictures and no words has no transcript check (that
+    // needs text), so the Enter watch is its only evidence (Sol's review,
+    // round twenty-six: one Claude never took, its picture still in the
+    // prompt, was reported delivered). Null for every other send.
+    // The chips Claude's prompt showed when this send was verified (deliver).
+    let verifiedChips = null;
+    const onVerified = ({ chips }) => { verifiedChips = chips; };
+    const claudePictureOutcome = (enterState) => {
+      if (provider !== 'claude' || trimmed || !imagePaths.length || slash) return null;
+      if (enterState === 'not-taken') throw pictureNotTakenError();
+      return enterState === 'taken' ? 'delivered' : 'unconfirmed';
+    };
     debug('resolved target', JSON.stringify(target), 'link was', JSON.stringify(links.get(sessionId)));
     logSend({
       sessionId,
@@ -3426,7 +4731,13 @@ function createSessionSend(deps) {
         // message inside preSize and guaranteeing a false timeout.
         const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
         try {
-          const enterState = await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly });
+          const verifyTarget = () => verifyPaneServes(sessionId, target, { strict: strictTarget });
+          const enterState = await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly, verifyTarget, onVerified });
+          const pictureOnly = claudePictureOutcome(enterState);
+          if (pictureOnly) {
+            status(sessionId, 'sent', pictureOnly === 'unconfirmed' ? PICTURE_UNCONFIRMED_NOTE : undefined);
+            return { ok: true, paneId: target.paneId, delivery: pictureOnly };
+          }
           if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && enterState === 'unconfirmed') {
             if (!trimmed || !confirmation || confirmation.skip) throw codexUnconfirmedError();
             status(sessionId, 'sending', 'checking that Codex took it');
@@ -3435,11 +4746,13 @@ function createSessionSend(deps) {
             const checkingSeq = statusSeq.get(sessionId);
             reconcileDelivery(sessionId, trimmed, slash, confirmation, () => {
               if (statusSeq.get(sessionId) === checkingSeq) status(sessionId, 'sent', normalizedNote || undefined);
-            }, checkingSeq, imagePaths.length);
+            }, checkingSeq, imagePaths.length, { paths: imagePaths });
             return { ok: true, paneId: target.paneId, delivery: 'confirming' };
           }
           status(sessionId, 'sent', normalizedNote || undefined);
-          if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, null, imagePaths.length);
+          // Its own status only (Sol's review, round thirty-five: an older send's
+          // late "could not confirm" overwrote a newer send's "sent").
+          if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, statusSeq.get(sessionId), imagePaths.length, { chips: verifiedChips, paths: imagePaths });
           return { ok: true, paneId: target.paneId, delivery: trimmed ? 'confirming' : 'delivered' };
         } catch (error) {
           // A pane at a dead shell prompt is a dead SESSION holding a leftover
@@ -3452,6 +4765,18 @@ function createSessionSend(deps) {
       }
     }
 
+    // AN AGENT'S MESSAGE NEVER REOPENS A SESSION (Sol's review, round ten).
+    // A strict send needs a live pane; with none, it is refused and nothing
+    // is launched. Every resume path had a last instant (the launcher's own
+    // ownership probe) in which a /clear could land and the resumed session's
+    // hook could then replace the mark; with no resume there is no instant.
+    // Pat's own sends still resume.
+    if (strictTarget) {
+      logSend({ sessionId, phase: 'strict-no-pane' });
+      const error = new Error('That session has no open window, and a message from another session never reopens it, so nothing was sent');
+      error.code = 'NO_LIVE_PANE';
+      throw error;
+    }
     // No pane: resume first, then deliver into the fresh pane. Codex/cursor
     // resume rides bin/ai (codex resume <id> / cursor-agent --resume <id>);
     // claude rides bin/claude-sessions. Never fire a claude resume at a
@@ -3463,15 +4788,20 @@ function createSessionSend(deps) {
         throw new Error(`this ${provider} session is not running in a pane and its working folder is unknown; cannot resume it`);
       }
       status(sessionId, 'resuming');
-      const providerPreIds = await paneIdSet();
-      await launchActions.resumeProviderSession({
-        provider,
-        cwd: providerMeta.cwd,
-        id: sessionId,
-        ...(providerMeta.profileId ? { profileId: providerMeta.profileId } : {}),
-        ...(providerMeta.configHome ? { configHome: providerMeta.configHome } : {}),
+      // One resume launch at a time across Harbor processes (round four): the
+      // new pane after this launch is then this launch's, never a pane another
+      // resume in the same project opened meanwhile.
+      const providerFresh = await withResumeLaunch(async () => {
+        const providerPreIds = await paneIdSet();
+        await launchActions.resumeProviderSession({
+          provider,
+          cwd: providerMeta.cwd,
+          id: sessionId,
+          ...(providerMeta.profileId ? { profileId: providerMeta.profileId } : {}),
+          ...(providerMeta.configHome ? { configHome: providerMeta.configHome } : {}),
+        });
+        return findFreshPane({ preIds: providerPreIds, cwd: providerMeta.cwd, sessionId });
       });
-      const providerFresh = await findFreshPane({ preIds: providerPreIds, cwd: providerMeta.cwd });
       if (!providerFresh) throw new Error(`resumed the ${provider} session, but the new pane never appeared`);
       links.set(sessionId, providerFresh);
       await terminalBridge.requestFocusPane({
@@ -3492,7 +4822,7 @@ function createSessionSend(deps) {
         return { ok: true, paneId: providerFresh.paneId, resumed: true };
       }
       status(sessionId, 'sending');
-      const freshEnter = await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly });
+      const freshEnter = await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly, verifyTarget: () => verifyPaneServes(sessionId, providerFresh) });
       if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && freshEnter === 'unconfirmed') throw codexUnconfirmedError();
       status(sessionId, 'sent', normalizedNote || undefined);
       return { ok: true, paneId: providerFresh.paneId, resumed: true, delivery: 'delivered' };
@@ -3502,13 +4832,15 @@ function createSessionSend(deps) {
     if (resumePlan.kind === 'refuse') throw new Error(resumePlan.text);
     status(sessionId, 'resuming');
     const meta = await getSessionMeta(sessionId).catch(() => null);
-    const preIds = await paneIdSet();
-    await launchActions.resumeSession({
-      id: sessionId,
-      detectedHome,
-      resumePrompt: resumePlan.kind === 'redeliver' ? resumePlan.text : null,
+    const fresh = await withResumeLaunch(async () => {
+      const preIds = await paneIdSet();
+      await launchActions.resumeSession({
+        id: sessionId,
+        detectedHome,
+        resumePrompt: resumePlan.kind === 'redeliver' ? resumePlan.text : null,
+      });
+      return findFreshPane({ preIds, cwd: meta?.cwd || null, sessionId });
     });
-    const fresh = await findFreshPane({ preIds, cwd: meta?.cwd || null });
     if (!fresh) throw new Error('resumed, but the new pane never appeared');
     links.set(sessionId, fresh);
     await terminalBridge.requestFocusPane({
@@ -3527,18 +4859,23 @@ function createSessionSend(deps) {
     }
     status(sessionId, 'sending');
     const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
-    await deliver(fresh.paneId, fresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice });
+    const freshState = await deliver(fresh.paneId, fresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, verifyTarget: () => verifyPaneServes(sessionId, fresh), onVerified });
+    const freshPicture = claudePictureOutcome(freshState);
+    if (freshPicture) {
+      status(sessionId, 'sent', freshPicture === 'unconfirmed' ? PICTURE_UNCONFIRMED_NOTE : undefined);
+      return { ok: true, paneId: fresh.paneId, resumed: true, delivery: freshPicture };
+    }
     status(sessionId, 'sent');
-    if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, null, imagePaths.length);
+    if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, statusSeq.get(sessionId), imagePaths.length, { chips: verifiedChips, paths: imagePaths });
     return { ok: true, paneId: fresh.paneId, resumed: true, delivery: trimmed ? 'confirming' : 'delivered' };
   };
 
   // Confirmation is deliberately detached from the user-visible send. A pty
   // write makes the message appear sent immediately; transcript reconciliation
   // can still replace that optimism with an honest error if delivery failed.
-  const reconcileDelivery = (sessionId, text, optional, confirmation, onConfirmed = null, guardSeq = null, images = 0) => {
+  const reconcileDelivery = (sessionId, text, optional, confirmation, onConfirmed = null, guardSeq = null, images = 0, { chips = null, paths = null } = {}) => {
     Promise.resolve(confirmation).then((prepared) => (
-      confirmDelivery(sessionId, text, { optional, prepared, images })
+      confirmDelivery(sessionId, text, { optional, prepared, images, chips, paths })
     )).then((confirmed) => {
       if (confirmed && onConfirmed) onConfirmed();
     }).catch((error) => {
@@ -3743,7 +5080,11 @@ function createSessionSend(deps) {
       if (!hit.failedAt) return hit.promise;
     }
     const entry = { key, questions: null, promise: null, failedAt: 0 };
-    entry.promise = serializeOnPane(paneId, async () => {
+    // Lock order, everywhere: this process's pane queue FIRST, then the
+    // cross-process pane lock inside it (answerMenu does the same). The other
+    // order deadlocks: a walk holding the lock waits for the queue while an
+    // answer holding the queue waits for the lock.
+    entry.promise = serializeOnPane(paneId, () => withPaneLock(paneId, async () => {
       terminalBridge.holdControl?.(paneId);
       try {
         await acquireControl(paneId, workspaceId);
@@ -3786,7 +5127,7 @@ function createSessionSend(deps) {
       } finally {
         terminalBridge.releaseControlHold?.(paneId);
       }
-    });
+    }));
     discoveries.set(paneId, entry);
     entry.promise.catch(() => null).then((found) => { if (!found) entry.failedAt = Date.now(); });
     return entry.promise;

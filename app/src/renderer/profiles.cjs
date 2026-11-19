@@ -100,31 +100,60 @@ function launchDefaults(options) {
   };
 }
 
-// The rail's launch buttons (Pat, 2026-10-29, with six Claude plans and three
-// codex plans configured: "remove all the buttons in the side panel except for
-// the claude plan buttons ... keep one 'o' button for other and have that be my
-// way of opening a session for another plan (one of the codex/cursor ones) via
-// the modal"). One button per Claude plan, then ONE "+O" that opens the Session
-// configuration window, preselected on the first other provider in the list,
-// where its Plan picker reaches every remaining home. `count` is the number of
-// buttons the row actually draws, the number the rail's width and density follow.
+// The plans the rail can launch. Pat, 2026-10-29, with six Claude plans and
+// three codex plans: "remove all the buttons in the side panel except for the
+// claude plan buttons ... keep one 'o' button for other and have that be my way
+// of opening a session for another plan (one of the codex/cursor ones) via the
+// modal". So the rail launches every Claude plan directly and folds every other
+// plan into one "Other" entry that opens the Session configuration window,
+// preselected on the first other provider in the list, whose Plan picker reaches
+// every remaining home.
+//
+// One button per Claude plan stopped fitting at eleven buttons (2026-11-19, the
+// last squeeze: the "Sessions" label and the buttons share one line, Pat
+// 2026-09-05). Adding the eleventh and twelfth Claude plans the same day, Pat
+// asked to "start to think the 'one button per claude plan' ui and do like a
+// 'picker' or little hover window". The rail now draws ONE split button however
+// many plans exist (the Windows Terminal new-tab pattern): "+<letter>" starts the
+// plan picked last (railPrimaryPlan), and the chevron opens the plan picker, one
+// row per Claude plan with its usage, then the "Other" row.
 function railLaunchPlan(profiles) {
   const list = Array.isArray(profiles) ? profiles : [];
   const isClaude = (profile) => (profile.provider || 'claude') === 'claude';
   const direct = list.filter(isClaude);
   const firstOther = list.find((profile) => !isClaude(profile)) || null;
-  return { direct, otherProvider: firstOther ? firstOther.provider : null, count: direct.length + 1 };
+  return { direct, otherProvider: firstOther ? firstOther.provider : null };
 }
 
-// Takes the number of launch BUTTONS in the rail head (railLaunchPlan().count).
-function railWidthForProfileCount(count) {
-  if (count <= 1) return 260;
-  if (count <= 3) return 292;
-  if (count <= 6) return 320;
-  // Seven or more launch buttons share the rail head even at their tightest
-  // ([data-crowded] in styles.css); 340 keeps eight on one line with room to spare.
-  return 340;
+// The plan the split button's "+" starts: the plan picked last in the picker
+// while it is still a Claude plan, else the default plan, else the first Claude
+// plan. Null only when no Claude plan is configured.
+function railPrimaryPlan(direct, rememberedId) {
+  const list = Array.isArray(direct) ? direct : [];
+  if (!list.length) return null;
+  return list.find((profile) => profile.id === rememberedId)
+    || list.find((profile) => profile.isDefault)
+    || list[0];
 }
+
+// A key pressed in the open plan picker: a Claude plan's letter starts that plan,
+// and "O" starts Other unless a Claude plan owns the letter O. Case-insensitive.
+// Returns { profile }, { other: true }, or null for any other key.
+function planForKey(direct, key, hasOther) {
+  if (typeof key !== 'string' || [...key].length !== 1) return null;
+  const letter = key.toUpperCase();
+  const profile = (Array.isArray(direct) ? direct : [])
+    .find((item) => String(item.letter || '').toUpperCase() === letter);
+  if (profile) return { profile };
+  if (hasOther && letter === 'O') return { other: true };
+  return null;
+}
+
+// The rail's default width. It followed the number of launch buttons until
+// 2026-11-19; the head now holds one split button whatever the plan count, so it
+// is one number: 292px, the measured width at which the worst-case usage meter
+// row ("100% ↻11:45pm  100% ↻12/31 12:30pm") renders in full.
+const RAIL_DEFAULT_WIDTH = 292;
 
 module.exports = {
   hexToRgb,
@@ -136,5 +165,7 @@ module.exports = {
   resumeCommandForProfile,
   launchDefaults,
   railLaunchPlan,
-  railWidthForProfileCount,
+  railPrimaryPlan,
+  planForKey,
+  RAIL_DEFAULT_WIDTH,
 };

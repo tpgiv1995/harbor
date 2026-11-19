@@ -651,103 +651,156 @@ button { font-family: inherit; }
   color: var(--fnt);
 }
 
-.rail-new-split {
-  display: flex;
-  gap: 2px;
+/* The rail's ONE launch control (2026-11-19; it replaced one button per Claude
+   plan, which ran out of room at eleven, see the profiles.cjs railLaunchPlan
+   comment). A split button in the Windows Terminal new-tab pattern: "+<letter>"
+   starts the plan picked last, tinted in that plan's colour, and the neutral
+   chevron opens the plan picker. --profile-* come from the split's own style
+   (profileStyle); --profile-fill/-fg/-edge exist only for a plan with a
+   textColor (a dark plan colour: solid chip, letter in the text colour). */
+.launch-split {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  height: 22px;
+  overflow: hidden;
+  border: 1px solid var(--profile-edge, rgb(var(--profile-rgb) / 32%));
+  border-radius: 7px;
+}
+.launch-split.project { height: 20px; }
+
+.launch-split > button {
+  height: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.launch-split > button:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px rgb(var(--ac-rgb) / 75%);
 }
 
-.sidebar-global-new,
-.sidebar-proj-new {
+.launch-split .launch-main {
+  min-width: 26px;
+  padding: 0 6px;
+  background: var(--profile-fill, rgb(var(--profile-rgb) / 9%));
+  color: var(--profile-fg, var(--profile-color));
+  font: 600 11px var(--font-ui);
+}
+.launch-split.project .launch-main { min-width: 24px; padding: 0 5px; font-size: 10px; }
+.launch-split .launch-main:hover { background: rgb(var(--profile-rgb) / 20%); }
+.launch-split[style*="--profile-fill"] .launch-main:hover {
+  background: color-mix(in srgb, var(--profile-fill) 85%, white);
+}
+
+.launch-split .launch-more {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  padding: 0;
+  border-left: 1px solid var(--profile-edge, rgb(var(--profile-rgb) / 32%));
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--sub);
+}
+.launch-split.project .launch-more { width: 16px; }
+.launch-split .launch-more .rail-opt-glyph { flex: none; opacity: 1; }
+.launch-split .launch-more:hover,
+.launch-split .launch-more[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--tx);
+}
+
+/* With no Claude plan configured the control is one neutral button that opens
+   the Session configuration window. */
+.sidebar-global-new.launch-other,
+.sidebar-proj-new.launch-other {
   height: 22px;
-  min-width: 22px;
-  padding: 0 5px;
-  /* --profile-fill/-fg/-edge exist only for a plan with a textColor (a dark
-     plan colour: solid chip, letter in the text colour; profileStyle in
-     profiles.cjs). Every other plan takes the tint of its colour. */
+  padding: 0 7px;
   cursor: pointer;
   white-space: nowrap;
   border: 1px solid var(--ln);
   border-radius: 7px;
-  background: var(--profile-fill, rgba(255, 255, 255, 0.04));
-  font-size: 11px;
-  font-weight: 600;
-  border-color: var(--profile-edge, rgb(var(--profile-rgb) / 32%));
-  color: var(--profile-fg, var(--profile-color));
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--sub);
+  font: 600 11px var(--font-ui);
+}
+.sidebar-proj-new.launch-other { height: 20px; font-size: 10px; }
+.sidebar-global-new.launch-other:hover,
+.sidebar-proj-new.launch-other:hover { background: rgba(255, 255, 255, 0.09); color: var(--tx); }
+
+/* The plan picker (a RailMenu, so it portals to <body> like the rail's other
+   menus). One row per Claude plan: check mark for the plan "+" starts, the
+   plan's badge, its name, then the 5-hour and weekly usage in the same colours
+   the meters use when a window runs high. */
+.plan-pick-head { padding-right: 8px; }
+.plan-pick-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plan-pick-cols {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 7px;
+  padding-top: 1px;
+}
+.plan-pick-cols > span {
+  width: 32px;
+  color: var(--fnt);
+  font: 500 9.5px var(--font-mono);
+  text-align: right;
 }
 
-.sidebar-global-new:hover,
-.sidebar-proj-new:hover {
-  background: rgba(255, 255, 255, 0.09);
-}
-.sidebar-global-new[style*="--profile-fill"]:hover,
-.sidebar-proj-new[style*="--profile-fill"]:hover {
-  background: color-mix(in srgb, var(--profile-fill) 85%, white);
-}
+/* Two pixels shorter than the rail's other menu rows, so all twelve plans and
+   Other fit under the rail head in Pat's 574px-tall window without scrolling. */
+.rail-menu-item.plan-pick { padding-block: 4px; }
+.plan-pick-foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* "+O", the one button for every plan that is not a Claude plan (2026-10-29):
-   it belongs to no profile, so it takes the rail's neutral ink, never a plan's
-   colour (the I plan is white). */
-.sidebar-global-new.launch-other,
-.sidebar-proj-new.launch-other {
-  border-color: var(--ln);
+.plan-pick:focus-visible {
+  outline: none;
+  background: var(--surface-2);
+  color: var(--tx);
+  box-shadow: inset 0 0 0 1px rgb(var(--ac-rgb) / 55%);
+}
+.plan-pick.current { color: var(--tx); }
+
+.plan-pick-badge {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  font: 700 10px/1 var(--font-ui);
+}
+.plan-pick-other .plan-pick-badge {
+  box-shadow: inset 0 0 0 1px var(--ln2);
   color: var(--sub);
 }
-.sidebar-global-new.launch-other:hover,
-.sidebar-proj-new.launch-other:hover { color: var(--tx); }
 
-/* Four or more profiles (Pat's three Claude plans plus three codex plans since
-   2026-09-28): the buttons go compact so the whole row keeps its one line at
-   the default rail width instead of hanging "+W" past the rail's edge. */
-.rail-new-split[data-dense] { gap: 3px; }
-.sidebar-project-actions[data-dense] { gap: 2px; }
-.rail-new-split[data-dense] .sidebar-global-new,
-.sidebar-project-actions[data-dense] .sidebar-proj-new {
-  padding: 0 4px;
-  font-size: 10px;
+.plan-pick-use {
+  flex: 0 0 32px;
+  color: var(--sub);
+  font: 500 10.5px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
+.plan-pick-use.hi { color: var(--warn); }
+.plan-pick-use.max { color: var(--err-text); }
 
-/* Seven or more (five Claude plans and three codex plans since 2026-10-21):
-   one step tighter, and the head's own gaps and eyebrow tracking with it. At
-   eight, the compact row needed a 302px rail and hung "+W" past Pat's (278px:
-   his window runs at 120% zoom). Measured in an isolated Harbor
-   (scripts/drive-plan-surfaces-win.js): this row fits from 266px. The default
-   rail for that many profiles is 340px (railWidthForProfileCount). */
-.rail-head:has(.rail-new-split[data-crowded]) { gap: 3px; }
-.rail-head:has(.rail-new-split[data-crowded]) .rail-eyebrow { letter-spacing: 0.08em; }
-@container rail (max-width: 360px) {
-  .rail-head:has(.rail-new-split[data-crowded]) .rail-count { display: none; }
-}
-.rail-new-split[data-crowded] { gap: 2px; }
-.rail-new-split[data-crowded] .sidebar-global-new,
-.sidebar-project-actions[data-crowded] .sidebar-proj-new {
-  padding: 0 3px;
+.plan-pick-sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: rgba(255, 255, 255, 0.06);
 }
 
-/* Nine or more (eight Claude plans and "+O" since 2026-11-15, the gold H plan):
-   one step tighter again. At nine, the crowded row needed a 296px rail and hung
-   "+O" 17.5px past Pat's 278px one. Keyed on the row's own child count (only the
-   launch buttons live in it), so it needs no new attribute. Measured in an
-   isolated Harbor (scripts/drive-plan-surfaces-win.js). */
-.rail-head:has(.rail-new-split[data-crowded] > :nth-child(9)) .rail-eyebrow { letter-spacing: 0.04em; }
-.rail-new-split[data-crowded]:has(> :nth-child(9)),
-.sidebar-project-actions[data-crowded]:has(> :nth-child(9)) { gap: 1px; }
-.rail-new-split[data-crowded]:has(> :nth-child(9)) .sidebar-global-new,
-.sidebar-project-actions[data-crowded]:has(> :nth-child(9)) .sidebar-proj-new {
-  min-width: 20px;
-  padding: 0 2px;
-}
-
-/* Ten or more (nine Claude plans and "+O" since 2026-11-18, the red Z plan):
-   at ten, the nine-button tier needed a 288px rail and hung "+O" 9px past Pat's
-   278px one, every button sitting at its 20px floor. The floor drops to 18px
-   (a 10px "+G" is about 13px of ink, so nothing clips) and the eyebrow tracks
-   tighter. Measured in an isolated Harbor (scripts/drive-plan-surfaces-win.js). */
-.rail-head:has(.rail-new-split[data-crowded] > :nth-child(10)) .rail-eyebrow { letter-spacing: 0.02em; }
-.rail-new-split[data-crowded]:has(> :nth-child(10)) .sidebar-global-new,
-.sidebar-project-actions[data-crowded]:has(> :nth-child(10)) .sidebar-proj-new {
-  min-width: 18px;
-  padding: 0 1px;
-}
+/* A project row's launch control stays on screen while its picker is open,
+   so the menu has the button it opened from in view. */
+.sidebar-project-actions[data-picker-open] { display: flex; }
+.sidebar-project-wrap:not(.date-group):has(.sidebar-project-actions[data-picker-open]) .pg-meta { display: none; }
 
 .rail-setup-hint,
 .rail-setup-banner {
@@ -1277,8 +1330,6 @@ button { font-family: inherit; }
 
 .sidebar-project-wrap:hover .pg-meta { display: none; }
 .sidebar-project-wrap.date-group:hover .pg-meta { display: inline; }
-
-.sidebar-proj-new { height: 20px; padding: 0 6px; font-size: 10px; }
 
 /* Session rows */
 .sr {

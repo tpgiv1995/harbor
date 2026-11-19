@@ -141,3 +141,21 @@ test('every ping site goes through the closing helper', () => {
     assert.doesNotMatch(source, /createControlClient\([^)]*\)\.ping\(\)/, `${name} pings through a client it never closes`);
   }
 });
+
+// Keys a session send types are ANSWERED (Sol's review, 2026-11-18): the
+// keeper replies once it has written them, and a write it refused fails the
+// send instead of leaving it to wait minutes for text that was never typed.
+test('an answered write resolves when the keeper took the keys and rejects when it did not', async () => {
+  const client = fakeClient();
+  client.request = async (verb, params) => {
+    client.calls.push([verb, params]);
+    if (verb === 'input' && params.text === 'refused') throw new Error('session p1 has exited');
+    return { accepted: true };
+  };
+  const supervisor = new SessionStreamSupervisor({ client });
+  await assert.rejects(supervisor.sendInputAcked('p1', 'x'), /not controlling p1/, 'only the controlling client types');
+  supervisor.acquireControl('p1', { cols: 80, rows: 24 });
+  assert.deepEqual(await supervisor.sendInputAcked('p1', 'hello'), { accepted: true });
+  await assert.rejects(supervisor.sendInputAcked('p1', 'refused'), /has exited/);
+  assert.deepEqual(client.calls.filter(([verb]) => verb === 'input'), [['input', { id: 'p1', text: 'hello' }], ['input', { id: 'p1', text: 'refused' }]]);
+});

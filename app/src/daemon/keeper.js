@@ -5,7 +5,7 @@
 // this console-less process (see win-hide-children.js).
 require('./win-hide-children.js').install();
 // Above the batch work its session starts (interactive-priority.js).
-const { raiseToInteractive } = require('./interactive-priority.js');
+const { raiseToInteractive, raiseLaunchedCli } = require('./interactive-priority.js');
 raiseToInteractive();
 
 const fs = require('node:fs');
@@ -218,6 +218,15 @@ function startSession() {
   // The CLI itself, explicitly: a keeper that could not raise itself still
   // must not hand below normal to the agent (interactive-priority.js).
   raiseToInteractive(terminal.pid);
+  // The real CLI behind a launcher shim (interactive-priority.js): one native
+  // process snapshot each at 1.5, 5 and 15 s, the window a shim takes to start it.
+  if (process.platform === 'win32') {
+    const { createProcessIntel } = require('./process-intel.js');
+    const intel = createProcessIntel({ refreshMs: 0 });
+    for (const delay of [1500, 5000, 15000]) {
+      setTimeout(() => { try { raiseLaunchedCli(terminal.pid, { table: intel.refresh() }); } catch { /* best effort */ } }, delay).unref?.();
+    }
+  }
 
   const persistCodexTitle = coalesceTitleWrites(() => { if (exit === null) persist(); });
   const observeCodexTitle = createCodexTitleIdentity({

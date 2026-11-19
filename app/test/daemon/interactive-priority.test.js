@@ -42,3 +42,24 @@ test('the real call on this machine leaves the process above normal (Windows onl
     os.setPriority(0, before);
   }
 });
+
+// Measured 2026-11-18: ABOVE NORMAL is not inherited, so a Codex pane's real
+// codex.exe (started by the npm node shim) ran at NORMAL. The keeper raises a
+// direct child of its spawned process that is a known agent CLI, nothing else.
+test('the real CLI behind a launcher shim is raised, and nothing else is', () => {
+  const { raiseLaunchedCli } = require('../../src/daemon/interactive-priority.js');
+  const set = [];
+  const fakeOs = { constants: { priority: { PRIORITY_ABOVE_NORMAL: -7 } }, setPriority: (pid, value) => set.push([pid, value]) };
+  const table = new Map([
+    [100, { pid: 100, ppid: 1, name: 'node.exe', created: 10n }],
+    [101, { pid: 101, ppid: 100, name: 'codex.exe', created: 11n }],
+    [102, { pid: 102, ppid: 100, name: 'python.exe', created: 12n }],
+    [103, { pid: 103, ppid: 101, name: 'claude.exe', created: 13n }],
+    [104, { pid: 104, ppid: 100, name: 'CURSOR-AGENT.EXE', created: 14n }],
+    [105, { pid: 105, ppid: 100, name: 'claude.exe', created: 5n }],
+  ]);
+  assert.deepEqual(raiseLaunchedCli(100, { table, platform: 'win32', os: fakeOs }), [101, 104]);
+  assert.deepEqual(set, [[101, -7], [104, -7]], 'not the tool (102), not a grandchild (103), not a recycled-pid stranger (105)');
+  assert.deepEqual(raiseLaunchedCli(100, { table, platform: 'linux', os: fakeOs }), []);
+  assert.deepEqual(raiseLaunchedCli(999, { table, platform: 'win32', os: fakeOs }), [], 'a root missing from the snapshot raises nothing');
+});

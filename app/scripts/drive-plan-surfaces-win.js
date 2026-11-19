@@ -12,6 +12,13 @@
 // per-project Orch chip; "+O" must open the Session configuration window on the first other
 // provider with that provider's plans in its Plan picker.
 //
+// Since 2026-11-19 (the eleventh and twelfth Claude plans, B and C; Pat: "start to think the 'one
+// button per claude plan' ui and do like a 'picker'") the rail head and a hovered project row hold ONE
+// split button: "+<letter>" starts the plan picked last and the chevron opens the plan picker, one row
+// per Claude plan with its usage, then Other. The drive proves the picker lists every Claude plan in
+// config order, fits Pat's window without scrolling, starts a plan from its typed letter (which then
+// becomes the "+" plan), and that Other opens the Session configuration window on the other provider.
+//
 // What it proves, at the rail widths that matter (the default the app picks for this
 // profile count, Pat's own 278px at his 120% zoom, and the widest the rail is ever dragged):
 //   - the rail head's "+letter" launch row keeps one line, never hangs past the rail,
@@ -35,7 +42,7 @@ const ELECTRON = path.join(APP_DIR, 'node_modules', 'electron', 'dist', 'electro
 const PORT = 9351;
 const OUT = path.join(os.tmpdir(), 'harbor-drive-plan-surfaces');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const { railLaunchPlan, railWidthForProfileCount } = require('../src/renderer/profiles.cjs');
+const { railLaunchPlan, railPrimaryPlan, RAIL_DEFAULT_WIDTH } = require('../src/renderer/profiles.cjs');
 
 class Cdp {
   constructor(ws) {
@@ -105,15 +112,15 @@ const railGeometry = (width) => `(() => {
   void rail.offsetWidth;
   const railBox = rail.getBoundingClientRect();
   const inner = railBox.right - 1; // the rail's own 1px right border
-  const head = [...document.querySelectorAll('.rail-head .sidebar-global-new')].map((b) => b.getBoundingClientRect());
+  const head = [...document.querySelectorAll('.rail-head .launch-split > button')].map((b) => b.getBoundingClientRect());
   const tops = new Set(head.map((b) => Math.round(b.top)));
   const eyebrow = document.querySelector('.rail-eyebrow').getBoundingClientRect();
   const actions = document.querySelector('.sidebar-project-actions');
   let project = null;
   if (actions) {
     actions.style.display = 'flex';
-    const boxes = [...actions.querySelectorAll('.sidebar-proj-new')].map((b) => b.getBoundingClientRect());
-    project = { count: boxes.length, letters: [...actions.querySelectorAll('.sidebar-proj-new')].map((b) => b.textContent.trim()).join(' '),
+    const boxes = [...actions.querySelectorAll('.launch-split > button')].map((b) => b.getBoundingClientRect());
+    project = { count: boxes.length, letters: [...actions.querySelectorAll('.sidebar-proj-new')].map((b) => b.textContent.trim()).join(' ') + (actions.querySelector('.launch-more') ? ' v' : ''),
       orchChip: Boolean(actions.querySelector('.sidebar-orch-btn')) || [...actions.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Orch'), overhang: boxes.length ? Math.round((Math.max(...boxes.map((b) => b.right)) - inner) * 10) / 10 : null,
       oneLine: new Set(boxes.map((b) => Math.round(b.top))).size <= 1 };
     actions.style.display = '';
@@ -126,7 +133,7 @@ const railGeometry = (width) => `(() => {
     zoom: getComputedStyle(document.documentElement).zoom + '/' + getComputedStyle(document.body).zoom + '/' + devicePixelRatio,
     firstLeft: head.length ? Math.round(head[0].left) : null,
     buttons: head.length,
-    letters: [...document.querySelectorAll('.rail-head .sidebar-global-new')].map((b) => b.textContent.trim()).join(' '),
+    letters: [...document.querySelectorAll('.rail-head .sidebar-global-new')].map((b) => b.textContent.trim()).join(' ') + (document.querySelector('.rail-head .launch-more') ? ' v' : ''),
     oneLine: tops.size === 1,
     overhang: Math.round((Math.max(...head.map((b) => b.right)) - inner) * 10) / 10,
     eyebrowWidth: Math.round(eyebrow.width),
@@ -158,6 +165,7 @@ async function main() {
   const profiles = realConfig.profiles || [];
   const claudeProfiles = profiles.filter((p) => (p.provider || 'claude') === 'claude');
   const launch = railLaunchPlan(profiles);
+  const primary = railPrimaryPlan(launch.direct, null);
   const otherProfiles = profiles.filter((p) => p.provider === launch.otherProvider);
   realConfig.paths = {
     ...realConfig.paths,
@@ -211,14 +219,15 @@ async function main() {
     // pixel and a 956x574 CSS viewport. His rail is 500 device pixels = 278 CSS.
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 956, height: 574, deviceScaleFactor: 1.8, mobile: false });
 
-    await waitFor(cdp, `document.querySelectorAll('.rail-head .sidebar-global-new').length === ${launch.count}`, 'one rail launch button per Claude plan, plus +O');
+    await waitFor(cdp, `document.querySelectorAll('.rail-head .launch-split').length === 1`, 'the one rail launch control');
     await waitFor(cdp, `document.querySelectorAll('.rail-meters .rm-row:not(.rm-sys)').length === ${claudeProfiles.length}`, 'one meter row per Claude plan');
     await sleep(2500); // let the first usage read land so the meters show real values
 
     // 1. Rail head and hovered project row at each width that matters.
     const PAT_RAIL = 278;
-    const widths = [...new Set([railWidthForProfileCount(launch.count), PAT_RAIL, 420])];
-    const wantLetters = [...claudeProfiles.map((p) => `+${p.letter}`), '+O'].join(' ');
+    const widths = [...new Set([RAIL_DEFAULT_WIDTH, PAT_RAIL, 420])];
+    // The split reads "+<the default plan's letter>" then the chevron (no plan picked yet in this isolated profile).
+    const wantLetters = `+${primary.letter} v`;
     facts.rail = [];
     for (const width of widths) {
       const g = await cdp.eval(railGeometry(width));
@@ -226,7 +235,7 @@ async function main() {
       // A measurement taken at the wrong width proves nothing (2026-10-29: every width read 340).
       if (Math.abs(g.width - width) > 1) problems.push(`asked for a ${width}px rail, measured ${g.width}px`);
       if (!g.oneLine) problems.push(`rail head wraps at ${width}px`);
-      if (g.overhang > 0) problems.push(`rail head "+O" hangs ${g.overhang}px past the rail at ${width}px`);
+      if (g.overhang > 0) problems.push(`rail head launch control hangs ${g.overhang}px past the rail at ${width}px`);
       if (g.letters !== wantLetters) problems.push(`rail head reads "${g.letters}", want "${wantLetters}"`);
       if (g.project && g.project.letters !== wantLetters) problems.push(`project row reads "${g.project.letters}", want "${wantLetters}"`);
       if (g.project?.orchChip) problems.push('the project row still carries an Orch chip');
@@ -244,26 +253,92 @@ async function main() {
     if (fits === null || fits > PAT_RAIL - 8) problems.push(`the rail head needs ${fits}px; Pat's rail is ${PAT_RAIL}px and wants 8px of slack`);
     await cdp.eval(railGeometry(PAT_RAIL));
     shots.push(await cdp.shot(`1-rail-at-${PAT_RAIL}`));
-    // A filled plan (one with a textColor, e.g. the black X plan) HOVERED: its launch
-    // button must lighten and keep its letter in the text colour (2026-11-03).
     const rgbOf = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ")})`;
-    for (const p of claudeProfiles.filter((q) => /^#[0-9a-f]{6}$/i.test(String(q.textColor || "")))) {
-      const sel = `.rail-new-split .sidebar-global-new.${p.id}`;
-      const rest = await cdp.eval(`(() => { const b = document.querySelector(${JSON.stringify(sel)}); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, bg: getComputedStyle(b).backgroundColor }; })()`);
-      if (!rest) { problems.push(`no rail launch button for ${p.letter}`); continue; }
-      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: rest.x, y: rest.y });
-      await sleep(300);
-      const hovered = await cdp.eval(`(() => { const b = document.querySelector(${JSON.stringify(sel)}); const st = getComputedStyle(b); return { hover: b.matches(":hover"), bg: st.backgroundColor, ink: st.color }; })()`);
-      facts[`hover${p.letter}`] = { restBg: rest.bg, ...hovered };
-      shots.push(await cdp.shot(`1c-hover-plus-${p.letter}-at-${PAT_RAIL}`));
-      if (!hovered.hover) problems.push(`could not hover +${p.letter}`);
-      else if (hovered.bg === rest.bg || hovered.ink !== rgbOf(p.textColor)) problems.push(`+${p.letter} hovered is ${hovered.ink} on ${hovered.bg} (rest ${rest.bg})`);
-      await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
-      await sleep(200);
+    // 1c. The plan picker, opened from the rail head's chevron, at Pat's window (956x574 CSS px).
+    const pickerFacts = async (label) => cdp.eval(`(() => {
+      const menu = document.querySelector('.plan-picker');
+      if (!menu) return null;
+      const box = menu.getBoundingClientRect();
+      const list = menu.querySelector('.rail-menu-list');
+      const rows = [...menu.querySelectorAll('.plan-pick:not(.plan-pick-other)')];
+      const rail = document.querySelector('.rail').getBoundingClientRect();
+      return {
+        label: ${JSON.stringify(label)},
+        title: menu.querySelector('.plan-pick-title')?.textContent.trim(),
+        letters: rows.map((r) => r.querySelector('.plan-pick-badge').textContent.trim()).join(' '),
+        names: rows.map((r) => r.querySelector('.rail-menu-label').textContent.trim()),
+        usage: rows.map((r) => [...r.querySelectorAll('.plan-pick-use')].map((u) => u.textContent.trim()).join('/')),
+        other: menu.querySelector('.plan-pick-other .rail-menu-label')?.textContent.trim() || null,
+        current: menu.querySelector('.plan-pick.current')?.dataset.plan || null,
+        focused: document.activeElement?.dataset?.plan || null,
+        scrolls: list.scrollHeight > list.clientHeight + 1,
+        height: Math.round(box.height), listHidden: list.scrollHeight - list.clientHeight, top: Math.round(box.top), bottom: Math.round(box.bottom),
+        footLines: Math.round(menu.querySelector('.rail-menu-foot').getBoundingClientRect().height),
+        inView: box.top >= 0 && box.bottom <= innerHeight && box.left >= 0 && box.right <= innerWidth,
+        overRail: Math.round(box.right - rail.right),
+        rowsInside: rows.every((r) => { const b = r.getBoundingClientRect(); return b.left >= box.left && b.right <= box.right + 0.5; }),
+        clipped: rows.filter((r) => [...r.children].some((c) => c.scrollWidth > c.clientWidth + 1)).map((r) => r.dataset.plan),
+      };
+    })()`);
+    await cdp.eval(click('.rail-head .launch-more'));
+    await waitFor(cdp, 'Boolean(document.querySelector(".plan-picker .plan-pick"))', 'the plan picker');
+    await sleep(500);
+    facts.picker = await pickerFacts('head');
+    shots.push(await cdp.shot(`1c-plan-picker-at-${PAT_RAIL}`));
+    const pk = facts.picker;
+    if (pk.letters !== facts.claude) problems.push(`the picker lists "${pk.letters}", config says "${facts.claude}"`);
+    if (launch.otherProvider && !pk.other) problems.push('the picker has no Other row');
+    if (pk.current !== primary.id) problems.push(`the picker checks ${pk.current}, the + plan is ${primary.id}`);
+    if (pk.focused !== primary.id) problems.push(`the picker opened with focus on ${pk.focused}, want ${primary.id}`);
+    if (pk.scrolls) problems.push('the plan picker scrolls inside Pat\'s 574px-tall window');
+    if (!pk.inView) problems.push('the plan picker runs off the window');
+    if (pk.overRail > 1) problems.push(`the plan picker runs ${pk.overRail}px past the rail's right edge`);
+    if (!pk.rowsInside || pk.clipped.length) problems.push(`picker rows clipped: ${JSON.stringify(pk.clipped)}`);
+    // A filled plan (one with a textColor, e.g. the black X plan): its picker badge is filled solid in the
+    // plan colour with the letter in the text colour (profileStyle, 2026-11-03).
+    for (const p of claudeProfiles.filter((q) => /^#[0-9a-f]{6}$/i.test(String(q.textColor || '')))) {
+      const badge = await cdp.eval(`(() => { const b = document.querySelector('.plan-picker .plan-pick[data-plan="${p.id}"] .plan-pick-badge'); if (!b) return null; const st = getComputedStyle(b); return { bg: st.backgroundColor, ink: st.color }; })()`);
+      facts[`pickerBadge${p.letter}`] = badge;
+      if (!badge || badge.bg !== rgbOf(p.color) || badge.ink !== rgbOf(p.textColor)) problems.push(`the ${p.letter} picker badge is ${badge?.ink} on ${badge?.bg}`);
     }
+    // Arrow keys move the focus; the row hovered lightens.
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
+    await sleep(200);
+    const afterArrow = await cdp.eval('document.activeElement?.dataset?.plan || null');
+    const wantNext = launch.direct[(launch.direct.findIndex((p) => p.id === primary.id) + 1) % launch.direct.length].id;
+    facts.arrowFocus = afterArrow;
+    if (afterArrow !== wantNext) problems.push(`ArrowDown moved focus to ${afterArrow}, want ${wantNext}`);
+    shots.push(await cdp.shot(`1c2-plan-picker-arrow-at-${PAT_RAIL}`));
+    await cdp.eval(escape);
+    await sleep(300);
+    if (await cdp.eval('Boolean(document.querySelector(".plan-picker"))')) problems.push('Escape did not close the plan picker');
+    // The picker at a tall window too.
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 956, height: 900, deviceScaleFactor: 1.8, mobile: false });
+    await sleep(400);
+    await cdp.eval(click('.rail-head .launch-more'));
+    await waitFor(cdp, 'Boolean(document.querySelector(".plan-picker .plan-pick"))', 'the plan picker (tall)');
+    await sleep(400);
+    shots.push(await cdp.shot('1c3-plan-picker-900-tall'));
+    await cdp.eval(escape);
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 956, height: 574, deviceScaleFactor: 1.8, mobile: false });
+    await sleep(300);
     // The hovered project row, held open the way :hover opens it (buttons shown, the age label hidden), so its buttons are seen, not just measured.
     await cdp.eval(`(() => { const a = document.querySelector('.sidebar-project-actions'); if (!a) return false; a.style.display = 'flex'; const m = a.closest('.sidebar-project-wrap')?.querySelector('.pg-meta'); if (m) m.style.display = 'none'; return true; })()`);
     shots.push(await cdp.shot(`1b-project-row-at-${PAT_RAIL}`));
+    // Its chevron opens the same picker, titled for that project.
+    if (await cdp.eval(click('.sidebar-project-actions .launch-more'))) {
+      await waitFor(cdp, 'Boolean(document.querySelector(".plan-picker .plan-pick"))', 'the project row plan picker');
+      await sleep(400);
+      facts.projectPicker = await pickerFacts('project');
+      shots.push(await cdp.shot(`1b2-project-picker-at-${PAT_RAIL}`));
+      if (!/^New in /.test(facts.projectPicker.title || '')) problems.push(`the project picker is titled "${facts.projectPicker.title}"`);
+      if (facts.projectPicker.scrolls) problems.push(`the project row picker scrolls (${facts.projectPicker.listHidden}px hidden, menu ${facts.projectPicker.top}-${facts.projectPicker.bottom})`);
+      if (facts.projectPicker.letters !== facts.claude) problems.push('the project picker does not list every Claude plan');
+      if (!facts.projectPicker.inView) problems.push('the project picker runs off the window');
+      await cdp.eval(escape);
+      await sleep(300);
+    } else problems.push('the project row has no plan chevron');
     await cdp.eval(`(() => { const a = document.querySelector('.sidebar-project-actions'); if (!a) return true; a.style.display = ''; const m = a.closest('.sidebar-project-wrap')?.querySelector('.pg-meta'); if (m) m.style.display = ''; return true; })()`);
 
     // 2. Rail meters: one row per Claude plan, config order, the profile's colour.
@@ -360,20 +435,46 @@ async function main() {
       await sleep(300);
     }
 
-    // 5b. "+O" opens the Session configuration window on the first other provider, whose Plan
-    // picker lists that provider's plans.
+    // 5a. A plan's letter typed in the open picker starts that plan (the rail head is not immediate,
+    // so the Session configuration window opens on it), and that plan becomes the "+" plan.
+    const typed = claudeProfiles[claudeProfiles.length - 1];
+    await cdp.eval(click('.rail-head .launch-more'));
+    await waitFor(cdp, 'Boolean(document.querySelector(".plan-picker .plan-pick"))', 'the plan picker (letter)');
+    await sleep(300);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: typed.letter.toLowerCase(), code: `Key${typed.letter}`, text: typed.letter.toLowerCase(), windowsVirtualKeyCode: typed.letter.charCodeAt(0) });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: typed.letter.toLowerCase(), code: `Key${typed.letter}`, windowsVirtualKeyCode: typed.letter.charCodeAt(0) });
+    await waitFor(cdp, 'Boolean(document.querySelector(".new-session-popover .config-account button.active"))', 'the Session configuration window from a typed letter');
+    await sleep(500);
+    facts.typedLetter = await cdp.eval(`({ typed: ${JSON.stringify(typed.letter)}, active: document.querySelector('.config-account button.active')?.textContent.trim() || null, picker: Boolean(document.querySelector('.plan-picker')) })`);
+    shots.push(await cdp.shot(`4a-typed-${typed.letter}-session-config`));
+    if (!facts.typedLetter.active || !facts.typedLetter.active.includes(typed.label)) problems.push(`typing ${typed.letter} opened the window on "${facts.typedLetter.active}", want ${typed.label}`);
+    if (facts.typedLetter.picker) problems.push('the picker stayed open after a letter started a plan');
+    await cdp.eval(escape);
+    await sleep(300);
+    if (await cdp.eval('Boolean(document.querySelector(".new-session-popover"))')) {
+      await cdp.eval(click('.new-session-popover .new-session-close'));
+      await sleep(300);
+    }
+    facts.plusAfterPick = await cdp.eval("document.querySelector('.rail-head .sidebar-global-new')?.textContent.trim() || null");
+    if (facts.plusAfterPick !== `+${typed.letter}`) problems.push(`after picking ${typed.letter} the + button reads "${facts.plusAfterPick}"`);
+    shots.push(await cdp.shot(`4a2-plus-is-${typed.letter}-after-pick`));
+
+    // 5b. Other (the picker's last row) opens the Session configuration window on the first other
+    // provider, whose Plan picker lists that provider's plans.
     if (launch.otherProvider) {
-      await cdp.eval(click('.rail-head .sidebar-global-new.launch-other'));
-      await waitFor(cdp, 'Boolean(document.querySelector(".new-session-popover"))', 'the Session configuration window from +O');
+      await cdp.eval(click('.rail-head .launch-more'));
+      await waitFor(cdp, 'Boolean(document.querySelector(".plan-picker .plan-pick-other"))', 'the picker Other row');
+      await cdp.eval(click('.plan-picker .plan-pick-other'));
+      await waitFor(cdp, 'Boolean(document.querySelector(".new-session-popover"))', 'the Session configuration window from Other');
       await sleep(800);
       facts.otherWindow = await cdp.eval(`(() => ({
         provider: document.querySelector('.new-session-providers button.active')?.textContent.trim() || null,
         plans: [...document.querySelectorAll('.config-account button')].map((b) => b.textContent.trim()),
         active: document.querySelector('.config-account button.active')?.textContent.trim() || null,
       }))()`);
-      shots.push(await cdp.shot('4b-plus-o-session-config'));
-      if (facts.otherWindow.plans.length !== otherProfiles.length) problems.push(`+O window shows ${facts.otherWindow.plans.length} plans, config has ${otherProfiles.length} ${launch.otherProvider} plans`);
-      for (const p of otherProfiles) if (!facts.otherWindow.plans.some((label) => label.includes(p.label))) problems.push(`+O window lacks the ${p.label} plan`);
+      shots.push(await cdp.shot('4b-other-session-config'));
+      if (facts.otherWindow.plans.length !== otherProfiles.length) problems.push(`Other window shows ${facts.otherWindow.plans.length} plans, config has ${otherProfiles.length} ${launch.otherProvider} plans`);
+      for (const p of otherProfiles) if (!facts.otherWindow.plans.some((label) => label.includes(p.label))) problems.push(`Other window lacks the ${p.label} plan`);
       await cdp.eval(escape);
       await sleep(300);
       if (await cdp.eval('Boolean(document.querySelector(".new-session-popover"))')) {

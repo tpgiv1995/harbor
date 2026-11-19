@@ -498,7 +498,13 @@ async function composeServer(options = {}) {
     'session:send': async (payload) => {
       if (sidebar.isDelegated?.(payload?.sessionId)) throw new Error('Delegated agents are read-only. Send instructions to their parent session.');
       try { return await sessionSend.send(payload); }
-      catch (error) { return { ok: false, reason: error.message }; }
+      catch (error) {
+        // The code travels with the refusal, and keys whose acknowledgement
+        // never came, and any refusal after an Enter was pressed, are "unknown", so
+        // a caller never sends a second copy of a message that may have been
+        // submitted (Sol's review, rounds three and four).
+        return { ok: false, reason: error.message, code: error.code || null, submission: error.submission || (error.code === 'INPUT_UNCONFIRMED' ? 'unknown' : null), clearedInto: error.clearedInto || null };
+      }
     },
     'orchestration:list-delegations': () => sidebar.listDelegations(),
     'orchestration:list-sub-sessions': (request) => sidebar.listSubSessions(request),

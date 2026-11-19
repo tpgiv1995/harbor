@@ -58,14 +58,24 @@ class SessionStreamSupervisor extends EventEmitter {
     return this.controller;
   }
   controllerReady(paneId) { return this.controller?.paneId === paneId; }
-  sendInput(paneId, input) {
-    if (!this.controllerReady(paneId)) throw new Error(`not controlling ${paneId}: acquireControl(${paneId}) first`);
-    const params = typeof input === 'string'
+  inputParams(input) {
+    return typeof input === 'string'
       ? { text: input }
       : Buffer.isBuffer(input?.bytes)
         ? { ...input, bytes: input.bytes.toString('base64') }
         : input;
-    this.client.request('input', { id: paneId, ...params }).catch((error) => this.emit('error', error));
+  }
+  sendInput(paneId, input) {
+    if (!this.controllerReady(paneId)) throw new Error(`not controlling ${paneId}: acquireControl(${paneId}) first`);
+    this.client.request('input', { id: paneId, ...this.inputParams(input) }).catch((error) => this.emit('error', error));
+  }
+  // The same write, answered: resolves once the keeper has written the bytes
+  // into the pty ({ accepted: true }), rejects when it could not (the session
+  // exited, the keeper is gone). Session sends use this (terminal-bridge
+  // sendInputAcked), so keys that never arrived fail the send at once.
+  sendInputAcked(paneId, input) {
+    if (!this.controllerReady(paneId)) return Promise.reject(new Error(`not controlling ${paneId}: acquireControl(${paneId}) first`));
+    return this.client.request('input', { id: paneId, ...this.inputParams(input) });
   }
   resize(paneId, size) {
     this.client.request('resize', { id: paneId, cols: size.cols, rows: size.rows }).then(

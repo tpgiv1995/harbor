@@ -132,7 +132,8 @@ function makeHarness({ panes = [], readFrames = [], controlled = null, promptEch
       launchActions: {
         resumeSession: async (args) => {
           harness.resumeCalls.push(args);
-          state.panes.push('pane-fresh');
+          // As the daemon does: a resumed pane carries its session id from spawn.
+          state.panes.push({ pane_id: 'pane-fresh', workspace_id: 'ws-1', agent_session: { kind: 'id', value: args.id } });
         },
       },
       getSessionMeta: async () => ({ cwd: '/home/x/dev/harbor' }),
@@ -140,6 +141,10 @@ function makeHarness({ panes = [], readFrames = [], controlled = null, promptEch
       projectLabelForCwd: () => 'harbor',
       sleep: async () => {},
       setXClipboardImage: async (imagePath) => sequence.push(['clipboard', imagePath]),
+      // The clipboard route is opt-in (2026-11-19); these specs keep proving it.
+      pasteClaudeImagesFromClipboard: true,
+      // Fixture paths name no real file; a spec about missing pictures overrides this.
+      imageFileReady: async () => true,
       captureDir: path.join(stateDir, 'unrecognized-dialogs'),
       sendLogFile: path.join(stateDir, 'send-log.jsonl'),
     },
@@ -256,12 +261,16 @@ test('model switch arriving after a send stops the Enter retry watcher', async (
 });
 test('damaged divider: idle prose question stays sendable without an answer panel', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  // The prompt draws what was typed into it (round fourteen: a draft already
+  // there that merely ENDS like the message is someone else's, PROMPT_BUSY).
+  h.prompt.echo = false;
   h.deps.readPane = async () => ['- Do you want me to sort the toy blocks?', damagedDivider,
-    '\u276f keep the blue blocks', damagedDivider, '  synthetic status'].join('\n');
+    `\u276f ${h.prompt.draft}`, damagedDivider, '  synthetic status'].join('\n');
   const send = createSessionSend(h.deps);
   assert.equal(await send.getMenu({ pane: { paneId: 'pane-1' }, blockedHint: true }), null);
-  await send.send({ sessionId: 'synthetic-damaged', text: 'blue blocks', pane: { paneId: 'pane-1' } });
-  assert.ok(h.sent.some(s => s.text.includes('blue blocks')));
+  await send.send({ sessionId: 'synthetic-damaged', text: 'keep the blue blocks', pane: { paneId: 'pane-1' } });
+  assert.ok(h.sent.some(s => s.text.includes('keep the blue blocks')));
+  assert.equal(h.sent.filter(s => s.text === '\r').length, 1);
 });
 test('damaged divider: real confirmation remains blocked and refuses a send', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
@@ -340,14 +349,16 @@ test('session-send test harness redirects every writable default away from the u
 
 test('image attachments set and verify the clipboard, send Ctrl+V, confirm each marker, then send text', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  const screens = [
-    'conversation\n❯',
-    'conversation\n❯',
-    'draft [Image #1]\n❯',
-    'draft [Image #1]\n❯',
-    'draft [Image #1] [Image #2]\n❯',
-  ];
-  h.deps.readPane = async () => screens.shift() || screens.at(-1) || '';
+  // As Claude draws it: each paste puts its chip IN THE PROMPT (round seven:
+  // only a chip in the composer confirms a paste).
+  h.deps.readPane = async () => `conversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  let chips = 0;
+  const base = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    const result = base(paneId, text);
+    if (text === IMAGE_PASTE) { chips += 1; h.prompt.draft += `[Image #${chips}] `; }
+    return result;
+  };
   const send = createSessionSend(h.deps);
 
   await send.send({
@@ -377,12 +388,18 @@ test('image attach is confirmed even when a prior turn\'s markers scroll off (ma
   // Idle pane whose last turn was an image send: two lingering #2 markers
   // (prompt echo + attachment line). Repeated to cover the composer-safe check
   // and the beforeMax read before the after-paste frame arrives.
-  const idle = '❯ [Image #2] describe this\n  ⎿  [Image #2]\n● sure\n────\n❯\n────';
-  // After Ctrl+V: old #2 markers scrolled off the top; only the new #3 remains.
+  const idle = '❯ [Image #2] describe this\n  ⎿  [Image #2]\n● sure';
+  // After Ctrl+V: old #2 markers scrolled off the top; only the new #3 remains,
+  // drawn in the prompt (the harness draws the prompt under each frame).
   // Old count-logic saw 2 -> 1 and failed; max-#N sees 2 -> 3 and confirms.
-  const afterPaste = '● sure\n────\n❯ [Image #3]\n────\n status';
-  const screens = [idle, idle, idle, afterPaste];
-  h.deps.readPane = async () => screens.shift() || screens.at(-1) || '';
+  let pasted = false;
+  h.deps.readPane = async () => `${pasted ? '● sure' : idle}\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  const base = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    const result = base(paneId, text);
+    if (text === IMAGE_PASTE) { pasted = true; h.prompt.draft += '[Image #3] '; }
+    return result;
+  };
   const send = createSessionSend(h.deps);
 
   const res = await send.send({
@@ -402,17 +419,30 @@ test('image attach is confirmed even when a prior turn\'s markers scroll off (ma
 });
 
 // One typist per pane across processes (withPaneLock): the desktop app and the
-// phone server both type into the same panes.
-test('a pane locked by another live Harbor process makes the send wait, then it goes in once released', async () => {
+// phone server both type into the same panes. The lock is OS-owned
+// (shared/os-lock.cjs): a second process holds it for real here.
+const OS_LOCK = path.resolve(__dirname, '../../src/shared/os-lock.cjs');
+function holdLockInAnotherProcess(name) {
   const { spawn } = require('node:child_process');
+  const child = spawn(process.execPath, ['-e', `
+    const { withLock } = require(${JSON.stringify(OS_LOCK)});
+    withLock(${JSON.stringify(name)}, () => new Promise((resolve) => {
+      process.stdout.write('held\\n');
+      process.stdin.on('end', resolve);
+      process.stdin.resume();
+    })).then(() => process.exit(0));
+  `], { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
+  const ready = new Promise((resolve) => child.stdout.on('data', (d) => { if (String(d).includes('held')) resolve(); }));
+  return { child, ready };
+}
+const paneLockName = (h, paneId) => `harbor-pane:${path.join(path.dirname(h.deps.sendLogFile), 'pane-locks')}:${paneId}`;
+
+test('a pane locked by another live Harbor process makes the send wait, then it goes in once released', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   const pane = composerPane(h);
-  const lockDir = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks');
-  fs.mkdirSync(lockDir, { recursive: true });
-  const lockFile = path.join(lockDir, 'pane-1.lock');
-  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore', windowsHide: true });
+  const other = holdLockInAnotherProcess(paneLockName(h, 'pane-1'));
   try {
-    fs.writeFileSync(lockFile, JSON.stringify({ pid: holder.pid, token: 'other', at: Date.now() }));
+    await other.ready;
     const send = createSessionSend(h.deps);
     const details = [];
     send.emitter.on('status', (st) => { if (st.detail) details.push(st.detail); });
@@ -420,32 +450,71 @@ test('a pane locked by another live Harbor process makes the send wait, then it 
     await new Promise((r) => setTimeout(r, 2200));
     assert.deepEqual(typed(h), [], 'nothing typed while the other process holds the pane');
     assert.ok(details.some((d) => /another Harbor window is typing/.test(d)), 'the bar says why');
-    fs.rmSync(lockFile);
+    other.child.stdin.end();
     const result = await pending;
     assert.equal(result.ok, true);
     assert.deepEqual(typed(h), ['hello there', '\r']);
     assert.equal(pane.draft, '');
-    assert.equal(fs.existsSync(lockFile), false, 'the lock is removed after the send');
   } finally {
-    holder.kill();
+    other.child.kill();
   }
 });
 
-test('a pane lock left by a process that no longer exists is taken over at once', async () => {
-  const { spawn } = require('node:child_process');
+test('a pane lock whose holder process dies is free at once, with no staleness rule', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   composerPane(h);
-  const lockDir = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks');
-  fs.mkdirSync(lockDir, { recursive: true });
-  const gone = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true });
-  await new Promise((r) => gone.once('exit', r));
-  fs.writeFileSync(path.join(lockDir, 'pane-1.lock'), JSON.stringify({ pid: gone.pid, token: 'dead', at: Date.now() }));
+  const other = holdLockInAnotherProcess(paneLockName(h, 'pane-1'));
+  await other.ready;
+  other.child.kill('SIGKILL');
+  await new Promise((r) => other.child.once('exit', r));
   const send = createSessionSend(h.deps);
   const started = Date.now();
   const result = await send.send({ sessionId: 's-lock-dead', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
   assert.equal(result.ok, true);
   assert.ok(Date.now() - started < 1500, 'no wait behind a dead holder');
   assert.deepEqual(typed(h), ['hello there', '\r']);
+});
+
+// A send that waited for another process re-checks, inside the lock, that the
+// pane still serves its session (Sol's review, round two).
+test('a send that waited out another typist re-checks the pane, and types nothing if it changed conversation', async () => {
+  const pane1 = { pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: 's-mine' } };
+  const h = makeHarness({ panes: [pane1], controlled: 'pane-1' });
+  composerPane(h);
+  const other = holdLockInAnotherProcess(paneLockName(h, 'pane-1'));
+  try {
+    await other.ready;
+    const send = createSessionSend(h.deps);
+    const pending = send.send({ sessionId: 's-mine', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    await new Promise((r) => setTimeout(r, 600));
+    pane1.agent_session = { kind: 'id', value: 's-someone-else' }; // the holder started another conversation there
+    other.child.stdin.end();
+    await assert.rejects(pending, (error) => error.code === 'TARGET_CHANGED');
+    assert.deepEqual(typed(h), [], 'nothing typed into the other conversation');
+  } finally {
+    other.child.kill();
+  }
+});
+
+// The record of typing a pane has not shown yet is shared by every Harbor
+// process on the store (Sol's review): kept per process, the phone server could
+// not see the desktop's paste still waiting in a stalled Claude, and typed a
+// second message behind it.
+test('typing one Harbor process left unshown is waited on by another, never typed again', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h, { renderDelayReads: 1300, alive: true });
+  const desktop = createSessionSend(h.deps);
+  const phone = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(
+    desktop.send({ sessionId: 's-two-procs', text: NEW_SESSION_MESSAGE, pane: target }),
+    (error) => error.code === 'PROMPT_NEVER_HELD',
+  );
+  assert.ok(fs.existsSync(path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'pane-1.pending.json')), 'the record is on disk for every process');
+  await phone.send({ sessionId: 's-two-procs', text: NEW_SESSION_MESSAGE, pane: target });
+  assert.deepEqual(typed(h), [NEW_SESSION_MESSAGE, '\r'], 'typed once, submitted once, across both processes');
+  assert.equal(pane.draft, '');
+  assert.equal(fs.existsSync(path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'pane-1.pending.json')), false, 'cleared once shown');
 });
 
 test('a picture whose chip wraps behind a long message is still seen as attached (2026-11-18, Vox)', async () => {
@@ -467,10 +536,1458 @@ test('a Claude that draws nothing after the image chord is waited on, not refuse
   assert.equal(pane.draft, '');
 });
 
+// Typed keys are answered by the keeper (terminal-bridge sendInputAcked): keys
+// the session did not take fail the send at once, never a wait of minutes.
+test('keys the session refuses fail the send at once, without waiting for the prompt', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h);
+  h.deps.terminalBridge.sendInputAcked = async () => ({ ok: false, reason: 'the session did not take the keys: session pane-1 has exited' });
+  const send = createSessionSend(h.deps);
+  let reads = 0;
+  const readPane = h.deps.readPane;
+  h.deps.readPane = async (...args) => { reads += 1; return readPane(...args); };
+  await assert.rejects(
+    send.send({ sessionId: 's-refused-keys', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    /did not take the keys/,
+  );
+  assert.ok(reads < 60, `refused at once, not after a wait (${reads} reads)`);
+});
+
+// One clipboard, many panes (Sol's review, rounds one and two): Claude reads
+// the clipboard when it reaches the chord, so a pane that never read its chord
+// could attach the NEXT image put there. While that pane is still frozen on the
+// same screen, other images go by path and the clipboard is left alone (never
+// cleared: that wiped Pat's own copy and could not stop the late read anyway).
+test('while a frozen pane still owes its clipboard read, the next image goes by path and the clipboard is untouched', async () => {
+  const h = makeHarness({ panes: ['pane-1', 'pane-2'], controlled: 'pane-2' });
+  const FROZEN = `✻ Working… (frozen)\nconversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  let pane2Screen = FROZEN;
+  // The send captures its screen reader when it is made, so this one routes
+  // pane-2 to pane2Screen and pane-1 to whatever draws it at the time (the
+  // composer, installed below).
+  let drawPane1 = h.deps.readPane;
+  h.deps.readPane = async (paneId, ...rest) => (paneId === 'pane-2' ? pane2Screen : drawPane1(paneId, ...rest));
+  const reader = h.deps.readPane;
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-frozen', text: 'x', images: ['/cache/one.png'], pane: { paneId: 'pane-2', workspaceId: 'ws-1' } }),
+    /drew nothing/,
+  );
+  const pane = composerPane(h, { pathChips: 'whole-line' });
+  drawPane1 = h.deps.readPane;
+  h.deps.readPane = reader;
+  const before = h.sequence.length;
+  const second = await send.send({ sessionId: 's-other', text: 'look at this', images: ['/cache/two.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(second.ok, true);
+  const during = h.sequence.slice(before);
+  assert.equal(during.some(([kind]) => kind === 'clipboard'), false, 'the clipboard still holds the frozen pane\'s own image');
+  assert.ok(during.some(([kind, text]) => kind === 'input' && String(text).includes('"/cache/two.png"')), 'the image went by path');
+  assert.equal(pane.draft, '');
+  // A redraw alone proves nothing: still by path.
+  pane2Screen = `✻ Working… (later)\nconversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  const redrawn = h.sequence.length;
+  const stillPath = await send.send({ sessionId: 's-other', text: 'one more', images: ['/cache/two-b.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(stillPath.ok, true);
+  assert.equal(h.sequence.slice(redrawn).some(([kind]) => kind === 'clipboard'), false, 'a redraw is not evidence the chord was read');
+  // The frozen pane draws ITS image chip (it read the clipboard): the clipboard route is back.
+  pane2Screen = `conversation\n${PROMPT_RULE}\n❯ [Image #1] x\n${PROMPT_RULE}`;
+  const mark = h.sequence.length;
+  const third = await send.send({ sessionId: 's-other', text: 'and this', images: ['/cache/three.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(third.ok, true);
+  assert.ok(h.sequence.slice(mark).some(([kind, file]) => kind === 'clipboard' && file === '/cache/three.png'));
+});
+
+// Round three: the debt is checked INSIDE the clipboard lock, so a send that
+// was already waiting for the lock while the frozen pane's paste failed sees
+// the debt and goes by path (checked before the lock, it wrote the clipboard).
+test('an image send waiting on the clipboard lock sees the debt the holder recorded, and goes by path', async () => {
+  const h = makeHarness({ panes: ['pane-1', 'pane-2'], controlled: 'pane-2' });
+  const FROZEN = `✻ Working… (frozen)\nconversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  let drawPane1 = h.deps.readPane;
+  // pane-2 is frozen and slow to read, so its failed paste holds the lock a while.
+  h.deps.readPane = async (paneId, ...rest) => {
+    if (paneId === 'pane-2') { await new Promise((r) => setTimeout(r, 5)); return FROZEN; }
+    return drawPane1(paneId, ...rest);
+  };
+  const reader = h.deps.readPane;
+  const baseInput = h.deps.terminalBridge.sendInput;
+  composerPane(h, { pathChips: 'whole-line' });
+  drawPane1 = h.deps.readPane;
+  h.deps.readPane = reader;
+  const composerInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => (paneId === 'pane-2' ? baseInput(paneId, text) : composerInput(paneId, text));
+  const send = createSessionSend(h.deps);
+  const first = send.send({ sessionId: 's-frozen', text: 'x', images: ['/cache/one.png'], pane: { paneId: 'pane-2', workspaceId: 'ws-1' } });
+  first.catch(() => {});
+  while (!h.sequence.some(([kind]) => kind === 'clipboard')) await new Promise((r) => setTimeout(r, 1));
+  const second = send.send({ sessionId: 's-other', text: 'look at this', images: ['/cache/two.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  await assert.rejects(first);
+  const result = await second;
+  assert.equal(result.ok, true);
+  assert.deepEqual(h.sequence.filter(([kind]) => kind === 'clipboard').map(([, file]) => file), ['/cache/one.png'], 'the clipboard still holds the frozen pane\'s image');
+});
+
+// Round three: every send re-checks the pane inside the lock, waited or not.
+test('a pane that started another conversation between lookup and typing gets nothing, even with no wait', async () => {
+  const pane1 = { pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: 's-mine' } };
+  const h = makeHarness({ panes: [pane1], controlled: 'pane-1' });
+  composerPane(h);
+  let lookups = 0;
+  h.deps.getSessionMeta = async () => {
+    lookups += 1;
+    // The second lookup runs after the pane was resolved and before the lock.
+    if (lookups === 2) pane1.agent_session = { kind: 'id', value: 's-someone-else' };
+    return null;
+  };
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-mine', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'TARGET_CHANGED',
+  );
+  assert.equal(lookups >= 2, true);
+  assert.deepEqual(typed(h), [], 'nothing typed into the other conversation');
+});
+
+// Round three: the record stands until the Enter is acknowledged.
+test('an Enter whose answer never came keeps the record, and the same send again presses Enter only', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h);
+  let lose = true;
+  h.deps.terminalBridge.sendInputAcked = async (paneId, text) => {
+    if (text === '\r' && lose) { lose = false; return { ok: false, ambiguous: true, reason: 'no answer from the session daemon: input request timed out after 10000ms' }; }
+    return h.deps.terminalBridge.sendInput(paneId, text);
+  };
+  const file = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'pane-1.pending.json');
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-enter-lost', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'INPUT_UNCONFIRMED',
+  );
+  assert.ok(fs.existsSync(file), 'the record stands');
+  const again = await send.send({ sessionId: 's-enter-lost', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(again.ok, true);
+  assert.deepEqual(typed(h), ['hello there', '\r'], 'typed once, Enter pressed for it');
+  assert.equal(pane.draft, '');
+  assert.equal(fs.existsSync(file), false);
+});
+
+// Round three: a resize reflowing a frozen frame is not the CLI drawing.
+test('a frozen frame reflowed by a resize still counts as frozen, so the next send types nothing', async () => {
+  const longAgo = new Date(Date.now() - 12 * 60 * 60_000).toISOString();
+  const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: longAgo }], controlled: 'pane-1' });
+  h.prompt.echo = false;
+  const frame = (width) => `✻ Working… (4m 11s · esc to interrupt)\n\n${'─'.repeat(width)}\n❯ \n${'─'.repeat(width)}\n  ⏵⏵ bypass permissions on`;
+  let width = 60;
+  h.deps.readPane = async () => frame(width);
+  const send = createSessionSend(h.deps);
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'first message', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }));
+  width = 44; // the window was resized; the CLI drew nothing
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'second message', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }));
+  assert.deepEqual(typed(h), ['first message'], 'nothing typed behind the queued first message');
+});
+
+// Round three: a Codex paste into a frozen Codex is queued too.
+function frozenCodex(h) {
+  const state = { frozen: true, draft: '', echoed: [] };
+  h.prompt.echo = false;
+  const frame = () => `  >_ OpenAI Codex (v0.165.0)\n\n${state.echoed.map((m) => `› ${m}\n\n• OK\n`).join('\n')}\n› ${state.draft || 'Ask Codex to do anything'}\n\n  GPT-6.1-Sol low · ~\\dev\\proof · proof`;
+  const still = frame();
+  h.deps.readPane = async () => (state.frozen ? still : frame());
+  const base = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    const result = base(paneId, text);
+    if (state.frozen) return result;
+    if (text === '\r') { if (state.draft.trim()) { state.echoed.push(state.draft.trim()); state.draft = ''; } } else state.draft += text.replace(/\x1b\[20[01]~/g, '');
+    return result;
+  };
+  return state;
+}
+
+test('a second send into a frozen Codex waits for its queued paste instead of pasting behind it', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const codex = frozenCodex(h);
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'first message', pane: target }));
+  await assert.rejects(
+    send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'second message', pane: target }),
+    (error) => error.code === 'EARLIER_TYPING_STALLED',
+  );
+  assert.equal(typed(h).filter((t) => t.includes('message')).length, 1, 'pasted once');
+  // Codex wakes: the queued paste shows in its box, and the same send presses Enter only.
+  codex.frozen = false;
+  codex.draft = 'first message';
+  const result = await send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'first message', pane: target });
+  assert.equal(result.ok, true);
+  assert.equal(typed(h).filter((t) => t.includes('message')).length, 1, 'still pasted once');
+  assert.deepEqual(codex.echoed, ['first message']);
+});
+
+test('a Codex that drew since with an empty box ends the record, and the next send pastes', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const codex = frozenCodex(h);
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'first message', pane: target }));
+  codex.frozen = false;
+  codex.echoed.push('something it did meanwhile'); // it drew; the paste is gone
+  const result = await send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'second message', pane: target });
+  assert.equal(result.ok, true);
+  assert.equal(codex.echoed.at(-1), 'second message');
+});
+
+// Round four: a resume delivers only into a pane that is its own.
+test('a resume takes only the new pane naming its own session, never one naming another or nobody', async () => {
+  const h = makeHarness({ panes: [] });
+  h.deps.readPane = async () => '  ready\n──────────────\n❯\n──────────────\n  opus 5 xhigh\n  hint';
+  h.deps.launchActions = {
+    resumeSession: async () => {
+      // Another resume in the same project opened its pane first.
+      h.state.panes.push({ pane_id: 'pane-other', workspace_id: 'ws-1', agent_session: { kind: 'id', value: 'sess-other' } });
+      h.state.panes.push({ pane_id: 'pane-unnamed', workspace_id: 'ws-1' }); // a New Session opened meanwhile
+      h.state.panes.push({ pane_id: 'pane-mine', workspace_id: 'ws-1', agent_session: { kind: 'id', value: 'sess-mine' } });
+    },
+  };
+  const send = createSessionSend(h.deps);
+  const result = await send.send({ sessionId: 'sess-mine', text: 'hello', resumeOnly: true });
+  assert.equal(result.paneId, 'pane-mine');
+});
+
+// Round four: any refusal after an Enter was pressed is "submission unknown".
+test('a Codex send refused after its Enter reports submission unknown', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { swallowEnters: 2 });
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: `Please look again. ${'proof words '.repeat(120)}marker`, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'CODEX_NOT_SUBMITTED' && error.submission === 'unknown',
+  );
+});
+
+// Round four: image chords and slash commands wait behind unshown typing too.
+function frozenClaude(h) {
+  const longAgo = new Date(Date.now() - 12 * 60 * 60_000).toISOString();
+  h.state.panes.splice(0, h.state.panes.length, { pane_id: 'pane-1', workspace_id: 'ws-1', created_at: longAgo });
+  h.prompt.echo = false;
+  const state = { screen: `✻ Working… (4m 11s · esc to interrupt)\n\n${'─'.repeat(60)}\n❯ \n${'─'.repeat(60)}\n  ⏵⏵ bypass permissions on` };
+  h.deps.readPane = async () => state.screen;
+  return state;
+}
+
+test('an image paste into a Claude still holding unshown typing writes nothing to the clipboard', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  frozenClaude(h);
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'first message', pane: target }));
+  await assert.rejects(
+    send.send({ sessionId: 's-frozen', text: 'see this', images: ['/cache/shot.png'], pane: target }),
+    (error) => error.code === 'EARLIER_TYPING_STALLED',
+  );
+  assert.equal(h.sequence.some(([kind]) => kind === 'clipboard'), false);
+  assert.deepEqual(typed(h), ['first message']);
+});
+
+test('a slash command into a frozen Codex with a queued paste types nothing', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  frozenCodex(h);
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'first message', pane: target }));
+  await assert.rejects(
+    send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: '/status', pane: target }),
+    (error) => error.code === 'EARLIER_TYPING_STALLED',
+  );
+  assert.equal(typed(h).filter((x) => x.includes('/status')).length, 0);
+});
+
+// Round four: a second look before ending a record on one changed frame.
+test('a frame drawn just before the queued keys arrive does not end the record', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const claude = frozenClaude(h);
+  let armed = false;
+  h.deps.sleep = async (ms) => {
+    // The second look: by now the CLI has read the queued keys and drawn them.
+    if (armed && ms === 1000) claude.screen = `✻ Working… (4m 13s · esc to interrupt)\n\n${'─'.repeat(60)}\n❯ first message\n${'─'.repeat(60)}\n  ⏵⏵ bypass permissions on`;
+  };
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'first message', pane: target }));
+  claude.screen = claude.screen.replace('4m 11s', '4m 12s'); // one spinner frame, prompt still empty
+  armed = true;
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'a different message', pane: target }));
+  assert.deepEqual(typed(h), ['first message'], 'nothing typed behind it');
+});
+
+// Round four: the clipboard debt survives a restart of the desktop process.
+test('a clipboard debt recorded by one Harbor process is honoured by the next', async () => {
+  const h = makeHarness({ panes: ['pane-1', 'pane-2'], controlled: 'pane-2' });
+  const FROZEN = `✻ Working… (frozen)\nconversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  let drawPane1 = h.deps.readPane;
+  h.deps.readPane = async (paneId, ...rest) => (paneId === 'pane-2' ? FROZEN : drawPane1(paneId, ...rest));
+  const reader = h.deps.readPane;
+  const before = createSessionSend(h.deps);
+  await assert.rejects(before.send({ sessionId: 's-frozen', text: 'x', images: ['/cache/one.png'], pane: { paneId: 'pane-2', workspaceId: 'ws-1' } }));
+  composerPane(h, { pathChips: 'whole-line' });
+  drawPane1 = h.deps.readPane;
+  h.deps.readPane = reader;
+  const after = createSessionSend(h.deps); // the desktop restarted
+  const mark = h.sequence.length;
+  const result = await after.send({ sessionId: 's-other', text: 'look', images: ['/cache/two.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.equal(h.sequence.slice(mark).some(([kind]) => kind === 'clipboard'), false, 'the restarted process still knows the debt');
+});
+
+// Round five: a bare Codex slash command can open a picker on its first
+// Enter, so it never gets a spare.
+test('a bare Codex slash command gets no spare Enter', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { swallowEnters: 1 });
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: '/model', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }).catch(() => {});
+  assert.equal(typed(h).filter((x) => x === '\r').length, 1, 'one Enter, no spare');
+});
+
+// Round five: one redraw and then the clock is not "alive".
+test('a CLI that drew one frame and then froze keeps the record, so the next send types nothing', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const claude = frozenClaude(h);
+  const base = h.deps.terminalBridge.sendInput;
+  let typedOnce = false;
+  let readsAfter = 0;
+  h.deps.terminalBridge.sendInput = (paneId, text) => { if (text === 'first message') typedOnce = true; return base(paneId, text); };
+  const frozenRead = h.deps.readPane;
+  h.deps.readPane = async (...args) => {
+    if (typedOnce && (readsAfter += 1) === 3) claude.screen = claude.screen.replace('4m 11s', '4m 12s'); // one frame, then frozen again
+    return frozenRead(...args);
+  };
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'first message', pane: target }));
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'a different message', pane: target }));
+  assert.deepEqual(typed(h), ['first message'], 'nothing typed behind it');
+});
+
+// Round five: an unreadable second look keeps the record.
+test('a second look that cannot read the screen keeps the record', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const claude = frozenClaude(h);
+  let blind = false;
+  const frozenRead = h.deps.readPane;
+  h.deps.readPane = async (...args) => { if (blind) throw new Error('pane unreadable'); return frozenRead(...args); };
+  h.deps.sleep = async (ms) => { if (ms === 1000 && claude.screen.includes('4m 12s')) blind = true; };
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'first message', pane: target }));
+  claude.screen = claude.screen.replace('4m 11s', '4m 12s'); // drew, prompt empty
+  await assert.rejects(send.send({ sessionId: 's-frozen', text: 'a different message', pane: target }));
+  assert.deepEqual(typed(h), ['first message']);
+});
+
+// Round five: an unreadable clipboard-debt record counts as a debt.
+test('an unreadable clipboard debt keeps images off the clipboard', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h, { pathChips: 'whole-line' });
+  const debts = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'clipboard-debts');
+  fs.mkdirSync(debts, { recursive: true });
+  fs.writeFileSync(path.join(debts, 'pane-9.json'), '{ half-written');
+  const send = createSessionSend(h.deps);
+  const result = await send.send({ sessionId: 's-img', text: 'look', images: ['/cache/shot.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.equal(h.sequence.some(([kind]) => kind === 'clipboard'), false);
+});
+
+// Round six: a Codex second look that cannot read the box keeps the record.
+test('a Codex second look that cannot read the box refuses and keeps the record', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const codex = frozenCodex(h);
+  let blind = false;
+  let armed = false;
+  const draw = h.deps.readPane;
+  h.deps.readPane = async (...args) => { if (blind) throw new Error('pane unreadable'); return draw(...args); };
+  // The send keeps the sleep it was made with, so the hook goes in first.
+  h.deps.sleep = async (ms) => { if (armed && ms === 1000) blind = true; };
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'first message', pane: target }));
+  codex.frozen = false;
+  codex.echoed.push('it drew something'); // the box is empty, and the frame changed
+  armed = true;
+  await assert.rejects(
+    send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: 'second message', pane: target }),
+    (error) => error.code === 'EARLIER_TYPING_UNRESOLVED' || /pane unreadable|no readable box/.test(error.message),
+  );
+  assert.equal(typed(h).filter((x) => x.includes('second message')).length, 0, 'nothing typed');
+});
+
+// Round six: an agent's (strict) send never crosses a Claude /clear.
+test('a strict send to a session the inbox registry marks cleared types nothing; a plain send still types', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const pipe = '\\\\.\\pipe\\LOCAL\\cc-msg-00000000000000000000000000000000';
+    const token = 'ab'.repeat(16);
+    assert.equal((await peer.writeRecord({ sessionId: OLD, socket: pipe, token })).written, true);
+    await peer.writeRecord({ sessionId: NEW, socket: pipe, token }); // the pane ran /clear
+    assert.equal(peer.lookup(OLD)?.clearedInto, NEW);
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: OLD } }], controlled: 'pane-1' });
+    composerPane(h);
+    const send = createSessionSend(h.deps);
+    const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', pane: target, strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED' && error.clearedInto === NEW,
+    );
+    assert.deepEqual(typed(h), []);
+    const plain = await send.send({ sessionId: OLD, text: 'Pat typing into the window he sees', pane: target });
+    assert.equal(plain.ok, true);
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round six: the chip count to beat must be readable, or the image goes by path.
+// Round twenty-nine: the old fallback (the path prepended to the text) let a
+// path Claude left as text through; an unreadable prompt now refuses.
+test('an image whose prompt cannot be read is refused before anything is written, by clipboard or by path', async () => {
+  for (const clipboard of [true, false]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    if (!clipboard) delete h.deps.pasteClaudeImagesFromClipboard;
+    composerPane(h, { pathChips: 'whole-line' });
+    const draw = h.deps.readPane;
+    // The image reads are the ones without a source (readPane(paneId, lines));
+    // screen reads for the prompt name one ('recent' or 'visible').
+    h.deps.readPane = async (paneId, lines, source) => { if (source === undefined) throw new Error('unreadable'); return draw(paneId, lines, source); };
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: 's-img', text: 'look', images: ['/cache/shot.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      (error) => error.code === 'IMAGE_PROMPT_UNREADABLE',
+    );
+    assert.equal(h.sequence.some(([kind]) => kind === 'clipboard'), false, 'the clipboard untouched');
+    assert.deepEqual(typed(h), [], `${clipboard ? 'clipboard' : 'path'} route: nothing written`);
+  }
+});
+
+// Round seven: a strict send checks for /clear before anything, resume included.
+test('a strict send to a cleared session with no pane resumes nothing', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const pipe = '\\\\.\\pipe\\LOCAL\\cc-msg-11111111111111111111111111111111';
+    const token = 'ab'.repeat(16);
+    await peer.writeRecord({ sessionId: OLD, socket: pipe, token });
+    await peer.writeRecord({ sessionId: NEW, socket: pipe, token });
+    const h = makeHarness({ panes: [] });
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED' && error.clearedInto === NEW,
+    );
+    assert.deepEqual(h.resumeCalls, [], 'no resume was launched');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round seven: only a chip in the COMPOSER confirms a paste or ends a debt.
+test('an image chip in the conversation output neither confirms the paste nor ends its debt', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let pasted = false;
+  // After the paste the model's output above the prompt shows "[Image #5]",
+  // while the prompt itself (drawn by the harness) never gets a chip.
+  h.deps.readPane = async () => `${pasted ? '● Here is [Image #5] again' : 'conversation'}\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  const base = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => { const result = base(paneId, text); if (text === IMAGE_PASTE) pasted = true; return result; };
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-img', text: 'see', images: ['/cache/one.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    /never confirmed the image|drew nothing/,
+  );
+  const debts = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'clipboard-debts');
+  assert.equal(fs.readdirSync(debts).filter((name) => name.endsWith('.json')).length, 1, 'the debt stands');
+});
+
+// Rounds eight to ten: a /clear landing while a strict send works toward a
+// resume can never reopen the session, because a strict send never resumes.
+test('a strict send whose session is cleared while it works toward a resume launches nothing', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const pipe = '\\\\.\\pipe\\LOCAL\\cc-msg-22222222222222222222222222222222';
+    const token = 'ab'.repeat(16);
+    await peer.writeRecord({ sessionId: OLD, socket: pipe, token });
+    const h = makeHarness({ panes: [] });
+    const meta = h.deps.getSessionMeta;
+    let cleared = false;
+    h.deps.getSessionMeta = async (...args) => {
+      // The /clear lands after the send's first check, while it works toward the resume.
+      if (!cleared) { cleared = true; await peer.writeRecord({ sessionId: NEW, socket: pipe, token }); }
+      return meta(...args);
+    };
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED' || error.code === 'NO_LIVE_PANE',
+    );
+    assert.deepEqual(h.resumeCalls, [], 'no resume was launched');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round eight: baseline and confirmation read the same scope (the composer).
+test('a chip number quoted in the conversation does not make a real attachment look old', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  h.deps.readPane = async () => `● The earlier screenshot was [Image #50]\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+  const base = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => { const result = base(paneId, text); if (text === IMAGE_PASTE) h.prompt.draft += '[Image #3] '; return result; };
+  const send = createSessionSend(h.deps);
+  const result = await send.send({ sessionId: 's-img', text: 'here it is', images: ['/cache/shot.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.ok(h.sequence.some(([kind]) => kind === 'clipboard'), 'it went through the clipboard, not by path');
+  const debts = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'clipboard-debts');
+  assert.equal(fs.existsSync(debts) ? fs.readdirSync(debts).filter((n) => n.endsWith('.json')).length : 0, 0, 'no debt left behind');
+});
+
+// Round nine: the /clear check runs after the last pane lookup before a launch.
+test('a strict send whose session is cleared during the final pane lookup launches nothing', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const pipe = '\\\\.\\pipe\\LOCAL\\cc-msg-33333333333333333333333333333333';
+    const token = 'ab'.repeat(16);
+    await peer.writeRecord({ sessionId: OLD, socket: pipe, token });
+    const h = makeHarness({ panes: [] });
+    const meta = h.deps.getSessionMeta;
+    let metaCalls = 0;
+    let armed = false;
+    h.deps.getSessionMeta = async (...args) => { metaCalls += 1; if (metaCalls === 2) armed = true; return meta(...args); };
+    const snapshot = h.deps.snapshot;
+    h.deps.snapshot = async (...args) => {
+      // The resume branch's own lookup: the /clear lands while it runs.
+      if (armed) { armed = false; await peer.writeRecord({ sessionId: NEW, socket: pipe, token }); }
+      return snapshot(...args);
+    };
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED' || error.code === 'NO_LIVE_PANE',
+    );
+    assert.deepEqual(h.resumeCalls, [], 'no resume was launched');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round ten: an agent's message never reopens a session; Pat's still does.
+test('a strict send with no live pane is refused and launches nothing; a plain send resumes', async () => {
+  const h = makeHarness({ panes: [] });
+  h.deps.readPane = async () => '  ready\n──────────────\n❯\n──────────────\n  opus 5 xhigh\n  hint';
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 'sess-closed', text: 'from another agent', strictTarget: true }),
+    (error) => error.code === 'NO_LIVE_PANE',
+  );
+  assert.deepEqual(h.resumeCalls, [], 'nothing launched for the agent');
+  await send.send({ sessionId: 'sess-closed', text: 'from Pat', resumeOnly: true }).catch(() => {});
+  assert.equal(h.resumeCalls.length, 1, 'Pat\'s own send still resumes');
+});
+
+// Round nine: the image checks read the wide frame.
+test('a paste that makes the prompt box one line taller is still confirmed', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const conversation = Array.from({ length: 6 }, (_, i) => `line ${i + 1}`).join('\n');
+  // Thirteen lines drawn UNDER the prompt (status line, background tasks):
+  // before the paste the 3-line box plus these is exactly 16 lines; the chip
+  // wraps the box to 4, and a 16-line read loses its top edge.
+  const below = Array.from({ length: 13 }, (_, i) => `  status ${i + 1}`).join('\n');
+  let pasted = false;
+  // Like the desktop's reader: a frame is cut to the LAST n lines (16 by default).
+  h.deps.readPane = async (paneId, lines = 16) => {
+    const prompt = pasted ? `${PROMPT_RULE}\n❯ [Image #1] a caption long enough\n  that it wraps\n${PROMPT_RULE}` : `${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
+    return `${conversation}\n${prompt}\n${below}`.split('\n').slice(-lines).join('\n');
+  };
+  const base = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => { const result = base(paneId, text); if (text === IMAGE_PASTE) pasted = true; return result; };
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 's-tall', text: 'see', images: ['/cache/shot.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }).catch(() => {});
+  const debts = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'clipboard-debts');
+  assert.ok(h.sequence.some(([kind]) => kind === 'clipboard'), 'pasted through the clipboard');
+  assert.equal(fs.existsSync(debts) ? fs.readdirSync(debts).filter((n) => n.endsWith('.json')).length : 0, 0, 'the chip was seen: no debt left');
+});
+
+// Round eleven: a screenshot paste the pane has not read blocks new writes.
+test('a text send never rides behind a screenshot paste the pane has not read', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const claude = frozenClaude(h);
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-shot', text: 'see this', images: ['/cache/shot.png'], pane: target }));
+  // Still frozen: the next message waits, then refuses, typing nothing.
+  await assert.rejects(
+    send.send({ sessionId: 's-shot', text: 'an unrelated message', pane: target }),
+    (error) => error.code === 'EARLIER_IMAGE_UNRESOLVED',
+  );
+  assert.deepEqual(typed(h), [IMAGE_PASTE], 'only the earlier paste');
+  // Claude wakes and draws the screenshot in its prompt: refused until it is sent or cleared.
+  claude.screen = `conversation\n${PROMPT_RULE}\n❯ [Image #1] \n${PROMPT_RULE}\n  ⏵⏵ bypass permissions on`;
+  await assert.rejects(
+    send.send({ sessionId: 's-shot', text: 'an unrelated message', pane: target }),
+    (error) => error.code === 'EARLIER_IMAGE_IN_PROMPT',
+  );
+  // Round twelve: a plain retry is refused too while the screenshot sits there.
+  await assert.rejects(
+    send.send({ sessionId: 's-shot', text: 'an unrelated message', pane: target }),
+    (error) => error.code === 'EARLIER_IMAGE_IN_PROMPT',
+  );
+  assert.deepEqual(typed(h), [IMAGE_PASTE]);
+  // Pat sends or clears it: the prompt no longer holds the chip, and the pane is free.
+  claude.screen = `conversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}\n  ⏵⏵ bypass permissions on`;
+  await send.send({ sessionId: 's-shot', text: 'an unrelated message', pane: target }).catch(() => {});
+  assert.ok(typed(h).includes('an unrelated message'), 'typed once the screenshot left the prompt');
+});
+
+test('a screenshot paste the pane drew past and lost no longer blocks it', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const claude = frozenClaude(h);
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-shot', text: 'see this', images: ['/cache/shot.png'], pane: target }));
+  claude.screen = claude.screen.replace('4m 11s', '4m 40s'); // it drew; the prompt is still empty
+  await send.send({ sessionId: 's-shot', text: 'the next message', pane: target }).catch(() => {});
+  assert.ok(typed(h).includes('the next message'), 'typed once the paste was shown to be lost');
+});
+
+// Round eleven: the strict target is checked again at the input boundary.
+test('a /clear that lands after the in-lock check stops a strict send before its first keystroke', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: OLD } }], controlled: 'pane-1' });
+    composerPane(h);
+    // The delivery starts (inside the lock, after its check); the /clear lands now.
+    h.deps.terminalBridge.holdControl = () => {
+      fs.mkdirSync(inboxDir, { recursive: true });
+      fs.writeFileSync(peer.recordPath(OLD), JSON.stringify({ sessionId: OLD, clearedInto: NEW, at: Date.now() }));
+    };
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED',
+    );
+    assert.deepEqual(typed(h), [], 'nothing typed into the new conversation');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round twelve: the draft and the target are checked on the last read before Enter.
+test('a draft replaced and a /clear landing during the last read before Enter get no Enter', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: OLD } }], controlled: 'pane-1' });
+    composerPane(h);
+    const draw = h.deps.readPane;
+    let shown = 0;
+    h.deps.readPane = async (...args) => {
+      const frame = await draw(...args);
+      if (!String(frame).includes('for the old conversation')) return frame;
+      shown += 1;
+      if (shown < 3) return frame; // the read after typing, and the hold check
+      // The read just before Enter: /clear ran, and the box holds the new conversation's draft.
+      fs.mkdirSync(inboxDir, { recursive: true });
+      fs.writeFileSync(peer.recordPath(OLD), JSON.stringify({ sessionId: OLD, clearedInto: NEW, at: Date.now() }));
+      return `conversation\n${PROMPT_RULE}\n❯ the new conversation's own draft\n${PROMPT_RULE}`;
+    };
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, strictTarget: true }),
+      (error) => error.code === 'DRAFT_CHANGED' || error.code === 'SESSION_CLEARED',
+    );
+    assert.equal(typed(h).filter((x) => x === '\r').length, 0, 'no Enter');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round twelve: a strict refusal before typing leaves no record of typing.
+test('a strict send refused before its first keystroke leaves no pending record', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: OLD } }], controlled: 'pane-1' });
+    composerPane(h);
+    h.deps.terminalBridge.holdControl = () => {
+      fs.mkdirSync(inboxDir, { recursive: true });
+      fs.writeFileSync(peer.recordPath(OLD), JSON.stringify({ sessionId: OLD, clearedInto: NEW, at: Date.now() }));
+    };
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED',
+    );
+    assert.equal(fs.existsSync(path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'pane-1.pending.json')), false);
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round thirteen: the draft at Enter is the draft the hold verified, attachments included.
+test('a screenshot chip drawn in front of the message before Enter stops the Enter', async () => {
+  for (const from of [2, 3]) { // 2: at the hold's read; 3: at the last read before Enter
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    composerPane(h);
+    const draw = h.deps.readPane;
+    let shown = 0;
+    h.deps.readPane = async (...args) => {
+      const frame = await draw(...args);
+      if (!String(frame).includes('intended reply')) return frame;
+      shown += 1;
+      // The composer draws its glyph with a no-break space, the echo above it with a plain one.
+      return shown < from ? frame : String(frame).replace(/❯([ \u00a0])(?![\s\S]*❯[ \u00a0])/, '❯$1[Image #99] ');
+    };
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: 's-chip', text: 'intended reply', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      (error) => error.code === 'DRAFT_CHANGED',
+      `chip from read ${from}`,
+    );
+    assert.equal(typed(h).filter((x) => x === '\r').length, 0, `no Enter (chip from read ${from})`);
+  }
+});
+
+// Round thirteen: a debt whose Harbor exited before recording a screen keeps blocking a frozen pane.
+test('a screenshot debt with no screen on record never ends on two identical frames', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  frozenClaude(h);
+  const debts = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'clipboard-debts');
+  fs.mkdirSync(debts, { recursive: true });
+  fs.writeFileSync(path.join(debts, 'pane-1.json'), JSON.stringify({ beforeMax: 0 }));
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-restart', text: 'an unrelated message', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'EARLIER_IMAGE_UNRESOLVED',
+  );
+  assert.deepEqual(typed(h), [], 'nothing typed behind the queued chord');
+  const debt = JSON.parse(fs.readFileSync(path.join(debts, 'pane-1.json'), 'utf8'));
+  assert.ok(debt.screen, 'the first read is now the debt\'s baseline');
+});
+
+// Round thirteen: Codex's spare Enter checks the target too.
+// Round twenty-one: the registry's two-week cleanup keeps /clear markers.
+test('an agent\'s message to a session cleared a month ago is still refused after the registry cleanup', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const monthAgo = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    fs.writeFileSync(peer.recordPath(OLD), JSON.stringify({ sessionId: OLD, clearedInto: NEW, at: monthAgo }));
+    await peer.pruneRecords({ HARBOR_INBOX_DIR: inboxDir });
+    // The Claude pane still advertises its launch id after /clear.
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: OLD } }], controlled: 'pane-1' });
+    composerPane(h);
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: OLD, text: 'for the old conversation', pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED',
+    );
+    assert.deepEqual(typed(h), [], 'nothing typed into the new conversation');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round twenty-two: a resume of the old session in another process does not make the cleared pane hold it.
+test('an agent\'s message is not typed into the cleared pane while the old session runs, or ran, elsewhere', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const env = { HARBOR_INBOX_DIR: inboxDir };
+    const pipe = (n) => `\\\\.\\pipe\\LOCAL\\cc-msg-${String(n).repeat(32)}`;
+    await peer.writeRecord({ sessionId: OLD, socket: pipe(1), token: 'ab'.repeat(16) }, env);
+    await peer.writeRecord({ sessionId: NEW, socket: pipe(1), token: 'ab'.repeat(16) }, env);
+    await peer.writeRecord({ sessionId: OLD, socket: pipe(2), token: 'ab'.repeat(16) }, env); // resumed elsewhere
+    for (const stage of ['while it runs elsewhere', 'after that process exited']) {
+      if (stage === 'after that process exited') await peer.dropRecord(OLD, env, { socket: pipe(2) });
+      const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: OLD } }], controlled: 'pane-1' });
+      composerPane(h);
+      const send = createSessionSend(h.deps);
+      await assert.rejects(
+        send.send({ sessionId: OLD, text: 'for the old conversation', pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, strictTarget: true }),
+        (error) => error.code === 'SESSION_CLEARED',
+        stage,
+      );
+      assert.deepEqual(typed(h), [], `nothing typed into the new conversation (${stage})`);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round twenty-three: a second process clearing and resuming the session keeps the first pane's marker.
+test('an agent\'s message is not typed into the cleared pane after another process cleared and resumed the session', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const A = '0a1b2c3d-1111-2222-3333-444455556666';
+    const B = '0a1b2c3d-9999-2222-3333-444455556666';
+    const C = '0a1b2c3d-7777-2222-3333-444455556666';
+    const env = { HARBOR_INBOX_DIR: inboxDir };
+    const pipe = (n) => `\\\\.\\pipe\\LOCAL\\cc-msg-${String(n).repeat(32)}`;
+    const token = 'ab'.repeat(16);
+    await peer.writeRecord({ sessionId: A, socket: pipe(1), token }, env);
+    await peer.writeRecord({ sessionId: B, socket: pipe(1), token }, env); // pane P: /clear A into B
+    await peer.writeRecord({ sessionId: A, socket: pipe(2), token }, env); // process Q resumes A
+    await peer.writeRecord({ sessionId: C, socket: pipe(2), token }, env); // Q: /clear A into C
+    await peer.writeRecord({ sessionId: A, socket: pipe(2), token }, env); // Q resumes A again
+    await peer.dropRecord(A, env, { socket: pipe(2) }); // Q exits
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: A } }], controlled: 'pane-1' });
+    composerPane(h);
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: A, text: 'for the old conversation', pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED',
+    );
+    assert.deepEqual(typed(h), [], 'nothing typed into pane P, which runs B');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+test('a /clear landing after a Codex Enter stops the spare Enter of a strict send', async () => {
+  const inboxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-strict-inbox-'));
+  const saved = process.env.HARBOR_INBOX_DIR;
+  process.env.HARBOR_INBOX_DIR = inboxDir;
+  try {
+    const peer = require('../../src/shared/peer-inbox.cjs');
+    const OLD = '0a1b2c3d-1111-2222-3333-444455556666';
+    const NEW = '0a1b2c3d-9999-2222-3333-444455556666';
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', agent_session: { kind: 'id', value: OLD } }], controlled: 'pane-1' });
+    codexPane(h, { swallowEnters: 1, burstReads: 2 });
+    const base = h.deps.terminalBridge.sendInput;
+    let enters = 0;
+    h.deps.terminalBridge.sendInput = (paneId, text) => {
+      const result = base(paneId, text);
+      if (text === '\r' && ++enters === 1) {
+        fs.mkdirSync(inboxDir, { recursive: true });
+        fs.writeFileSync(peer.recordPath(OLD), JSON.stringify({ sessionId: OLD, clearedInto: NEW, at: Date.now() }));
+      }
+      return result;
+    };
+    const send = createSessionSend(h.deps);
+    const text = `Reply with just OK. ${proofWords.repeat(6)}marker`;
+    await assert.rejects(
+      send.send({ sessionId: OLD, text, provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, strictTarget: true }),
+      (error) => error.code === 'SESSION_CLEARED',
+    );
+    assert.equal(typed(h).filter((x) => x === '\r').length, 1, 'no spare Enter into the new conversation');
+  } finally {
+    if (saved === undefined) delete process.env.HARBOR_INBOX_DIR; else process.env.HARBOR_INBOX_DIR = saved;
+  }
+});
+
+// Round thirty: a picture's caption that starts with "/" is a message, not a command.
+test('a picture captioned with a leading slash is typed and checked as a message', async () => {
+  const caption = '/compact is visible in this screenshot';
+  for (const dropCaption of [true, false]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const pane = composerPane(h, { dropTypings: dropCaption ? 1 : 0 });
+    const send = createSessionSend(h.deps);
+    const message = { sessionId: 's-slash-cap', text: caption, images: ['/cache/one.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } };
+    if (dropCaption) {
+      await assert.rejects(send.send(message), (error) => error.code === 'PROMPT_NEVER_HELD');
+      assert.equal(typed(h).filter((x) => x === '\r').length, 0, 'the picture is not submitted without its caption');
+    } else {
+      const result = await send.send(message);
+      assert.equal(result.delivery, 'confirming', 'confirmed as a message, not best-effort');
+      assert.ok(typed(h).includes(caption), 'typed whole, not split as a command token');
+      assert.deepEqual(pane.echoed, [`[Image #1] ${caption}`]);
+    }
+  }
+});
+
+// Round twenty-nine: one failed read never routes a picture around its chip check.
+test('a picture send whose prompt read fails once reads again, and still needs its chip before Enter', async () => {
+  for (const converts of [false, true]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    delete h.deps.pasteClaudeImagesFromClipboard;
+    const pane = composerPane(h, converts ? { pathChips: 'whole-line' } : {});
+    const draw = h.deps.readPane;
+    let failed = false;
+    h.deps.readPane = async (paneId, lines, source) => {
+      if (source === undefined && !failed) { failed = true; throw new Error('one unreadable frame'); }
+      return draw(paneId, lines, source);
+    };
+    const send = createSessionSend(h.deps);
+    const message = { sessionId: 's-once', text: '', images: ['C:\\cache\\shot.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } };
+    if (converts) {
+      const result = await send.send(message);
+      assert.equal(result.delivery, 'delivered', 'read again, pasted, attached');
+      assert.deepEqual(pane.echoed, ['[Image #1]']);
+    } else {
+      await assert.rejects(send.send(message), (error) => error.code === 'IMAGE_NOT_ATTACHED');
+      assert.equal(typed(h).filter((x) => x === '\r').length, 0, 'a path left as text is never submitted');
+    }
+  }
+});
+
+// Round twenty-eight: a picture by path must become an attachment, and only this send's.
+test('a picture no longer on disk is refused before anything is typed', async () => {
+  for (const phone of [false, true]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    delete h.deps.pasteClaudeImagesFromClipboard;
+    if (phone) delete h.deps.setXClipboardImage;
+    h.deps.imageFileReady = async (imagePath) => !imagePath.endsWith('gone.png');
+    composerPane(h, { pathChips: 'whole-line' });
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: 's-gone', text: 'look', images: ['C:\\cache\\here.png', 'C:\\cache\\gone.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      (error) => error.code === 'IMAGE_MISSING',
+    );
+    assert.deepEqual(typed(h), [], `${phone ? 'phone' : 'desktop'}: nothing typed`);
+  }
+});
+
+test('a picture path Claude leaves as text is refused with no Enter, and owes nothing afterwards', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  delete h.deps.pasteClaudeImagesFromClipboard;
+  const pane = composerPane(h, {}); // this Claude converts no path
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(
+    send.send({ sessionId: 's-literal', text: 'look at this', images: ['C:\\cache\\unreadable.png'], pane: target }),
+    (error) => error.code === 'IMAGE_NOT_ATTACHED',
+  );
+  assert.equal(typed(h).filter((x) => x === '\r').length, 0, 'no Enter');
+  assert.equal(typed(h).filter((x) => x === 'look at this').length, 0, 'the caption was not typed behind it');
+  assert.match(pane.draft, /unreadable\.png/, 'the path is left in the prompt for Pat to clear');
+  // Nothing is owed: the next send is refused at once for the draft, not held
+  // waiting for a chip that will never come.
+  await assert.rejects(send.send({ sessionId: 's-literal', text: 'next', pane: target }), (error) => error.code === 'PROMPT_BUSY');
+});
+
+test('a caption that is itself an image path stays text: only the attached picture becomes a chip', async () => {
+  for (const phone of [false, true]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    delete h.deps.pasteClaudeImagesFromClipboard;
+    if (phone) delete h.deps.setXClipboardImage;
+    const pane = composerPane(h, { pathChips: 'whole-line' });
+    const send = createSessionSend(h.deps);
+    const caption = '"C:\\Users\\me\\Pictures\\other.png"';
+    await send.send({ sessionId: 's-cap-path', text: caption, images: ['C:\\cache\\shot.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    assert.deepEqual(pane.echoed, [`[Image #1]${caption}`], `${phone ? 'phone' : 'desktop'}: one attachment, the caption as written`);
+  }
+});
+
+// Round twenty-seven: pictures by path with no caption are pasted, and taken by their chips.
+test('pictures sent by path with no caption are pasted, so they attach, and count as delivered once their chips are submitted', async () => {
+  for (const count of [1, 2]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    delete h.deps.setXClipboardImage;
+    const pane = composerPane(h, { pathChips: 'whole-line' });
+    const send = createSessionSend(h.deps);
+    const shots = [PHONE_SHOT, PHONE_SHOT.replace('387201e8', '9a0b1c2d')].slice(0, count);
+    const result = await send.send({ sessionId: 's-pics', text: '', images: shots, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    const writes = typed(h).filter((x) => x !== '\r');
+    assert.equal(writes.length, count, `${count}: one write per picture`);
+    assert.ok(writes.every((w) => w.startsWith('\x1b[200~')), `${count}: each path went as a paste, not typed keys`);
+    assert.deepEqual(pane.echoed, [count === 1 ? '[Image #1]' : '[Image #1][Image #2]'], `${count}: the pictures were submitted attached`);
+    assert.equal(result.delivery, 'delivered', `${count} picture(s): delivered`);
+  }
+});
+
+test('a desktop screenshot goes by path, and Harbor never touches the clipboard', async () => {
+  for (const text of ['look at this', '']) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    delete h.deps.pasteClaudeImagesFromClipboard; // the production default
+    const pane = composerPane(h, { pathChips: 'whole-line' });
+    const send = createSessionSend(h.deps);
+    const result = await send.send({ sessionId: 's-desk', text, images: ['C:\\Users\\me\\.cache\\harbor\\pastes\\shot.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+    assert.deepEqual(h.sequence.filter(([kind]) => kind === 'clipboard'), [], `${text || 'no caption'}: the clipboard was never written`);
+    assert.equal(typed(h).filter((x) => x === IMAGE_PASTE).length, 0, 'no paste chord');
+    assert.deepEqual(pane.echoed, [`[Image #1]${text}`], `${text || 'no caption'}: submitted with the picture attached`);
+    assert.equal(result.delivery, text ? 'confirming' : 'delivered');
+  }
+});
+
+// Round twenty-six: a captionless picture's only evidence is the Enter watch.
+test('a picture with no caption that Claude never takes is reported not sent, on an open pane and after a resume', async () => {
+  const cases = [
+    { label: 'desktop, open pane', phone: false, resume: false },
+    { label: 'phone, open pane', phone: true, resume: false },
+    { label: 'desktop, after a resume', phone: false, resume: true },
+  ];
+  for (const c of cases) {
+    for (const swallowEnters of [3, 0]) {
+      const h = makeHarness({ panes: [c.resume ? 'pane-old' : 'pane-1'], controlled: c.resume ? null : 'pane-1' });
+      if (c.phone) delete h.deps.setXClipboardImage;
+      composerPane(h, { swallowEnters, ...(c.phone ? { pathChips: 'whole-line' } : {}) });
+      const send = createSessionSend(h.deps);
+      const message = c.resume
+        ? { sessionId: 's-pic-resume', text: '', images: ['/cache/one.png'] }
+        : { sessionId: 's-pic', text: '', images: [c.phone ? PHONE_SHOT : '/cache/one.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } };
+      if (swallowEnters) {
+        await assert.rejects(send.send(message), (error) => error.code === 'NOT_TAKEN', `${c.label}: refused`);
+        assert.equal(typed(h).filter((x) => x === '\r').length, 3, `${c.label}: the Enter and both spares, nothing more`);
+      } else {
+        const result = await send.send(message);
+        assert.equal(result.delivery, 'delivered', `${c.label}: taken`);
+      }
+    }
+  }
+});
+
+// Round twenty-four: the chip proves Claude read A clipboard image, not this one.
+test('a screenshot whose clipboard was replaced before Claude read it is not submitted, and the pane stays blocked', async () => {
+  for (const stillThere of [false, true]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const pane = composerPane(h);
+    h.deps.setXClipboardImage = async (imagePath) => {
+      h.sequence.push(['clipboard', imagePath]);
+      return { stillOnClipboard: async () => stillThere };
+    };
+    const send = createSessionSend(h.deps);
+    const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+    if (stillThere) {
+      await send.send({ sessionId: 's-clip', text: 'look at this', images: ['/cache/one.png'], pane: target });
+      assert.deepEqual(pane.echoed, ['[Image #1] look at this'], 'the same image on the clipboard: sent');
+      continue;
+    }
+    await assert.rejects(
+      send.send({ sessionId: 's-clip', text: 'look at this', images: ['/cache/one.png'], pane: target }),
+      (error) => error.code === 'CLIPBOARD_CHANGED',
+    );
+    assert.equal(typed(h).filter((x) => x === '\r').length, 0, 'no Enter with a picture that may not be ours');
+    await assert.rejects(
+      send.send({ sessionId: 's-clip', text: 'an unrelated message', pane: target }),
+      (error) => error.code === 'EARLIER_IMAGE_IN_PROMPT',
+    );
+    assert.equal(typed(h).filter((x) => x === 'an unrelated message').length, 0, 'nothing typed behind it');
+  }
+});
+
+test('the clipboard writer tells whether the clipboard still holds the image it wrote', async () => {
+  const { createPlatform } = require('../../src/main/platform/index.js');
+  const pixels = (n) => Buffer.alloc(16, n);
+  const imageOf = (n) => ({ isEmpty: () => n === null, getSize: () => ({ width: 2, height: 2 }), toBitmap: () => pixels(n) });
+  let held = null;
+  const electron = {
+    nativeImage: { createFromPath: () => imageOf(1) },
+    clipboard: { writeImage: (image) => { held = image; }, readImage: () => held || imageOf(null) },
+  };
+  const platform = createPlatform('win32', { electron });
+  const written = await platform.clipboardImage('C:/shot.png');
+  assert.equal(await written.stillOnClipboard(), true, 'unchanged');
+  held = imageOf(2);
+  assert.equal(await written.stillOnClipboard(), false, 'another image copied over it');
+  held = null;
+  assert.equal(await written.stillOnClipboard(), false, 'text (no image) copied over it');
+});
+
+// Round fourteen: a draft Harbor did not type is never typed behind, whatever this send writes first.
+test('a draft already in Claude\'s prompt is never typed behind: text, screenshot and slash command are refused', async () => {
+  const messages = {
+    text: { text: 'intended reply' },
+    image: { text: 'look at this', images: ['/cache/one.png'] },
+    slash: { text: '/effort high' },
+  };
+  for (const [kind, message] of Object.entries(messages)) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    const pane = composerPane(h, { initialDraft: 'half-written note [Image #1] ', imagesBefore: 1 });
+    const send = createSessionSend(h.deps);
+    await assert.rejects(
+      send.send({ sessionId: `s-busy-${kind}`, ...message, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+      (error) => error.code === 'PROMPT_BUSY',
+      kind,
+    );
+    assert.deepEqual(typed(h), [], `nothing typed (${kind})`);
+    assert.equal(h.sequence.some(([what]) => what === 'clipboard'), false, `clipboard untouched (${kind})`);
+    assert.equal(pane.draft, 'half-written note [Image #1] ', `the draft is left alone (${kind})`);
+  }
+});
+
+// Round fourteen: a spare Enter runs the first Enter's draft test.
+test('a spare Enter is not pressed once a chip is drawn in front of a swallowed message', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h, { swallowEnters: 1 });
+  const draw = h.deps.readPane;
+  h.deps.readPane = async (...args) => {
+    const frame = await draw(...args);
+    if (!typed(h).includes('\r')) return frame;
+    // The composer draws its glyph with a no-break space, the echo above it with a plain one.
+    return String(frame).replace(/❯([  ])(?![\s\S]*❯[  ])/, '❯$1[Image #99] ');
+  };
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 's-spare-chip', text: 'intended reply', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }).catch(() => {});
+  assert.equal(typed(h).filter((x) => x === '\r').length, 1, 'no spare Enter into the changed draft');
+});
+
+test('resending the message after that refused spare does not submit the chip in front of it', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h, { swallowEnters: 1 });
+  const draw = h.deps.readPane;
+  h.deps.readPane = async (...args) => {
+    const frame = await draw(...args);
+    if (!typed(h).includes('\r')) return frame;
+    return String(frame).replace(/❯([  ])(?![\s\S]*❯[  ])/, '❯$1[Image #99] ');
+  };
+  const send = createSessionSend(h.deps);
+  const text = `Please look again. ${proofWords.repeat(4)}marker`;
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await send.send({ sessionId: 's-resend-chip', text, pane: target }).catch(() => {});
+  await assert.rejects(send.send({ sessionId: 's-resend-chip', text, pane: target }));
+  assert.equal(typed(h).filter((x) => x === '\r').length, 1, 'the resend pressed no Enter into the changed draft');
+  assert.equal(typed(h).filter((x) => x !== '\r').length, 1, 'and typed nothing');
+});
+
+// Round fifteen: an Enter-only retry needs evidence of the whole draft.
+test('resending the message after a refused spare does not submit text drawn in front of it', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h, { swallowEnters: 1 });
+  const draw = h.deps.readPane;
+  h.deps.readPane = async (...args) => {
+    const frame = await draw(...args);
+    if (!typed(h).includes('\r')) return frame;
+    return String(frame).replace(/❯([ \u00a0])(?![\s\S]*❯[ \u00a0])/, '❯$1stranger text ');
+  };
+  const send = createSessionSend(h.deps);
+  const text = `Please look again. ${proofWords.repeat(4)}marker`;
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await send.send({ sessionId: 's-resend-text', text, pane: target }).catch(() => {});
+  await assert.rejects(send.send({ sessionId: 's-resend-text', text, pane: target }));
+  assert.equal(typed(h).filter((x) => x === '\r').length, 1, 'the resend pressed no Enter into the changed draft');
+  assert.equal(typed(h).filter((x) => x !== '\r').length, 1, 'and typed nothing');
+});
+
+test('a message that showed up late behind other text is not submitted by the resend', async () => {
+  const message = 'line one of the handoff\nline two of the handoff\nline three of the handoff';
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false });
+  let released = false;
+  h.deps.readPane = async () => {
+    const shown = released ? `stranger text ${message.split('\n').join('\n  ')}` : '';
+    return `${PROMPT_RULE}\n❯ ${shown}\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`;
+  };
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-late-behind', text: message, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  released = true;
+  await assert.rejects(send.send({ sessionId: 's-late-behind', text: message, pane: target }), (e) => e.code === 'PROMPT_HOLDS_MORE');
+  assert.equal(typed(h).filter((x) => x === '\r').length, 0, 'no Enter');
+});
+
+// Round fifteen: a screenshot with no caption gets the last look before its Enter too.
+test('text drawn after a caption-less screenshot at any read before Enter is never submitted', async () => {
+  for (const provider of ['claude', 'codex']) {
+    const reads = provider === 'claude' ? 4 : 3; // chip reads before the Enter; the last is the final check
+    for (let from = 1; from <= reads; from += 1) {
+      const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+      if (provider === 'claude') composerPane(h); else codexPane(h);
+      const draw = h.deps.readPane;
+      let shown = 0;
+      h.deps.readPane = async (...args) => {
+        const frame = String(await draw(...args));
+        const line = provider === 'claude' ? /(❯[ \u00a0][^\n]*\[Image #1\])/ : /(› [^\n]*\[Image #1\])(?![\s\S]*› )/;
+        if (!line.test(frame)) return frame;
+        shown += 1;
+        return shown < from ? frame : frame.replace(line, '$1 stranger text');
+      };
+      const send = createSessionSend(h.deps);
+      const image = provider === 'claude' ? '/cache/one.png' : 'C:/virtual/example.png';
+      await send.send({ sessionId: `s-bare-${provider}`, text: '', images: [image], provider, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }).catch(() => {});
+      assert.equal(typed(h).filter((x) => x === '\r').length, 0, `no Enter (${provider}, text from chip read ${from})`);
+    }
+  }
+});
+
+// Round sixteen: chips are checked by identity, not by number. `boxEditRun`
+// sends on a fresh pane and edits every frame from the `from`-th one showing
+// `marker` (before the first Enter); with no edit it reports that count.
+async function boxEditRun(provider, message, { marker = '[Image #1]', from = Infinity, edit = (f) => f, phone = false, paneOptions = null } = {}) {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  // `phone`: no clipboard, so images go as path lines Claude draws as chips
+  // (or, with `paneOptions: {}`, leaves drawn as the paths themselves).
+  if (phone) delete h.deps.setXClipboardImage;
+  if (provider === 'claude') composerPane(h, paneOptions ?? (phone ? { pathChips: 'whole-line' } : {})); else codexPane(h);
+  const draw = h.deps.readPane;
+  let shown = 0;
+  h.deps.readPane = async (...args) => {
+    const frame = String(await draw(...args));
+    if (typed(h).includes('\r') || !frame.includes(marker)) return frame;
+    shown += 1;
+    return shown < from ? frame : edit(frame);
+  };
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: `s-edit-${provider}`, provider, pane: { paneId: 'pane-1', workspaceId: 'ws-1' }, ...message }).catch(() => {});
+  return { h, shown };
+}
+
+test('a screenshot chip replaced or dropped after it was confirmed is never submitted, captioned or not', async () => {
+  const shot = (provider, n = 1) => Array.from({ length: n }, (_, i) => (provider === 'claude' ? `/cache/shot-${i}.png` : `C:/virtual/shot-${i}.png`));
+  const cases = [];
+  for (const provider of ['claude', 'codex']) {
+    const swap = (f) => f.replace('[Image #1]', '[Image #99]');
+    cases.push({ provider, label: 'no caption, swapped', message: { text: '', images: shot(provider) }, edit: swap });
+    cases.push({ provider, label: 'captioned, swapped', message: { text: 'look at this', images: shot(provider) }, edit: swap });
+    cases.push({ provider, label: 'no caption, one of two dropped', marker: '[Image #2]', message: { text: '', images: shot(provider, 2) }, edit: (f) => f.replace('[Image #2]', ''), lastOnly: true });
+  }
+  for (const c of cases) {
+    const { shown, h: clean } = await boxEditRun(c.provider, c.message, { marker: c.marker });
+    assert.equal(typed(clean).filter((x) => x === '\r').length, 1, `${c.provider} ${c.label}: sent when nothing changes`);
+    // The hold's read and the last read before Enter (the confirmation itself is the chip's origin).
+    for (const from of c.lastOnly ? [shown] : [shown - 1, shown]) {
+      const { h } = await boxEditRun(c.provider, c.message, { marker: c.marker, from, edit: c.edit });
+      assert.equal(typed(h).filter((x) => x === '\r').length, 0, `${c.provider} ${c.label}: no Enter (from chip read ${from} of ${shown})`);
+    }
+  }
+});
+
+// Round seventeen: a caption never goes without its picture.
+test('a caption that lost its screenshot is never submitted: a leftover tail, a quoted marker, a phone path', async () => {
+  const caption = 'please look at this screenshot of the failing build';
+  const cases = [
+    { label: 'tail of the caption left, chip gone', message: { text: caption, images: ['/cache/one.png'] }, edit: (f) => f.replace(`[Image #1] ${caption}`, 'this screenshot of the failing build') },
+    { label: 'chip gone, caption quotes its marker', message: { text: 'compare with [Image #1] from before', images: ['/cache/one.png'] }, edit: (f) => f.replace('[Image #1] compare', 'compare') },
+    { label: 'phone route, path chip gone', phone: true, message: { text: caption, images: [PHONE_SHOT] }, edit: (f) => f.replace('[Image #1]', '') },
+  ];
+  for (const c of cases) {
+    const { shown, h: clean } = await boxEditRun('claude', c.message, { phone: c.phone });
+    assert.equal(typed(clean).filter((x) => x === '\r').length, 1, `${c.label}: sent when nothing changes`);
+    for (const from of [shown - 1, shown]) {
+      const { h } = await boxEditRun('claude', c.message, { phone: c.phone, from, edit: c.edit });
+      assert.equal(typed(h).filter((x) => x === '\r').length, 0, `${c.label}: no Enter (from chip read ${from} of ${shown})`);
+    }
+  }
+});
+
+// Round eighteen: the phone route's paths are matched as whole tokens, each visible one counted once.
+test('a phone send missing one of its pictures is never submitted: a quoted placeholder', async () => {
+  const cases = [
+    {
+      label: 'caption quotes a paste placeholder, path chip gone',
+      message: { text: 'see [Pasted text #42 +2 lines] and check the failing build', images: [PHONE_SHOT] },
+      edit: (f) => f.replace('[Image #1]', ''),
+    },
+    // Two paths that squash alike, left as text: no longer a case, because a
+    // path Claude leaves as text is refused (round twenty-eight, its own test).
+  ];
+  for (const c of cases) {
+    const options = { phone: true, paneOptions: c.paneOptions, marker: c.marker };
+    const { shown, h: clean } = await boxEditRun('claude', c.message, options);
+    assert.equal(typed(clean).filter((x) => x === '\r').length, 1, `${c.label}: sent when nothing changes`);
+    for (const from of [shown - 1, shown]) {
+      const { h } = await boxEditRun('claude', c.message, { ...options, from, edit: c.edit });
+      assert.equal(typed(h).filter((x) => x === '\r').length, 0, `${c.label}: no Enter (from read ${from} of ${shown})`);
+    }
+  }
+});
+
+// Round nineteen: a caption collapsed into a paste placeholder hides its quotes.
+test('a screenshot whose caption quotes its chip and is collapsed into a placeholder is sent', async () => {
+  const caption = 'see [Image #1] above\nline two of the note\nline three of the note';
+  const collapse = (f) => f.replace(/see \[Image #1\] above\n\s*line two of the note\n\s*line three of the note/, '[Pasted text #2 +2 lines]');
+  const cases = [
+    { label: 'clipboard chip', options: {}, message: { text: caption, images: ['/cache/one.png'] } },
+    { label: 'phone path chip', options: { phone: true }, message: { text: caption, images: [PHONE_SHOT] } },
+  ];
+  for (const c of cases) {
+    const { h } = await boxEditRun('claude', c.message, { ...c.options, marker: 'line three of the note', from: 1, edit: collapse });
+    assert.equal(typed(h).filter((x) => x === '\r').length, 1, `${c.label}: sent`);
+  }
+});
+
+// Round twenty: only the path lines Harbor added are pictures to check.
+test('a screenshot whose collapsed caption names a file is sent, not taken for a second picture', async () => {
+  const caption = 'line one of the note\nline two of the note\nSave this as review.png';
+  const cases = [
+    {
+      label: 'clipboard chip',
+      options: {},
+      message: { text: caption, images: ['/cache/one.png'] },
+      collapse: (f) => f.replace(/line one of the note\n\s*line two of the note\n\s*Save this as review\.png/, '[Pasted text #2 +2 lines]'),
+    },
+    {
+      // This stand-in draws the caption's last line as a chip of its own.
+      label: 'phone path chip',
+      options: { phone: true },
+      message: { text: caption, images: [PHONE_SHOT] },
+      collapse: (f) => f.replace(/\[Image #1\]\[Image #2\]line one of the note\n\s*line two of the note/, '[Image #1][Pasted text #2 +2 lines]'),
+    },
+  ];
+  for (const c of cases) {
+    let collapsed = 0;
+    const edit = (f) => { const out = c.collapse(f); if (out !== f) collapsed += 1; return out; };
+    const { h } = await boxEditRun('claude', c.message, { ...c.options, marker: 'line two of the note', from: 1, edit });
+    assert.ok(collapsed > 0, `${c.label}: the caption was drawn collapsed`);
+    assert.equal(typed(h).filter((x) => x === '\r').length, 1, `${c.label}: sent`);
+  }
+});
+
+test('a message that quotes a chip in its own words is sent, not taken for a stray attachment', async () => {
+  for (const provider of ['claude', 'codex']) {
+    const { h } = await boxEditRun(provider, { text: 'the chip reads [Image #3] in the box' });
+    assert.equal(typed(h).filter((x) => x === '\r').length, 1, `${provider}: sent`);
+  }
+});
+
+test('a lone paste placeholder is not taken for the earlier try of a message that never showed', async () => {
+  const message = 'line one of the handoff\nline two of the handoff\nline three of the handoff';
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1', promptEchoes: false });
+  let released = false;
+  h.deps.readPane = async () => `${PROMPT_RULE}\n❯ ${released ? '[Pasted text #99 +2 lines]' : ''}\n${PROMPT_RULE}\n  personal  ·  Opus 5.5`;
+  const send = createSessionSend(h.deps);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  await assert.rejects(send.send({ sessionId: 's-placeholder', text: message, pane: target }), (e) => e.code === 'PROMPT_NEVER_HELD');
+  released = true;
+  await assert.rejects(send.send({ sessionId: 's-placeholder', text: message, pane: target }));
+  assert.equal(typed(h).filter((x) => x === '\r').length, 0, 'no Enter for a placeholder nothing ties to this send');
+});
+
+test('a Codex spare Enter is not pressed once other text is drawn in front of a swallowed message', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  codexPane(h, { swallowEnters: 1 });
+  const draw = h.deps.readPane;
+  h.deps.readPane = async (...args) => {
+    const frame = await draw(...args);
+    if (!typed(h).includes('\r')) return frame;
+    return String(frame).replace(/› (?![\s\S]*› )/, '› stranger text ');
+  };
+  const send = createSessionSend(h.deps);
+  await send.send({ sessionId: 's-codex-spare', text: 'Reply with just OK.', provider: 'codex', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }).catch(() => {});
+  assert.equal(typed(h).filter((x) => x === '\r').length, 1, 'no spare Enter into the changed box');
+});
+
+// Round fourteen: a recovered screenshot debt whose first frame already shows the chip says so at once.
+test('a screenshot debt with no screen on record whose first frame shows the chip is in the prompt at once', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const frozen = frozenClaude(h);
+  frozen.screen = frozen.screen.replace('❯ \n', '❯ [Image #1] \n');
+  const debts = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'clipboard-debts');
+  fs.mkdirSync(debts, { recursive: true });
+  fs.writeFileSync(path.join(debts, 'pane-1.json'), JSON.stringify({ paneId: 'pane-1', beforeMax: 0 }));
+  let waited = 0;
+  const sleep = h.deps.sleep;
+  h.deps.sleep = async (...args) => { waited += 1; return sleep(...args); };
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-restart-chip', text: 'an unrelated message', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'EARLIER_IMAGE_IN_PROMPT',
+  );
+  assert.deepEqual(typed(h), [], 'nothing typed behind the screenshot');
+  assert.ok(waited < 10, `no wait for a redraw (${waited} sleeps)`);
+  const debt = JSON.parse(fs.readFileSync(path.join(debts, 'pane-1.json'), 'utf8'));
+  assert.equal(debt.inPrompt, true, 'the clipboard is free, the pane stays blocked');
+});
+
+// Keys whose confirmation never came may have been written: never typed again
+// (Sol's review, round two). A definite refusal is retried after re-taking control.
+test('keys whose confirmation never came are not typed again, and the send stops with its record kept', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h);
+  let calls = 0;
+  h.deps.terminalBridge.sendInputAcked = async () => { calls += 1; return { ok: false, ambiguous: true, reason: 'no answer from the session daemon: input request timed out after 10000ms' }; };
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-unconfirmed', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'INPUT_UNCONFIRMED',
+  );
+  assert.equal(calls, 1, 'one write, no retry');
+  assert.ok(fs.existsSync(path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'pane-1.pending.json')), 'the pending record stays, so the next send waits instead of typing again');
+});
+
+test('the record of a send is on disk BEFORE its keys go out', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h);
+  const file = path.join(path.dirname(h.deps.sendLogFile), 'pane-locks', 'pane-1.pending.json');
+  let recordedFirst = null;
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => {
+    if (recordedFirst === null && text === 'hello there') recordedFirst = fs.existsSync(file);
+    return sendInput(paneId, text);
+  };
+  const send = createSessionSend(h.deps);
+  const result = await send.send({ sessionId: 's-record-first', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.equal(recordedFirst, true);
+  assert.equal(fs.existsSync(file), false, 'and retired once the prompt showed it');
+});
+
+test('a send whose record cannot be written types nothing', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  composerPane(h);
+  // A FILE where the lock directory should be: nothing can be recorded there.
+  fs.writeFileSync(path.join(path.dirname(h.deps.sendLogFile), 'pane-locks'), 'not a directory');
+  const send = createSessionSend(h.deps);
+  await assert.rejects(
+    send.send({ sessionId: 's-unrecordable', text: 'hello there', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PENDING_RECORD_FAILED' || error.code === 'PANE_BUSY' || /pane-locks|ENOTDIR|EEXIST/.test(error.message),
+  );
+  assert.deepEqual(typed(h), [], 'nothing typed');
+});
+
+test('a Claude that wakes late after the image chord gets a full window to attach it', async () => {
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h);
+  const inner = h.deps.readPane;
+  let chord = false;
+  let baseline = null;
+  let calls = 0;
+  h.deps.readPane = async (...args) => {
+    if (!chord) { baseline = await inner(...args); return baseline; }
+    calls += 1;
+    if (calls <= 200) return baseline; // frozen past the 12 s window
+    if (calls <= 250) return `${baseline}\n✻ waking`; // redraws, no marker yet
+    return inner(...args);
+  };
+  const sendInput = h.deps.terminalBridge.sendInput;
+  h.deps.terminalBridge.sendInput = (paneId, text) => { if (text === IMAGE_PASTE) chord = true; return sendInput(paneId, text); };
+  const send = createSessionSend(h.deps);
+  const result = await send.send({ sessionId: 's-img-late', text: 'look at this', images: ['/cache/one.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(result.ok, true);
+  assert.equal(pane.draft, '');
+});
+
 test('image marker timeout is an honest send error and text is never typed', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   let tick = 0;
-  h.deps.readPane = async () => `✻ Working… (${tick++}s)\nconversation\n❯`;
+  h.deps.readPane = async () => `✻ Working… (${tick++}s)\nconversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`;
   const realNow = Date.now;
   let now = realNow();
   h.deps.sleep = async () => { now += 500; };
@@ -534,7 +2051,7 @@ const lastTypedPiece = (text) => (text.length > 1024 ? text.slice(-(text.length 
 // `alive`: the CLI redraws on every read (a working spinner), so an unshown
 // typing is LOST rather than queued behind a stall (waitForPromptToHold).
 // `wrapImageChips`: the chip wraps at its space, as behind a long message.
-function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0, drawAfter = null, dropTypings = 0, cutsLongTyping = false, alive = false, wrapImageChips = false } = {}) {
+function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = false, initialDraft = '', imagesBefore = 0, drawAfter = null, dropTypings = 0, cutsLongTyping = false, alive = false, wrapImageChips = false, wrapAt = 0 } = {}) {
   let draft = initialDraft;
   let dropped = 0;
   const state = { reads: 0 };
@@ -568,7 +2085,9 @@ function composerPane(h, { swallowEnters = 0, renderDelayReads = 0, pathChips = 
   h.deps.readPane = async () => {
     state.reads += 1;
     const typedShown = hideReads > 0 ? '' : draft;
-    const shown = typedShown && drawAfter ? `${typedShown}${drawAfter(typedShown)}` : typedShown;
+    const after = typedShown && drawAfter ? `${typedShown}${drawAfter(typedShown)}` : typedShown;
+    // `wrapAt`: the prompt cuts each row at that width, inside a word too.
+    const shown = wrapAt ? after.replace(new RegExp(`(.{${wrapAt}})(?=.)`, 'g'), '$1\n  ') : after;
     if (hideReads > 0) hideReads -= 1;
     const above = echoed.map((line) => `❯ ${line}`).join('\n');
     const spinner = alive ? `✻ Working… (${state.reads}s)\n` : '';
@@ -824,9 +2343,11 @@ test('a short phone message with an image is sent when Claude draws the path as 
   await send.send({ sessionId: 's-phone-fyi', text: 'FYI', images: [PHONE_SHOT], pane: target });
   await send.send({ sessionId: 's-phone-fyi', text: 'What\u2019s the deal? Fix please', images: [PHONE_SHOT], pane: target });
 
+  // Each picture is pasted by itself and its chip seen before the caption is
+  // typed (round twenty-eight).
   assert.deepEqual(typed(h), [
-    `\x1b[200~"${PHONE_SHOT}"\nFYI\x1b[201~`, '\r',
-    `\x1b[200~"${PHONE_SHOT}"\nWhat\u2019s the deal? Fix please\x1b[201~`, '\r',
+    `\x1b[200~"${PHONE_SHOT}"\x1b[201~`, 'FYI', '\r',
+    `\x1b[200~"${PHONE_SHOT}"\x1b[201~`, 'What\u2019s the deal? Fix please', '\r',
   ], 'each typed once, each submitted with one Enter');
   assert.equal(pane.draft, '');
   assert.deepEqual(pane.echoed, ['[Image #13]FYI', '[Image #14]What\u2019s the deal? Fix please']);
@@ -844,7 +2365,7 @@ test('a phone image is attached by Claude 2.1.311 and later: its path goes on a 
 
   await send.send({ sessionId: 's-phone-2-1-311', text: 'FYI', images: [PHONE_SHOT], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
 
-  assert.deepEqual(typed(h), [`\x1b[200~"${PHONE_SHOT}"\nFYI\x1b[201~`, '\r']);
+  assert.deepEqual(typed(h), [`\x1b[200~"${PHONE_SHOT}"\x1b[201~`, 'FYI', '\r']);
   assert.deepEqual(pane.echoed, ['[Image #13]FYI'], 'the image is attached and the path is gone from the message');
 });
 
@@ -855,20 +2376,26 @@ test('two phone images each get a line of their own', async () => {
   const pane = composerPane(h, { pathChips: 'whole-line', imagesBefore: 2 });
   const send = createSessionSend(h.deps);
   await send.send({ sessionId: 's-phone-two', text: 'compare these', images: [PHONE_SHOT, second], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
-  assert.deepEqual(typed(h), [`\x1b[200~"${PHONE_SHOT}"\n"${second}"\ncompare these\x1b[201~`, '\r']);
+  assert.deepEqual(typed(h), [`\x1b[200~"${PHONE_SHOT}"\x1b[201~`, `\x1b[200~"${second}"\x1b[201~`, 'compare these', '\r']);
   assert.deepEqual(pane.echoed, ['[Image #3][Image #4]compare these']);
 });
 
-test('a phone image message already in the prompt as a chip is submitted, not typed again', async () => {
+// Round twenty-eight: each picture is pasted by itself, and the first paste
+// needs an empty prompt (round fourteen), as the desktop's always did. A chip
+// cannot say which picture it is, so an earlier try in the prompt is left for
+// Pat to send or clear, and nothing is typed twice.
+test('a phone image message already in the prompt is never typed again: the send is refused and the prompt left as it was', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   delete h.deps.setXClipboardImage;
   const pane = composerPane(h, { pathChips: true, initialDraft: '[Image #13]FYI', imagesBefore: 13 });
   const send = createSessionSend(h.deps);
 
-  await send.send({ sessionId: 's-phone-again', text: 'FYI', images: [PHONE_SHOT], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
-
-  assert.deepEqual(typed(h), ['\r'], 'nothing typed on top of it');
-  assert.deepEqual(pane.echoed, ['[Image #13]FYI']);
+  await assert.rejects(
+    send.send({ sessionId: 's-phone-again', text: 'FYI', images: [PHONE_SHOT], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } }),
+    (error) => error.code === 'PROMPT_BUSY',
+  );
+  assert.deepEqual(typed(h), [], 'nothing typed on top of it, and no Enter');
+  assert.equal(pane.draft, '[Image #13]FYI', 'the earlier try is left in the prompt');
 });
 
 test('the sessions view is recognized by its own box and key hints, never by prose that quotes it', () => {
@@ -1006,9 +2533,13 @@ test('a pane the daemon started long ago is not treated as starting, even by a H
 
 test('a Claude that draws nothing for minutes after the typing gets the message once it shows: typed once, one Enter, no refusal', async () => {
   // 2026-11-18: starved panes drew nothing for minutes; the 7.5 s wait refused,
-  // the next send pasted again, and the copies stacked when Claude woke.
-  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
-  const pane = composerPane(h, { renderDelayReads: 1300 });
+  // the next send pasted again, and the copies stacked when Claude woke. An
+  // established pane (spawned hours ago), so the wait is the stall rule's and
+  // not a starting Claude's; 1,000 frozen reads is 2.5 minutes, inside the
+  // three-minute stall window.
+  const longAgo = new Date(Date.now() - 12 * 60 * 60_000).toISOString();
+  const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: longAgo }], controlled: 'pane-1' });
+  const pane = composerPane(h, { renderDelayReads: 1000 });
   const send = createSessionSend(h.deps);
   const details = [];
   send.emitter.on('status', (s) => { if (s.phase === 'sending' && s.detail) details.push(s.detail); });
@@ -1405,7 +2936,7 @@ test('a resumed cursor pane that stays blank for 70 s still gets the message', a
   h.deps.sleep = async (ms) => { t += ms; };
   let resumedAt = null;
   h.deps.readPane = async () => (resumedAt === null || t - resumedAt < 70_000 ? '' : 'Cursor Agent v2026.11.05\n → Plan, search, build anything');
-  h.deps.launchActions.resumeProviderSession = async () => { resumedAt = t; h.state.panes.push('pane-fresh'); };
+  h.deps.launchActions.resumeProviderSession = async ({ id }) => { resumedAt = t; h.state.panes.push({ pane_id: 'pane-fresh', workspace_id: 'ws-1', agent_session: { kind: 'id', value: id } }); };
   h.deps.getSessionMeta = async () => ({ cwd: '/home/x/dev/harbor', provider: 'cursor' });
   const send = createSessionSend(h.deps);
   const res = await send.send({ sessionId: 's-cursor-slow', text: 'after a slow resume', provider: 'cursor' });
@@ -1982,7 +3513,7 @@ test('Codex resume-only reports a notice honestly and a usable composer as ready
   ]) {
     const h = makeHarness({ panes: [], controlled: null, readFrames: [screen], promptEchoes: false });
     h.deps.getSessionMeta = async () => ({ provider: 'codex', cwd: '/work' });
-    h.deps.launchActions.resumeProviderSession = async () => h.state.panes.push({ pane_id: 'pane-fresh', workspace_id: 'ws-1', cwd: '/work', agent: 'codex' });
+    h.deps.launchActions.resumeProviderSession = async ({ id }) => h.state.panes.push({ pane_id: 'pane-fresh', workspace_id: 'ws-1', cwd: '/work', agent: 'codex', agent_session: { kind: 'id', value: id } });
     const send = createSessionSend(h.deps), statuses = [];
     send.emitter.on('status', entry => statuses.push(entry));
     const result = await send.send({ sessionId: 'saved-codex', text: '', provider: 'codex', resumeOnly: true });
@@ -2018,6 +3549,7 @@ test('Codex swallowing both Enters is an honest error, and the resend presses En
 test('with no clipboard, an image is delivered as a path instead of a paste', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   delete h.deps.setXClipboardImage;
+  composerPane(h, { pathChips: 'whole-line' });
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 's-headless-image',
@@ -2036,9 +3568,10 @@ test('with no clipboard, an image is delivered as a path instead of a paste', as
 // Claude 2.1.311 attaches a pasted path only when it has its line to itself, so
 // a Claude pane gets one quoted path per line (a bare POSIX path would start the
 // message with "/" and be typed as a slash command); another CLI keeps the label.
-test('two headless images are both delivered, one quoted path per line, ahead of the text', async () => {
+test('two headless images are both delivered, each quoted path pasted by itself, ahead of the text', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   delete h.deps.setXClipboardImage;
+  composerPane(h, { pathChips: 'whole-line' });
   const send = createSessionSend(h.deps);
   await send.send({
     sessionId: 's-headless-two',
@@ -2047,7 +3580,7 @@ test('two headless images are both delivered, one quoted path per line, ahead of
     pane: { paneId: 'pane-1', workspaceId: 'ws-1' },
   });
   const body = h.sent.map(({ text }) => text).join('');
-  assert.equal(body, '\x1b[200~"/srv/upload/a.png"\n"/srv/upload/b.png"\ncompare these\x1b[201~\r', 'one paste, never a slash command typed raw');
+  assert.equal(body, '\x1b[200~"/srv/upload/a.png"\x1b[201~\x1b[200~"/srv/upload/b.png"\x1b[201~compare these\r', 'each path a paste of its own, never a slash command typed raw');
   assert.doesNotMatch(body, /Images?:/);
 });
 
@@ -2095,6 +3628,7 @@ test('an image Codex never attaches stops the send before the text or Enter', as
 test('clipboard failure is an honest send error before Ctrl+V or text', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   h.deps.setXClipboardImage = async () => { throw new Error('clipboard failed'); };
+  h.deps.readPane = async () => `conversation\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`; // a drawn prompt box: without one, images go by path (rounds six and eight)
   const send = createSessionSend(h.deps);
   await assert.rejects(
     () => send.send({
@@ -2555,7 +4089,7 @@ test('a non-Claude provider send refuses the dead shell and resumes through bin/
   const providerResumes = [];
   h.deps.launchActions.resumeProviderSession = async (args) => {
     providerResumes.push(args);
-    h.state.panes.push('pane-fresh');
+    h.state.panes.push({ pane_id: 'pane-fresh', workspace_id: 'ws-1', agent_session: { kind: 'id', value: args.id } });
   };
   h.deps.getSessionMeta = async () => ({ cwd: '/home/x/dev/harbor', provider: 'codex' });
   const send = createSessionSend(h.deps);
@@ -2950,6 +4484,14 @@ test('getMenu returns null when the pane is a normal composer', async () => {
   assert.equal(await send.getMenu({ pane: { paneId: 'pane-1' } }), null);
 });
 
+// The CLI draws a switch's answer only after its Enter: before it, the idle
+// screen; after it, `frames` in order (the send reads the screen before its
+// Enter too, to count the command's echoes).
+// `before`: the screen until the Enter (the idle one unless given).
+const afterEnterScreens = (h, frames, idle = 'conversation\n❯', before = idle) => {
+  h.deps.readPane = async () => (h.sent.some(({ text }) => text === '\r') ? (frames.shift() ?? idle) : before);
+};
+
 const MODEL_SWITCH_DIALOG = [
   'Switching to Haiku 4.5 means the full history gets re-read on your next message.',
   '1. Yes',
@@ -2963,7 +4505,7 @@ test('Claude /model answers a post-send full-history confirmation with 1 then En
     MODEL_SWITCH_DIALOG,
     'conversation\n❯',
   ];
-  h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+  afterEnterScreens(h, panes);
   const send = createSessionSend(h.deps);
 
   await send.send({
@@ -2979,7 +4521,7 @@ test('Claude /model answers a post-send full-history confirmation with 1 then En
 test('Claude /effort handles the same post-send full-history confirmation', async () => {
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   const panes = ['conversation\n❯', MODEL_SWITCH_DIALOG, 'conversation\n❯'];
-  h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+  afterEnterScreens(h, panes);
   const send = createSessionSend(h.deps);
 
   await send.send({
@@ -2999,7 +4541,7 @@ for (const [fixtureName, level] of [['claude-2.1.303-effort-xhigh-120.txt', 'xhi
     const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', fixtureName), 'utf8');
     const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
     const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
-    h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+    afterEnterScreens(h, panes);
     const send = createSessionSend(h.deps);
 
     await send.send({
@@ -3024,7 +4566,7 @@ for (const fixtureName of ['claude-2.1.312-model-sonnet-120.txt', 'claude-2.1.31
     const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', fixtureName), 'utf8');
     const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
     const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
-    h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+    afterEnterScreens(h, panes);
     const send = createSessionSend(h.deps);
 
     await send.send({
@@ -3037,6 +4579,114 @@ for (const fixtureName of ['claude-2.1.312-model-sonnet-120.txt', 'claude-2.1.31
     assert.deepEqual(h.sent.map(({ text }) => text), ['/model ', 'sonnet', '\r', '1', '\r']);
   });
 }
+
+// 2026-11-19, CLI 2.1.321 (four of seven live drives): the CLI drew only the
+// echoed command, no box and no result, for longer than the old 4.5-second
+// watch, then opened the dialog, which stayed open.
+test('a /model cache warning that opens late is still answered; a switch with no dialog ends at its result', async () => {
+  const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', 'claude-2.1.312-model-sonnet-120.txt'), 'utf8');
+  const echoOnly = 'conversation\n\n❯ /model sonnet\n';
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const late = ['conversation\n❯', ...Array(15).fill(echoOnly), dialog, 'conversation\n❯'];
+  afterEnterScreens(h, late);
+  await createSessionSend(h.deps).send({ sessionId: 's-model-late', text: '/model sonnet', provider: 'claude', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(h), ['/model ', 'sonnet', '\r', '1', '\r'], 'the late dialog is answered');
+
+  const g = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  let reads = 0;
+  const settled = `${echoOnly}  ⎿  Set model to Sonnet 5.5\n\n────\n❯ \n────`;
+  const frames = ['conversation\n❯', echoOnly, echoOnly];
+  g.deps.readPane = async () => { reads += 1; return g.sent.some(({ text }) => text === '\r') ? (frames.shift() ?? settled) : 'conversation\n❯'; };
+  await createSessionSend(g.deps).send({ sessionId: 's-model-plain', text: '/model sonnet', provider: 'claude', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(g), ['/model ', 'sonnet', '\r'], 'nothing answered when no dialog opens');
+  assert.ok(reads < 20, `the watch ends at the command's result (${reads} reads)`);
+});
+
+// Round forty: only an open dialog after an actual switch command is answered,
+// and only a NEW echo's result ends the watch early.
+test('a switch watch answers only an open dialog after a real /model, and an older result never ends it', async () => {
+  const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', 'claude-2.1.312-model-sonnet-120.txt'), 'utf8');
+  const quoted = ['● The dialog reads:', '  Switch model?', '  This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.', '  ❯ 1. Yes, switch to Sonnet 5.5', '    2. No, go back'].join('\n');
+  // A screenshot captioned "/model sonnet" is words, under prose quoting the dialog.
+  const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  const pane = composerPane(h);
+  const draw = h.deps.readPane;
+  h.deps.readPane = async (...args) => String(await draw(...args)).replace('conversation\n', `conversation\n${quoted}\n`);
+  await createSessionSend(h.deps).send({ sessionId: 's-caption-model', text: '/model sonnet', images: ['/cache/one.png'], pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.equal(typed(h).includes('1'), false, 'no "1" typed after a screenshot whose caption names /model');
+  assert.equal(pane.echoed.length, 1, 'one message submitted');
+  // A real /model under the same quoted prose and an idle prompt: nothing answered.
+  const q = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  afterEnterScreens(q, [], `conversation\n${quoted}\n${PROMPT_RULE}\n❯ \n${PROMPT_RULE}`);
+  await createSessionSend(q.deps).send({ sessionId: 's-quoted', text: '/model sonnet', provider: 'claude', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(q), ['/model ', 'sonnet', '\r'], 'a quoted dialog above the prompt is history');
+  // The same command's earlier echo and result are still on screen; the new
+  // echo is drawn late and the dialog six seconds after.
+  const old = 'conversation\n❯ /model sonnet\n  ⎿  Set model to Sonnet 5.5\n❯ /model opus\n  ⎿  Set model to Opus 5.5\n';
+  const g = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  afterEnterScreens(g, [...Array(12).fill(old), dialog, 'conversation\n❯'], old);
+  await createSessionSend(g.deps).send({ sessionId: 's-model-again', text: '/model sonnet', provider: 'claude', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+  assert.deepEqual(typed(g), ['/model ', 'sonnet', '\r', '1', '\r'], 'the late dialog is answered, not cut off by the older result');
+});
+
+// Round forty-one: positive evidence of an open dialog, an unknown baseline
+// from a blank read, and one wall-clock deadline over slow reads.
+test('a switch watch needs the dialog drawn last, keeps a blank baseline unknown, and ends on its clock', async () => {
+  const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', 'claude-2.1.312-model-sonnet-120.txt'), 'utf8');
+  const quoted = ['● The dialog reads:', '  Switch model?', '  This conversation is cached for the current model. Switching to Sonnet 5.5 means the full history gets re-read.', '  ❯ 1. Yes, switch to Sonnet 5.5', '    2. No, go back'].join('\n');
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  // Quoted prose above a BARE prompt (no box edges).
+  const q = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  afterEnterScreens(q, [], `conversation\n${quoted}\n\n❯ `);
+  await createSessionSend(q.deps).send({ sessionId: 's-bare', text: '/model sonnet', provider: 'claude', pane: target });
+  assert.deepEqual(typed(q), ['/model ', 'sonnet', '\r'], 'a quoted dialog above a bare prompt gets no "1"');
+  // The read before the Enter comes back blank; the older echo and result show next.
+  const old = 'conversation\n❯ /model sonnet\n  ⎿  Set model to Sonnet 5.5\n❯ /model opus\n  ⎿  Set model to Opus 5.5\n';
+  const b = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  b.prompt.echo = false;
+  const frames = [...Array(12).fill(old), dialog, 'conversation\n❯'];
+  b.deps.readPane = async () => (b.sent.some(({ text }) => text === '\r') ? (frames.shift() ?? 'conversation\n❯') : '');
+  await createSessionSend(b.deps).send({ sessionId: 's-blank', text: '/model sonnet', provider: 'claude', pane: target });
+  assert.deepEqual(typed(b), ['/model ', 'sonnet', '\r', '1', '\r'], 'a blank baseline never makes the older result new');
+  // Every read after the Enter hangs: the watch ends on its own clock.
+  process.env.HARBOR_SWITCH_WATCH_MS = '600';
+  try {
+    const s = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    s.deps.readPane = async () => (s.sent.some(({ text }) => text === '\r') ? new Promise(() => {}) : 'conversation\n❯');
+    const started = Date.now();
+    await createSessionSend(s.deps).send({ sessionId: 's-slow', text: '/model sonnet', provider: 'claude', pane: target });
+    assert.ok(Date.now() - started < 5000, `the send ends near its 600 ms watch (${Date.now() - started} ms)`);
+  } finally {
+    delete process.env.HARBOR_SWITCH_WATCH_MS;
+  }
+});
+
+// Round forty-two: one dialog, read as one; a blank frame never closes it.
+test('a switch watch never answers another dialog under an older warning, and a blank frame never reads as closed', async () => {
+  const dialog = fs.readFileSync(path.join(__dirname, '../fixtures/effort-switch', 'claude-2.1.312-model-sonnet-120.txt'), 'utf8');
+  const edge = '─'.repeat(120);
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  const olderWarning = [edge, '  Switch model?', '  This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.', '  ❯ 1. Yes, switch to Opus 5.5', '    2. No, go back'].join('\n');
+  const editDialog = ['  Do you want to make this edit to notes.md?', '  ❯ 1. Yes', '    2. No'].join('\n');
+  for (const [label, screen] of [
+    ['an edit confirmation with its own edge', `conversation\n${olderWarning}\n● Done.\n❯ /model sonnet\n${edge}\n${editDialog}\n`],
+    ['an edit confirmation with none', `conversation\n${olderWarning}\n● Done.\n❯ /model sonnet\n${editDialog}\n`],
+  ]) {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    afterEnterScreens(h, [], screen, 'conversation\n❯');
+    await createSessionSend(h.deps).send({ sessionId: `s-other-${label.length}`, text: '/model sonnet', provider: 'claude', pane: target });
+    assert.deepEqual(typed(h), ['/model ', 'sonnet', '\r'], `no "1" for ${label}`);
+  }
+  // The answer is typed, a blank frame follows, and the dialog is still open.
+  const b = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+  b.prompt.echo = false;
+  afterEnterScreens(b, [dialog, '', ...Array(12).fill(dialog)], dialog, 'conversation\n❯');
+  await assert.rejects(
+    createSessionSend(b.deps).send({ sessionId: 's-blank-close', text: '/model sonnet', provider: 'claude', pane: target }),
+    /could not confirm the Claude model\/effort switch/,
+    'a dialog still open is never reported answered',
+  );
+});
 
 // SYNTHETIC regression guard, not a capture: the /effort dialog is the same
 // 2.1.312 component with "Change effort level?" and "for the current effort
@@ -3055,7 +4705,7 @@ test('SYNTHETIC: Claude /effort confirms the 2.1.312 sentence without "on your n
   ].join('\n');
   const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
   const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
-  h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+  afterEnterScreens(h, panes);
   const send = createSessionSend(h.deps);
 
   await send.send({
@@ -3081,7 +4731,7 @@ for (const ending of ['re-read on your next message.', 're-read.']) {
     ].join('\n');
     const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
     const panes = ['conversation\n❯', dialog, 'conversation\n❯'];
-    h.deps.readPane = async () => panes.shift() ?? 'conversation\n❯';
+    afterEnterScreens(h, panes);
     const send = createSessionSend(h.deps);
     await send.send({ sessionId: `s-sentence-${ending.length}`, text: '/model sonnet', provider: 'claude', pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
     assert.deepEqual(h.sent.map(({ text }) => text), ['/model ', 'sonnet', '\r', '1', '\r']);
@@ -3181,10 +4831,12 @@ test('a busy-session queue-operation enqueue confirms delivery without a false e
       pane: { paneId: 'pane-1' },
     });
     assert.equal(res.delivery, 'confirming');
+    // Claude queues the text exactly as typed, newlines kept (real enqueue
+    // records, 2026-11-19); round thirty-seven compares it exactly.
     await fsp.appendFile(file, `${JSON.stringify({
       type: 'queue-operation',
       operation: 'enqueue',
-      content: 'please queue this',
+      content: 'please   queue\nthis',
     })}\n`);
     await new Promise((resolve) => setTimeout(resolve, 550));
     assert.equal(statuses.at(-1).phase, 'sent');
@@ -4171,7 +5823,7 @@ test('the pane is sized BEFORE the settle, never during it', async () => {
   };
   h.deps.terminalBridge.ensureDialogSize = async (paneId) => { order.push('size'); return { ok: true }; };
   h.deps.launchActions = {
-    resumeSession: async () => { h.state.panes.push('pane-fresh'); },
+    resumeSession: async ({ id }) => { h.state.panes.push({ pane_id: 'pane-fresh', workspace_id: 'ws-1', agent_session: { kind: 'id', value: id } }); },
   };
   const send = createSessionSend(h.deps);
   await send.send({ sessionId: 'sess-2', text: 'hello', resumeOnly: true }).catch(() => {});
@@ -4843,6 +6495,449 @@ test('2026-11-02: a queued image send confirms by its enqueue, and only with the
   await assert.rejects(send.confirmDelivery('s', text, { prepared, images: 0, timeoutMs: 1200 }), (e) => e.code === 'UNCONFIRMED');
   // Nor by a chip count that is not what it sent.
   await assert.rejects(send.confirmDelivery('s', text, { prepared, images: 2, timeoutMs: 1200 }), (e) => e.code === 'UNCONFIRMED');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// Round thirty: a line of the message's own that Claude turned into a picture is
+// not in the transcript as text; the converted form confirms too.
+test('a message whose own path line Claude turned into a picture confirms in its converted form', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } };
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  // chips: what the verified draft showed (round thirty-two); null when it showed no conversion.
+  const confirm = async (records, text, { images = 0, chips = null } = {}) => {
+    await fsp.writeFile(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    return send.confirmDelivery('s', text, { prepared: { path: file, preSize: 0 }, images, chips, timeoutMs: 1200 });
+  };
+  const turn = (said, pictures = 1) => ({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: said }, ...Array(pictures).fill(image)] } });
+  const unconfirmed = (e) => e.code === 'UNCONFIRMED';
+  const text = 'compare with this one\n"C:\\Users\\me\\Pictures\\other.png"';
+  const three = { chips: ['[Image #3]'] };
+  // A text-only message: a user turn, and a queued one.
+  assert.equal(await confirm([turn('[Image #3] compare with this one')], text, three), true, 'user turn');
+  assert.equal(await confirm([{ type: 'queue-operation', operation: 'enqueue', content: '[Image #3] compare with this one' }], text, three), true, 'queued');
+  // A caption beside a sent picture: two chips queued, one sent and one converted.
+  assert.equal(await confirm([{ type: 'queue-operation', operation: 'enqueue', content: '[Image #4] [Image #5] compare with this one' }], text, { images: 1, chips: ['[Image #4]', '[Image #5]'] }), true, 'caption with a sent picture');
+  // Every line a path: only the pictures arrive, exactly those.
+  const paths = '"C:\\a.png"\n"C:\\b.png"';
+  const both = { chips: ['[Image #1]', '[Image #2]'] };
+  assert.equal(await confirm([turn('[Image #1] [Image #2]', 2)], paths, both), true, 'pictures only');
+  await assert.rejects(confirm([turn('[Image #1]')], paths, both), unconfirmed, 'one picture is not two');
+  await assert.rejects(confirm([turn('[Image #3] a different message')], text, three), unconfirmed, 'another message');
+  // Round thirty-one: its words alone, or the wrong picture count, are not this send.
+  await assert.rejects(confirm([{ type: 'user', message: { role: 'user', content: 'compare with this one' } }], text, three), unconfirmed, 'the words alone, no picture');
+  await assert.rejects(confirm([{ type: 'queue-operation', operation: 'enqueue', content: 'compare with this one' }], text, three), unconfirmed, 'a plain enqueue');
+  await assert.rejects(confirm([turn('[Image #3] compare with this one', 2)], text, three), unconfirmed, 'two pictures for one');
+  // Round thirty-two: the same words with ANOTHER send's picture (an earlier
+  // try taken in late) are not this send, and nothing converted unless the
+  // verified draft showed it.
+  await assert.rejects(confirm([turn('[Image #2] compare with this one')], text, three), unconfirmed, 'another picture, same words');
+  await assert.rejects(confirm([{ type: 'queue-operation', operation: 'enqueue', content: '[Image #2] compare with this one' }], text, three), unconfirmed, 'another picture, queued');
+  await assert.rejects(confirm([turn('[Image #2] [Image #1]', 2)], paths, { chips: ['[Image #3]', '[Image #4]'] }), unconfirmed, 'other pictures only');
+  await assert.rejects(confirm([turn('[Image #3] compare with this one')], text), unconfirmed, 'no conversion seen in the draft');
+  // Round thirty-three: attachments are the LEADING chips. A label quoted in
+  // prose is words: it neither confirms another send's picture nor makes a
+  // caption that quotes one fail.
+  await assert.rejects(confirm([turn('[Image #2] compare with this one, see [Image #3]')], text, three), unconfirmed, 'another picture, this chip only quoted');
+  const quoting = 'look at [Image #3] again\n"C:\\Users\\me\\Pictures\\other.png"';
+  assert.equal(await confirm([{ type: 'queue-operation', operation: 'enqueue', content: '[Image #4] [Image #5] look at [Image #3] again' }], quoting, { images: 1, chips: ['[Image #4]', '[Image #5]', '[Image #3]'] }), true, 'a caption quoting a label');
+  assert.equal(await confirm([turn('[Image #4] [Image #5] look at [Image #3] again', 2)], quoting, { images: 1, chips: ['[Image #4]', '[Image #5]', '[Image #3]'] }), true, 'the same as a user turn');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// Round thirty-five: another session's words never confirm a typed send, and a
+// late check never speaks over a newer send.
+test('a peer message through the native inbox never confirms a typed send, and a record must be the whole message', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const confirm = async (record, text = 'continue', options = {}) => {
+    await fsp.writeFile(file, `${JSON.stringify(record)}\n`);
+    return send.confirmDelivery('s', text, { prepared: { path: file, preSize: 0 }, timeoutMs: 1200, ...options });
+  };
+  const unconfirmed = (e) => e.code === 'UNCONFIRMED';
+  const wrapped = '<cross-session-message from-name="Router">\nPlease continue with the next part\n</cross-session-message>';
+  await assert.rejects(confirm({ type: 'queue-operation', operation: 'enqueue', content: wrapped }), unconfirmed, 'the peer\'s enqueue');
+  await assert.rejects(confirm({ type: 'user', message: { role: 'user', content: wrapped } }), unconfirmed, 'the peer\'s turn');
+  await assert.rejects(confirm({ type: 'user', isMeta: true, message: { role: 'user', content: 'Another Claude session sent a message: continue' } }), unconfirmed, 'Claude\'s note about it');
+  await assert.rejects(confirm({ type: 'user', message: { role: 'user', content: 'Please continue with the next part' } }), unconfirmed, 'a longer message holding the word');
+  await assert.rejects(confirm({ type: 'user', message: { role: 'user', content: '<cross-session-message from-name="Router">\ncontinue\n</cross-session-message>' } }), unconfirmed, 'a peer saying exactly the same');
+  assert.equal(await confirm({ type: 'user', message: { role: 'user', content: 'continue' } }), true, 'the typed message itself');
+  assert.equal(await confirm({ type: 'user', message: { role: 'user', content: '<command-name>/model</command-name>\n<command-args>haiku</command-args>' } }, '/model haiku', { optional: true }), true, 'a real slash command by its tag');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// Round thirty-six: words compared with their spaces, only recognized records,
+// and the typed words out of Claude's own paste wrapper.
+test('a delivery record confirms only as a recognized record holding exactly the typed words', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const confirm = async (record, text) => {
+    await fsp.writeFile(file, `${JSON.stringify(record)}\n`);
+    return send.confirmDelivery('s', text, { prepared: { path: file, preSize: 0 }, timeoutMs: 1200 });
+  };
+  const unconfirmed = (e) => e.code === 'UNCONFIRMED';
+  const user = (content) => ({ type: 'user', message: { role: 'user', content } });
+  const notes = 'Use C:/work/release notes.txt';
+  await assert.rejects(confirm(user('Use C:/work/releasenotes.txt'), notes), unconfirmed, 'another file whose name lacks the space');
+  await assert.rejects(confirm({ type: 'queue-operation', operation: 'enqueue', content: 'Use C:/work/releasenotes.txt' }, notes), unconfirmed, 'the same, queued');
+  // Round thirty-seven: exact words (a line break is not a space; indentation is content).
+  await assert.rejects(confirm(user('Use C:/work/release\nnotes.txt'), notes), unconfirmed, 'a line break where a space was is another message');
+  assert.equal(await confirm(user('Use C:/work/release notes.txt  \r\n'), notes), true, 'trailing spaces and line endings aside, the same message');
+  await assert.rejects(confirm({ type: 'summary', summary: 'continue', leafUuid: 'x' }, 'continue'), unconfirmed, 'a session summary');
+  await assert.rejects(confirm({ type: 'progress', data: { message: 'continue' } }, 'continue'), unconfirmed, 'a shape not known as a delivery');
+  const prose = 'the tag <cross-session-message shows up in the log';
+  assert.equal(await confirm(user(prose), prose), true, 'prose naming the peer tag is typed words');
+  const pasted = 'line one of the note\nline two of the note';
+  assert.equal(await confirm(user(`<pasted_content id="9d3b">\n${pasted}\n</pasted_content id="9d3b">`), pasted), true, 'Claude\'s paste pair unwrapped');
+  assert.equal(await confirm({ type: 'queue-operation', operation: 'enqueue', content: `<pasted_content id="9d3b">\n${pasted}\n</pasted_content id="9d3b">` }, pasted), true, 'the same, queued');
+  // Cursor: no type, the words framed in <user_query>.
+  const cursor = (words) => ({ role: 'user', message: { content: [{ type: 'text', text: `<timestamp>Thursday, Nov 19, 2026</timestamp>\n<user_query>\n${words}\n</user_query>` }] } });
+  assert.equal(await confirm(cursor('hello there'), 'hello there'), true, 'a Cursor turn');
+  await assert.rejects(confirm(cursor('hello there'), 'hello'), unconfirmed, 'a Cursor turn that only holds the words');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// Round thirty-seven: exact words, the literal text first, and Codex's typed item.
+test('a record confirms only with the exact typed words: indentation, literal tags and Codex instruction items', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const confirm = async (record, text) => {
+    await fsp.writeFile(file, `${JSON.stringify(record)}\n`);
+    return send.confirmDelivery('s', text, { prepared: { path: file, preSize: 0 }, timeoutMs: 1000 });
+  };
+  const unconfirmed = (e) => e.code === 'UNCONFIRMED';
+  const user = (content) => ({ type: 'user', message: { role: 'user', content } });
+  // Indentation is content.
+  const inside = 'if ready:\n    run_first()\n    run_second()';
+  const outside = 'if ready:\n    run_first()\nrun_second()';
+  await assert.rejects(confirm(user(outside), inside), unconfirmed, 'another snippet, user turn');
+  await assert.rejects(confirm({ type: 'queue-operation', operation: 'enqueue', content: outside }, inside), unconfirmed, 'another snippet, queued');
+  assert.equal(await confirm(user(inside), inside), true, 'the snippet itself');
+  // A tag the message itself holds is its words; only a part the CLI adds is set aside.
+  const literal = 'Document this example:\n<system-reminder>be brief</system-reminder>';
+  assert.equal(await confirm(user(literal), literal), true, 'a message holding a literal reminder tag');
+  await assert.rejects(confirm(user(literal), 'Document this example:'), unconfirmed, 'its first line alone');
+  assert.equal(await confirm(user([{ type: 'text', text: '<system-reminder>the CLI added this</system-reminder>' }, { type: 'text', text: 'hello there' }]), 'hello there'), true, 'a reminder part of its own is the CLI\'s');
+  // Codex: the typed item, never its instruction items.
+  const codexTurn = { type: 'response_item', payload: { type: 'message', role: 'user', content: [
+    { type: 'input_text', text: '# AGENTS.md instructions\n<INSTRUCTIONS>\nAlways run focused tests before finishing.\n</INSTRUCTIONS>' },
+    { type: 'input_text', text: 'Review the settings file.' },
+  ] } };
+  await assert.rejects(confirm(codexTurn, 'run focused tests'), unconfirmed, 'words inside AGENTS.md');
+  assert.equal(await confirm(codexTurn, 'Review the settings file.'), true, 'the typed item');
+  await assert.rejects(confirm({ type: 'event_msg', payload: { type: 'user_message', message: 'Please run focused tests now' } }, 'run focused tests'), unconfirmed, 'a user_message only holding the words');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// Rounds thirty-eight and thirty-nine: a draft is this send only with this
+// send's spaces, the screen alone settles only a one-row draft, and a record of
+// a different draft vetoes the screen.
+test('an Enter-only retry needs the draft drawn with the send\'s own spaces, in Claude and Codex', async () => {
+  const notes = 'Use C:/work/release notes.txt';
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  const claude = async (draft, options = {}) => {
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: LONG_AGO() }], controlled: 'pane-1' });
+    const pane = composerPane(h, { initialDraft: draft, ...options });
+    const send = createSessionSend(h.deps);
+    let code = 'sent';
+    try { await send.send({ sessionId: 's-spaces', text: notes, pane: target }); } catch (error) { code = error.code; }
+    return { code, typed: typed(h), pane };
+  };
+  const other = await claude('Use C:/work/releasenotes.txt');
+  assert.notEqual(other.code, 'sent', 'another file\'s name is refused');
+  assert.equal(other.typed.includes('\r'), false, 'no Enter on the other filename');
+  assert.equal(other.pane.draft, 'Use C:/work/releasenotes.txt', 'the prompt is left as it was');
+  const same = await claude(notes);
+  assert.equal(same.code, 'sent', 'the same message on one row');
+  assert.deepEqual(same.typed, ['\r'], 'Enter only, nothing typed again');
+  // Wrapped, the screen cannot tell "release notes" from "releasenotes" cut in two.
+  for (const wrapAt of [19, 17]) {
+    const wrapped = await claude(notes, { wrapAt });
+    assert.notEqual(wrapped.code, 'sent', `a wrapped draft is not settled by the screen alone (row width ${wrapAt})`);
+    assert.equal(wrapped.typed.includes('\r'), false);
+  }
+  const codex = async (draft) => {
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    codexPane(h, { initialDraft: draft });
+    const send = createSessionSend(h.deps);
+    let code = 'sent';
+    try { await send.send({ sessionId: 'pane:pane-1', provider: 'codex', text: notes, pane: target }); } catch (error) { code = error.code; }
+    return { code, typed: typed(h) };
+  };
+  const codexOther = await codex('Use C:/work/releasenotes.txt');
+  assert.notEqual(codexOther.code, 'sent', 'Codex: another file\'s name is refused');
+  assert.equal(codexOther.typed.includes('\r'), false, 'Codex: no Enter on the other filename');
+  const codexSame = await codex(notes);
+  assert.equal(codexSame.code, 'sent', 'Codex: the same message');
+  assert.deepEqual(codexSame.typed, ['\r'], 'Codex: Enter only');
+});
+
+test('a record of a different earlier draft vetoes an Enter-only retry the screen cannot tell apart', async () => {
+  const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+  const run = async (first, second, options) => {
+    const h = makeHarness({ panes: [{ pane_id: 'pane-1', workspace_id: 'ws-1', created_at: LONG_AGO() }], controlled: 'pane-1' });
+    const pane = composerPane(h, { swallowEnters: 50, ...options });
+    const send = createSessionSend(h.deps);
+    let firstOutcome = 'sent';
+    try { firstOutcome = (await send.send({ sessionId: 's-veto', text: first, pane: target })).delivery; } catch (error) { firstOutcome = error.code; }
+    assert.ok(pane.draft, `the first send's draft stays in the prompt (${firstOutcome})`);
+    const before = typed(h).length;
+    let code = 'sent';
+    try { await send.send({ sessionId: 's-veto', text: second, pane: target }); } catch (error) { code = error.code; }
+    return { code, after: typed(h).slice(before), pane, firstOutcome };
+  };
+  // Claude ignored the first send's Enters; its draft wraps between "release" and "notes.txt".
+  const files = await run('Use C:/work/releasenotes.txt', 'Use C:/work/release notes.txt', { wrapAt: 19 });
+  assert.notEqual(files.code, 'sent', 'the new request is refused');
+  assert.deepEqual(files.after, [], 'no Enter on the old filename, nothing typed');
+  // The earlier draft's picture is drawn as the same chip a new picture would be.
+  const pictures = await run('C:\\shots\\older.png\nlook at this', 'C:\\shots\\newer.png\nlook at this', { pathChips: true });
+  assert.notEqual(pictures.code, 'sent', 'a new picture request is refused');
+  assert.deepEqual(pictures.after, [], 'no Enter on the older picture');
+  // The same request again, on the record's word, still gets Enter only.
+  const again = await run('Use C:/work/release notes.txt', 'Use C:/work/release notes.txt', { wrapAt: 19 });
+  assert.deepEqual(again.after.filter((key) => key !== '\r'), [], 'the same request is never typed twice');
+});
+
+test('a Codex record confirms a picture send only when it carries the pictures', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const confirm = async (record, text, images) => {
+    await fsp.writeFile(file, `${JSON.stringify(record)}\n`);
+    return send.confirmDelivery('s', text, { prepared: { path: file, preSize: 0 }, timeoutMs: 1000, images, paths: images ? ['C:\\Users\\pat\\shot.png'] : [] });
+  };
+  const unconfirmed = (e) => e.code === 'UNCONFIRMED';
+  const caption = 'what is wrong on this screen';
+  // Codex 0.17x: each picture an input_image item, the typed words their own item.
+  const item = (pictures, shot = 'C:\\Users\\pat\\shot.png') => ({ type: 'response_item', payload: { type: 'message', role: 'user', content: [
+    ...Array.from({ length: pictures }, (_, n) => [
+      { type: 'input_text', text: `<image name=[Image #${n + 1}] path="${shot}">` },
+      { type: 'input_image', image_url: 'data:image/png;base64,AAAA' },
+      { type: 'input_text', text: '</image>' },
+    ]).flat(),
+    { type: 'input_text', text: caption },
+  ] } });
+  await assert.rejects(confirm(item(0), caption, 1), unconfirmed, 'a text-only turn with the caption');
+  await assert.rejects(confirm({ type: 'event_msg', payload: { type: 'user_message', message: caption } }, caption, 1), unconfirmed, 'a text-only user_message');
+  await assert.rejects(confirm(item(2), caption, 1), unconfirmed, 'a turn with another number of pictures');
+  assert.equal(await confirm(item(1), caption, 1), true, 'the picture turn');
+  assert.equal(await confirm(item(1, 'c:/users/pat/shot.png'), caption, 1), true, 'the same path, slashes and case aside');
+  // Round thirty-nine: the pictures must be the send's own, by path.
+  await assert.rejects(confirm(item(1, 'C:\\Users\\pat\\older.png'), caption, 1), unconfirmed, 'an older screenshot with the same caption');
+  await assert.rejects(confirm({ type: 'event_msg', payload: { type: 'user_message', message: caption, images: ['data:image/png;base64,AAAA'] } }, caption, 1), unconfirmed, 'an encoded picture names no path');
+  assert.equal(await confirm({ type: 'event_msg', payload: { type: 'user_message', message: caption, local_images: ['C:\\Users\\pat\\shot.png'] } }, caption, 1), true, 'a user_message naming it');
+  await assert.rejects(confirm(item(1), caption, 0), unconfirmed, 'a picture turn is not a text-only send');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('a Codex screenshot receipt larger than the line limit still confirms: its encoded picture is dropped as it streams', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const shot = 'C:\\Users\\pat\\big.png';
+  const record = { type: 'response_item', payload: { type: 'message', role: 'user', content: [
+    { type: 'input_text', text: `<image name=[Image #1] path="${shot}">` },
+    { type: 'input_image', image_url: `data:image/png;base64,${'A'.repeat(10 * 1024 * 1024)}`, detail: 'high' },
+    { type: 'input_text', text: '</image>' },
+    { type: 'input_text', text: 'is this layout right' },
+  ] } };
+  const line = JSON.stringify(record);
+  for (const keyCut of [null, 5, 16]) {
+    // keyCut: pad so the "image_url":"data: key is split by the 1 MB read boundary.
+    let lead = '';
+    if (keyCut) {
+      const at = line.indexOf('"image_url":"data:');
+      const skeleton = JSON.stringify({ type: 'progress', pad: '' });
+      lead = `${JSON.stringify({ type: 'progress', pad: 'x'.repeat(1024 * 1024 - keyCut - at - 1 - skeleton.length) })}\n`;
+    }
+    await fsp.writeFile(file, `${lead}${line}\n`);
+    assert.equal(await send.confirmDelivery('s', 'is this layout right', { prepared: { path: file, preSize: 0 }, timeoutMs: 3000, images: 1, paths: [shot] }), true, keyCut ? `key cut ${keyCut} characters in` : 'whole');
+  }
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('a late delivery check never overwrites the status of a newer send', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const before = process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '1500';
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  try {
+    const file = path.join(dir, 't.jsonl');
+    await fsp.writeFile(file, '');
+    const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+    composerPane(h);
+    h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file });
+    const send = createSessionSend(h.deps);
+    const statuses = [];
+    send.emitter.on('status', (s) => statuses.push(s.phase));
+    const target = { paneId: 'pane-1', workspaceId: 'ws-1' };
+    await send.send({ sessionId: 's-seq', text: 'first message, never in the transcript', pane: target });
+    await send.send({ sessionId: 's-seq', text: 'second message', pane: target });
+    await fsp.appendFile(file, `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'second message' } })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    assert.equal(statuses.at(-1), 'sent', `the newer send keeps its status: ${statuses.join(' > ')}`);
+  } finally {
+    if (before === undefined) delete process.env.HARBOR_CONFIRM_TIMEOUT_MS; else process.env.HARBOR_CONFIRM_TIMEOUT_MS = before;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Round thirty-four: a screenshot send is held to its own draft's chips too, and
+// a long line is judged whole or not at all.
+test('a screenshot send confirms only on a record that starts with its own chips and carries its picture', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } };
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const caption = 'what is wrong with this screen';
+  const confirm = async (record) => {
+    await fsp.writeFile(file, `${JSON.stringify(record)}\n`);
+    return send.confirmDelivery('s', caption, { prepared: { path: file, preSize: 0 }, images: 1, chips: ['[Image#3]'], timeoutMs: 1200 });
+  };
+  const unconfirmed = (e) => e.code === 'UNCONFIRMED';
+  assert.equal(await confirm({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: `[Image #3] ${caption}` }, image] } }), true, 'its own picture');
+  assert.equal(await confirm({ type: 'queue-operation', operation: 'enqueue', content: `[Image #3] ${caption}` }), true, 'queued');
+  assert.equal(await confirm({ type: 'attachment', attachment: { type: 'queued_command', prompt: [{ type: 'text', text: `[Image #3] ${caption}` }, image] } }), true, 'queued_command');
+  await assert.rejects(confirm({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: `[Image #2] ${caption}` }, image] } }), unconfirmed, 'an older screenshot, same caption');
+  await assert.rejects(confirm({ type: 'queue-operation', operation: 'enqueue', content: `[Image #2] ${caption}` }), unconfirmed, 'an older one queued');
+  await assert.rejects(confirm({ type: 'user', message: { role: 'user', content: caption } }), unconfirmed, 'the caption alone');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('a message too long to parse in one read is matched whole, never by its first 60 characters', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const start = `please review this long note ${'y'.repeat(60)}`;
+  const text = `${start}${'y'.repeat(1_500_000)}`;
+  const codexUser = (message) => ({ type: 'event_msg', payload: { type: 'user_message', message } });
+  const confirm = async (record) => {
+    await fsp.writeFile(file, `${JSON.stringify(record)}\n`);
+    return send.confirmDelivery('s', text, { prepared: { path: file, preSize: 0 }, timeoutMs: 2000 });
+  };
+  await assert.rejects(confirm(codexUser(`${start}${'z'.repeat(1_500_000)}`)), (e) => e.code === 'UNCONFIRMED', 'the same start, another message');
+  assert.equal(await confirm(codexUser(text)), true, 'the same message, read whole');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// Round thirty-two: the chips the verified draft showed reach the delivery check.
+test('a sent message whose path line Claude converts confirms only by the chips its draft showed', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const before = process.env.HARBOR_CONFIRM_TIMEOUT_MS;
+  process.env.HARBOR_CONFIRM_TIMEOUT_MS = '1500';
+  try {
+    for (const chip of ['[Image #1]', '[Image #7]']) {
+      const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+      const file = path.join(dir, 't.jsonl');
+      await fsp.writeFile(file, '');
+      const h = makeHarness({ panes: ['pane-1'], controlled: 'pane-1' });
+      composerPane(h, { pathChips: 'whole-line' });
+      h.deps.getSessionMeta = async () => ({ cwd: '/x', path: file });
+      const send = createSessionSend(h.deps);
+      const errors = [];
+      send.emitter.on('status', (s) => { if (s.phase === 'error') errors.push(s.detail); });
+      const text = 'compare with this one\n"C:\\Users\\me\\Pictures\\other.png"';
+      const result = await send.send({ sessionId: 's-conv', text, pane: { paneId: 'pane-1', workspaceId: 'ws-1' } });
+      assert.equal(result.delivery, 'confirming');
+      // The draft drew "[Image #1]"; the transcript gets that chip, or another send's.
+      await fsp.appendFile(file, `${JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: `${chip} compare with this one` }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }] } })}\n`);
+      if (chip === '[Image #1]') {
+        // Past its 1.5 s check with no error: it confirmed.
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        assert.deepEqual(errors, [], 'its own chip confirms');
+      } else {
+        // The refusal is awaited, not timed: under a loaded gate it can come
+        // after 2.5 s (a run with three suites in parallel failed here).
+        for (const end = Date.now() + 10_000; Date.now() < end && !errors.length;) await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.ok(errors.some((e) => /could not confirm/.test(e)), 'another send\'s chip does not');
+      }
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  } finally {
+    if (before === undefined) delete process.env.HARBOR_CONFIRM_TIMEOUT_MS; else process.env.HARBOR_CONFIRM_TIMEOUT_MS = before;
+  }
+});
+
+test('a line too large to read whole confirms only as a delivery record, never a tool result quoting the words', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const caption = 'please look at the failing build log';
+  const bulk = 'log line\n'.repeat(170_000); // about 1.5 MB of words, no picture to strip
+  for (const [where, content] of [['at its start', `${caption}\n${bulk}`], ['at its end', `${bulk}\n${caption}`]]) {
+    const tool = { type: 'user', message: { role: 'user', content: [{ tool_use_id: 'toolu_1', type: 'tool_result', content }] } };
+    await fsp.writeFile(file, `${JSON.stringify(tool)}\n`);
+    await assert.rejects(send.confirmDelivery('s', caption, { prepared: { path: file, preSize: 0 }, timeoutMs: 1500 }), (e) => e.code === 'UNCONFIRMED', `a tool result quoting it ${where} is not the message`);
+  }
+  const pasted = `${caption}\n${bulk}`;
+  await fsp.writeFile(file, `${JSON.stringify({ type: 'user', message: { role: 'user', content: pasted } })}\n`);
+  assert.equal(await send.confirmDelivery('s', pasted, { prepared: { path: file, preSize: 0 }, timeoutMs: 1500 }), true, 'a huge message of its own still confirms');
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+// Round thirty-one: a screenshot record runs to megabytes and straddles reads.
+test('a large screenshot record confirms its caption, a leading slash included, wherever the reads fall', async () => {
+  const os = require('node:os');
+  const fsp = require('node:fs/promises');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-send-'));
+  const file = path.join(dir, 't.jsonl');
+  const send = createSessionSend(makeHarness({ panes: ['pane-1'] }).deps);
+  const big = (caption) => JSON.stringify({ type: 'user', message: { role: 'user', content: [
+    { type: 'text', text: `[Image #1] ${caption}` },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBOR'.repeat(300_000) } },
+  ] } });
+  for (const caption of ['/compact is visible in this screenshot', 'plain words about it']) {
+    for (const keyCut of [null, 3]) {
+      // keyCut: pad so the image's "data":" key is split by the 1 MB read boundary.
+      const record = big(caption);
+      let lead = '';
+      if (keyCut) {
+        const at = record.indexOf('"data":"');
+        const skeleton = JSON.stringify({ type: 'progress', pad: '' });
+        lead = `${JSON.stringify({ type: 'progress', pad: 'x'.repeat(1024 * 1024 - keyCut - at - 1 - skeleton.length) })}\n`;
+      }
+      await fsp.writeFile(file, `${lead}${record}\n`);
+      assert.equal(await send.confirmDelivery('s', caption, { prepared: { path: file, preSize: 0 }, images: 1, timeoutMs: 1500 }), true, `${caption}${keyCut ? ', key cut by the read boundary' : ''}`);
+    }
+  }
+  assert.equal(send.confirmNeedle('/compact is visible', false), '/compact is visible', 'a message keeps its own words as the needle');
   await fsp.rm(dir, { recursive: true, force: true });
 });
 

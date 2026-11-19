@@ -482,7 +482,8 @@ async function main() {
         await menu('menu-rail-projects', '.rail-opt-chip[title^="Show only"]');
         if (await rightClick('.sr.live')) { await cdp.shot(tag('menu-session-row')); await closeMenus(); }
         await menu('menu-plus', '.ubar .attach');
-        await menu('menu-launch-other', '.sidebar-global-new.launch-other');
+        // The rail's plan picker (the launch button's chevron; "+O" became its Other row, 2026-11-19).
+        await menu('menu-plan-picker', '.rail-head .launch-more');
         // The new-session dialog and the session configuration dialog.
         if (await click('.ubar .mswitch')) { await sleep(600); await cdp.shot(tag('dialog-config')); if (await click('.model-select')) { await sleep(350); await cdp.shot(tag('dialog-config-model-list')); await esc(); } await esc(); await cdp.eval("document.querySelector('.new-session-backdrop')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))"); await sleep(250); }
         // Right-click menu in the composer, the format strip, the slash popup.

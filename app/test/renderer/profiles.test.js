@@ -12,7 +12,9 @@ const {
   profileStyle,
   resumeCommandForProfile,
   railLaunchPlan,
-  railWidthForProfileCount,
+  railPrimaryPlan,
+  planForKey,
+  RAIL_DEFAULT_WIDTH,
 } = require('../../src/renderer/profiles.cjs');
 const { normalizeHome: sidebarNormalizeHome } = require('../../src/shared/sidebar-model.cjs');
 
@@ -100,21 +102,18 @@ test('a config home with a space is quoted so the command can be pasted', () => 
   );
 });
 
-test('rail width scales with profile count without shrinking the three-profile case', () => {
-  assert.equal(railWidthForProfileCount(1), 260);
-  assert.equal(railWidthForProfileCount(3), 292);
-  assert.equal(railWidthForProfileCount(5), 320);
-  assert.equal(railWidthForProfileCount(6), 320);
-  // Eight launch buttons (five Claude plans, three codex) need the wider default.
-  assert.equal(railWidthForProfileCount(7), 340);
-  assert.equal(railWidthForProfileCount(8), 340);
+// Since 2026-11-19 the rail head holds one split button however many plans are
+// configured, so its default width no longer follows the plan count.
+test('the rail default width is one number, the width the worst meter row needs', () => {
+  assert.equal(RAIL_DEFAULT_WIDTH, 292);
 });
 
 // Pat, 2026-10-29, with six Claude plans and three codex plans: "remove all the
 // buttons in the side panel except for the claude plan buttons ... keep one 'o'
-// button for other ... via the modal". The rail draws one button per Claude plan
-// and one "+O"; its width and density follow that count, not the profile count.
-test('the rail launches Claude plans directly and folds every other plan into one +O', () => {
+// button for other ... via the modal". Every Claude plan launches directly and
+// every other plan folds into one Other entry (the plan picker's last row since
+// 2026-11-19).
+test('the rail launches Claude plans directly and folds every other plan into one Other entry', () => {
   const nine = [
     ...['P', 'T', 'S', 'R', 'G', 'I'].map((letter) => ({ id: letter.toLowerCase(), letter, provider: 'claude' })),
     { id: 'codex-a', letter: 'X', provider: 'codex' },
@@ -124,12 +123,47 @@ test('the rail launches Claude plans directly and folds every other plan into on
   const plan = railLaunchPlan(nine);
   assert.deepEqual(plan.direct.map((p) => p.letter), ['P', 'T', 'S', 'R', 'G', 'I']);
   assert.equal(plan.otherProvider, 'codex');
-  assert.equal(plan.count, 7);
-  assert.equal(railWidthForProfileCount(plan.count), 340);
   // A profile with no provider is a Claude profile (the pre-codex config shape).
-  assert.deepEqual(railLaunchPlan([{ id: 'personal', letter: 'P' }]), { direct: [{ id: 'personal', letter: 'P' }], otherProvider: null, count: 2 });
+  assert.deepEqual(railLaunchPlan([{ id: 'personal', letter: 'P' }]), { direct: [{ id: 'personal', letter: 'P' }], otherProvider: null });
   // Nothing configured is still a well-formed plan.
-  assert.deepEqual(railLaunchPlan(undefined), { direct: [], otherProvider: null, count: 1 });
+  assert.deepEqual(railLaunchPlan(undefined), { direct: [], otherProvider: null });
+});
+
+// The split button's "+" starts the plan last picked in the plan picker, while
+// that plan is still a Claude plan; otherwise the default plan, otherwise the
+// first. Pat, 2026-11-19, at twelve Claude plans: "do like a 'picker'".
+test('the launch button starts the plan picked last, else the default, else the first', () => {
+  const direct = [
+    { id: 'personal', letter: 'P' },
+    { id: 'team', letter: 'T', isDefault: true },
+    { id: 'claudeb', letter: 'B' },
+  ];
+  assert.equal(railPrimaryPlan(direct, 'claudeb').id, 'claudeb');
+  assert.equal(railPrimaryPlan(direct, null).id, 'team');
+  // A remembered plan that was removed, or a codex id, falls back to the default.
+  assert.equal(railPrimaryPlan(direct, 'gone').id, 'team');
+  assert.equal(railPrimaryPlan(direct, 'codex-personal').id, 'team');
+  assert.equal(railPrimaryPlan([{ id: 'a' }, { id: 'b' }], null).id, 'a');
+  assert.equal(railPrimaryPlan([], 'a'), null);
+  assert.equal(railPrimaryPlan(undefined, 'a'), null);
+});
+
+// In the open picker a plan's letter starts that plan; "O" starts Other unless a
+// Claude plan owns O. The personal Codex plan also wears C, but the picker lists
+// Claude plans only, so C means the Claude plan there.
+test('a letter typed in the plan picker picks that Claude plan, and O picks Other', () => {
+  const direct = [
+    { id: 'personal', letter: 'P' },
+    { id: 'claudeb', letter: 'B' },
+    { id: 'claudec', letter: 'C' },
+  ];
+  assert.equal(planForKey(direct, 'b', true).profile.id, 'claudeb');
+  assert.equal(planForKey(direct, 'C', true).profile.id, 'claudec');
+  assert.deepEqual(planForKey(direct, 'o', true), { other: true });
+  assert.equal(planForKey(direct, 'o', false), null);
+  assert.equal(planForKey([...direct, { id: 'orange', letter: 'O' }], 'O', true).profile.id, 'orange');
+  assert.equal(planForKey(direct, 'q', true), null);
+  for (const key of ['Enter', 'ArrowDown', 'Escape', '', undefined]) assert.equal(planForKey(direct, key, true), null);
 });
 
 test('renderer sources no longer hardcode the lab account id', () => {
@@ -154,7 +188,9 @@ test('sidebar launch buttons are profile-driven', () => {
   );
   assert.match(sidebarSource, /launchPlan\.direct\.map\(\(profile\)/);
   assert.match(sidebarSource, /railLaunchPlan\(profiles\)/);
-  assert.match(sidebarSource, /renderProfileLaunchButtons/);
+  assert.match(sidebarSource, /railPrimaryPlan\(launchPlan\.direct, lastPlanId\)/);
+  assert.match(sidebarSource, /renderLaunchSplit\('head'\)/);
+  assert.match(sidebarSource, /renderLaunchSplit\('project'/);
   assert.doesNotMatch(sidebarSource, /account: 'personal'/);
 });
 

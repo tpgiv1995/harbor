@@ -673,6 +673,28 @@ function createTerminalBridge(options = {}) {
     return { ok: true };
   };
 
+  // The same write, ANSWERED (Sol's review, 2026-11-18): resolves once the
+  // keeper has written the keys into the pane, or says why it could not (the
+  // session exited, the keeper is gone). sendInput's success meant only "handed
+  // to the daemon", so a send whose keys never arrived waited out the whole
+  // stall window for text that was never typed.
+  const sendInputAcked = async (paneId, text) => {
+    if (externalControl.has(paneId)) return { ok: false, reason: externalControl.get(paneId) };
+    if (controlledPaneId !== paneId) return { ok: false, reason: 'pane is not focused for control' };
+    if (typeof supervisor.sendInputAcked !== 'function') { supervisor.sendInput(paneId, text); return { ok: true }; }
+    try {
+      await supervisor.sendInputAcked(paneId, text);
+      return { ok: true, acked: true };
+    } catch (error) {
+      const message = String(error?.message || error);
+      // An answer that never came (a timeout, a dropped daemon connection) may
+      // follow a write the keeper DID make: uncertain, and never to be retried.
+      // An answer that refused (the session exited, not controlling) is definite.
+      const ambiguous = /timed out|connection closed|ECONNRESET|EPIPE|socket hang up/i.test(message);
+      return { ok: false, ambiguous, reason: ambiguous ? `no answer from the session daemon: ${message}` : `the session did not take the keys: ${message}` };
+    }
+  };
+
   // Observer respawn is debounced per pane: window drags fire many resize
   // reports, and each observer respawn discards and re-renders the view.
   const observerResizeTimers = new Map();
@@ -1152,6 +1174,7 @@ function createTerminalBridge(options = {}) {
     holdControl,
     releaseControlHold,
     sendInput,
+    sendInputAcked,
     resizePane,
     ensureDialogSize,
     sizeAllPanes,

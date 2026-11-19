@@ -27,9 +27,11 @@ const sidebarSource = fs.readFileSync(
 
 const emitRows = (...rows) => parseEmitTsv(rows.join('\n'));
 
-test('project launch actions render one button per configured profile', () => {
-  assert.match(sidebarSource, /renderProfileLaunchButtons/);
-  assert.match(sidebarSource, /profiles\.map\(\(profile\)/);
+// Since 2026-11-19 a project row carries ONE launch control (renderLaunchSplit),
+// and its plan picker lists every configured Claude plan.
+test('project launch actions offer every configured Claude plan through the plan picker', () => {
+  assert.match(sidebarSource, /renderLaunchSplit\('project'/);
+  assert.match(sidebarSource, /launchPlan\.direct\.map\(\(profile\)/);
 });
 
 const history = [

@@ -19,14 +19,14 @@ const path = require('node:path');
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   try {
     const socket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
     const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
     if (!socket || !token) process.exit(0);
     const hook = JSON.parse(input || '{}');
     const inbox = require(path.join(path.dirname(__dirname), 'app', 'src', 'shared', 'peer-inbox.cjs'));
-    inbox.writeRecord({
+    await inbox.writeRecord({
       sessionId: hook.session_id,
       socket,
       token,
@@ -35,8 +35,8 @@ process.stdin.on('end', () => {
       home: process.env.CLAUDE_CONFIG_DIR || null,
       pid: process.ppid,
     });
-    if (hook.hook_event_name === 'SessionStart') inbox.pruneRecords();
+    if (hook.hook_event_name === 'SessionStart') await inbox.pruneRecords();
   } catch { /* never block a session */ }
   process.exit(0);
 });
-setTimeout(() => process.exit(0), 5000).unref();
+setTimeout(() => process.exit(0), 9000).unref();

@@ -10,7 +10,9 @@ import * as dateRoll from '../../shared/date-roll.js';
 import { homeLabel, projectRowFill } from '../stage/project-colors.js';
 import { ProjectIcon } from '../stage/ProjectIcon.jsx';
 import { providerIdentity, ProfileBadge, useProfiles } from '../providers.js';
-import { resumeCommandForProfile, railLaunchPlan, railWidthForProfileCount, profileStyle } from '../profiles.cjs';
+import {
+  resumeCommandForProfile, railLaunchPlan, railPrimaryPlan, planForKey, RAIL_DEFAULT_WIDTH, profileStyle,
+} from '../profiles.cjs';
 import { ViewSwitch } from '../ViewSwitch.jsx';
 import { resetBadge, resetTooltip } from './usage-reset.cjs';
 import { collapseForView, planCollapseAll } from './collapse-policy.cjs';
@@ -39,8 +41,11 @@ const ARCHIVE_STORE_KEY = 'harbor-archived';
 // and the meters degrade rather than clip if it is dragged narrow (see the
 // @container rules in styles.css).
 const DEFAULT_RAIL_STATE = {
-  width: 292, hidden: false, grouping: 'project', sort: 'newest', projectFilter: [],
+  width: RAIL_DEFAULT_WIDTH, hidden: false, grouping: 'project', sort: 'newest', projectFilter: [],
 };
+// The Claude plan the launch button's "+" starts: the plan last picked in the
+// plan picker (railPrimaryPlan in profiles.cjs).
+const LAUNCH_STORE_KEY = 'harbor-rail-launch-plan';
 // Bump to re-seed a stored rail width from the default above. Deliberately NOT
 // bumped for the 2026-08-25 sort/project-filter fields: they read through their
 // own normalizers, so an older stored rail state upgrades in place, and bumping
@@ -62,8 +67,8 @@ function clampRailWidth(width) {
   return Math.max(MIN_RAIL_WIDTH, Math.min(MAX_RAIL_WIDTH, Math.round(numeric)));
 }
 
-function restoreRailState(profileCount = 3) {
-  const measuredDefault = railWidthForProfileCount(profileCount);
+function restoreRailState() {
+  const measuredDefault = RAIL_DEFAULT_WIDTH;
   try {
     const saved = JSON.parse(localStorage.getItem(RAIL_STORE_KEY) || 'null');
     const staleWidth = !saved || saved.v !== RAIL_STATE_VERSION;
@@ -274,8 +279,9 @@ function MeterBar({ pct, reset, title, short = false }) {
 // for"): the "Plans" title and the "5 hours" / "This week" column labels are
 // gone, so the first plan's row is the top of the pane. The left meter is the
 // 5-hour window and the right one the week; each tooltip still says which.
-function RailMeters({ profiles: allProfiles }) {
-  const profiles = allProfiles.filter((profile) => (profile.provider || 'claude') === 'claude');
+// Every Claude plan's usage, read once for the rail: the meters below and the
+// plan picker in the rail head show the same numbers from the same read.
+function usePlanUsage() {
   const [usage, setUsage] = useState({});
   const refresh = React.useCallback(async () => {
     try { setUsage(await window.harbor.usage.getAll()); } catch { /* keep previous */ }
@@ -287,6 +293,11 @@ function RailMeters({ profiles: allProfiles }) {
     window.addEventListener('focus', onFocus);
     return () => { unsubscribe(); window.removeEventListener('focus', onFocus); };
   }, [refresh]);
+  return usage;
+}
+
+function RailMeters({ profiles: allProfiles, usage = {} }) {
+  const profiles = allProfiles.filter((profile) => (profile.provider || 'claude') === 'claude');
 
   if (!profiles.length) return null;
 
@@ -373,6 +384,7 @@ const FUNNEL_PATHS = ['M2.4 3.4h11.2L9.3 8.4v4.1l-2.6 1.3V8.4z'];
 const FOLD_LINE = 'M2.5 8h11';
 const COLLAPSE_PATHS = [FOLD_LINE, 'M5.4 3.1 8 5.7l2.6-2.6', 'M5.4 12.9 8 10.3l2.6 2.6'];
 const EXPAND_PATHS = [FOLD_LINE, 'M5.4 5.7 8 3.1l2.6 2.6', 'M5.4 10.3 8 12.9l2.6-2.6'];
+const CHEVRON_PATHS = ['M4.6 6.4 8 9.8l3.4-3.4'];
 
 // Every rail popover portals to document.body. A `backdrop-filter` ancestor
 // becomes the containing block for a fixed-position descendant, which has
@@ -380,10 +392,16 @@ const EXPAND_PATHS = [FOLD_LINE, 'M5.4 5.7 8 3.1l2.6 2.6', 'M5.4 10.3 8 12.9l2.6
 // Placement is measured from the trigger at OPEN time and re-measured on
 // resize, and the menu carries its own max-height so a 60-project list scrolls
 // inside itself instead of running off the bottom of the screen.
+// `align="end"` lines the menu's right edge up with the trigger's, for a
+// trigger at the rail's right edge (the plan picker), so the menu opens over
+// the rail instead of running out across the stage. `flip` lets a menu open
+// UPWARD when it would not fit below its trigger and there is more room above
+// (the plan picker from a project row low in the rail).
 function RailMenu({
-  anchorRef, open, onClose, className = '', label, width = 236, maxHeight = 460, children,
+  anchorRef, open, onClose, className = '', label, width = 236, maxHeight = 460, align = 'start', flip = false, children,
 }) {
   const [pos, setPos] = useState(null);
+  const menuRef = useRef(null);
   // Layout, not effect: the menu must be placed before the browser paints, or
   // an autofocused field inside it would be focused while still parked
   // off-screen.
@@ -392,9 +410,35 @@ function RailMenu({
     const place = () => {
       const rect = anchorRef?.current?.getBoundingClientRect();
       if (!rect) return;
+      const start = align === 'end' ? rect.right - width : rect.left;
+      const left = Math.max(8, Math.min(start, window.innerWidth - width - 8));
+      if (flip) {
+        // The menu's full height: first placed off-screen with no cap, so its
+        // own height; after that, its height plus what its list hides.
+        const node = menuRef.current;
+        const list = node?.querySelector('.rail-menu-list');
+        const natural = node ? node.offsetHeight + (list ? list.scrollHeight - list.clientHeight : 0) : 0;
+        const below = window.innerHeight - rect.bottom - 20;
+        const above = rect.top - 20;
+        const room = window.innerHeight - 24;
+        const tall = Math.min(natural, maxHeight);
+        if (tall > below) {
+          if (above >= tall || (tall > room && above > below)) {
+            // Fits above (or fits nowhere and above is the bigger side): open upward.
+            setPos({ bottom: window.innerHeight - rect.top + 6, left, maxHeight: Math.min(maxHeight, Math.max(140, above)) });
+            return;
+          }
+          if (tall <= room) {
+            // Fits neither side but fits the window: slide up until all of it
+            // is on screen, over its own trigger, as a native dropdown does.
+            setPos({ top: Math.max(12, window.innerHeight - 12 - tall), left, maxHeight: Math.min(maxHeight, room) });
+            return;
+          }
+        }
+      }
       setPos({
         top: rect.bottom + 6,
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+        left,
         // Capped as well as fitted: on a 1600px screen the room below the
         // trigger is ~1300px, and a menu that tall is a wall, not a list.
         maxHeight: Math.min(maxHeight, Math.max(140, window.innerHeight - rect.bottom - 20)),
@@ -412,7 +456,7 @@ function RailMenu({
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('resize', place);
     };
-  }, [open, anchorRef, onClose, width, maxHeight]);
+  }, [open, anchorRef, onClose, width, maxHeight, align, flip]);
 
   if (!open) return null;
   return createPortal(
@@ -425,6 +469,7 @@ function RailMenu({
         onClick={onClose}
       />
       <div
+        ref={menuRef}
         className={`rail-menu ${className}`.trim()}
         role="menu"
         aria-label={label}
@@ -461,7 +506,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
     return () => clearInterval(timer);
   }, []);
   const { profiles, loaded: profilesLoaded } = useProfiles();
-  const [railState, setRailState] = useState(() => restoreRailState(3));
+  const [railState, setRailState] = useState(restoreRailState);
   const sharedState = useSidebarState();
   const [testModel, setTestModel] = useState(null);
   const model = testModel || sharedState.model;
@@ -494,6 +539,14 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
   const dragRef = useRef(null);
   const sortButtonRef = useRef(null);
   const projectButtonRef = useRef(null);
+  // The plan picker (the launch button's chevron): which launch it is for, the
+  // rail head's or a project row's, and the button it opened from.
+  const [planPicker, setPlanPicker] = useState(null); // { where, folder, sessionId, immediate, title }
+  const planPickerAnchorRef = useRef(null);
+  const [lastPlanId, setLastPlanId] = useState(() => {
+    try { return localStorage.getItem(LAUNCH_STORE_KEY) || null; } catch { return null; }
+  });
+  const usage = usePlanUsage();
   const {
     width, hidden, grouping, sort, projectFilter,
   } = railState;
@@ -603,18 +656,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
   }, []);
 
   const launchPlan = railLaunchPlan(profiles);
-  useEffect(() => {
-    if (!profiles.length) return;
-    const measured = railWidthForProfileCount(launchPlan.count);
-    updateRailState((previous) => {
-      if (previous.width === measured) return previous;
-      try {
-        const saved = JSON.parse(localStorage.getItem(RAIL_STORE_KEY) || 'null');
-        if (saved?.v === RAIL_STATE_VERSION && Number.isFinite(saved?.width)) return previous;
-      } catch { /* re-seed below */ }
-      return { ...previous, width: measured };
-    });
-  }, [profiles.length, launchPlan.count, updateRailState]);
+  const primaryPlan = railPrimaryPlan(launchPlan.direct, lastPlanId);
 
   useEffect(() => {
     window.harbor.accounts.readEmails().then(setAccountEmails).catch(() => {});
@@ -764,49 +806,114 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
     setMenu(null);
   }, [profiles]);
 
-  // The rail head and a hovered project row carry one button per Claude plan
-  // and one "+O" for everything else (railLaunchPlan, 2026-10-29). Four or more
-  // buttons go compact (CSS [data-dense]) and drop the space in "+ P"; seven or
-  // more tighten once more (CSS [data-crowded]): at eight, the compact row
-  // needed a 302px rail and hung "+W" past Pat's 278px one.
-  const denseLaunch = launchPlan.count >= 4;
-  const crowdedLaunch = launchPlan.count >= 7;
-  const renderProfileLaunchButtons = (className, { folder, sessionId, immediate = false } = {}) => {
-    const launch = async (request) => {
-      let resolvedFolder = folder;
-      if (!resolvedFolder) {
-        resolvedFolder = await window.harbor.session.pickFolder();
-        if (!resolvedFolder) return;
-      }
-      onNewSession({ ...request, folder: resolvedFolder, sessionId });
-    };
-    const label = (letter) => (denseLaunch ? `+${letter}` : `+ ${letter}`);
-    return [
-      ...launchPlan.direct.map((profile) => (
+  // One launch for every entry point: a project row passes its folder; the rail
+  // head asks for one first.
+  const startLaunch = useCallback(async (request, { folder, sessionId } = {}) => {
+    let resolvedFolder = folder;
+    if (!resolvedFolder) {
+      resolvedFolder = await window.harbor.session.pickFolder();
+      if (!resolvedFolder) return;
+    }
+    onNewSession({ ...request, folder: resolvedFolder, sessionId: sessionId || undefined });
+  }, [onNewSession]);
+  // Never immediate: the point of Other is choosing the provider and plan in
+  // the Session configuration window.
+  const otherRequest = launchPlan.otherProvider ? { provider: launchPlan.otherProvider } : {};
+
+  // The rail head and a hovered project row carry ONE launch control since
+  // 2026-11-19 (railLaunchPlan in profiles.cjs): "+<letter>" starts the plan
+  // picked last, and the chevron opens the plan picker below. Until then they
+  // drew one button per Claude plan plus "+O", squeezed in five CSS tiers until
+  // eleven buttons left no room on the line the "Sessions" label shares.
+  const renderLaunchSplit = (where, { folder = null, sessionId = null, immediate = false, title = 'New session' } = {}) => {
+    const mainClass = where === 'head' ? 'sidebar-global-new' : 'sidebar-proj-new';
+    const inFolder = folder ? ` in ${folder}` : '';
+    if (!primaryPlan) {
+      // No Claude plan configured: the one button opens the Session configuration window.
+      return (
+        <button type="button" className={`${mainClass} launch-other`} title={`New session${inFolder}`} onClick={() => startLaunch(otherRequest, { folder, sessionId })}>
+          + New
+        </button>
+      );
+    }
+    const open = Boolean(planPicker && planPicker.where === where && planPicker.folder === folder);
+    const email = accountEmails[primaryPlan.id] || usage[primaryPlan.id]?.email;
+    return (
+      <div className={`launch-split ${where}`} style={profileStyle(primaryPlan)} data-plan={primaryPlan.id}>
         <button
           type="button"
-          key={profile.id}
-          className={`${className} ${profile.id}`}
-          style={profileStyle(profile)}
-          title={`New ${profile.label} session${folder ? ` in ${folder}` : ''}${accountEmails[profile.id] ? `: ${accountEmails[profile.id]}` : ''}`}
-          onClick={() => launch({ account: profile.id, provider: profile.provider || 'claude', immediate })}
+          className={`${mainClass} launch-main ${primaryPlan.id}`}
+          title={`New ${primaryPlan.label} session${inFolder}${email ? `: ${email}` : ''}`}
+          onClick={() => startLaunch({ account: primaryPlan.id, provider: primaryPlan.provider || 'claude', immediate }, { folder, sessionId })}
         >
-          {label(profile.letter)}
+          {`+${primaryPlan.letter}`}
         </button>
-      )),
-      // Never immediate: the point of "+O" is choosing the provider and plan in
-      // the Session configuration window.
-      <button
-        type="button"
-        key="launch-other"
-        className={`${className} launch-other`}
-        title={`New session on another plan${folder ? ` in ${folder}` : ''}: choose Codex, Cursor or any plan`}
-        onClick={() => launch(launchPlan.otherProvider ? { provider: launchPlan.otherProvider } : {})}
-      >
-        {label('O')}
-      </button>,
-    ];
+        <button
+          type="button"
+          className="launch-more"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label="Choose a plan"
+          title={`Choose a plan for a new session${inFolder}`}
+          onClick={(event) => {
+            planPickerAnchorRef.current = event.currentTarget.closest('.launch-split');
+            setPlanPicker(open ? null : { where, folder, sessionId, immediate, title });
+          }}
+        >
+          <RailGlyph paths={CHEVRON_PATHS} size={11} />
+        </button>
+      </div>
+    );
   };
+
+  const closePlanPicker = useCallback(() => setPlanPicker(null), []);
+  const pickPlan = useCallback((profile) => {
+    const request = planPicker;
+    setPlanPicker(null);
+    if (!request) return;
+    setLastPlanId(profile.id);
+    try { localStorage.setItem(LAUNCH_STORE_KEY, profile.id); } catch { /* remembered for this run only */ }
+    startLaunch({ account: profile.id, provider: profile.provider || 'claude', immediate: request.immediate }, request);
+  }, [planPicker, startLaunch]);
+  const pickOther = useCallback(() => {
+    const request = planPicker;
+    setPlanPicker(null);
+    if (request) startLaunch(otherRequest, request);
+  }, [planPicker, startLaunch, otherRequest]);
+  // Keys in the open picker: a plan's letter starts it, arrows move between
+  // rows, Enter starts the focused row (a native button click), Escape closes
+  // (RailMenu).
+  const onPlanPickerKey = (event) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const rows = [...event.currentTarget.querySelectorAll('.plan-pick')];
+    const at = rows.indexOf(document.activeElement);
+    const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+    if (step) {
+      event.preventDefault();
+      const next = at < 0 ? (step > 0 ? 0 : rows.length - 1) : (at + step + rows.length) % rows.length;
+      rows[next]?.focus();
+      return;
+    }
+    if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      rows[event.key === 'Home' ? 0 : rows.length - 1]?.focus();
+      return;
+    }
+    const hit = planForKey(launchPlan.direct, event.key, Boolean(launchPlan.otherProvider));
+    if (!hit) return;
+    event.preventDefault();
+    if (hit.other) pickOther(); else pickPlan(hit.profile);
+  };
+  // Opening the picker puts the keyboard on the plan "+" would start, so Enter
+  // alone repeats the last choice and the arrows go from there.
+  useEffect(() => {
+    if (!planPicker) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const menu = document.querySelector('.plan-picker');
+      (menu?.querySelector('.plan-pick.current') || menu?.querySelector('.plan-pick'))?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [planPicker]);
 
   const handleSessionContextMenu = useCallback((event, session) => {
     // Right-click opens a small options menu (copy resume command, archive,
@@ -899,11 +1006,12 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
             </span>
           </button>
           {!project.isDateGroup && !project.isWindowsEra && newSessionFolder && profiles.length > 0 ? (
-            <div className="sidebar-project-actions" data-launch-count={launchPlan.count} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
-              {renderProfileLaunchButtons('sidebar-proj-new', {
+            <div className="sidebar-project-actions" data-picker-open={planPicker?.where === 'project' && planPicker.folder === newSessionFolder ? 'true' : undefined}>
+              {renderLaunchSplit('project', {
                 folder: newSessionFolder,
                 sessionId: newSessionId,
                 immediate: true,
+                title: `New in ${homeLabel(project.label)}`,
               })}
             </div>
           ) : null}
@@ -985,9 +1093,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
         </span>
         <div className="rail-head-actions">
           {profiles.length > 0 ? (
-            <div className="rail-new-split" data-launch-count={launchPlan.count} data-dense={denseLaunch ? 'true' : undefined} data-crowded={crowdedLaunch ? 'true' : undefined}>
-              {renderProfileLaunchButtons('sidebar-global-new')}
-            </div>
+            renderLaunchSplit('head')
           ) : profilesLoaded ? (
             <span className="rail-setup-hint" title="Add a Claude profile in Harbor settings">Set up a profile</span>
           ) : null}
@@ -1227,10 +1333,81 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
         </p>
       </RailMenu>
 
+      {/* The plan picker: one row per Claude plan (its letter, name, then the
+          5-hour and weekly usage the meters below show), then Other. The row
+          "+" would start is checked; a plan's letter starts it. */}
+      <RailMenu
+        anchorRef={planPickerAnchorRef}
+        open={Boolean(planPicker)}
+        onClose={closePlanPicker}
+        className="plan-picker"
+        label="Choose a plan for the new session"
+        width={256}
+        maxHeight={560}
+        align="end"
+        flip
+      >
+        <div className="rail-menu-head plan-pick-head">
+          <span className="rail-menu-title plan-pick-title" title={planPicker?.folder || undefined}>{planPicker?.title || 'New session'}</span>
+          <span className="plan-pick-cols" aria-hidden="true"><span>5h</span><span>week</span></span>
+        </div>
+        {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
+        <div className="rail-menu-list" onKeyDown={onPlanPickerKey}>
+          {launchPlan.direct.map((profile) => {
+            const data = usage[profile.id];
+            const current = profile.id === primaryPlan?.id;
+            const email = accountEmails[profile.id] || data?.email;
+            const level = (pct) => (typeof pct !== 'number' ? '' : pct >= 100 ? ' max' : pct >= 75 ? ' hi' : '');
+            const shown = (pct) => (typeof pct === 'number' && Number.isFinite(pct) ? `${Math.round(pct)}%` : '--');
+            return (
+              <button
+                key={profile.id}
+                type="button"
+                role="menuitem"
+                data-plan={profile.id}
+                className={`rail-menu-item plan-pick${current ? ' current' : ''}`}
+                style={profileStyle(profile)}
+                title={[
+                  `New ${profile.label} session${planPicker?.folder ? ` in ${planPicker.folder}` : ''} (${profile.letter})`,
+                  email || null,
+                  resetTooltip({ window: 'fiveHour', pct: data?.fiveHourPct, resetsAt: data?.fiveHourResetsAt, rolled: data?.fiveHourRolled }),
+                  resetTooltip({ window: 'weekly', pct: data?.weeklyPct, resetsAt: data?.weeklyResetsAt, rolled: data?.weeklyRolled }),
+                ].filter(Boolean).join('\n')}
+                onClick={() => pickPlan(profile)}
+              >
+                <span className="rail-menu-mark" aria-hidden="true">{current ? '✓' : ''}</span>
+                <span className="profile-badge plan-pick-badge" aria-hidden="true">{profile.letter}</span>
+                <span className="rail-menu-label">{profile.label}</span>
+                <span className={`plan-pick-use${level(data?.fiveHourPct)}`}>{shown(data?.fiveHourPct)}</span>
+                <span className={`plan-pick-use${level(data?.weeklyPct)}`}>{shown(data?.weeklyPct)}</span>
+              </button>
+            );
+          })}
+          {launchPlan.otherProvider ? (
+            <>
+              <div className="plan-pick-sep" role="separator" />
+              <button
+                type="button"
+                role="menuitem"
+                data-plan="other"
+                className="rail-menu-item plan-pick plan-pick-other"
+                title={`New session on another plan${planPicker?.folder ? ` in ${planPicker.folder}` : ''}: choose Codex, Cursor or any plan`}
+                onClick={pickOther}
+              >
+                <span className="rail-menu-mark" aria-hidden="true" />
+                <span className="plan-pick-badge" aria-hidden="true">O</span>
+                <span className="rail-menu-label">Other: Codex, Cursor…</span>
+              </button>
+            </>
+          ) : null}
+        </div>
+        <p className="rail-menu-foot plan-pick-foot">Press a letter to start that plan. ✓ is the + plan.</p>
+      </RailMenu>
+
       <VirtualList rows={rows} renderRow={renderRow} />
       </div>
 
-      <RailMeters profiles={profiles} />
+      <RailMeters profiles={profiles} usage={usage} />
       <div
         className={`rail-resize-handle${width === MIN_RAIL_WIDTH ? ' at-min' : ''}${width === MAX_RAIL_WIDTH ? ' at-max' : ''}`}
         role="separator"
