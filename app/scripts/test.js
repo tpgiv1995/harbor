@@ -2,14 +2,18 @@
 'use strict';
 
 // Test runner for the harbor app. Discovers *.test.js under app/test/ and runs
-// them with Node's built-in test runner. An optional filter argument selects a
-// subset by path substring.
+// them with Node's built-in test runner. Optional filter arguments select a
+// subset by path substring; with several, a file matching ANY of them runs.
+// Until 2026-11-19 only the first filter counted and the rest were silently
+// dropped: `npm test -- renderer sidebar` ran the renderer files alone, passed,
+// and a stale test/sidebar spec reached the public publish gate.
 // A repeatable --exclude flag removes files by path segment instead, so CI
 // can run everything except a suite it cannot host (see .github/workflows/ci.yml,
 // which documents every excluded host-dependent suite).
 //
 //   npm test                          run every test file
 //   npm test -- main                  run test files whose path contains "main"
+//   npm test -- renderer sidebar      run files whose path contains either word
 //   npm test -- --exclude daemon      run every test file except daemon tests
 //   npm test -- --exclude daemon --exclude e2e   multiple excludes stack
 //
@@ -38,8 +42,8 @@ for (let i = 0; i < args.length; i += 1) {
     positional.push(arg);
   }
 }
-const filter = positional[0] || '';
-const normalizedFilter = filter.split(/[\\/]+/).filter(Boolean).join(path.sep);
+const filters = positional.length ? positional : [''];
+const normalizedFilters = filters.map((filter) => filter.split(/[\\/]+/).filter(Boolean).join(path.sep));
 const testRoot = path.join(__dirname, '..', 'test');
 
 function matchesExclude(file, needle) {
@@ -69,11 +73,11 @@ try {
 }
 
 const selected = files
-  .filter((f) => path.relative(path.join(__dirname, '..'), f).includes(normalizedFilter))
+  .filter((f) => normalizedFilters.some((needle) => path.relative(path.join(__dirname, '..'), f).includes(needle)))
   .filter((f) => !excludes.some((needle) => matchesExclude(f, needle)))
   .sort();
 if (selected.length === 0) {
-  console.error(`no test files match filter ${JSON.stringify(filter)}${excludes.length ? ` after excluding ${JSON.stringify(excludes)}` : ''}`);
+  console.error(`no test files match filter ${JSON.stringify(filters.join(' '))}${excludes.length ? ` after excluding ${JSON.stringify(excludes)}` : ''}`);
   process.exit(1);
 }
 
