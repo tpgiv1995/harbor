@@ -31,6 +31,7 @@ const {
   createTakeoverOwner,
   createTakeoverHandler,
   createSessionOperationGate,
+  gateLaunchActions,
   startResumeFollowup,
 } = require('./actions/takeover.js');
 const { platform } = require('./platform/index.js');
@@ -2806,30 +2807,10 @@ app.whenReady().then(async () => {
   });
   const sendClient = createControlClient({ env: process.env, sessionStorePolicy });
   sessionSend = createSessionSend({
-    snapshot: async () => {
-      const res = await sendClient.snapshot();
-      return res?.snapshot || res || {};
-    },
-    readPane: async (paneId, lines = 16, source = 'recent') => {
-      const res = await sendClient.readPane(paneId, { source, lines, strip_ansi: true });
-      return res?.read?.text || '';
-    },
-    readSuggestion: async (paneId) => {
-      const res = await sendClient.readPane(paneId, { source: 'visible', lines: 1 });
-      return res?.screen?.suggestion || null;
-    },
+    // Shared with the phone server's send engine (server/compose.js).
+    ...require('./session-daemon/send-reads.js').daemonSendReads(sendClient),
     terminalBridge,
-    launchActions: {
-      ...launchActions,
-      resumeSession: (args) => sessionOperationGate.run(
-        args.id,
-        () => launchActions.resumeSession(args),
-      ),
-      resumeProviderSession: (args) => sessionOperationGate.run(
-        args.id,
-        () => launchActions.resumeProviderSession(args),
-      ),
-    },
+    launchActions: gateLaunchActions(launchActions, sessionOperationGate),
     getSessionMeta: (id) => sidebarBridge.getSessionMeta(id),
     resolveTranscriptPath: (id) => askTranscript.resolve(id),
     recheckProviderTitle: paneId => sidebarBridge.recheckProviderTitle(paneId),

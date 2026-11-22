@@ -12,9 +12,10 @@ const { createConfigStore, resolveConfigFile } = require('../main/config/store.j
 const { createSidebarBridge } = require('../main/sidebar-bridge.js');
 const { createTerminalBridge } = require('../main/terminal-bridge.js');
 const { createControlClient, pingDaemonOnce, resolveSessionBackend } = require('../main/session-daemon/factory.js');
+const { daemonSendReads } = require('../main/session-daemon/send-reads.js');
 const { createLaunchActions } = require('../main/actions/launch.js');
 const { createPlanChange } = require('../main/actions/change-plan.js');
-const { createSessionOperationGate, createSessionOwnerProbe, createTakeoverOwner, createTakeoverHandler, startResumeFollowup } = require('../main/actions/takeover.js');
+const { createSessionOperationGate, gateLaunchActions, createSessionOwnerProbe, createTakeoverOwner, createTakeoverHandler, startResumeFollowup } = require('../main/actions/takeover.js');
 const { createPlatform } = require('../main/platform/index.js');
 const { createVoiceRealtime } = require('../main/voice-realtime.js');
 const { createWhisperTranscriber } = require('../main/whisper-transcription.js');
@@ -318,17 +319,16 @@ async function composeServer(options = {}) {
     getSessionMeta: (id) => sidebar.getSessionMeta(id),
     findTranscript: findProviderTranscript,
   });
+  // One gate per session for every resume this server starts: the resume
+  // button, adopt-on-send (takeoverHandler) and the send engine's own resumes.
+  const operationGate = createSessionOperationGate();
   const sessionSend = options.sessionSend || createSessionSend({
-    snapshot: async () => {
-      const result = await sendClient.snapshot();
-      return result?.snapshot || result || {};
-    },
-    readPane: async (paneId, lines = 16, source = 'recent') => {
-      const result = await sendClient.readPane(paneId, { source, lines, strip_ansi: true });
-      return result?.read?.text || '';
-    },
+    // The same reads as the desktop's engine, the dim-suggestion read included:
+    // without it every phone send into a box showing Claude's suggested prompt
+    // was refused as "already has text" (2026-11-20, send-reads.js).
+    ...daemonSendReads(sendClient),
     terminalBridge,
-    launchActions,
+    launchActions: gateLaunchActions(launchActions, operationGate),
     getSessionMeta: (id) => sidebar.getSessionMeta(id),
     resolveTranscriptPath: (id) => askTranscript.resolve(id),
     recheckProviderTitle: paneId => sidebar.recheckProviderTitle?.(paneId),
@@ -358,7 +358,6 @@ async function composeServer(options = {}) {
   const artifactThumbs = options.artifactThumbs || createArtifactThumbs({
     cacheDir: path.join(config.paths.cacheDir, 'artifact-thumbs'),
   });
-  const operationGate = createSessionOperationGate();
   const takeoverOwner = options.takeoverOwner || createTakeoverOwner({
     ownerProbe: sessionOwnerProbe,
     platform: {

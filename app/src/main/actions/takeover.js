@@ -31,6 +31,21 @@ function createSessionOperationGate() {
   };
 }
 
+// A SEND ENGINE'S RESUMES GO THROUGH THE SAME GATE AS THE RESUME BUTTON AND
+// ADOPT-ON-SEND, so a send that has to resume a session and a resume asked for
+// at the same moment launch ONE resume, not two copies of the session. The
+// desktop (main/index.js) always wrapped its engine this way; the phone server
+// (server/compose.js) gated its own resume and takeover but handed its send
+// engine the bare launch actions (2026-11-20, found beside the missing
+// dim-suggestion read, the same drift between the two roots). Both take this.
+function gateLaunchActions(launchActions, gate) {
+  return {
+    ...launchActions,
+    resumeSession: (args) => gate.run(args.id, () => launchActions.resumeSession(args)),
+    resumeProviderSession: (args) => gate.run(args.id, () => launchActions.resumeProviderSession(args)),
+  };
+}
+
 function startResumeFollowup({ sessionId, run, emitStatus }) {
   return Promise.resolve()
     .then(run)
@@ -322,6 +337,7 @@ function createTakeoverHandler(options = {}) {
 module.exports = {
   OWNER_UNKNOWN,
   createSessionOperationGate,
+  gateLaunchActions,
   startResumeFollowup,
   createSessionOwnerProbe,
   createTakeoverOwner,

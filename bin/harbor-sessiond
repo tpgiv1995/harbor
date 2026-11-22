@@ -503,8 +503,28 @@ async function recoverDaemon(json) {
   if (!started.started) process.exitCode = 1;
 }
 
+const USAGE = [
+  'usage: harbor-sessiond <start|stop|handover|recover|serve|status|list|kill|logs|spawn> [options]',
+  '  status | list [--json]        read the daemon',
+  '  logs [--lines N] [--json]     read the daemon log',
+  '  kill <id> [--json]            terminate one session',
+  '  spawn --cwd PATH [--cols N --rows N] -- COMMAND [ARG...]',
+  '  start | stop | handover | recover | serve   act on the daemon itself',
+  '  --help, -h                    print this and do nothing else',
+].join('\n');
+
 async function main() {
   const args = process.argv.slice(2);
+  // --help / -h ACT ON NOTHING (2026-11-22): `handover --help` once ignored the
+  // unknown flag and performed a live handover. Checked before any client,
+  // store or daemon code; only arguments before spawn's `--` count, since a
+  // --help after it belongs to the child command.
+  const separator = args.indexOf('--');
+  const own = separator < 0 ? args : args.slice(0, separator);
+  if (own.includes('--help') || own.includes('-h')) {
+    output(USAGE, false);
+    return;
+  }
   const command = args[0];
   const json = args.includes('--json');
   if (command === 'start') {

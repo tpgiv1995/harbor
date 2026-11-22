@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Copy and paste keep their formatting. Pasting from Teams, Outlook, Word,
+  Google Docs, a web page or another Harbor window brings real bullets,
+  nesting, numbering, bold, italics, links, headings and quotes into the
+  message box; plain text and spreadsheet tables paste exactly as before.
+  Copying from a conversation window or the message box gives Teams, Outlook
+  and Word clean formatting (bullets, bold, tables with borders, a blank line
+  between paragraphs) instead of white-on-black text, and plain-text targets
+  get real "- " bullets and tab-separated table rows.
+- A message copied out of Teams no longer reports "could not confirm the
+  message reached the session". Claude Code now removes invisible characters
+  (zero-width spaces and similar) from what it receives, so Harbor removes
+  them before sending, and a message holding a direction mark is no longer
+  left unsent in Claude's box waiting for a second Enter.
 - Conversation windows stay where you left them. A window at its latest
   message keeps following new replies through windows opening and closing,
   rearranging, full-stage toggles and minimizing; a window you scrolled up

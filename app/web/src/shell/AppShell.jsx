@@ -1,5 +1,6 @@
 import { subSessionReadOnly } from '../../../src/shared/sub-sessions.js';
 import { runStateCue } from '../../../src/shared/session-run-state.cjs';
+import { planName } from '../../../src/shared/plan-options.cjs';
 import React, {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
@@ -20,6 +21,7 @@ import { NewSessionSheet } from '../newsession/NewSessionSheet.jsx';
 import { SettingsSheet } from '../settings/SettingsSheet.jsx';
 import { CapabilitySheet } from '../capability/CapabilitySheet.jsx';
 import { PlanSheet } from '../plan/PlanSheet.jsx';
+import { usePlanProfiles } from '../plan/use-plan-profiles.js';
 import { BottomNav } from '../nav/BottomNav.jsx';
 import { TasksView } from '../tasks/TasksView.jsx';
 import { NotesView } from '../notes/NotesView.jsx';
@@ -40,10 +42,10 @@ import './shell.css';
 // have said all along, so it says that. Deliberately NOT a fixed vocabulary:
 // profiles are a user-defined ordered list, so whatever the profile is called
 // is what shows, and an unknown one falls back to a word rather than a letter.
-function planLabel(session) {
-  const raw = String(session?.home || session?.account || '').trim();
-  if (!raw) return 'Plan';
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
+// The name comes from the configured plan list ("Claude C", "Ren 2"); the id
+// itself only capitalised read "Claudec" and "Ren2" (2026-11-19).
+function planLabel(session, profiles) {
+  return planName(profiles, session?.home || session?.account) || 'Plan';
 }
 
 // CONNECTION STATE COSTS ONE PILL, NEVER HALF THE SCREEN (2026-10-21, Pat: "if
@@ -273,6 +275,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
   const { model, loadError, refresh: refreshSidebar, applyPush: applySidebarPush, fetchSlice } = useSidebar(client);
   const { iconUrl, refresh: refreshIcons } = useProjectIcons(client, settings.serverUrl);
   const { activeId, openSession } = useOpenSessions();
+  const planProfiles = usePlanProfiles(client, connection);
 
   const refreshRef = useRef({});
   refreshRef.current = {
@@ -415,7 +418,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
       const provider = activeSession.provider || 'claude';
       const hasPlan = provider !== 'cursor' && (activeSession.home || activeSession.account);
       const project = activeSession.project && activeSession.project !== '~' ? activeSession.project : 'home';
-      return `New ${PROVIDER_NAME[provider] || provider} session${hasPlan ? ` (${planLabel(activeSession)})` : ''} in ${project}`;
+      return `New ${PROVIDER_NAME[provider] || provider} session${hasPlan ? ` (${planLabel(activeSession, planProfiles)})` : ''} in ${project}`;
     })()
     : 'New session';
 
@@ -500,7 +503,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
               {view === 'chat' && activeSession ? (
                 <div className="hdr-strip">
                   <button type="button" disabled={subSessionReadOnly(activeSession)} className={`hdr-chip hdr-model-chip tier-${modelTier} effort-${visibleEffort || 'default'}`} onClick={() => setCapabilityOpen(true)} aria-label={`Model ${visibleModel}${visibleEffort ? `, effort ${visibleEffort}` : ''}`}><span className="hdr-chip-face">{compactModel}{visibleEffort ? <span className="hdr-chip-effort">{EFFORT_BADGE[visibleEffort] || visibleEffort}</span> : null}</span></button>
-                  <button type="button" className="hdr-chip hdr-plan-chip" onClick={() => setPlanOpen(true)} aria-label={`Plan ${planLabel(activeSession)} and usage`}><span className="hdr-chip-face">{planLabel(activeSession)}</span></button>
+                  <button type="button" className="hdr-chip hdr-plan-chip" onClick={() => setPlanOpen(true)} aria-label={`Plan ${planLabel(activeSession, planProfiles)} and usage`}><span className="hdr-chip-face">{planLabel(activeSession, planProfiles)}</span></button>
                   <SessionMeta facts={facts} />
                 </div>
               ) : null}
@@ -522,7 +525,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
                 session={activeSession}
                 onOpenBrowse={openBrowse}
                 onHeader={setActiveHeader}
-                accountName={planLabel(activeSession)}
+                accountName={planLabel(activeSession, planProfiles)}
                 offline={disconnected}
               /> : null}
               {view === 'tasks' ? <TasksView client={client} /> : null}
@@ -575,7 +578,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
           onSignOut={onSignOut}
         />
         <CapabilitySheet open={capabilityOpen && !subSessionReadOnly(activeSession)} onClose={() => setCapabilityOpen(false)} client={client} session={activeSession} header={activeHeader} onApplied={({ model: nextModel, effort: nextEffort }) => setActiveHeader((current) => ({ ...(current || {}), ...(nextEffort ? { effort: nextEffort } : {}), ...(nextModel ? { model: { id: nextModel, label: nextModel } } : {}) }))} />
-        <PlanSheet open={planOpen} onClose={() => setPlanOpen(false)} client={client} session={activeSession} />
+        <PlanSheet open={planOpen} onClose={() => setPlanOpen(false)} client={client} session={activeSession} profiles={planProfiles} />
       </div>
     </RpcProvider>
   );

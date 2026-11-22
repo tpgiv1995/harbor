@@ -41,6 +41,7 @@ function parseArgs(argv) {
   const repeatable = new Set(['tag', 'untag']);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (arg === '-h') { flags.help = true; continue; } // a bare -h is help, never a word (2026-11-22)
     if (!arg.startsWith('--')) { positional.push(arg); continue; }
     const [rawName, inlineValue] = arg.slice(2).split(/=(.*)/s);
     const name = rawName;

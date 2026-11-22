@@ -97,3 +97,26 @@ test('a late plan-change result cannot relabel another session', async () => {
   c.render(next); await c.flush(); finish({ ok: true }); await pending;
   const tree = c.render(next); assert.match(text(tree), /Current: Oak/); assert.doesNotMatch(text(tree), /now on Maple/);
 });
+// The phone named a plan by its folder id: the header chip and the Plans sheet
+// read "Claudec" and "Ren2" while the New session sheet said "Claude C" and
+// "Ren 2" (2026-11-19). Both now take the name from the configured plan list.
+test('planName takes the configured name, then the id in title case', () => {
+  const { planName } = require('../../src/shared/plan-options.cjs');
+  const list = [{ id: 'pinec', label: 'Pine C', configHome: 'C:\\Toy\\.claude-pinec' }, { id: 'oak', label: 'Oak' }];
+  assert.equal(planName(list, 'pinec'), 'Pine C');
+  assert.equal(planName(list, 'C:\\Toy\\.claude-pinec'), 'Pine C');
+  assert.equal(planName(list, 'elm-two'), 'Elm Two');
+  assert.equal(planName(null, 'pinec'), 'Pinec');
+  assert.equal(planName(list, ''), '');
+  assert.equal(planName(list, undefined), '');
+});
+test('the Plans sheet names each card from the plan list', async () => {
+  const usage = { pinec: { fiveHourPct: 4, weeklyPct: 9, email: 'pine@example.test' }, 'elm-two': { weeklyPct: 1 } };
+  const rpc = { getState: () => 'connected', onChannel: () => () => {}, call: async (method) => (
+    method === 'usage:get-all' ? usage : method === 'accounts:read-emails' ? {} : null) };
+  const props = { open: true, client: rpc, onClose() {}, session: { home: 'pinec' }, profiles: [{ id: 'pinec', label: 'Pine C', provider: 'claude' }] };
+  const c = await mount('plan/PlanSheet.jsx', 'PlanSheet', props);
+  const titles = nodes(c.tree).filter(n => n.type === 'article').map(card => text(nodes(card).find(n => n.type === 'strong')));
+  assert.deepEqual(titles, ['Pine C', 'Elm Two']);
+  assert.match(text(c.tree), /Pine C.*This session/);
+});

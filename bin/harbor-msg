@@ -48,6 +48,9 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--no-fallback') out.noFallback = true;
+    // Help is an ARGUMENT that is exactly --help or -h; a flag's value (`--text --help`)
+    // is consumed below and never reaches this test (2026-11-22: `send ... --help` sent).
+    else if (arg === '--help' || arg === '-h') out.help = true;
     else if (arg.startsWith('--')) { out[arg.slice(2)] = argv[i + 1]; i += 1; }
     else out._.push(arg);
   }
@@ -244,9 +247,11 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const verb = args._[0];
   const print = (obj) => { process.stdout.write(`${JSON.stringify(obj)}\n`); process.exit(obj.ok === false ? 1 : 0); };
+  const usage = 'usage: harbor-msg send --to <session id> (--file <path> | --text <text>) [--from <name>] [--reply-to <session id>] [--no-fallback] | harbor-msg confirm --receipt <id> | harbor-msg status --to <session id>';
+  if (args.help) { process.stdout.write(`${usage}\n`); process.exit(0); }
   if (verb === 'status') print(status(args.to));
   if (verb === 'confirm') print(inbox.checkReceipt(args.receipt));
-  if (verb !== 'send') print({ ok: false, why: 'usage: harbor-msg send --to <session id> (--file <path> | --text <text>) [--from <name>] [--reply-to <session id>] [--no-fallback] | harbor-msg confirm --receipt <id> | harbor-msg status --to <session id>' });
+  if (verb !== 'send') print({ ok: false, why: usage });
   let text = args.text;
   if (args.file) {
     try { text = fs.readFileSync(args.file, 'utf8'); } catch (error) { print({ ok: false, why: `cannot read ${args.file}: ${error.message}` }); }

@@ -104,11 +104,37 @@ function htmlNode(node) {
   if (tag === 'a') return `<a href="${escapeHtml(safeHref(node.href))}">${children}</a>`;
   const attr = BLOCK_STYLE[tag] ? ` style="${BLOCK_STYLE[tag]}"` : '';
   if (tag === 'pre') return `<pre${attr}>${children}</pre>`;
+  if (tag === 'table') return tableHtml(node);
   if (INLINE_TAGS.has(tag) || ['p', 'ul', 'ol', 'li', 'blockquote'].includes(tag)
     || /^h[1-6]$/.test(tag)) {
     return `<${tag}${attr}>${children}</${tag}>`;
   }
   return children;
+}
+
+// A copied table (paste-html.cjs copy mode): plain borders so Outlook, Word
+// and Teams draw a grid, header cells bold.
+const CELL_STYLE = 'border:1px solid #bfbfbf; padding:2px 6px; vertical-align:top';
+function tableHtml(node) {
+  const rows = (node.rows || []).map((row) => `<tr>${(row.cells || []).map((cell) => {
+    const tag = cell.header ? 'th' : 'td';
+    return `<${tag} style="${CELL_STYLE}${cell.header ? '; font-weight:bold; text-align:left' : ''}">${(cell.children || []).map(htmlNode).join('')}</${tag}>`;
+  }).join('')}</tr>`).join('');
+  return `<table style="border-collapse:collapse; margin:0">${rows}</table>`;
+}
+
+// The same exports from a node SPEC rather than markdown: what a copy out of a
+// conversation window or the composer hands the clipboard (copy-flavors.cjs).
+function specToHtml(spec) {
+  const blocks = paragraphBlocks(Array.isArray(spec) ? spec : [], { spacers: true });
+  return `<div>${blocks.map(htmlNode).join('')}</div>`;
+}
+
+function specToPlainText(spec) {
+  return paragraphBlocks(Array.isArray(spec) ? spec : [])
+    .map(plainBlock)
+    .filter((block) => block !== '')
+    .join('\n\n');
 }
 
 function markdownToHtml(markdown) {
@@ -151,6 +177,8 @@ function plainBlock(node) {
     return inlineText(node.children).split('\n').map((line) => `> ${line}`).join('\n');
   }
   if (tag === 'pre') return inlineText(node.children);
+  // Tab-separated, so a copied table pastes into Excel as cells.
+  if (tag === 'table') return (node.rows || []).map((row) => (row.cells || []).map((cell) => inlineText(cell.children).replace(/\s*\n\s*/g, ' ')).join('\t')).join('\n');
   return inlineText(node?.children);
 }
 
@@ -161,4 +189,4 @@ function markdownToPlainText(markdown) {
     .join('\n\n');
 }
 
-module.exports = { markdownToHtml, markdownToPlainText };
+module.exports = { markdownToHtml, markdownToPlainText, specToHtml, specToPlainText };

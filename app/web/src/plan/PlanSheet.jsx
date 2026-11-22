@@ -1,15 +1,15 @@
 import React from 'react';
 import resetFormat from '../../../src/renderer/sidebar/usage-reset.cjs';
+import { planName } from '../../../src/shared/plan-options.cjs';
 import { useUsage } from './use-usage.js';
 import './plan.css';
 
 const { resetBadge, resetTooltip } = resetFormat;
-// Labels for the profile ids Harbor has historically shipped. A machine can
-// carry any profile id at all (they are DISCOVERED from the config homes that
-// exist, see main/config/homes.js), so this is a display courtesy and never the
-// list of accounts: an id with no entry renders under its own name.
-const LABELS = { personal: 'Personal', team: 'Team' };
-const titleCase = (id) => String(id).replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+// Each card is named from the configured plan list (`profiles`, the list the
+// New session sheet offers), so it reads "Claude C" and "Ren 2" as the desktop
+// does. A fixed two-name table here (Personal, Team) title-cased every other id
+// into "Claudec" and "Ren2" until 2026-11-19; an id the list does not name, or
+// a list not loaded yet, still renders under its own id.
 const pct = (value) => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)}%` : '—';
 
 function Meter({ label, value, resetsAt, rolled, kind }) {
@@ -18,7 +18,7 @@ function Meter({ label, value, resetsAt, rolled, kind }) {
   </div>;
 }
 
-export function PlanSheet({ open, onClose, client, session }) {
+export function PlanSheet({ open, onClose, client, session, profiles }) {
   const { usage, emails, error } = useUsage(client, open);
   if (!open) return null;
   const current = session?.home || session?.account || session?.detectedHome || null;
@@ -33,7 +33,7 @@ export function PlanSheet({ open, onClose, client, session }) {
       <div className="mobile-sheet-scroll">
         {error ? <p className="sheet-error" role="alert">{error}</p> : null}
         <div className="plan-list">{ids.map((id) => { const data = usage[id] || {}; const active = current === id; return <article className={`plan-card${active ? ' active' : ''}`} key={id}>
-          <header><div><strong>{LABELS[id] || titleCase(id)}</strong>{active ? <span>This session</span> : null}</div><small>{data.email || emails[id] || 'Email unavailable'}</small></header>
+          <header><div><strong>{planName(profiles, id)}</strong>{active ? <span>This session</span> : null}</div><small>{data.email || emails[id] || 'Email unavailable'}</small></header>
           <Meter label="5 hour" value={data.fiveHourPct} resetsAt={data.fiveHourResetsAt} rolled={data.fiveHourRolled} kind="fiveHour" />
           <Meter label="Weekly" value={data.weeklyPct} resetsAt={data.weeklyResetsAt} rolled={data.weeklyRolled} kind="weekly" />
         </article>; })}</div>

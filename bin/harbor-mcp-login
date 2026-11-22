@@ -42,6 +42,13 @@ const name = opt('name');
 const timeoutMs = Number(opt('timeout-ms', String(10 * 60 * 1000)));
 
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
+// --help / -h starts nothing (2026-11-22): an argument that is exactly one of
+// them, unless it is the value of a flag that takes one.
+const VALUE_FLAGS = new Set(['--claude', '--home', '--cwd', '--name', '--timeout-ms']);
+if (args.some((arg, i) => (arg === '--help' || arg === '-h') && !VALUE_FLAGS.has(args[i - 1]))) {
+  emit({ event: 'exit', code: 0, output: 'usage: harbor-mcp-login --claude <bin> --home <config dir> --cwd <dir> --name <server> [--timeout-ms N]' });
+  process.exit(0);
+}
 if (!claude || !home || !name) {
   emit({ event: 'exit', code: 2, output: 'usage: harbor-mcp-login --claude <bin> --home <config dir> --cwd <dir> --name <server>' });
   process.exit(2);

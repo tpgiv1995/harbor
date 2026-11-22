@@ -25,6 +25,7 @@ const { mergeAsk, normalizeAsk, currentQuestionIndex, isReviewMenu, answeredFrom
 const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-session-link.js');
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
 const { planResumeNudge } = require('./resume-nudge.js');
+const { stripInvisible, dropAllInvisible } = require('../shared/invisible-chars.cjs');
 
 // Claude Code's project-dir munge: every non-alphanumeric cwd character
 // becomes '-' ('/home/you/dev/harbor' -> '-home-you-dev-harbor').
@@ -1342,7 +1343,10 @@ function createSessionSend(deps) {
     const [x, y] = [norm(recorded), norm(sent)];
     return /^[A-Za-z]:\//.test(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
   };
-  const exactWords = (value) => String(value ?? '').replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim();
+  // Invisible characters are dropped from both sides first (2026-11-21): Claude
+  // 2.1.321 records a prompt with them stripped (shared/invisible-chars.cjs),
+  // so a message copied out of Teams never matched its own record.
+  const exactWords = (value) => dropAllInvisible(value).replace(/[ \t]+$/gm, '').trim();
   // The readings of a record that may be the typed message: its literal
   // words first (a message may itself hold any tag), then, only from what
   // the CLI adds, a reminder or notification that is a part of its own left
@@ -4644,6 +4648,20 @@ function createSessionSend(deps) {
     // "Unrecognized command '/effort'".
     const codexEffort = provider === 'codex' ? /^\/effort\s+([\w-]+)\s*$/i.exec(String(text ?? '').trim()) : null;
     let trimmed = codexEffort ? `/model --reasoning=${codexEffort[1].toLowerCase()}` : String(text ?? '').replace(/\r\n/g, '\n').trim();
+    // CLAUDE STRIPS INVISIBLE CHARACTERS, SO HARBOR SENDS WHAT CLAUDE WILL KEEP
+    // (2026-11-21). Claude 2.1.321 removes zero-width spaces, soft hyphens,
+    // direction marks and their kin from a prompt before submitting it, and
+    // when what it removed includes a direction mark, or the cleaned text starts
+    // with "/" or "!", it does not submit at all ("review and press Enter to
+    // send"). The cleaned text is THE message from here on, typed, matched and
+    // confirmed as one, exactly as the Codex normalization below does it.
+    if ((provider || 'claude') === 'claude' && trimmed) {
+      const clean = stripInvisible(trimmed).trim();
+      if (clean !== trimmed) {
+        logSend({ sessionId, phase: 'claude-invisible-removed', removed: Array.from(trimmed).length - Array.from(clean).length });
+        trimmed = clean;
+      }
+    }
     const imagePaths = Array.isArray(images) ? images.filter(Boolean) : [];
     if (!trimmed && imagePaths.length === 0 && !resumeOnly) throw new Error('nothing to send');
     // A Claude send carrying a picture is a message (see deliver's typedAsSlash).

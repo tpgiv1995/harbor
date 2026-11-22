@@ -4,8 +4,11 @@ import React, {
 import composeDoc from './compose-doc.cjs';
 import composeKeys from './compose-keys.cjs';
 import slashTokens from './slash-tokens.cjs';
+import pasteHtml from './paste-html.cjs';
+import copyFlavors from './copy-flavors.cjs';
 
 const { serializeDoc, markdownToSpec, buildNodes } = composeDoc;
+const { foreignHtmlToSpec, cleanPastedText } = pasteHtml;
 const {
   composeKeyVerdict, listNormalizationVerdict, autoFormatVerdict, autoFormatRevertVerdict,
   normalizeLinkUrl,
@@ -1250,12 +1253,52 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
     // The image branch calls preventDefault synchronously before it awaits.
     onPasteImage?.(event);
     if (event.defaultPrevented) return;
-    // Everything else pastes as PLAIN TEXT. A contenteditable would otherwise
-    // accept whatever HTML the source page put on the clipboard, dragging
-    // foreign styling and structure into a message bound for a terminal.
+    // A contenteditable left alone accepts whatever HTML the source put on the
+    // clipboard, foreign styling and all, so the paste is always ours. Until
+    // 2026-11-21 that meant PLAIN TEXT only, and a Teams list arrived as bare
+    // paragraphs with its bullets, nesting and bold gone (Pat: "less of a pain
+    // in the ass to copy and paste data in and out of harbor"). Now the HTML
+    // flavor is read into the composer's own node spec (paste-html.cjs:
+    // lists, nesting, marks, links, headings, quotes, code; no attribute but a
+    // safe href, no style, no foreign element), built with buildNodes, and
+    // inserted with insertHTML so the paste is one undo step. The string
+    // handed to insertHTML is the serialization of nodes we built from our own
+    // spec, never markup from the clipboard. A copy with nothing worth keeping
+    // (plain prose, a spreadsheet's table), or a paste inside a code block,
+    // takes the plain-text path, which now drops invisible characters too.
     event.preventDefault();
+    const root = editorRef.current;
+    const html = event.clipboardData?.getData('text/html') || '';
     const text = event.clipboardData?.getData('text/plain') || '';
-    if (text) exec('insertText', text);
+    const anchor = window.getSelection()?.anchorNode || null;
+    const inCode = Boolean(root && anchor && closestTag(anchor, ['PRE', 'CODE'], root));
+    let spec = null;
+    if (html && !inCode) {
+      try {
+        spec = foreignHtmlToSpec(new DOMParser().parseFromString(html, 'text/html').body);
+      } catch { spec = null; }
+    }
+    if (spec) {
+      const holder = document.createElement('div');
+      holder.appendChild(buildNodes(spec, document));
+      if (!exec('insertHTML', holder.innerHTML)) {
+        const clean = cleanPastedText(text);
+        if (clean) exec('insertText', clean);
+      }
+    } else {
+      const clean = cleanPastedText(text);
+      if (clean) exec('insertText', clean);
+    }
+    emit();
+  };
+
+  // Copying OUT of the composer gets the same clean flavors as a conversation
+  // window (copy-flavors.cjs), not Chromium's dark-theme inline styles.
+  const handleCopy = (event) => { copyFlavors.writeSelection(event, editorRef.current); };
+
+  const handleCut = (event) => {
+    if (disabled || !copyFlavors.writeSelection(event, editorRef.current)) return;
+    exec('delete');
     emit();
   };
 
@@ -1344,6 +1387,8 @@ export const ComposeEditor = forwardRef(function ComposeEditor({
         onInput={emit}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
+        onCopy={handleCopy}
+        onCut={handleCut}
       />
     </div>
   );

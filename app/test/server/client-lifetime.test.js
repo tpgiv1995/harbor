@@ -289,14 +289,39 @@ test('a client that leaves while its open is still in flight leaves nothing open
   const reached = new Promise((resolve) => { entered = resolve; });
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const { composed, url } = await harness(t, { metaGate: () => { entered(); return gate; } });
+  // EVENTS, NOT SLEEPS (2026-11-20). This test slept 150 ms for the server to
+  // notice the dropped socket and 150 ms for the late open to finish, and
+  // failed two full publish gates in a row on a busy machine ("1 !== 0") while
+  // passing alone every time. The server logs a client's close and runs its
+  // teardown in the same handler, so that line means the departure is
+  // processed; only then is the open released, which keeps the in-flight case
+  // the one under test. The open is not counted until its metadata arrives,
+  // so a count of 0 alone could be read before the late open has even run:
+  // the test waits for the server to close session A for the departed client.
+  // A leaked ref still fails: that close never comes and the count stays at 1.
+  let departed;
+  const left = new Promise((resolve) => { departed = resolve; });
+  const logger = {
+    info: (line) => { if (/ closed \(code /.test(String(line))) departed(); },
+    warn: (line) => console.warn(line),
+    error: (line) => console.error(line),
+  };
+  const { composed, url } = await harness(t, { metaGate: () => { entered(); return gate; }, logger });
+  let closedA;
+  const lateClose = new Promise((resolve) => { closedA = resolve; });
+  const realClose = composed.transcript.close;
+  composed.transcript.close = function close(sessionId, ...rest) {
+    const result = realClose.call(this, sessionId, ...rest);
+    if (sessionId === SESSION_A) closedA();
+    return result;
+  };
   const ws = await connect(url);
   ws.send(JSON.stringify({ id: 1, method: 'transcript:open', payload: { sessionId: SESSION_A } }));
   await within(reached, 'the server entering the gated open'); // the server is inside the open, waiting on the transcript's metadata
   ws._socket.destroy();
-  await settle();
+  await within(left, 'the server processing the departure');
   release();
-  await settle();
+  await within(lateClose, 'the late open closing what it opened for the departed client');
   assert.equal(composed.transcript.openCount(), 0, 'the late open gives its ref straight back');
   assert.equal(composed.clientResources.clientCount(), 0, 'and the departed client is not resurrected as a holder');
 

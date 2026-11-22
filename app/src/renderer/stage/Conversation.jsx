@@ -5,6 +5,7 @@ import turnMeta from './turn-meta.cjs';
 import messageTimes from './message-time.cjs';
 import { useConversationScroll } from './use-conversation-scroll.js';
 import { clipboardImageDataURL } from '../image-clipboard.js';
+import copyFlavors from './copy-flavors.cjs';
 import './conversation-image-copy.css';
 
 const { turnMetaLabel, queueStateLabel, subagentLabel } = turnMeta;
@@ -21,7 +22,8 @@ const { messageTime, subscribeDay, currentDay } = messageTimes;
 function MessageTime({ ts, className = 'conv-time' }) {
   const time = messageTime(ts);
   if (!time) return null;
-  return <time className={className} dateTime={time.iso} title={time.title}>{time.label}</time>;
+  // data-copy="skip": a copied reply is the reply, not its clock (copy-flavors.cjs).
+  return <time className={className} dateTime={time.iso} title={time.title} data-copy="skip">{time.label}</time>;
 }
 
 function ImageLightbox({ src, alt, onClose }) {
@@ -312,14 +314,14 @@ const Block = memo(function Block({ block, onImageLoad, day: _day }) {
           output tokens across every reply it produced and the time from the
           prompt to the latest reply, growing while it runs. */}
       {sent || meta ? (
-        <div className={`conv-turn-meta${block.peer ? ' peer' : ''}`} data-anchor={`${block.key}:meta`}>
+        <div className={`conv-turn-meta${block.peer ? ' peer' : ''}`} data-anchor={`${block.key}:meta`} data-copy="skip">
           {sent ? <MessageTime ts={block.ts} /> : null}
           {sent && meta ? <span className="conv-meta-sep" aria-hidden="true"> · </span> : null}
           {meta ? <span title="Output tokens and time this task has used so far">{meta}</span> : null}
         </div>
       ) : null}
       {/* Whether Claude has read a queued message yet (turn-meta queueStateLabel). */}
-      {queueLabel ? <div className={`conv-queue-state${waiting ? ' waiting' : ''}${block.peer ? ' peer' : ''}`} data-anchor={`${block.key}:queue`}>{queueLabel}</div> : null}
+      {queueLabel ? <div className={`conv-queue-state${waiting ? ' waiting' : ''}${block.peer ? ' peer' : ''}`} data-anchor={`${block.key}:queue`} data-copy="skip">{queueLabel}</div> : null}
       </>
     );
   }
@@ -377,7 +379,9 @@ export const Conversation = memo(function Conversation({
   }, [items]);
 
   return (
-    <div className="conv" ref={scrollRef} onScroll={onScroll}>
+    // Ctrl+C and right-click Copy both land here: the clipboard gets clean
+    // formatting instead of Harbor's dark theme (copy-flavors.cjs).
+    <div className="conv" ref={scrollRef} onScroll={onScroll} onCopy={(event) => { copyFlavors.writeSelection(event, scrollRef.current); }}>
       <div className="conv-body" ref={contentRef}>
         {blocks.length === 0 ? (
           <div className="conv-empty" data-anchor="empty">
