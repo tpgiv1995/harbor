@@ -355,10 +355,13 @@ async function main() {
     // A plan with a textColor (a dark plan colour, e.g. the black X plan) draws
     // its meter in the TEXT colour and its badge filled solid with the plan
     // colour; every other plan draws in its own colour (profileStyle).
-    for (const p of claudeProfiles) {
+    // Rows are matched by position, not by letter: two Claude plans may share a
+    // letter (letters are display-only; the live config has two R plans since
+    // 2026-11-22), and the check above already proved the rows follow config order.
+    for (const [i, p] of claudeProfiles.entries()) {
       const inked = /^#[0-9a-f]{6}$/i.test(String(p.textColor || ''));
       const expected = rgbOf(inked ? p.textColor : p.color);
-      const row = facts.meters.find((m) => m.letter === p.letter);
+      const row = facts.meters[i];
       if (!row || row.color !== expected) problems.push(`the ${p.letter} meter row is ${row?.color}, expected ${expected}`);
       if (row && inked && (row.badgeBg !== rgbOf(p.color) || row.badgeInk !== rgbOf(p.textColor))) {
         problems.push(`the ${p.letter} badge is ${row.badgeInk} on ${row.badgeBg}, expected ${rgbOf(p.textColor)} on ${rgbOf(p.color)}`);
@@ -437,7 +440,10 @@ async function main() {
 
     // 5a. A plan's letter typed in the open picker starts that plan (the rail head is not immediate,
     // so the Session configuration window opens on it), and that plan becomes the "+" plan.
-    const typed = claudeProfiles[claudeProfiles.length - 1];
+    // The newest plan whose letter no other Claude plan shares: a shared letter
+    // starts the FIRST plan that has it (planForKey in renderer/profiles.cjs), by design.
+    const letterCount = (l) => claudeProfiles.filter((q) => String(q.letter).toUpperCase() === String(l).toUpperCase()).length;
+    const typed = [...claudeProfiles].reverse().find((p) => letterCount(p.letter) === 1) || claudeProfiles[claudeProfiles.length - 1];
     await cdp.eval(click('.rail-head .launch-more'));
     await waitFor(cdp, 'Boolean(document.querySelector(".plan-picker .plan-pick"))', 'the plan picker (letter)');
     await sleep(300);
