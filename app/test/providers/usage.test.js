@@ -284,7 +284,7 @@ test('keychainServicesFor names each config home its own Claude Code credential 
 
 const fs = require('node:fs');
 const os = require('node:os');
-const { parseRetryAfter, SHOWN_STALE_MS, DEFAULT_RETRY_AFTER_MS } = require('../../src/main/providers/usage.js');
+const { parseRetryAfter, SHOWN_STALE_MS, DEFAULT_RETRY_AFTER_MS, MAX_RETRY_AFTER_MS } = require('../../src/main/providers/usage.js');
 
 const OLD_TEE = {
   updated_at: '2026-11-21T10:00:00.000Z',
@@ -381,8 +381,13 @@ test('fetchOauthUsage hands back the provider\'s Retry-After on a 429 (seconds, 
   const answer = (value) => async () => ({ ok: false, status: 429, headers: { get: (name) => (name === 'retry-after' ? value : null) } });
   const read = (value) => fetchOauthUsage('/claude', { readCredentials: creds, reportUnavailable: true, now, fetchImpl: answer(value) });
   assert.equal((await read('817')).retryAfterMs, 817_000);
-  assert.equal((await read('Mon, 23 Nov 2026 18:53:00 GMT')).retryAfterMs, 3_600_000);
+  assert.equal(parseRetryAfter('Mon, 23 Nov 2026 18:53:00 GMT', Date.parse('2026-11-23T17:53:00.000Z')), 3_600_000);
   assert.equal((await read(null)).retryAfterMs, DEFAULT_RETRY_AFTER_MS);
+  // A long Retry-After is kept only up to the cap (Work, 2026-11-23: told
+  // 3600 s at 19:10Z, answering 200 at 19:52Z while the rail sat on "94%+").
+  assert.equal(MAX_RETRY_AFTER_MS, 15 * 60 * 1000);
+  assert.equal((await read('3600')).retryAfterMs, MAX_RETRY_AFTER_MS);
+  assert.equal((await read('Mon, 23 Nov 2026 18:53:00 GMT')).retryAfterMs, MAX_RETRY_AFTER_MS);
   assert.equal(parseRetryAfter('garbage', 0), null);
   // A non-429 failure carries no wait.
   const other = await fetchOauthUsage('/claude', { readCredentials: creds, reportUnavailable: true, now, fetchImpl: async () => ({ ok: false, status: 500 }) });

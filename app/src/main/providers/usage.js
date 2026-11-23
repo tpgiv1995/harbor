@@ -102,6 +102,15 @@ const SHOWN_STALE_MS = 15 * 60 * 1000;
 // keeps 900 s when the header is missing, and one rule across both readers of
 // the same endpoint is the point.
 const DEFAULT_RETRY_AFTER_MS = 15 * 60 * 1000;
+// AND NO WAIT IS KEPT LONGER THAN THAT. A Retry-After is the provider's upper
+// bound, not when it will answer: Work's plan was given 3600 s at 19:10Z and
+// answered 200 at 19:52Z, both with and without the CLI headers, while the
+// rail sat on "94%+" (it was 96%) for the whole hour (Pat: "you sure its
+// fixed? work plan is still showing the + shit"). Fifteen minutes still
+// gives a refusing account its quiet (four calls an hour, not sixty, the
+// hammering that kept a plan at 429 for four hours) without leaving the rail
+// stale for an hour after the refusals stop.
+const MAX_RETRY_AFTER_MS = 15 * 60 * 1000;
 
 // Retry-After is either delta seconds or an HTTP date (RFC 9110 10.2.3).
 function parseRetryAfter(value, nowMs) {
@@ -203,7 +212,7 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   // calling again inside it is what kept accounts at 429 for hours
   // (2026-11-23), because each early call is another refusal.
   if (res.status === 429) {
-    const retryAfterMs = parseRetryAfter(res.headers?.get?.('retry-after'), now().getTime()) ?? DEFAULT_RETRY_AFTER_MS;
+    const retryAfterMs = Math.min(parseRetryAfter(res.headers?.get?.('retry-after'), now().getTime()) ?? DEFAULT_RETRY_AFTER_MS, MAX_RETRY_AFTER_MS);
     return reportUnavailable
       ? { unavailable: true, status: 429, retryAfterMs, reason: 'Claude usage request failed: HTTP 429 (rate limited; Claude asked for a pause before the next read)' }
       : null;
@@ -564,6 +573,7 @@ module.exports = {
   REMOTE_COOLDOWN_MS,
   SHOWN_STALE_MS,
   DEFAULT_RETRY_AFTER_MS,
+  MAX_RETRY_AFTER_MS,
   createUsageProvider,
   fetchOauthUsage,
   keychainServicesFor,
