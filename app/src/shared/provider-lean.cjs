@@ -40,6 +40,18 @@
 // and it is gone. So under Balanced only the better-side kinds cross over:
 // images to a GPT seat, simple mechanical work to Cursor.
 //
+// One more route is set per PROJECT, not per setting (Pat, 2026-11-23, after
+// upgrading Cursor to its top plan: test-backed builds for one project go to
+// Cursor, his other projects stay as they are). The kind is `build`: a code
+// change that starts from a failing test, carries a --check, and is read whole
+// by a Claude reviewer. Those three are what make a real build safe to hand
+// over, so the kind needs no "better than Claude" claim; like mechanical work it
+// rides on an idle budget and Pat's explicit word. A project with the override
+// (the `projects` list in the setting file, shown and switched in the plans
+// menu) sends `build` to Cursor under every setting except Claude only while
+// Cursor's month is known and under 90%. Anywhere else, `build` is general work,
+// and no other kind changes.
+//
 // Pure on purpose: the renderer imports this file, so no fs here. The file
 // itself is read and written by main/providers/provider-lean.js.
 
@@ -82,6 +94,14 @@ const TASK_KINDS = Object.freeze([
     detail: 'boilerplate, scaffolding, wide renames and find-and-replace edits, format conversions, applying a decided pattern across many files; only when every change is the same and a simple check proves it',
     why: "Cursor's plan sits nearly unused and this work needs no judgement; Claude reviews the result.",
   }),
+  // side null: general work, except in a project whose override sends it to
+  // Cursor (`projectWhy` is that route's reason).
+  Object.freeze({
+    id: 'build', side: null, label: 'Test-backed builds',
+    detail: 'a code change that starts from a failing test, carries a --check, and is read whole by a Claude reviewer',
+    why: null,
+    projectWhy: 'each one starts from a failing test, carries a check, and a Claude reviewer reads it whole.',
+  }),
   Object.freeze({
     id: 'connected', side: 'claude', label: 'Connected work',
     detail: 'claude.ai connectors (Teams, Outlook, Dropbox and the rest), live browser checks, deploys',
@@ -115,6 +135,66 @@ function taskKind(value) {
   return TASK_KINDS.find((kind) => kind.id === value) || TASK_KINDS.find((kind) => kind.id === 'general');
 }
 
+// The per-project overrides from the setting file, read defensively: an entry
+// needs an id, a label, at least one folder and the one route that exists
+// (`build: 'cursor'`); a repeated id keeps the first. Only an explicit
+// `enabled: false` switches one off. Unknown fields pass through untouched.
+function normalizeProjects(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    const label = typeof entry.label === 'string' ? entry.label.trim() : '';
+    const folders = Array.isArray(entry.folders)
+      ? entry.folders.filter((f) => typeof f === 'string' && f.trim()).map((f) => f.trim())
+      : [];
+    if (!id || !label || !folders.length || entry.build !== 'cursor' || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      ...entry,
+      id,
+      label,
+      folders,
+      build: 'cursor',
+      enabled: entry.enabled !== false,
+      updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : null,
+    });
+  }
+  return out;
+}
+
+// Folder comparison without node:path (the renderer imports this file). Either
+// slash works; a drive-letter path compares without case, as Windows does; a
+// `*` matches within one folder name (slot-*). A folder matches a pattern when
+// it is that folder or anything inside it.
+const pathParts = (value) => String(value).trim().replace(/\//g, '\\').replace(/\\+$/, '').split(/\\+/);
+const segmentRx = new Map();
+function segmentMatches(pattern, name) {
+  if (!pattern.includes('*')) return pattern === name;
+  let rx = segmentRx.get(pattern);
+  if (!rx) {
+    rx = new RegExp(`^${pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^\\\\]*')}$`);
+    segmentRx.set(pattern, rx);
+  }
+  return rx.test(name);
+}
+function folderMatches(pattern, folder) {
+  if (typeof pattern !== 'string' || typeof folder !== 'string' || !pattern.trim() || !folder.trim()) return false;
+  const anyCase = /^[a-z]:/i.test(pattern.trim()) || /^[a-z]:/i.test(folder.trim());
+  const fold = (s) => (anyCase ? s.toLowerCase() : s);
+  const want = pathParts(fold(pattern));
+  const have = pathParts(fold(folder));
+  return have.length >= want.length && want.every((part, i) => segmentMatches(part, have[i]));
+}
+
+// The project a folder belongs to (switched on or off), or null.
+function matchProject(projects, folder) {
+  if (!Array.isArray(projects)) return null;
+  return projects.find((p) => p && Array.isArray(p.folders) && p.folders.some((f) => folderMatches(f, folder))) || null;
+}
+
 function pctText(pct) {
   if (pct > 0 && pct < 1) return '<1%';
   return `${Math.round(pct)}%`;
@@ -143,33 +223,53 @@ function spareReason(seat) {
   return `${seat.label} is ${pctText(seat.weeklyPct)} used but has ${n} reset${n === 1 ? '' : 's'} waiting; apply one when it runs out.`;
 }
 
+const cursorHasRoom = (cursor) => Boolean(cursor && finitePct(cursor.monthlyPct) && cursor.monthlyPct < CURSOR_MAX_PCT);
+
+// Why Cursor cannot take work right now: full, signed out, or unreadable.
+function cursorMissReason(cursor) {
+  if (cursor && finitePct(cursor.monthlyPct)) return `Cursor is at least ${CURSOR_MAX_PCT}% used this month.`;
+  if (cursor?.signedOut) return 'Cursor is signed out; sign it in again with cursor-agent login.';
+  return "Cursor's usage could not be read.";
+}
+
 // One task's route. seats: [{ label, weeklyPct }] for the codex homes; cursor:
 // { label, monthlyPct } or null. Unknown usage never qualifies, so missing data
 // always lands on Claude (or, for mechanical work, on the general rule).
 // `large` is still accepted from older callers (bin/harbor-lean --large) but no
 // setting reads it since 2026-10-18. `complex` takes mechanical work off
-// Cursor: it routes as general work, with the reason.
-// Returns { side: 'claude' | 'gpt' | 'cursor', seat, kind, reason }.
-function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex = false } = {}) {
+// Cursor: it routes as general work, with the reason. `project` is the
+// override the work's folder belongs to (matchProject), read only by `build`.
+// Returns { side: 'claude' | 'gpt' | 'cursor', seat, kind, reason }, plus
+// `project` (the override's id, or null) for a build.
+function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex = false, project = null } = {}) {
   const id = normalizeLean(mode);
   const kind = taskKind(kindId);
   const { best, open, spare } = seatFacts(seats);
   const claude = (reason) => ({ side: 'claude', seat: null, kind: kind.id, reason });
   const gpt = (seat, reason) => ({ side: 'gpt', seat, kind: kind.id, reason });
+  if (kind.id === 'build') {
+    // A build is general work unless its project's override sends it to
+    // Cursor, and even then Claude only wins and a full or unreadable Cursor
+    // hands it back to the general rule, with the reason.
+    const general = leanRoute(id, 'general', seats, { large });
+    const override = project && project.build === 'cursor' && project.enabled !== false ? project : null;
+    if (!override) return { ...general, kind: kind.id, project: null };
+    if (id === 'claude-only') return { ...general, kind: kind.id, project: override.id };
+    if (cursorHasRoom(cursor)) {
+      return { side: 'cursor', seat: cursor, kind: kind.id, project: override.id, reason: `${override.label} sends test-backed builds to Cursor: ${kind.projectWhy}` };
+    }
+    return { ...general, kind: kind.id, project: override.id, reason: `${cursorMissReason(cursor)} ${general.reason}` };
+  }
   if (id === 'claude-only') return claude('Heavy lifting is Claude only.');
   if (kind.side === 'claude') return claude(kind.why);
   if (kind.side === 'cursor') {
-    const room = cursor && finitePct(cursor.monthlyPct) && cursor.monthlyPct < CURSOR_MAX_PCT;
-    if (room && !complex) {
+    if (cursorHasRoom(cursor) && !complex) {
       return { side: 'cursor', seat: cursor, kind: kind.id, reason: kind.why };
     }
     // Too complex for Cursor, or Cursor full or unreadable: the work is
     // ordinary general work again.
     const fallback = leanRoute(id, 'general', seats, { large });
-    let why = "Cursor's usage could not be read.";
-    if (cursor?.signedOut) why = 'Cursor is signed out; sign it in again with cursor-agent login.';
-    if (complex) why ='Too complex for Cursor: the changes need judgement or a hard-to-check result.';
-    else if (cursor && finitePct(cursor.monthlyPct)) why = `Cursor is at least ${CURSOR_MAX_PCT}% used this month.`;
+    const why = complex ? 'Too complex for Cursor: the changes need judgement or a hard-to-check result.' : cursorMissReason(cursor);
     return { ...fallback, kind: kind.id, reason: `${why} ${fallback.reason}` };
   }
   if (kind.side === 'gpt' || id === 'lean-openai') {
@@ -229,6 +329,20 @@ function leanVerdict(mode, seats, cursor = null) {
   return { gpt, seat, rows, summary };
 }
 
+// One row per project override, for the plans menu and bin/harbor-lean: where
+// that project's test-backed builds go right now, or why not.
+// [{ id, label, enabled, folders, target, note }].
+function projectRows(mode, seats, cursor, projects) {
+  return normalizeProjects(projects).map((project) => {
+    const route = leanRoute(mode, 'build', seats, { cursor, project });
+    const row = routeRow(project.label, route);
+    let note = row.note;
+    if (!project.enabled) note = 'Off: builds route as general work';
+    else if (route.side !== 'cursor') note = route.reason.split('. ')[0].replace(/\.$/, '');
+    return { id: project.id, label: project.label, enabled: project.enabled, folders: project.folders, target: row.target, note };
+  });
+}
+
 // The weekly window and reset credits of each codex plan, in the shape
 // plan-usage.js returns.
 function seatsFromPlans(plans) {
@@ -266,8 +380,12 @@ module.exports = {
   normalizeLean,
   leanMode,
   taskKind,
+  normalizeProjects,
+  folderMatches,
+  matchProject,
   leanRoute,
   leanVerdict,
+  projectRows,
   seatsFromPlans,
   cursorFromPlans,
 };

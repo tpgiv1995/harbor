@@ -52,7 +52,7 @@ const { createCrashCapture } = require('./crash-capture.js');
 const { createUsageProvider } = require('./providers/usage.js');
 const { createTeamProvider } = require('./providers/team.js');
 const { createPlanUsageProvider } = require('./providers/plan-usage.js');
-const { resolveLeanFile, readLean, writeLean } = require('./providers/provider-lean.js');
+const { resolveLeanFile, readLean, writeLean, writeLeanProject } = require('./providers/provider-lean.js');
 const { createWorkflowRuns } = require('./providers/workflow-runs.js');
 const { readAccountEmails, createAccountsProvider } = require('./providers/accounts.js');
 const { createSingleFlight } = require('./single-flight.js');
@@ -1488,7 +1488,11 @@ function registerIpc() {
     defaultUserDataPath: path.join(app.getPath('appData'), app.getName()),
   });
   ipcMain.handle('usage:get-lean', () => readLean(leanFile()));
-  ipcMain.handle('usage:set-lean', (_event, mode) => writeLean(leanFile(), mode));
+  // A string is the setting; { project, enabled } is one project override's
+  // switch (the plans menu's Project routes, 2026-11-23). Both stay local-only.
+  ipcMain.handle('usage:set-lean', (_event, value) => (value && typeof value === 'object'
+    ? writeLeanProject(leanFile(), value.project, value.enabled)
+    : writeLean(leanFile(), value)));
   ipcMain.handle('accounts:read-emails', () => readAccountEmails({ profiles: harborConfig.profiles }));
 
   ipcMain.handle('pick-folder', async () => {

@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   LEAN_MODES, TASK_KINDS, DEFAULT_LEAN, normalizeLean, leanMode, taskKind, leanRoute, leanVerdict, seatsFromPlans, cursorFromPlans,
+  normalizeProjects, matchProject, projectRows,
 } = require('../../src/shared/provider-lean.cjs');
 
 const seat = (label, weeklyPct) => ({ label, weeklyPct });
@@ -27,7 +28,7 @@ test('four settings in slider order, Balanced by default', () => {
 
 test('a kind sits on a side only where that side is better, and says why (Pat, 2026-10-05)', () => {
   assert.deepEqual(TASK_KINDS.map((k) => [k.id, k.side]), [
-    ['image', 'gpt'], ['mechanical', 'cursor'], ['connected', 'claude'], ['review', 'claude'], ['general', null],
+    ['image', 'gpt'], ['mechanical', 'cursor'], ['build', null], ['connected', 'claude'], ['review', 'claude'], ['general', null],
   ]);
   for (const kind of TASK_KINDS) {
     if (kind.side) assert.ok(typeof kind.why === 'string' && kind.why.length > 10 && !DASHES.test(kind.why), kind.id);
@@ -212,4 +213,106 @@ test('a seat with a reset waiting is not out: it takes the work when no seat has
   }
   // The Right now row says the reset is there.
   assert.deepEqual(leanVerdict('lean-claude', OCT8, CURSOR).rows[0], { label: 'Image work', target: 'Studio', note: '97% used this week, 1 reset waiting' });
+});
+
+// A per-project route for test-backed builds (Pat, 2026-11-23): one project's
+// builds go to Cursor, each starting from a failing test, carrying a --check and
+// read whole by a Claude reviewer. Every other project, and every other kind,
+// routes exactly as before. The project here is synthetic.
+const ACME = {
+  id: 'acme', label: 'Acme App', build: 'cursor', enabled: true,
+  folders: ['C:\\work\\acme', 'C:\\work\\.orch\\acme\\slot-*'],
+};
+const ACME_OFF = { ...ACME, enabled: false };
+
+test('build is a kind of its own: general work unless a project sends it to Cursor', () => {
+  const build = taskKind('build');
+  assert.equal(build.id, 'build');
+  assert.equal(build.side, null);
+  assert.equal(build.why, null);
+  assert.match(build.detail, /starts from a failing test.*--check.*read whole by a Claude reviewer/);
+  assert.ok(build.projectWhy && !DASHES.test(build.projectWhy) && !DASHES.test(build.detail));
+});
+
+test('a project matches its folders, inside them, and slot globs; nothing else', () => {
+  const projects = normalizeProjects([ACME]);
+  for (const folder of ['C:\\work\\acme', 'C:\\work\\acme\\app\\src', 'c:/work/ACME/', 'C:\\work\\.orch\\acme\\slot-3', 'C:\\work\\.orch\\acme\\slot-10\\app']) {
+    assert.equal(matchProject(projects, folder)?.id, 'acme', folder);
+  }
+  for (const folder of ['C:\\work\\acme-old', 'C:\\work', 'C:\\work\\.orch\\acme', 'C:\\work\\.orch\\acme\\scratch', 'C:\\work\\.orch\\other\\slot-1', '', null, undefined]) {
+    assert.equal(matchProject(projects, folder), null, String(folder));
+  }
+  // A switched-off project still matches (the menu shows it); it just routes nothing.
+  assert.equal(matchProject(normalizeProjects([ACME_OFF]), 'C:\\work\\acme').enabled, false);
+});
+
+test('the projects list is read defensively: malformed entries are dropped', () => {
+  assert.deepEqual(normalizeProjects(undefined), []);
+  assert.deepEqual(normalizeProjects({ acme: ACME }), []);
+  const kept = normalizeProjects([ACME, null, { id: 'x' }, { id: 'y', label: 'Y', folders: [] }, { id: 'z', label: 'Z', folders: [42, 'C:\\z'], build: 'cursor' }, { id: 'acme', label: 'Dup', folders: ['C:\\d'], build: 'cursor' }]);
+  assert.deepEqual(kept.map((p) => [p.id, p.folders, p.enabled]), [['acme', ACME.folders, true], ['z', ['C:\\z'], true]]);
+  assert.equal(normalizeProjects([{ ...ACME, build: 'gpt' }]).length, 0, 'only a Cursor build route exists');
+  assert.equal(normalizeProjects([{ ...ACME, enabled: 'yes' }])[0].enabled, true, 'only an explicit false switches it off');
+});
+
+test('build on an overridden project goes to Cursor while Cursor has room, under every setting but Claude only', () => {
+  for (const mode of ['lean-claude', 'balanced', 'lean-openai']) {
+    const r = leanRoute(mode, 'build', TODAY, { cursor: CURSOR, project: ACME });
+    assert.deepEqual([r.side, r.seat.label, r.kind, r.project], ['cursor', 'Cursor', 'build', 'acme'], mode);
+    assert.match(r.reason, /^Acme App sends test-backed builds to Cursor/);
+  }
+  assert.equal(leanRoute('claude-only', 'build', TODAY, { cursor: CURSOR, project: ACME }).side, 'claude');
+  // --complex is a mechanical-work flag; a build's safeguards are its failing test, its check and the whole read.
+  assert.equal(leanRoute('balanced', 'build', TODAY, { cursor: CURSOR, project: ACME, complex: true }).side, 'cursor');
+});
+
+test('build on a project without the override routes exactly as general work', () => {
+  for (const mode of ['claude-only', 'lean-claude', 'balanced', 'lean-openai']) {
+    for (const project of [null, undefined, ACME_OFF]) {
+      const build = leanRoute(mode, 'build', TODAY, { cursor: CURSOR, project });
+      const general = leanRoute(mode, 'general', TODAY, { cursor: CURSOR });
+      assert.deepEqual({ ...build, kind: 'general' }, { ...general, project: null }, `${mode} ${project && project.id}`);
+      assert.equal(build.kind, 'build');
+    }
+  }
+});
+
+test('build on an overridden project with Cursor at 95% falls back to general work, and says why', () => {
+  const b = leanRoute('balanced', 'build', TODAY, { cursor: CURSOR_FULL, project: ACME });
+  assert.deepEqual([b.side, b.seat, b.kind], ['claude', null, 'build']);
+  assert.equal(b.reason, 'Cursor is at least 90% used this month. Balanced keeps general work on Claude, where it is best done.');
+  const lo = leanRoute('lean-openai', 'build', TODAY, { cursor: CURSOR_FULL, project: ACME });
+  assert.deepEqual([lo.side, lo.seat.label], ['gpt', 'Studio']);
+});
+
+test('build on an overridden project with Cursor usage unreadable falls back to general work, and says why', () => {
+  for (const cursor of [null, { label: 'Cursor', monthlyPct: null }, { label: 'Cursor', monthlyPct: Number.NaN }]) {
+    const r = leanRoute('balanced', 'build', TODAY, { cursor, project: ACME });
+    assert.equal(r.side, 'claude', JSON.stringify(cursor));
+    assert.equal(r.reason, "Cursor's usage could not be read. Balanced keeps general work on Claude, where it is best done.");
+  }
+  const signedOut = leanRoute('lean-claude', 'build', TODAY, { cursor: { label: 'Cursor', monthlyPct: null, signedOut: true }, project: ACME });
+  assert.equal(signedOut.reason, 'Cursor is signed out; sign it in again with cursor-agent login. Heavy lifting leans Claude.');
+});
+
+test('an override changes no other kind', () => {
+  for (const mode of ['claude-only', 'lean-claude', 'balanced', 'lean-openai']) {
+    for (const kind of ['image', 'mechanical', 'connected', 'review', 'general']) {
+      for (const cursor of [CURSOR, CURSOR_FULL, null]) {
+        assert.deepEqual(leanRoute(mode, kind, TODAY, { cursor, project: ACME }), leanRoute(mode, kind, TODAY, { cursor }), `${mode} ${kind}`);
+      }
+    }
+  }
+});
+
+test('the menu rows for project overrides: where builds go right now, or that it is off', () => {
+  const rows = (mode, cursor, projects) => projectRows(mode, TODAY, cursor, projects).map((r) => [r.id, r.label, r.enabled, r.target, r.note]);
+  assert.deepEqual(rows('balanced', CURSOR, [ACME]), [['acme', 'Acme App', true, 'Cursor', '<1% used this month']]);
+  assert.deepEqual(rows('balanced', CURSOR_FULL, [ACME]), [['acme', 'Acme App', true, 'Claude', 'Cursor is at least 90% used this month']]);
+  assert.deepEqual(rows('balanced', null, [ACME]), [['acme', 'Acme App', true, 'Claude', "Cursor's usage could not be read"]]);
+  assert.deepEqual(rows('claude-only', CURSOR, [ACME]), [['acme', 'Acme App', true, 'Claude', 'Heavy lifting is Claude only']]);
+  assert.deepEqual(rows('balanced', CURSOR, [ACME_OFF]), [['acme', 'Acme App', false, 'Claude', 'Off: builds route as general work']]);
+  assert.deepEqual(rows('balanced', CURSOR, []), []);
+  assert.deepEqual(projectRows('balanced', TODAY, CURSOR, [ACME])[0].folders, ACME.folders);
+  for (const row of projectRows('balanced', TODAY, CURSOR, [ACME, ACME_OFF])) assert.ok(!DASHES.test(JSON.stringify(row)));
 });

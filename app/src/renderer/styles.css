@@ -6153,6 +6153,18 @@ button { font-family: inherit; }
 .plan-lean-route-label { color: var(--sub); }
 .plan-lean-route-target { color: var(--tx); font-weight: 600; }
 .plan-lean-route-note { text-align: right; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--slate); }
+/* Project routes (2026-11-23) share the "Right now" grid, so their columns line
+   up with it; a fourth column holds each project's switch, and a Right now note
+   spans into it. */
+.plan-lean-now { grid-template-columns: max-content max-content minmax(0, 1fr) max-content; align-items: center; }
+.plan-lean-now > .plan-lean-route > .plan-lean-route-note { grid-column: 3 / -1; }
+.plan-lean-projects { display: contents; }
+.plan-lean-projects > .plan-lean-now-head { margin-top: 7px; }
+.plan-lean-switch { height: 20px; min-width: 38px; padding: 0 8px; border: 1px solid #ffffff1f; border-radius: 10px; background: var(--well); color: var(--sub); font: 600 10.5px var(--font-ui); cursor: pointer; }
+.plan-lean-switch.on { border-color: transparent; background: var(--btn); box-shadow: var(--btn-light); color: var(--on-ac); }
+.plan-lean-switch:hover:not(:disabled):not(.on) { background: var(--fill); color: var(--tx); }
+.plan-lean-switch:focus-visible { outline: 2px solid var(--ac2); outline-offset: 1px; }
+.plan-lean-switch:disabled { cursor: default; }
 .plan-usage-scroll { overflow-y: auto; min-height: 0; padding: 0 8px; }
 .plan-usage-group + .plan-usage-group { margin-top: 2px; border-top: 1px solid var(--hair-soft); }
 .plan-usage-provider { display: flex; align-items: center; gap: 7px; margin: 0; padding: 11px 0 3px; border-bottom: 1px solid var(--ln); background: rgb(255 255 255 / 4%); color: var(--tx); font-size: 12.5px; font-weight: 600; }

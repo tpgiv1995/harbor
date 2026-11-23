@@ -37,15 +37,21 @@ async function host() {
     io: { readFile: fs.promises.readFile, readdir: () => { throw Error('Fixture must not discover homes'); } } });
   // The heavy-lifting setting goes through the production resolver with this
   // drive's relocated userData, so it must land in the drive's own profile.
-  const { resolveLeanFile, readLean, writeLean } = require('../src/main/providers/provider-lean.js');
+  const { resolveLeanFile, readLean, writeLean, writeLeanProject } = require('../src/main/providers/provider-lean.js');
   const leanFile = resolveLeanFile({ env: {}, homedir: root, userDataPath: app.getPath('userData'),
     defaultUserDataPath: path.join(root, 'not-the-default') });
   assert.equal(leanFile, path.join(root, 'userData', 'provider-lean.json'));
+  // One synthetic project override (2026-11-23) and no saved setting: the menu
+  // reads Balanced and shows the project's route with its switch.
+  const PROJECT = { id: 'acme', label: 'Acme App', build: 'cursor', enabled: true, folders: ['C:\\work\\acme', 'C:\\work\\.orch\\acme\\slot-*'] };
+  fs.mkdirSync(path.dirname(leanFile), { recursive: true });
+  fs.writeFileSync(leanFile, JSON.stringify({ projects: [PROJECT] }));
+  const seeded = fs.readFileSync(leanFile, 'utf8');
   let reads = 0;
   const answers = {
     'usage:get-plans': () => { reads++; return provider.getPlans(); },
     'usage:get-lean': () => readLean(leanFile),
-    'usage:set-lean': (mode) => writeLean(leanFile, mode),
+    'usage:set-lean': (value) => (value && typeof value === 'object' ? writeLeanProject(leanFile, value.project, value.enabled) : writeLean(leanFile, value)),
     'sidebar:get-state': () => ({ model: mergeSidebarModel({ historySessions: [], livePanes: [], workspaces: [] }) }),
     'terminal:get-state': () => ({ panes: [], workspaces: [], tabs: [], connected: false }),
     'new-session:options': () => ({ profiles: [], providers: {}, defaults: {} }),
@@ -87,17 +93,19 @@ async function host() {
     const content = await evaluate(`document.querySelector('.plan-usage-menu').textContent`);
     for (const expected of ['Claude', 'Codex', 'Cursor', 'Week 53%', 'Resets left: 2', 'Resets left: unknown', 'Stale', 'Unavailable', 'Included <1%']) assert.ok(content.includes(expected), expected);
     assert.ok(!content.includes('$'), 'no visible dollar ratio beside the Cursor percentage');
-    // One boxed group per provider, each headed by its logo, name and plan count;
-    // the Claude "Default" and the Codex "Default" land in different groups.
+    // One group per provider, each headed by its logo, name and plan count; the
+    // Claude "Default" and the Codex "Default" land in different groups. Since the
+    // Lighthouse popups (f50e45d8, 2026-11-09) the logo is 14px and a hairline
+    // divides each group from the one above instead of a box around each.
     const groups = await evaluate(`[...document.querySelectorAll('.plan-usage-scroll > .plan-usage-group')].map((g) => {
       const img = g.querySelector('.plan-usage-provider img');
-      return { head: g.querySelector('.plan-usage-provider').textContent, logo: !!img && img.complete && img.getBoundingClientRect().width === 15,
-        rows: [...g.querySelectorAll('.plan-usage-row strong')].map((s) => s.textContent), boxed: getComputedStyle(g).borderTopStyle === 'solid' && parseFloat(getComputedStyle(g).borderTopWidth) > 0 };
+      return { head: g.querySelector('.plan-usage-provider').textContent, logo: !!img && img.complete && img.getBoundingClientRect().width === 14,
+        rows: [...g.querySelectorAll('.plan-usage-row strong')].map((s) => s.textContent), divided: getComputedStyle(g).borderTopStyle === 'solid' && parseFloat(getComputedStyle(g).borderTopWidth) > 0 };
     })`);
     assert.deepEqual(groups, [
-      { head: 'Claude3 plans', logo: true, rows: ['Default', 'Research', 'Writing'], boxed: true },
-      { head: 'Codex2 plans', logo: true, rows: ['Default', 'Projects'], boxed: true },
-      { head: 'Cursor1 plan', logo: true, rows: ['Cursor'], boxed: true },
+      { head: 'Claude3 plans', logo: true, rows: ['Default', 'Research', 'Writing'], divided: false },
+      { head: 'Codex2 plans', logo: true, rows: ['Default', 'Projects'], divided: true },
+      { head: 'Cursor1 plan', logo: true, rows: ['Cursor'], divided: true },
     ]);
     assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length === document.querySelectorAll('.plan-usage-group .plan-usage-row').length`), true, 'every plan sits inside its provider group');
     await shot('groups');
@@ -111,26 +119,47 @@ async function host() {
     const lean = `(() => {
       const g = document.querySelector('.plan-lean-seg');
       const on = [...g.querySelectorAll('[role=radio]')].filter((b) => b.getAttribute('aria-checked') === 'true').map((b) => b.textContent);
-      const rows = [...document.querySelectorAll('.plan-lean-route')].map((r) => [...r.children].map((c) => c.textContent).join(' | '));
-      const cells = [...document.querySelectorAll('.plan-lean-seg button, .plan-lean-route > span')];
+      const rows = [...document.querySelectorAll('.plan-lean-now > .plan-lean-route')].map((r) => [...r.children].map((c) => c.textContent).join(' | '));
+      const cells = [...document.querySelectorAll('.plan-lean-seg button, .plan-lean-route > span, .plan-lean-switch')];
       return { labels: [...g.querySelectorAll('[role=radio]')].map((b) => b.textContent), on, rows,
         detail: document.querySelector('.plan-lean-detail')?.textContent || '',
         clipped: cells.some((b) => b.scrollWidth > b.clientWidth + 1),
-        within: (() => { const p = document.querySelector('.plan-usage-menu').getBoundingClientRect(); return [g, document.querySelector('.plan-lean-now')].every((e) => { const r = e.getBoundingClientRect(); return r.left >= p.left && r.right <= p.right; }); })() };
+        within: (() => { const p = document.querySelector('.plan-usage-menu').getBoundingClientRect(); return [g, document.querySelector('.plan-lean-now'), ...document.querySelectorAll('.plan-lean-switch')].every((e) => { const r = e.getBoundingClientRect(); return r.left >= p.left && r.right <= p.right; }); })() };
     })()`;
-    const rowsAre = (rows) => `JSON.stringify([...document.querySelectorAll('.plan-lean-route')].map((r) => [...r.children].map((c) => c.textContent).join(' | '))) === ${JSON.stringify(JSON.stringify(rows))}`;
-    const BALANCED = ['Image work | Projects | 19% used this week', 'Simple mechanical work | Cursor | <1% used this month', 'Large general jobs | Projects | 19% used this week', 'Everything else | Claude | '];
+    const rowsAre = (rows) => `JSON.stringify([...document.querySelectorAll('.plan-lean-now > .plan-lean-route')].map((r) => [...r.children].map((c) => c.textContent).join(' | '))) === ${JSON.stringify(JSON.stringify(rows))}`;
+    // The "Large general jobs" row went with the 2026-10-18 Balanced rule.
+    const BALANCED = ['Image work | Projects | 19% used this week', 'Simple mechanical work | Cursor | <1% used this month', 'Everything else | Claude | '];
+    // Project routes (2026-11-23): label | where builds go | how full or why not | switch.
+    const projectIs = (row) => `JSON.stringify([...document.querySelectorAll('.plan-lean-projects .plan-lean-route')].map((r) => [...r.children].map((c) => c.textContent).join(' | '))) === ${JSON.stringify(JSON.stringify([row]))}`;
+    const switchState = `(() => { const b = document.querySelector('.plan-lean-projects [role=switch]'); return { checked: b.getAttribute('aria-checked'), label: b.getAttribute('aria-label'), folders: document.querySelector('.plan-lean-projects .plan-lean-route-label').title }; })()`;
     await waitFor(rowsAre(BALANCED));
     let state = await evaluate(lean);
     assert.deepEqual(state.labels, ['Claude only', 'Lean Claude', 'Balanced', 'Lean OpenAI']);
     assert.deepEqual(state.on, ['Balanced']);
     assert.equal(state.clipped, false);
     assert.equal(state.within, true);
-    assert.equal(fs.existsSync(leanFile), false, 'opening the menu must not write the setting');
+    assert.equal(fs.readFileSync(leanFile, 'utf8'), seeded, 'opening the menu must not write the setting');
+    await waitFor(projectIs('Acme App builds | Cursor | <1% used this month | On'));
+    assert.deepEqual(await evaluate(switchState), { checked: 'true', label: 'Send Acme App test-backed builds to Cursor', folders: 'Test-backed builds in C:\\work\\acme, C:\\work\\.orch\\acme\\slot-*' });
+    // The project row's target lines up with the Right now targets above it.
+    assert.equal(await evaluate(`new Set([...document.querySelectorAll('.plan-lean-route-target')].map((t) => Math.round(t.getBoundingClientRect().left))).size`), 1, 'one target column');
     await shot('lean-balanced');
+    // The switch turns the override off and on, saved at once to the drive's own
+    // file; the setting stays unsaved and the project keeps its folders.
+    await click('.plan-lean-projects [role=switch]');
+    await waitFor(projectIs('Acme App builds | Claude | Off: builds route as general work | Off'));
+    assert.equal((await evaluate(switchState)).checked, 'false');
+    assert.deepEqual([readLean(leanFile).saved, readLean(leanFile).projects.map((p) => [p.id, p.enabled, p.folders.length])], [false, [['acme', false, 2]]]);
+    assert.equal((await evaluate(lean)).clipped, false);
+    await shot('project-off');
+    await click('.plan-lean-projects [role=switch]');
+    await waitFor(projectIs('Acme App builds | Cursor | <1% used this month | On'));
+    assert.equal(readLean(leanFile).projects[0].enabled, true);
     await click('.plan-lean-seg [data-lean="claude-only"]');
     await waitFor(rowsAre(['All work | Claude | ']));
+    await waitFor(projectIs('Acme App builds | Claude | Heavy lifting is Claude only | On'));
     assert.equal(readLean(leanFile).mode, 'claude-only');
+    assert.equal(readLean(leanFile).projects.length, 1, 'changing the setting keeps the project override');
     state = await evaluate(lean);
     assert.equal(state.detail, 'Claude does all the work. No Astra runs, GPT or Cursor workers.');
     await shot('lean-claude-only');
@@ -143,6 +172,7 @@ async function host() {
     await click('.plan-lean-seg [data-lean="lean-openai"]');
     await waitFor(rowsAre(['Image work | Projects | 19% used this week', 'Simple mechanical work | Cursor | <1% used this month', 'Connected work and reviews | Claude | ', 'Everything else | Projects | 19% used this week']));
     assert.equal(readLean(leanFile).mode, 'lean-openai');
+    await waitFor(projectIs('Acme App builds | Cursor | <1% used this month | On'));
     assert.equal((await evaluate(lean)).clipped, false);
     await shot('lean-openai');
     // Arrow keys move the choice and save it, like any radio group.
@@ -203,10 +233,14 @@ async function host() {
     await win.webContents.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width: 960, height: 480, deviceScaleFactor: 1, mobile: false });
     await sleep(100);
     await evaluate(`document.querySelector('.plan-usage-menu').focus()`);
-    // The heavy-lifting group is ONE stop (its checked option), then the plan list.
+    // The heavy-lifting group is ONE stop (its checked option), then each project
+    // switch, then the plan list.
     win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
     win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
     await waitFor(`document.activeElement.dataset.lean === 'balanced'`);
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+    await waitFor(`document.activeElement.classList.contains('plan-lean-switch')`);
     win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
     win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
     await waitFor(`document.activeElement.classList.contains('plan-usage-scroll')`);
@@ -223,8 +257,9 @@ async function host() {
     await waitFor(`!!document.querySelector('.plan-usage-message[role=alert]')`);
     await shot('refresh-error');
     assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length`), 6);
-    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'six plans', 'one boxed group per provider with logo, name and plan count', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480',
-      'heavy lifting: unset reads Balanced, clicks and arrow keys save to the relocated profile only, Right now follows the seats, labels unclipped at 960px'] };
+    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'six plans', 'one group per provider with logo, name and plan count, hairline between groups', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480',
+      'heavy lifting: unset reads Balanced, clicks and arrow keys save to the relocated profile only, Right now follows the seats, labels unclipped at 960px',
+      'project routes: the override row reads Cursor, Off and Claude only correctly, its switch saves off and on to the relocated profile, setting changes keep it, unclipped at 960px, one Tab stop'] };
     fs.writeFileSync(path.join(OUT, 'verdict.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));
   } finally { win.destroy(); app.quit(); }
 }

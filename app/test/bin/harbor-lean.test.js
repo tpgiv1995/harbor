@@ -112,7 +112,7 @@ test('--task routes one task and names the tag the guard expects', (t) => {
   assert.deepEqual([general.task, general.large, general.route.side, general.route.reason], ['general', true, 'claude', 'Heavy lifting leans Claude.']);
   const bad = run(root, { HARBOR_PROVIDER_LEAN_FILE: file }, ['--task', 'everything']);
   assert.equal(bad.status, 2);
-  assert.match(bad.stderr, /unknown task kind "everything"\. Kinds: image, mechanical, connected, review, general/);
+  assert.match(bad.stderr, /unknown task kind "everything"\. Kinds: image, mechanical, build, connected, review, general/);
   // The kinds dropped as merely good are no longer accepted.
   for (const gone of ['visual', 'writing', 'judgement']) assert.equal(run(root, { HARBOR_PROVIDER_LEAN_FILE: file }, ['--task', gone]).status, 2, gone);
 });
@@ -171,4 +171,76 @@ test('Claude only needs no seats at all', (t) => {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /GPT seats this week: none found/);
   assert.match(r.stdout, /Verdict: All work: Claude\./);
+});
+
+// A per-project Cursor route for test-backed builds (Pat, 2026-11-23). The
+// project and its folders are synthetic and real folders under the test home,
+// so `--project` and the current folder both resolve the way a session's would.
+function projectHome(t, cursorPct) {
+  const root = home(t, { '.codex-work': 62, '.codex-pro': 41 });
+  const acme = path.join(root, 'work', 'acme');
+  const slot = path.join(root, 'work', '.orch', 'acme', 'slot-3');
+  const other = path.join(root, 'work', 'other');
+  for (const dir of [path.join(acme, 'app'), slot, other]) fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(root, 'lean.json');
+  fs.writeFileSync(file, JSON.stringify({ mode: 'balanced', updatedAt: new Date().toISOString(), projects: [
+    { id: 'acme', label: 'Acme App', build: 'cursor', enabled: true, folders: [acme, path.join(root, 'work', '.orch', 'acme', 'slot-*')] },
+  ] }));
+  const env = { HARBOR_PROVIDER_LEAN_FILE: file };
+  if (cursorPct !== null) env.HARBOR_PLAN_USAGE_FIXTURE = cursorFixture(root, cursorPct);
+  return { root, acme, slot, other, file, env };
+}
+
+test('build on an overridden project goes to Cursor, by --project or by the current folder', (t) => {
+  const p = projectHome(t, 3);
+  const named = run(p.root, p.env, ['--task', 'build', '--project', path.join(p.acme, 'app')]);
+  assert.equal(named.status, 0, named.stderr);
+  assert.match(named.stdout, /^build: Cursor \(Acme App sends test-backed builds to Cursor/);
+  assert.match(named.stdout, /\r?\nRun it (with node C:\/tools\/cursor-worker\/cursor-worker\.mjs --task build|by putting HARBOR_LEAN_TASK=build in front of the cursor-agent command)/);
+  const slot = JSON.parse(run(p.root, p.env, ['--task', 'build', '--project', p.slot, '--json']).stdout);
+  assert.deepEqual([slot.task, slot.route.side, slot.route.project, slot.project.id, slot.project.enabled], ['build', 'cursor', 'acme', 'acme', true]);
+  // No --project: the folder the session runs in.
+  const here = spawnSync(process.execPath, [BIN, '--task', 'build'], { cwd: p.acme, encoding: 'utf8',
+    env: { ...process.env, USERPROFILE: p.root, HOME: p.root, HARBOR_CONFIG_FILE: path.join(p.root, 'config.json'), HARBOR_NO_USAGE_FETCH: '1', ...p.env } });
+  assert.equal(here.status, 0, here.stderr);
+  assert.match(here.stdout, /^build: Cursor /);
+});
+
+test('build on a project without the override routes as general work', (t) => {
+  const p = projectHome(t, 3);
+  const r = run(p.root, p.env, ['--task', 'build', '--project', p.other]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), 'build: Claude (Balanced keeps general work on Claude, where it is best done)');
+  const json = JSON.parse(run(p.root, p.env, ['--task', 'build', '--project', p.other, '--json']).stdout);
+  assert.equal(json.project, null);
+  // The same project switched off in the menu routes the same way.
+  const saved = JSON.parse(fs.readFileSync(p.file, 'utf8'));
+  saved.projects[0].enabled = false;
+  fs.writeFileSync(p.file, JSON.stringify(saved));
+  assert.equal(run(p.root, p.env, ['--task', 'build', '--project', p.acme]).stdout.trim(), 'build: Claude (Balanced keeps general work on Claude, where it is best done)');
+});
+
+test('build on an overridden project with Cursor at 95% stays off Cursor, and says why', (t) => {
+  const p = projectHome(t, 95);
+  const r = JSON.parse(run(p.root, p.env, ['--task', 'build', '--project', p.acme, '--json']).stdout);
+  assert.deepEqual([r.route.side, r.route.reason], ['claude', 'Cursor is at least 90% used this month. Balanced keeps general work on Claude, where it is best done.']);
+});
+
+test('build on an overridden project with Cursor usage unreadable stays off Cursor, and says why', (t) => {
+  const p = projectHome(t, null);
+  const r = run(p.root, p.env, ['--task', 'build', '--project', p.acme]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "build: Claude (Cursor's usage could not be read. Balanced keeps general work on Claude, where it is best done)");
+});
+
+test('the full report names each project override and where its builds go', (t) => {
+  const p = projectHome(t, 3);
+  const r = run(p.root, p.env);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\nProject overrides:\r?\n  Acme App \(on\): test-backed builds go to Cursor \(3% used this month\)\. Folders: .*acme.*slot-\*/);
+  const json = JSON.parse(run(p.root, p.env, ['--json']).stdout);
+  assert.deepEqual(json.projects.map((x) => [x.id, x.enabled, x.target]), [['acme', true, 'Cursor']]);
+  // No overrides: no section.
+  const plain = home(t, {});
+  assert.doesNotMatch(run(plain, { HARBOR_PROVIDER_LEAN_FILE: path.join(plain, 'missing.json') }).stdout, /Project overrides/);
 });

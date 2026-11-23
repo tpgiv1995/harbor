@@ -211,6 +211,8 @@ const api = {
     getPlans: () => ipcRenderer.invoke('usage:get-plans'),
     getLean: () => ipcRenderer.invoke('usage:get-lean'),
     setLean: (mode) => ipcRenderer.invoke('usage:set-lean', mode),
+    // One project override's switch, through the same local-only channel.
+    setLeanProject: (id, enabled) => ipcRenderer.invoke('usage:set-lean', { project: id, enabled }),
     onUpdate: (listener) => {
       const handler = () => listener();
       ipcRenderer.on('usage:update', handler);

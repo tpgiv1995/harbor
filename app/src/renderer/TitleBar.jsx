@@ -5,23 +5,48 @@ import { AppMenu } from './AppMenu.jsx';
 import { MemoryChip } from './MemoryChip.jsx';
 import { armedConfirmClick, DISARM_MS } from './armed-confirm.cjs';
 import { ago, formatWindow, formatResets } from './plan-usage-format.cjs';
-import { LEAN_MODES, leanMode, leanVerdict, seatsFromPlans, cursorFromPlans } from '../shared/provider-lean.cjs';
+import { LEAN_MODES, leanMode, leanVerdict, projectRows, seatsFromPlans, cursorFromPlans } from '../shared/provider-lean.cjs';
 import { providerIdentity } from './providers.js';
 
 // "Heavy lifting": how much Claude sessions may hand to GPT seats. Saved by main
 // (providers/provider-lean.js) and read by sessions before they launch Astra or
 // a codex/cursor worker. Each click saves at once; there is no Apply.
+// Below it, one row per project override (Pat, 2026-11-23): where that
+// project's test-backed builds go right now, and a switch that turns the
+// override off and on (saved at once, like the setting).
 function LeanControl({ data }) {
   const [lean, setLean] = useState(null);
+  const [projects, setProjects] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [savingProject, setSavingProject] = useState(null);
   const [error, setError] = useState('');
   useEffect(() => {
     let live = true;
     window.harbor.usage.getLean()
-      .then((value) => { if (live) setLean(value?.mode || null); })
+      .then((value) => {
+        if (!live) return;
+        setLean(value?.mode || null);
+        setProjects(Array.isArray(value?.projects) ? value.projects : []);
+      })
       .catch(() => { if (live) setError('Could not read this setting.'); });
     return () => { live = false; };
   }, []);
+  const switchProject = async (id, enabled) => {
+    if (savingProject) return;
+    const previous = projects;
+    setProjects(projects.map((p) => (p.id === id ? { ...p, enabled } : p)));
+    setSavingProject(id);
+    setError('');
+    try {
+      const saved = await window.harbor.usage.setLeanProject(id, enabled);
+      if (Array.isArray(saved?.projects)) setProjects(saved.projects);
+    } catch {
+      setProjects(previous);
+      setError('Could not save this project route. Try again.');
+    } finally {
+      setSavingProject(null);
+    }
+  };
   const choose = async (id) => {
     if (saving || id === lean) return;
     const previous = lean;
@@ -53,6 +78,7 @@ function LeanControl({ data }) {
   const rows = mode && (!needsUsage || data)
     ? leanVerdict(lean, seatsFromPlans(data?.plans), cursorFromPlans(data?.plans)).rows
     : null;
+  const overrides = rows ? projectRows(lean, seatsFromPlans(data?.plans), cursorFromPlans(data?.plans), projects) : [];
   return <div className="plan-lean">
     <div className="plan-lean-head">Heavy lifting</div>
     <div className="plan-lean-seg" role="radiogroup" aria-label="Heavy lifting" onKeyDown={step}>
@@ -71,6 +97,18 @@ function LeanControl({ data }) {
         <span className="plan-lean-route-target">{row.target}</span>
         <span className="plan-lean-route-note" title={row.note || undefined}>{row.note || ''}</span>
       </div>)}
+      {overrides.length ? <div className="plan-lean-projects" role="group" aria-label="Project routes">
+      <div className="plan-lean-now-head">Project routes</div>
+      {overrides.map((row) => <div className="plan-lean-route" key={row.id}>
+        <span className="plan-lean-route-label" title={`Test-backed builds in ${row.folders.join(', ')}`}>{row.label} builds</span>
+        <span className="plan-lean-route-target">{row.target}</span>
+        <span className="plan-lean-route-note" title={row.note || undefined}>{row.note || ''}</span>
+        <button type="button" role="switch" aria-checked={row.enabled}
+          aria-label={`Send ${row.label} test-backed builds to Cursor`}
+          className={row.enabled ? 'plan-lean-switch on' : 'plan-lean-switch'}
+          disabled={Boolean(savingProject)} onClick={() => switchProject(row.id, !row.enabled)}>{row.enabled ? 'On' : 'Off'}</button>
+      </div>)}
+      </div> : null}
     </div> : null}
   </div>;
 }

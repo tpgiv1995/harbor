@@ -10,8 +10,13 @@
 //
 //   node bin/harbor-lean                         the setting, seats and routing
 //   node bin/harbor-lean --task image [--large] [--complex]  where ONE task goes (kinds:
-//                                                image, mechanical,
+//                                                image, mechanical, build,
 //                                                connected, review, general)
+//   node bin/harbor-lean --task build [--project <folder>]   a test-backed build: Cursor
+//                                                only in a project whose override
+//                                                (the plans menu) sends builds
+//                                                there; the folder defaults to
+//                                                the current one
 //   add --json to either for the same facts as JSON
 //
 // Reads the setting (~/.harbor/provider-lean.json, or HARBOR_PROVIDER_LEAN_FILE),
@@ -27,7 +32,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const app = path.join(path.dirname(__dirname), 'app', 'src');
-const { TASK_KINDS, GPT_MAX_PCT, leanMode, leanRoute, leanVerdict, cursorFromPlans } = require(path.join(app, 'shared', 'provider-lean.cjs'));
+const { TASK_KINDS, GPT_MAX_PCT, leanMode, leanRoute, leanVerdict, cursorFromPlans, matchProject, projectRows } = require(path.join(app, 'shared', 'provider-lean.cjs'));
 const { resolveLeanFile, readLean } = require(path.join(app, 'main', 'providers', 'provider-lean.js'));
 const { createPlanUsageProvider } = require(path.join(app, 'main', 'providers', 'plan-usage.js'));
 const { defaultConfigFile } = require(path.join(app, 'shared', 'tasks-file.cjs'));
@@ -108,15 +113,29 @@ function argValue(name) {
 
 function routeText(route) {
   if (route.side === 'claude') return `Claude (${route.reason.replace(/\.$/, '')})`;
-  if (route.side === 'cursor') return 'Cursor';
+  if (route.side === 'cursor') return route.project ? `Cursor (${route.reason.replace(/\.$/, '')})` : 'Cursor';
   const why = route.seat.resetsAvailable > 0 && route.reason.includes('reset') ? ` (${route.reason.replace(/\.$/, '')})` : '';
   return `GPT seat ${route.seat.label}${route.seat.home ? `, CODEX_HOME ${route.seat.home}` : ''}${why}`;
 }
+
+// The folder a task is for (--project, else the current folder), and the
+// project override it belongs to, matched by the path as given and by the
+// file system's own spelling (8.3 names, junctions).
+function projectFor(projects) {
+  const folder = path.resolve(argValue('--project') || process.cwd());
+  let real = folder;
+  try { real = fs.realpathSync.native(folder); } catch { /* a folder that does not exist matches by name only */ }
+  const project = matchProject(projects, folder) || matchProject(projects, real);
+  return { folder, project };
+}
+
+const projectFacts = (project) => (project ? { id: project.id, label: project.label, enabled: project.enabled, folders: project.folders } : null);
 
 (async () => {
   const nowMs = Date.now();
   const file = resolveLeanFile();
   const setting = readLean(file);
+  const { folder, project } = projectFor(setting.projects);
   const [list, cursor] = await Promise.all([seats(), cursorUsage()]);
   const verdict = leanVerdict(setting.mode, list, cursor);
   const json = process.argv.includes('--json');
@@ -128,9 +147,9 @@ function routeText(route) {
       console.error(`harbor-lean: unknown task kind "${task}". Kinds: ${TASK_KINDS.map((kind) => kind.id).join(', ')}`);
       process.exit(2);
     }
-    const route = leanRoute(setting.mode, task, list, { large, cursor, complex });
+    const route = leanRoute(setting.mode, task, list, { large, cursor, complex, project });
     if (json) {
-      console.log(JSON.stringify({ mode: setting.mode, task, large, complex, route }, null, 2));
+      console.log(JSON.stringify({ mode: setting.mode, task, large, complex, folder, project: projectFacts(project), route }, null, 2));
       return;
     }
     console.log(`${task}${large ? ' (large)' : ''}${complex ? ' (complex)' : ''}: ${routeText(route)}`);
@@ -139,18 +158,23 @@ function routeText(route) {
     const imageHelper = 'C:/tools/gpt-image/gpt-image.mjs';
     const cursorWorker = 'C:/tools/cursor-worker/cursor-worker.mjs';
     if (route.side === 'gpt') console.log(`Launch it with HARBOR_LEAN_TASK=${task} in front of the codex or astra-run command${task === 'image' && fs.existsSync(imageHelper) ? `, or use node ${imageHelper}` : ''}.`);
-    if (route.side === 'cursor') console.log(`Run it ${fs.existsSync(cursorWorker) ? `with node ${cursorWorker}, or put ` : 'by putting '}HARBOR_LEAN_TASK=mechanical in front of the cursor-agent command.`);
+    if (route.side === 'cursor' && task === 'build') {
+      console.log(fs.existsSync(cursorWorker)
+        ? `Run it with node ${cursorWorker} --task build: its --check is the failing test, and a Claude reviewer reads the whole change after.`
+        : 'Run it by putting HARBOR_LEAN_TASK=build in front of the cursor-agent command; its check is the failing test, and a Claude reviewer reads the whole change after.');
+    } else if (route.side === 'cursor') console.log(`Run it ${fs.existsSync(cursorWorker) ? `with node ${cursorWorker}, or put ` : 'by putting '}HARBOR_LEAN_TASK=mechanical in front of the cursor-agent command.`);
     return;
   }
   const routes = TASK_KINDS.map((kind) => ({
     kind: kind.id,
     label: kind.label,
     detail: kind.detail,
-    route: leanRoute(setting.mode, kind.id, list, { cursor }),
+    route: leanRoute(setting.mode, kind.id, list, { cursor, project }),
     large: kind.side === null ? leanRoute(setting.mode, kind.id, list, { large: true, cursor }) : undefined,
   }));
+  const projects = projectRows(setting.mode, list, cursor, setting.projects);
   if (json) {
-    console.log(JSON.stringify({ mode: setting.mode, saved: setting.saved, updatedAt: setting.updatedAt, file, seats: list, cursor, verdict, routes }, null, 2));
+    console.log(JSON.stringify({ mode: setting.mode, saved: setting.saved, updatedAt: setting.updatedAt, file, seats: list, cursor, verdict, routes, projects, folder, project: projectFacts(project) }, null, 2));
     return;
   }
   const label = leanMode(setting.mode).label;
@@ -190,7 +214,15 @@ function routeText(route) {
     console.log(`  ${r.label} (${r.detail}): ${routeText(r.route)}`);
     if (r.large && r.large.side !== r.route.side) console.log(`    large jobs: ${routeText(r.large)}`);
   }
-  console.log('One task: node bin/harbor-lean --task <kind> [--large] [--complex]');
+  // Per-project routes (Pat, 2026-11-23): each project override, switched on
+  // or off in the plans menu, and where its test-backed builds go right now.
+  if (projects.length) {
+    console.log('Project overrides:');
+    for (const p of projects) {
+      console.log(`  ${p.label} (${p.enabled ? 'on' : 'off'}): test-backed builds go to ${p.target}${p.note ? ` (${p.note})` : ''}. Folders: ${p.folders.join(', ')}`);
+    }
+  }
+  console.log('One task: node bin/harbor-lean --task <kind> [--large] [--complex] [--project <folder>]');
 })().catch((error) => {
   console.error(`harbor-lean: ${error.message}`);
   process.exit(1);
