@@ -28,6 +28,12 @@ export const PROVIDERS = {
     color: '#a78bfa',
     logo: new URL('../../assets/logo-cursor.svg', import.meta.url).href,
   },
+  // Usage only (the plans dropdown): Gemini through Google's Antigravity CLI has no Harbor panes.
+  gemini: {
+    label: 'Gemini',
+    color: '#8ab4f8',
+    logo: new URL('../../assets/logo-gemini.svg', import.meta.url).href,
+  },
 };
 
 export function providerIdentity(provider = 'claude') {

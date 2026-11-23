@@ -216,7 +216,7 @@ export function PlanUsageButton() {
           {/* One boxed group per provider, headed by its logo, so a plan name
               that exists on two providers (an account with both a Claude and
               a Codex plan) reads as two different things (Pat, 2026-10-13). */}
-          {['claude', 'codex', 'cursor'].map((provider) => {
+          {['claude', 'codex', 'cursor', 'gemini'].map((provider) => {
             const plans = data?.plans.filter((p) => p.provider === provider) || [];
             const identity = providerIdentity(provider);
             return plans.length ? <section key={provider} className="plan-usage-group" aria-label={`${provider} plans`}>

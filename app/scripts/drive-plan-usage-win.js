@@ -22,6 +22,8 @@ function fixture() {
     plan('codex', 'codex-a', 'Default', [window('weekly', 53, 120)], { planType: 'Example plan', resets: { available: 2, nextExpiresAt: (now + 4 * 86400000) / 1000 } }),
     plan('codex', 'codex-b', 'Projects', [window('fiveHour', 0, 3), window('weekly', 19, 48)], { resetsReason: 'Reset credits could not be read with this CLI sign-in.' }),
     plan('cursor', 'cursor-a', 'Cursor', [{ kind: 'monthly', usedPct: 0.4, includedPct: 0.4, autoPct: 0, apiPct: 0.4, resetsAt: (now + 12 * 86400000) / 1000, used: 5, limit: 20, unit: 'USD' }]),
+    // Gemini (2026-11-23): the shape geminiPlan() builds from `agy -p /usage`, a 5-hour and a weekly window, no email.
+    plan('gemini', 'gemini:default', 'Gemini', [window('fiveHour', 5.3, 4.7), window('weekly', 1.5, 167)], { email: null, source: 'cli' }),
   ] };
 }
 
@@ -88,10 +90,10 @@ async function host() {
     await waitFor(`!!document.querySelector('.titlebar-controls [aria-label="Plan usage"]')`);
     assert.equal(reads, 0, 'closed dropdown must never fetch');
     await click('.titlebar-controls [aria-label="Plan usage"]');
-    await waitFor(`document.querySelectorAll('.plan-usage-row').length === 6`);
-    assert.deepEqual(await evaluate(geometry), { within: true, overflow: false, portal: true, rows: 6 });
+    await waitFor(`document.querySelectorAll('.plan-usage-row').length === 7`);
+    assert.deepEqual(await evaluate(geometry), { within: true, overflow: false, portal: true, rows: 7 });
     const content = await evaluate(`document.querySelector('.plan-usage-menu').textContent`);
-    for (const expected of ['Claude', 'Codex', 'Cursor', 'Week 53%', 'Resets left: 2', 'Resets left: unknown', 'Stale', 'Unavailable', 'Included <1%']) assert.ok(content.includes(expected), expected);
+    for (const expected of ['Claude', 'Codex', 'Cursor', 'Gemini', 'Week 53%', 'Resets left: 2', 'Resets left: unknown', 'Stale', 'Unavailable', 'Included <1%']) assert.ok(content.includes(expected), expected);
     assert.ok(!content.includes('$'), 'no visible dollar ratio beside the Cursor percentage');
     // One group per provider, each headed by its logo, name and plan count; the
     // Claude "Default" and the Codex "Default" land in different groups. Since the
@@ -106,9 +108,18 @@ async function host() {
       { head: 'Claude3 plans', logo: true, rows: ['Default', 'Research', 'Writing'], divided: false },
       { head: 'Codex2 plans', logo: true, rows: ['Default', 'Projects'], divided: true },
       { head: 'Cursor1 plan', logo: true, rows: ['Cursor'], divided: true },
+      { head: 'Gemini1 plan', logo: true, rows: ['Gemini'], divided: true },
     ]);
     assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length === document.querySelectorAll('.plan-usage-group .plan-usage-row').length`), true, 'every plan sits inside its provider group');
     await shot('groups');
+    // The Gemini group: its own logo, both windows with their reset times, and no account line (the CLI names none).
+    const gemini = await evaluate(`(() => { const g = document.querySelector('section[aria-label="gemini plans"]'); g.scrollIntoView({ block: 'end' });
+      const img = g.querySelector('.plan-usage-provider img');
+      return { windows: [...g.querySelectorAll('.plan-usage-window')].map((w) => w.querySelector('.plan-usage-percent').textContent + ' | ' + (w.querySelector('.plan-usage-reset').textContent ? 'reset' : 'none')),
+        account: !!g.querySelector('.plan-usage-account'), logoLoaded: img.complete && img.naturalWidth > 0 }; })()`);
+    assert.deepEqual(gemini, { windows: ['5h 5% | reset', 'Week 2% | reset'], account: false, logoLoaded: true });
+    await shot('gemini');
+    await evaluate(`document.querySelector('.plan-usage-scroll').scrollTop = 0`);
     const cursorTooltip = await evaluate(`document.querySelector('section[aria-label="cursor plans"] .plan-usage-window').title`);
     for (const expected of ['Included <1% used', 'Auto 0% used', 'API <1% used']) assert.ok(cursorTooltip.includes(expected), expected);
     assert.equal(reads, 1);
@@ -223,8 +234,8 @@ async function host() {
     await sleep(100);
     assert.equal(await evaluate(`(() => {const r=document.querySelector('.titlebar-controls [aria-label="Plan usage"]').getBoundingClientRect();return r.left >= 0 && r.right <= innerWidth;})()`), true);
     await click('.titlebar-controls [aria-label="Plan usage"]');
-    await waitFor(`document.querySelectorAll('.plan-usage-row').length === 6`);
-    assert.deepEqual(await evaluate(geometry), { within: true, overflow: false, portal: true, rows: 6 });
+    await waitFor(`document.querySelectorAll('.plan-usage-row').length === 7`);
+    assert.deepEqual(await evaluate(geometry), { within: true, overflow: false, portal: true, rows: 7 });
     await waitFor(rowsAre(BALANCED));
     state = await evaluate(lean);
     assert.equal(state.clipped, false, 'segment labels fit at the 960px minimum');
@@ -256,8 +267,8 @@ async function host() {
     await click('.titlebar-controls [aria-label="Plan usage"]');
     await waitFor(`!!document.querySelector('.plan-usage-message[role=alert]')`);
     await shot('refresh-error');
-    assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length`), 6);
-    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'six plans', 'one group per provider with logo, name and plan count, hairline between groups', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480',
+    assert.equal(await evaluate(`document.querySelectorAll('.plan-usage-row').length`), 7);
+    const report = { result: 'PASS', reads, wide: '1440x1000', narrow: '960x800', checks: ['portal', 'seven plans', 'a Gemini group with its logo and both windows', 'one group per provider with logo, name and plan count, hairline between groups', 'weekly-only Codex', 'known and unknown resets', 'stale and unavailable', 'Cursor below one percent, no visible dollars, Included/Auto/API tooltip', 'refresh', 'Escape and focus return', 'outside close', 'no closed fetch', 'failed refresh retains rows', 'geometry and overflow', 'narrow trigger visible', 'keyboard scrolling at 960x480',
       'heavy lifting: unset reads Balanced, clicks and arrow keys save to the relocated profile only, Right now follows the seats, labels unclipped at 960px',
       'project routes: the override row reads Cursor, Off and Claude only correctly, its switch saves off and on to the relocated profile, setting changes keep it, unclipped at 960px, one Tab stop'] };
     fs.writeFileSync(path.join(OUT, 'verdict.json'), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));

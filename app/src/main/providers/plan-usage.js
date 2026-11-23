@@ -217,6 +217,41 @@ function createRequestCache(now) {
   };
 }
 
+// Gemini (Google's Antigravity CLI, `agy`): `agy -p /usage --output-format json` is answered by the CLI itself (no
+// model turn, no tokens) with the account's quota groups, each a weekly and a 5-hour bucket of `remaining_fraction`
+// and `reset_time` (measured on agy 1.5.14, 2026-11-23). Harbor runs it only when the dropdown opens or refreshes,
+// through the shared one-minute cooldown, bounded to 10 seconds, with the CLI's self-updater switched off, and never
+// reads or passes the CLI's credentials. The window kinds match the Claude rows.
+const GEMINI_WINDOWS = { '5h': ['fiveHour', 300], weekly: ['weekly', 10080] };
+function geminiWindows(body) {
+  const groups = body?.command?.data?.groups;
+  if (!Array.isArray(groups)) return null;
+  // The group the Gemini models share (Neon, Hydrogen, Flash); not the separate Claude/GPT or Argon groups.
+  const group = groups.find((g) => /^gemini models$/i.test(String(g?.name || '')))
+    || groups.find((g) => /gemini 4 neon/i.test(String(g?.description || '')));
+  if (!group || !Array.isArray(group.buckets)) return null;
+  const windows = [];
+  for (const b of group.buckets) {
+    const kind = GEMINI_WINDOWS[b?.window];
+    if (!kind || !finite(b.remaining_fraction)) continue;
+    const reset = stamp(b.reset_time);
+    windows.push({ kind: kind[0], windowMinutes: kind[1], usedPct: Math.max(0, Math.min(100, (1 - b.remaining_fraction) * 100)),
+      resetsAt: reset > 0 ? Math.floor(reset / 1000) : null, rolled: false });
+  }
+  return windows.length ? windows.sort((a, b) => a.windowMinutes - b.windowMinutes) : null;
+}
+
+function runAgyUsage(bin, agyHome) {
+  return new Promise((resolve) => {
+    const { execFile } = require('node:child_process');
+    execFile(bin, ['-p', '/usage', '--output-format', 'json', '--settings', '{"disableSlashCommands":false}'], {
+      cwd: agyHome || undefined,
+      env: { ...process.env, ...(agyHome ? { USERPROFILE: agyHome, HOME: agyHome } : {}), AGY_CLI_DISABLE_AUTO_UPDATE: 'true' },
+      windowsHide: true, timeout: 10_000, maxBuffer: 1 << 20, encoding: 'utf8',
+    }, (error, stdout) => resolve({ error, stdout: String(stdout || '') }));
+  });
+}
+
 function createPlanUsageProvider({
   usageProvider,
   profiles = [],
@@ -228,6 +263,7 @@ function createPlanUsageProvider({
   fetchImpl = globalThis.fetch,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  runGeminiUsage = runAgyUsage,
 } = {}) {
   let flight;
   const cachedRequest = createRequestCache(now);
@@ -545,10 +581,49 @@ function createPlanUsageProvider({
       lastGood: lastGood || null,
     };
   }
+  // Where Gemini's CLI is: HARBOR_AGY_BIN and HARBOR_AGY_HOME, else ~/.harbor/gemini.json ({ "bin": ..., "home": ... },
+  // a machine's own pinned install and the profile folder that holds its sign-in), else the CLI installer's default
+  // %LOCALAPPDATA%\agy\bin\agy.exe (the install target agy 1.5.14 itself names) with the user's own profile. No CLI
+  // found: no Gemini row at all.
+  async function geminiConfig() {
+    const saved = await readJson(path.join(home, '.harbor', 'gemini.json'));
+    const bin = env.HARBOR_AGY_BIN || saved?.bin
+      || (platform === 'win32' && env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'agy', 'bin', 'agy.exe') : path.join(home, '.local', 'bin', 'agy'));
+    const agyHome = env.HARBOR_AGY_HOME || saved?.home || null;
+    try {
+      await io.stat(bin);
+    } catch {
+      return null;
+    }
+    return { bin, agyHome };
+  }
+
+  async function geminiPlan() {
+    const cfg = await geminiConfig();
+    if (!cfg) return null;
+    const shape = (sample, reason) => ({
+      provider: 'gemini', id: 'gemini:default', label: 'Gemini', email: null, planType: null,
+      windows: sample?.windows || [], resets: null, source: sample ? 'cli' : null, updatedAt: sample?.updatedAt || null,
+      unavailable: !sample, reason: sample ? null : reason,
+    });
+    if (offline) return shape(null, 'Online usage checks are disabled.');
+    const result = await cachedRequest(`gemini:${cfg.bin}`, `${cfg.bin}\0${cfg.agyHome || ''}`, async () => {
+      const run = await runGeminiUsage(cfg.bin, cfg.agyHome);
+      let body = null;
+      try { body = JSON.parse(run.stdout); } catch { body = null; }
+      const windows = body ? geminiWindows(body) : null;
+      if (windows) return { value: { windows, updatedAt: new Date(now()).toISOString() }, reason: null };
+      if (run.error?.killed) return { value: null, reason: 'Gemini usage read timed out after 10 seconds.' };
+      if (body?.error) return { value: null, reason: /sign in|authenticat/i.test(body.error) ? 'Gemini CLI is signed out; sign in again with agy.' : 'Gemini CLI could not read its usage.' };
+      return { value: null, reason: 'Gemini CLI reported no usage windows.' };
+    });
+    return shape(result.value, result.reason);
+  }
+
   async function collect() {
     if (env.HARBOR_PLAN_USAGE_FIXTURE) {
       const fixture = await readJson(env.HARBOR_PLAN_USAGE_FIXTURE);
-      if (!Array.isArray(fixture?.plans) || !fixture.plans.every((p) => p && ['claude', 'codex', 'cursor'].includes(p.provider)
+      if (!Array.isArray(fixture?.plans) || !fixture.plans.every((p) => p && ['claude', 'codex', 'cursor', 'gemini'].includes(p.provider)
         && typeof p.id === 'string' && typeof p.label === 'string' && Array.isArray(p.windows)
         && p.windows.every((w) => w && typeof w.kind === 'string' && (w.usedPct == null || finite(w.usedPct))))) {
         throw new Error('Plan usage fixture is unreadable or invalid.');
@@ -594,8 +669,8 @@ function createPlanUsageProvider({
         reason,
       };
     }));
-    const [claudePlans, codexPlans, cursor] = await Promise.all([plans, allCodexPlans(time), cursorPlan()]);
-    return { generatedAt: new Date(now()).toISOString(), plans: [...claudePlans, ...codexPlans, cursor] };
+    const [claudePlans, codexPlans, cursor, gemini] = await Promise.all([plans, allCodexPlans(time), cursorPlan(), geminiPlan()]);
+    return { generatedAt: new Date(now()).toISOString(), plans: [...claudePlans, ...codexPlans, cursor, ...(gemini ? [gemini] : [])] };
   }
 
   async function allCodexPlans(time, withHome = false) {
@@ -640,4 +715,4 @@ function createPlanUsageProvider({
   };
 }
 
-module.exports = { createPlanUsageProvider, createRequestCache, codexHomeLabel, discoverCodexHomes, readRolloutSample, windowsFromLimits, jwtClaims, resetCredits, cursorWindow, cursorAuthFile, TAIL_BYTES };
+module.exports = { createPlanUsageProvider, createRequestCache, codexHomeLabel, discoverCodexHomes, readRolloutSample, windowsFromLimits, jwtClaims, resetCredits, cursorWindow, cursorAuthFile, geminiWindows, TAIL_BYTES };
