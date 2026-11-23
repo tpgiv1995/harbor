@@ -316,3 +316,45 @@ test('the menu rows for project overrides: where builds go right now, or that it
   assert.deepEqual(projectRows('balanced', TODAY, CURSOR, [ACME])[0].folders, ACME.folders);
   for (const row of projectRows('balanced', TODAY, CURSOR, [ACME, ACME_OFF])) assert.ok(!DASHES.test(JSON.stringify(row)));
 });
+
+// Pat, 2026-11-23: an unreadable Cursor usage read must not keep Cursor off
+// while there is headroom. When the live read fails, Cursor still routes if its sign-in key is stored and the last
+// GOOD reading was under 90%; it stays off when signed out, when that reading was 90% or more, or when there was none.
+test('an unreadable Cursor read routes on the last good reading when the sign-in key is stored (OO 568)', () => {
+  const AT = '2026-11-23T03:58:00.000Z';
+  const lost = (extra) => ({ label: 'Cursor', monthlyPct: null, signedOut: false, ...extra });
+  const LAST_LOW = lost({ keyPresent: true, lastGood: { monthlyPct: 0.2, at: AT } });
+  const mech = leanRoute('balanced', 'mechanical', TODAY, { cursor: LAST_LOW });
+  assert.deepEqual([mech.side, mech.usage], ['cursor', 'last-good']);
+  assert.match(mech.reason, /^Cursor's usage could not be read just now; its last good reading was 0\.2% \(2026-11-23 03:58Z\) and its sign-in key is stored, so it stays on\. /);
+  const build = leanRoute('balanced', 'build', TODAY, { cursor: LAST_LOW, project: ACME });
+  assert.deepEqual([build.side, build.usage, build.project], ['cursor', 'last-good', 'acme']);
+  // No key stored: Claude, saying so.
+  const noKey = leanRoute('balanced', 'mechanical', TODAY, { cursor: lost({ keyPresent: false, lastGood: { monthlyPct: 0.2, at: AT } }) });
+  assert.equal(noKey.side, 'claude');
+  assert.match(noKey.reason, /^Cursor's usage could not be read and no sign-in key is stored\. /);
+  // The last good reading was 90% or more: Claude.
+  const lastFull = leanRoute('balanced', 'mechanical', TODAY, { cursor: lost({ keyPresent: true, lastGood: { monthlyPct: 95, at: AT } }) });
+  assert.equal(lastFull.side, 'claude');
+  assert.match(lastFull.reason, /^Cursor's usage could not be read, and its last good reading was 95% \(2026-11-23 03:58Z\), at least 90%\. /);
+  // No good reading ever: Claude.
+  const never = leanRoute('balanced', 'mechanical', TODAY, { cursor: lost({ keyPresent: true }) });
+  assert.equal(never.side, 'claude');
+  assert.match(never.reason, /^Cursor's usage could not be read and there is no earlier good reading\. /);
+  // Signed out wins over any saved reading.
+  const out = leanRoute('balanced', 'mechanical', TODAY, { cursor: lost({ signedOut: true, keyPresent: true, lastGood: { monthlyPct: 0.2, at: AT } }) });
+  assert.equal(out.side, 'claude');
+  assert.match(out.reason, /^Cursor is signed out; /);
+  // A live reading is still the first word, and says it is live.
+  assert.equal(leanRoute('balanced', 'mechanical', TODAY, { cursor: CURSOR }).usage, 'live');
+  assert.equal(leanRoute('balanced', 'mechanical', TODAY, { cursor: { ...CURSOR_FULL, keyPresent: true, lastGood: { monthlyPct: 0.2, at: AT } } }).side, 'claude', 'a live 90%+ beats a low saved reading');
+  // The menu rows never show a made-up live percent: they say the live read failed and give the saved reading.
+  const row = leanVerdict('balanced', TODAY, LAST_LOW).rows.find((r) => r.label === 'Simple mechanical work');
+  assert.deepEqual([row.target, row.note], ['Cursor', 'live read failed; last good reading 0.2% (2026-11-23 03:58Z)']);
+  assert.deepEqual(projectRows('balanced', TODAY, LAST_LOW, [ACME]).map((r) => [r.target, r.note]), [['Cursor', 'live read failed; last good reading 0.2% (2026-11-23 03:58Z)']]);
+  // cursorFromPlans carries the key and the saved reading through, and only when present.
+  assert.deepEqual(cursorFromPlans([{ provider: 'cursor', label: 'Cursor', unavailable: true, windows: [], keyPresent: true, lastGood: { monthlyPct: 0.2, at: AT } }]),
+    { label: 'Cursor', monthlyPct: null, signedOut: false, keyPresent: true, lastGood: { monthlyPct: 0.2, at: AT } });
+  assert.deepEqual(cursorFromPlans([{ provider: 'cursor', label: 'Cursor', unavailable: true, windows: [], lastGood: { monthlyPct: 'x', at: AT } }]),
+    { label: 'Cursor', monthlyPct: null, signedOut: false }, 'an unreadable saved reading is no reading');
+});

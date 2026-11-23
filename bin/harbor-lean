@@ -113,7 +113,8 @@ function argValue(name) {
 
 function routeText(route) {
   if (route.side === 'claude') return `Claude (${route.reason.replace(/\.$/, '')})`;
-  if (route.side === 'cursor') return route.project ? `Cursor (${route.reason.replace(/\.$/, '')})` : 'Cursor';
+  // A project route, or a route on the last good reading (OO 568), says why.
+  if (route.side === 'cursor') return route.project || route.usage === 'last-good' ? `Cursor (${route.reason.replace(/\.$/, '')})` : 'Cursor';
   const why = route.seat.resetsAvailable > 0 && route.reason.includes('reset') ? ` (${route.reason.replace(/\.$/, '')})` : '';
   return `GPT seat ${route.seat.label}${route.seat.home ? `, CODEX_HOME ${route.seat.home}` : ''}${why}`;
 }
@@ -199,6 +200,11 @@ const projectFacts = (project) => (project ? { id: project.id, label: project.la
   }
   const cursorPct = cursor.monthlyPct === null ? `unknown (${cursor.reason})` : (cursor.monthlyPct > 0 && cursor.monthlyPct < 1 ? '<1%' : `${Math.round(cursor.monthlyPct)}%`);
   console.log(`Cursor this month: ${cursorPct}`);
+  // OO 568: when the live read fails, routing leans on the last good reading and the stored sign-in key.
+  if (cursor.monthlyPct === null && typeof cursor.keyPresent === 'boolean') {
+    const last = cursor.lastGood ? `${cursor.lastGood.monthlyPct}% at ${cursor.lastGood.at}` : 'none';
+    console.log(`Cursor's last good reading: ${last}; sign-in key ${cursor.keyPresent ? 'stored' : 'not stored'}.`);
+  }
   // Cursor's browser sign-in lapses every 60 days and never renews itself, and a
   // lapsed one keeps all mechanical work on Claude (2026-10-11 to 10-13), so the
   // last week before it ends, and after, says how to sign it back in.

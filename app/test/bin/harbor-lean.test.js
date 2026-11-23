@@ -244,3 +244,28 @@ test('the full report names each project override and where its builds go', (t) 
   const plain = home(t, {});
   assert.doesNotMatch(run(plain, { HARBOR_PROVIDER_LEAN_FILE: path.join(plain, 'missing.json') }).stdout, /Project overrides/);
 });
+
+// OO 568 (2026-11-23): an unreadable Cursor read routes on the last good reading when the sign-in key is stored.
+function lostCursorFixture(root, name, extra) {
+  const file = path.join(root, `cursor-lost-${name}.json`);
+  fs.writeFileSync(file, JSON.stringify({ generatedAt: new Date().toISOString(), plans: [
+    { provider: 'cursor', id: 'cursor:default', label: 'Cursor', unavailable: true, windows: [], reason: "Cursor's usage could not be read.", ...extra },
+  ] }));
+  return file;
+}
+
+test('--task mechanical: an unreadable read with a stored key and a low last reading still answers Cursor, and says why', (t) => {
+  const root = home(t, { '.codex': 10 });
+  const file = path.join(root, 'provider-lean.json');
+  fs.writeFileSync(file, JSON.stringify({ mode: 'balanced', updatedAt: '2026-11-23T00:00:00Z' }));
+  const at = '2026-11-23T03:58:00.000Z';
+  const low = run(root, { HARBOR_PROVIDER_LEAN_FILE: file, HARBOR_PLAN_USAGE_FIXTURE: lostCursorFixture(root, 'low', { keyPresent: true, lastGood: { monthlyPct: 0.2, at } }) }, ['--task', 'mechanical']);
+  assert.equal(low.status, 0, low.stderr);
+  assert.match(low.stdout, /^mechanical: Cursor \(Cursor's usage could not be read just now; its last good reading was 0\.2% \(2026-11-23 03:58Z\) and its sign-in key is stored, so it stays on/);
+  const json = JSON.parse(run(root, { HARBOR_PROVIDER_LEAN_FILE: file, HARBOR_PLAN_USAGE_FIXTURE: lostCursorFixture(root, 'low2', { keyPresent: true, lastGood: { monthlyPct: 0.2, at } }) }, ['--task', 'mechanical', '--json']).stdout);
+  assert.deepEqual([json.route.side, json.route.usage], ['cursor', 'last-good']);
+  const noKey = run(root, { HARBOR_PROVIDER_LEAN_FILE: file, HARBOR_PLAN_USAGE_FIXTURE: lostCursorFixture(root, 'nokey', { keyPresent: false, lastGood: { monthlyPct: 0.2, at } }) }, ['--task', 'mechanical']);
+  assert.match(noKey.stdout, /^mechanical: Claude \(Cursor's usage could not be read and no sign-in key is stored/);
+  const high = run(root, { HARBOR_PROVIDER_LEAN_FILE: file, HARBOR_PLAN_USAGE_FIXTURE: lostCursorFixture(root, 'high', { keyPresent: true, lastGood: { monthlyPct: 95, at } }) }, ['--task', 'mechanical']);
+  assert.match(high.stdout, /^mechanical: Claude \(Cursor's usage could not be read, and its last good reading was 95%/);
+});

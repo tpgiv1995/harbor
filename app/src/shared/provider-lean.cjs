@@ -223,18 +223,54 @@ function spareReason(seat) {
   return `${seat.label} is ${pctText(seat.weeklyPct)} used but has ${n} reset${n === 1 ? '' : 's'} waiting; apply one when it runs out.`;
 }
 
-const cursorHasRoom = (cursor) => Boolean(cursor && finitePct(cursor.monthlyPct) && cursor.monthlyPct < CURSOR_MAX_PCT);
+// A saved reading's percent and time, written the way Pat reads them: "0.2%", "2026-11-23 03:58Z".
+const lastPctText = (pct) => (pct > 0 && pct < 0.1 ? '<0.1%' : pct > 0 && pct < 1 ? `${Math.round(pct * 10) / 10}%` : `${Math.round(pct)}%`);
+function lastAtText(at) {
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return String(at);
+  const iso = d.toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
+}
 
-// Why Cursor cannot take work right now: full, signed out, or unreadable.
+// Whether Cursor can take work, and which case decided it (`usage`):
+//   live       a live reading under 90% (room) or at least 90% (no room);
+//   signed-out the sign-in lapsed or Cursor refused its key: no room;
+//   last-good  the live read failed, the sign-in key is stored, and the last good reading (plan-usage.js saves it with
+//              its time) was under 90%: room. Pat, 2026-11-23: an unreadable read must not keep Cursor off while
+//              there is headroom. With on-demand billing off in the Cursor account, running past the plan cannot
+//              cost money; Cursor simply stops serving;
+//   last-full  the same, but that reading was 90% or more: no room;
+//   no-key     the read failed and no sign-in key is stored (a browser sign-in, or a sign-in moved where Harbor cannot
+//              read it): no room;
+//   never      the read failed, the key is stored, and there was never a good reading: no room;
+//   unread     nothing is known (usage checks off, or an older caller): no room.
+function cursorState(cursor) {
+  if (cursor && finitePct(cursor.monthlyPct)) {
+    return cursor.monthlyPct < CURSOR_MAX_PCT ? { room: true, usage: 'live' } : { room: false, usage: 'live', why: `Cursor is at least ${CURSOR_MAX_PCT}% used this month.` };
+  }
+  if (cursor?.signedOut) return { room: false, usage: 'signed-out', why: 'Cursor is signed out; sign it in again with cursor-agent login.' };
+  if (!cursor || typeof cursor.keyPresent !== 'boolean') return { room: false, usage: 'unread', why: "Cursor's usage could not be read." };
+  if (!cursor.keyPresent) return { room: false, usage: 'no-key', why: "Cursor's usage could not be read and no sign-in key is stored." };
+  const last = cursor.lastGood;
+  if (!last || !finitePct(last.monthlyPct)) return { room: false, usage: 'never', why: "Cursor's usage could not be read and there is no earlier good reading." };
+  const when = `${lastPctText(last.monthlyPct)} (${lastAtText(last.at)})`;
+  if (last.monthlyPct >= CURSOR_MAX_PCT) {
+    return { room: false, usage: 'last-full', why: `Cursor's usage could not be read, and its last good reading was ${when}, at least ${CURSOR_MAX_PCT}%.` };
+  }
+  return { room: true, usage: 'last-good', note: `Cursor's usage could not be read just now; its last good reading was ${when} and its sign-in key is stored, so it stays on.` };
+}
+
+const cursorHasRoom = (cursor) => cursorState(cursor).room;
+
+// Why Cursor cannot take work right now: full, signed out, no key, or unreadable.
 function cursorMissReason(cursor) {
-  if (cursor && finitePct(cursor.monthlyPct)) return `Cursor is at least ${CURSOR_MAX_PCT}% used this month.`;
-  if (cursor?.signedOut) return 'Cursor is signed out; sign it in again with cursor-agent login.';
-  return "Cursor's usage could not be read.";
+  return cursorState(cursor).why || "Cursor's usage could not be read.";
 }
 
 // One task's route. seats: [{ label, weeklyPct }] for the codex homes; cursor:
-// { label, monthlyPct } or null. Unknown usage never qualifies, so missing data
-// always lands on Claude (or, for mechanical work, on the general rule).
+// { label, monthlyPct, signedOut, keyPresent?, lastGood? } or null. Unknown usage qualifies Cursor only through a
+// stored sign-in key and a last good reading under 90% (cursorState, OO 568); otherwise missing data lands on Claude
+// (or, for mechanical work, on the general rule). A Cursor route carries `usage`: 'live' or 'last-good'.
 // `large` is still accepted from older callers (bin/harbor-lean --large) but no
 // setting reads it since 2026-10-18. `complex` takes mechanical work off
 // Cursor: it routes as general work, with the reason. `project` is the
@@ -255,16 +291,19 @@ function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex 
     const override = project && project.build === 'cursor' && project.enabled !== false ? project : null;
     if (!override) return { ...general, kind: kind.id, project: null };
     if (id === 'claude-only') return { ...general, kind: kind.id, project: override.id };
-    if (cursorHasRoom(cursor)) {
-      return { side: 'cursor', seat: cursor, kind: kind.id, project: override.id, reason: `${override.label} sends test-backed builds to Cursor: ${kind.projectWhy}` };
+    const state = cursorState(cursor);
+    if (state.room) {
+      const why = `${override.label} sends test-backed builds to Cursor: ${kind.projectWhy}`;
+      return { side: 'cursor', seat: cursor, kind: kind.id, project: override.id, usage: state.usage, reason: state.note ? `${state.note} ${why}` : why };
     }
     return { ...general, kind: kind.id, project: override.id, reason: `${cursorMissReason(cursor)} ${general.reason}` };
   }
   if (id === 'claude-only') return claude('Heavy lifting is Claude only.');
   if (kind.side === 'claude') return claude(kind.why);
   if (kind.side === 'cursor') {
-    if (cursorHasRoom(cursor) && !complex) {
-      return { side: 'cursor', seat: cursor, kind: kind.id, reason: kind.why };
+    const state = cursorState(cursor);
+    if (state.room && !complex) {
+      return { side: 'cursor', seat: cursor, kind: kind.id, usage: state.usage, reason: state.note ? `${state.note} ${kind.why}` : kind.why };
     }
     // Too complex for Cursor, or Cursor full or unreadable: the work is
     // ordinary general work again.
@@ -287,7 +326,12 @@ function routeRow(label, route) {
     const n = hasReset(route.seat) ? route.seat.resetsAvailable : 0;
     return { label, target: route.seat.label, note: `${pctText(route.seat.weeklyPct)} used this week${n ? `, ${n} reset${n === 1 ? '' : 's'} waiting` : ''}` };
   }
-  if (route.side === 'cursor') return { label, target: route.seat.label || 'Cursor', note: `${pctText(route.seat.monthlyPct)} used this month` };
+  if (route.side === 'cursor') {
+    // On the last good reading (OO 568) there is no live percent to show: say so, and show that reading.
+    const last = route.usage === 'last-good' && route.seat.lastGood;
+    const note = last ? `live read failed; last good reading ${lastPctText(last.monthlyPct)} (${lastAtText(last.at)})` : `${pctText(route.seat.monthlyPct)} used this month`;
+    return { label, target: route.seat.label || 'Cursor', note };
+  }
   return { label, target: 'Claude', note: null };
 }
 
@@ -364,10 +408,15 @@ function cursorFromPlans(plans) {
   const plan = (Array.isArray(plans) ? plans : []).find((p) => p && p.provider === 'cursor');
   if (!plan) return null;
   const monthly = (plan.windows || []).find((w) => w && w.kind === 'monthly');
+  const last = plan.lastGood;
+  const lastGood = last && finitePct(last.monthlyPct) && typeof last.at === 'string' ? { monthlyPct: last.monthlyPct, at: last.at } : null;
   return {
     label: plan.label || 'Cursor',
     monthlyPct: plan.unavailable || !monthly ? null : monthly.usedPct,
     signedOut: Boolean(plan.signedOut),
+    // Present only when the reader checked (OO 568): whether the sign-in key is stored, and the last good reading.
+    ...(typeof plan.keyPresent === 'boolean' ? { keyPresent: plan.keyPresent } : {}),
+    ...(lastGood ? { lastGood } : {}),
   };
 }
 

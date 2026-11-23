@@ -434,6 +434,30 @@ function createPlanUsageProvider({
     };
   }
 
+  // The last GOOD Cursor reading, with its time (Pat, 2026-11-23: an unreadable read must not keep Cursor off while
+  // there is headroom). Each good reading is saved in the shared state
+  // folder; a failed read hands it back with whether the sign-in key is stored, and provider-lean.cjs routes on it
+  // (Cursor stays on when the key is stored and that reading was under 90%). Usage numbers only, never a credential.
+  const cursorLastFile = env.HARBOR_CURSOR_LAST_FILE || path.join(home, '.harbor', 'cursor-usage-last.json');
+  async function cursorLastGood() {
+    const saved = await readJson(cursorLastFile);
+    return saved && finite(saved.monthlyPct) && saved.monthlyPct >= 0 && typeof saved.at === 'string' && !Number.isNaN(Date.parse(saved.at))
+      ? { monthlyPct: saved.monthlyPct, at: saved.at } : null;
+  }
+  async function saveCursorLastGood(sample) {
+    const monthly = (sample?.windows || []).find((w) => w && w.kind === 'monthly');
+    if (!monthly || !finite(monthly.usedPct) || typeof sample.updatedAt !== 'string') return;
+    try {
+      const prior = await readJson(cursorLastFile);
+      // Harbor reads every few minutes: an unchanged reading is rewritten only when the saved one is 10 minutes old.
+      if (prior && prior.monthlyPct === monthly.usedPct && now() - Date.parse(prior.at) < 10 * 60_000) return;
+      await io.mkdir(path.dirname(cursorLastFile), { recursive: true });
+      const tmp = `${cursorLastFile}.${process.pid}.tmp`;
+      await io.writeFile(tmp, JSON.stringify({ monthlyPct: monthly.usedPct, at: sample.updatedAt }));
+      await io.rename(tmp, cursorLastFile);
+    } catch { /* best effort: the next good read writes it */ }
+  }
+
   async function cursorPlan() {
     const file = cursorAuthFile(home, env, platform);
     const auth = await readJson(file);
@@ -455,7 +479,8 @@ function createPlanUsageProvider({
         const fresh = await cursorKeyToken(apiKey);
         if (!fresh.token) {
           const email = typeof claims.email === 'string' ? claims.email : null;
-          return cursorShape({ email, login: { expiresAt: null, signedOut: fresh.refused ? fresh.reason : null, notice: null }, reason: fresh.reason });
+          return cursorShape({ email, login: { expiresAt: null, signedOut: fresh.refused ? fresh.reason : null, notice: null }, reason: fresh.reason,
+            keyPresent: true, lastGood: fresh.refused ? null : await cursorLastGood() });
         }
         token = fresh.token;
       }
@@ -471,8 +496,11 @@ function createPlanUsageProvider({
       };
     }, seed);
     const sample = result.value;
+    if (sample) await saveCursorLastGood(sample);
     const email = sample?.email || (typeof claims.email === 'string' ? claims.email : null);
-    return cursorShape({ email, sample, login, reason: result.reason });
+    // With usage checks off nothing was read, so nothing is said about the key or an earlier reading.
+    return cursorShape({ email, sample, login, reason: result.reason,
+      keyPresent: offline ? undefined : Boolean(apiKey), lastGood: sample || offline ? null : await cursorLastGood() });
   }
 
   // When the browser sign-in ends, and the notice Pat sees for the last week
@@ -497,7 +525,7 @@ function createPlanUsageProvider({
     return { expiresAt: exp, signedOut: null, notice };
   }
 
-  function cursorShape({ email, sample = null, login, reason }) {
+  function cursorShape({ email, sample = null, login, reason, keyPresent, lastGood = null }) {
     return {
       provider: 'cursor',
       id: 'cursor:default',
@@ -513,6 +541,8 @@ function createPlanUsageProvider({
       signedOut: Boolean(login.signedOut),
       signInExpiresAt: login.expiresAt,
       signInNotice: login.notice,
+      ...(keyPresent === undefined ? {} : { keyPresent: Boolean(keyPresent) }),
+      lastGood: lastGood || null,
     };
   }
   async function collect() {

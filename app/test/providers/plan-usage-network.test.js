@@ -100,7 +100,7 @@ function fixture(t) {
     assert.deepEqual(unexpected, [], 'unexpected fetch or failed request assertion was swallowed');
   });
   return {
-    calls, secrets, put, codex, cursor, local, provider, clean,
+    calls, secrets, put, codex, cursor, local, provider, clean, root,
     dispatch(fn) { dispatch = fn; },
     advance(ms) { time += ms; },
   };
@@ -612,4 +612,42 @@ test('plan-usage-network overlapping cache calls await the same pending read wit
   assert.deepEqual(await Promise.all([first, second]), [answer, answer]);
   assert.deepEqual(await cachedRequest('synthetic-home:resets', 'synthetic-identity', request), answer);
   assert.equal(calls, 1);
+});
+
+// OO 568 (2026-11-23): each good Cursor reading is saved with its time in <home>\.harbor\cursor-usage-last.json, and
+// a failed read hands it back with whether the sign-in key is stored, so routing can lean on it.
+test('plan-usage-network saves the last good Cursor reading and hands it back when a read fails', async (t) => {
+  const f = fixture(t);
+  f.cursor(NOW / 1000 + 3000, { apiKey: 'synthetic-cursor-api-key' });
+  let fail = false;
+  f.dispatch((url) => {
+    assert.equal(url, CURSOR);
+    return fail ? { ok: false, status: 500, json: async () => ({}) } : response({ planUsage: { totalPercentUsed: 0.2 } });
+  });
+  const provider = f.provider({ usageProvider: { getUsage: async () => ({}) } });
+  const good = plan(await provider.getPlans(), 'cursor');
+  assert.equal(good.windows[0].usedPct, 0.2);
+  const lastFile = path.join(f.root, '.harbor', 'cursor-usage-last.json');
+  const saved = JSON.parse(fs.readFileSync(lastFile, 'utf8'));
+  assert.deepEqual(saved, { monthlyPct: 0.2, at: new Date(NOW).toISOString() });
+  for (const secret of f.secrets) assert.equal(fs.readFileSync(lastFile, 'utf8').includes(secret), false, 'no credential in the saved reading');
+  fail = true;
+  f.advance(61_000);
+  const lost = await provider.getPlans();
+  const row = plan(lost, 'cursor');
+  assert.equal(row.unavailable, true);
+  assert.equal(row.keyPresent, true);
+  assert.deepEqual(row.lastGood, { monthlyPct: 0.2, at: new Date(NOW).toISOString() });
+  f.clean(lost);
+});
+
+test('plan-usage-network reports no stored key for a Cursor sign-in without one', async (t) => {
+  const f = fixture(t);
+  f.cursor(NOW / 1000 + 3000);
+  f.put('.harbor/cursor-usage-last.json', { monthlyPct: 3, at: '2026-09-30T12:00:00.000Z' });
+  f.dispatch(() => ({ ok: false, status: 500, json: async () => ({}) }));
+  const row = plan(await f.provider({ usageProvider: { getUsage: async () => ({}) } }).getPlans(), 'cursor');
+  assert.equal(row.unavailable, true);
+  assert.equal(row.keyPresent, false);
+  assert.deepEqual(row.lastGood, { monthlyPct: 3, at: '2026-09-30T12:00:00.000Z' });
 });
