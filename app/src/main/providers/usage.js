@@ -83,6 +83,35 @@ async function readEmail(home, readFile) {
 const STALE_AFTER_MS = 3 * 60 * 1000;
 const REMOTE_COOLDOWN_MS = 60 * 1000; // per-account floor between endpoint hits
 
+// A READING OLDER THAN THIS IS MARKED STALE WHERE IT IS SHOWN (2026-11-23).
+// Pat started a session on Claude C because the rail said its week was at about
+// 20%; it was at 99%. The rail had been drawing a statusline sample from Nov 21
+// (the plan's last interactive prompt, two hours into its new week) for two
+// days, in full colour, while headless workers and lanes, which never draw a
+// statusline, burned the week to 100%. The direct read below was failing with
+// HTTP 429 the whole time, and a Harbor restart that morning had emptied the
+// only good reading it held. Within a window usage only goes up, so an old
+// number is a floor, never the answer; the rail now says so (`stale`, with
+// `staleReason`) instead of presenting it as current. 15 minutes: a healthy
+// endpoint re-reads every idle plan each minute, and an active plan's
+// statusline lands every few seconds, so only a reading Harbor truly cannot
+// refresh gets this old.
+const SHOWN_STALE_MS = 15 * 60 * 1000;
+// The wait to keep after an HTTP 429 that names none. The endpoint has answered
+// 429 with Retry-After 817 s and 3600 s (2026-11-23); C:\tools\claude-usage
+// keeps 900 s when the header is missing, and one rule across both readers of
+// the same endpoint is the point.
+const DEFAULT_RETRY_AFTER_MS = 15 * 60 * 1000;
+
+// Retry-After is either delta seconds or an HTTP date (RFC 9110 10.2.3).
+function parseRetryAfter(value, nowMs) {
+  if (value == null || value === '') return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const at = Date.parse(String(value));
+  return Number.isFinite(at) ? Math.max(0, at - nowMs) : null;
+}
+
 // Direct read of the same endpoint the CLI's own rate_limits derive from.
 // Read-only: the CLI owns token refresh, so an expired access token means
 // skip, never a call that would 401. Any failure returns null and the caller
@@ -146,7 +175,12 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   if (creds?.keychainError) return reportUnavailable ? { unavailable: true, reason: `Could not read Claude credentials from the macOS Keychain: ${creds.keychainError}` } : null;
   const oauth = creds?.claudeAiOauth;
   if (!oauth?.accessToken) return reportUnavailable ? { unavailable: true, reason: 'Claude is not signed in for usage access. Sign in with the Claude CLI, then refresh Harbor.' } : null;
-  if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return reportUnavailable ? { unavailable: true, reason: 'Claude credentials have expired. Open the Claude CLI to renew the session, then refresh Harbor.' } : null;
+  // An expired ACCESS token is not a sign-out: it lives about 8 hours and is
+  // renewed from the refresh token beside it (the login itself runs for weeks;
+  // `claude auth status` showed one valid to Dec 11 while its access token had
+  // lapsed). `tokenLapsed` lets the provider ask the Claude CLI to renew it
+  // (renewTokenWithCli below) instead of serving an old number.
+  if (finiteNumber(oauth.expiresAt) && oauth.expiresAt <= now().getTime()) return reportUnavailable ? { unavailable: true, tokenLapsed: true, reason: 'This plan has been idle, so its short-lived access token lapsed (its login is fine); Harbor renews it through the Claude CLI before reading' } : null;
   // Each failure below used to collapse to `null`, which the panel rendered as
   // the generic "usage is unavailable" line: a network error, a 401/429 and a
   // body with no numbers all looked identical (2026-10-05, a live account
@@ -165,7 +199,16 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
   } catch (error) {
     return failed(`Claude usage request failed: ${error?.name === 'TimeoutError' ? 'timed out after 10s' : (error?.cause?.code || error?.message || 'network error')}`);
   }
-  if (!res.ok) return failed(`Claude usage request failed: HTTP ${res.status}${res.status === 429 ? ' (rate limited; retrying shortly)' : ''}`);
+  // A 429 carries the provider's own wait, and every reader must honour it:
+  // calling again inside it is what kept accounts at 429 for hours
+  // (2026-11-23), because each early call is another refusal.
+  if (res.status === 429) {
+    const retryAfterMs = parseRetryAfter(res.headers?.get?.('retry-after'), now().getTime()) ?? DEFAULT_RETRY_AFTER_MS;
+    return reportUnavailable
+      ? { unavailable: true, status: 429, retryAfterMs, reason: 'Claude usage request failed: HTTP 429 (rate limited; Claude asked for a pause before the next read)' }
+      : null;
+  }
+  if (!res.ok) return failed(`Claude usage request failed: HTTP ${res.status}`);
   let body;
   try {
     body = await res.json();
@@ -186,6 +229,80 @@ async function fetchOauthUsage(home, { readFile = fs.promises.readFile, readCred
     && !finiteNumber(rateLimits.seven_day?.used_percentage)) return failed('Claude usage response carried no 5-hour or weekly numbers');
   return { payload: { rate_limits: rateLimits }, updatedAt: now().toISOString() };
 }
+
+// RENEW AN IDLE PLAN'S ACCESS TOKEN THROUGH THE CLAUDE CLI ITSELF (2026-11-23).
+// Harbor never refreshes a token or writes an auth file: the CLI owns that
+// (with its own lock), and a second refresher racing it could rotate the
+// refresh token out from under a live session. So an idle plan, whose access
+// token lapses about 8 hours after its last session, could never be read, and
+// the rail showed its last statusline number for days: nine of fifteen plans
+// that day, e.g. Ocean "82%" at 94% and Patchy "76%" at 100%. Pat: "this
+// happens when we havent used one of them in a few days but the credentials
+// are good". `claude -p /usage` is a LOCAL command in print mode (measured on
+// 2.1.321: num_turns 0, total_cost_usd 0, no model call), and to answer it the
+// CLI renews the token the way any session would. Guards: the API key is
+// stripped (a key would bill the console and skip the plan's login), no
+// transcript is kept, no MCP servers, hooks or settings load, the cwd is an
+// empty folder, and a cheap model plus one turn bound the cost if a future CLI
+// ever sent "/usage" to the model; a run that reports a turn or a cost
+// returns `modelCall` and the provider stops renewing for good. Success is
+// judged by the credentials file, never by the CLI's words: the token must now
+// be unexpired.
+const RENEW_TIMEOUT_MS = 120 * 1000;
+function renewTokenWithCli(home, {
+  resolveBin = async (env) => (await require('./model-catalog.js').resolveClaudeBinary(env))?.path || null,
+  spawnImpl = require('node:child_process').spawn,
+  env = process.env,
+  cwdRoot,
+  homedir = require('node:os').homedir(),
+  readCredentials = async (dir) => JSON.parse(await fs.promises.readFile(path.join(dir, '.credentials.json'), 'utf8')),
+  now = () => Date.now(),
+  timeoutMs = RENEW_TIMEOUT_MS,
+} = {}) {
+  return (async () => {
+    const bin = await resolveBin(env);
+    if (!bin) return { ok: false, reason: 'the Claude CLI was not found' };
+    const childEnv = { ...env };
+    delete childEnv.ANTHROPIC_API_KEY;
+    delete childEnv.ANTHROPIC_AUTH_TOKEN;
+    delete childEnv.CLAUDE_CONFIG_DIR;
+    // The default home is the CLI's own default (its .claude.json sits beside
+    // it, not in it); every other home is named the way Harbor launches it.
+    if (path.resolve(home) !== path.resolve(homedir, '.claude')) childEnv.CLAUDE_CONFIG_DIR = home;
+    const cwd = path.join(cwdRoot || path.join(homedir, '.cache', 'harbor'), 'usage-renew-empty');
+    await fs.promises.mkdir(cwd, { recursive: true });
+    const args = ['-p', '/usage', '--output-format', 'json', '--no-session-persistence',
+      '--strict-mcp-config', '--setting-sources', '', '--tools', '', '--max-turns', '1', '--model', 'haiku'];
+    const run = await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawnImpl(bin, args, { cwd, env: childEnv, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (error) { resolve({ error: error.message }); return; }
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } resolve({ error: `timed out after ${Math.round(timeoutMs / 1000)}s` }); }, timeoutMs);
+      child.stdout.on('data', (chunk) => { if (out.length < 1 << 20) out += chunk; });
+      child.stderr.on('data', (chunk) => { if (err.length < 1 << 16) err += chunk; });
+      child.on('error', (error) => { clearTimeout(timer); resolve({ error: error.message }); });
+      child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+    });
+    if (run.error) return { ok: false, reason: run.error };
+    let result = null;
+    try { result = JSON.parse(run.out); } catch { /* judged below */ }
+    if (result && ((result.num_turns || 0) > 0 || (result.total_cost_usd || 0) > 0)) {
+      return { ok: false, modelCall: true, reason: 'the Claude CLI sent /usage to the model instead of answering it locally' };
+    }
+    let creds = null;
+    try { creds = await readCredentials(home); } catch { /* judged below */ }
+    const expiresAt = creds?.claudeAiOauth?.expiresAt;
+    if (finiteNumber(expiresAt) && expiresAt > now()) return { ok: true };
+    const said = String(result?.result || run.err || '').trim().split('\n')[0].slice(0, 160);
+    return { ok: false, reason: `the Claude CLI exited ${run.code} without renewing it${said ? `: ${said}` : ''}` };
+  })().catch((error) => ({ ok: false, reason: error.message }));
+}
+
+const RENEW_COOLDOWN_MS = 30 * 60 * 1000; // per plan, success or failure
+const RENEW_CONCURRENCY = 3;
 
 function createUsageProvider(options = {}) {
   const homes = options.homes || profilesToHomes(options.profiles);
@@ -211,11 +328,78 @@ function createUsageProvider(options = {}) {
   const remoteSamples = new Map();
   const lastRemoteAttempt = new Map();
   const remoteUnavailable = new Map();
+  const remoteWaitUntil = new Map();
+  // THE LAST GOOD DIRECT READ, AND ANY 429 WAIT, ARE KEPT ON DISK (2026-11-23).
+  // They lived only in this process's memory, so a Harbor restart dropped the
+  // rail back to whatever the statusline file last held (two days old for
+  // Claude C), and the phone server, a second process with its own provider,
+  // neither saw the desktop's reads nor knew to wait. One small JSON per plan
+  // under `<cacheDir>/usage-remote/`, read on every getUsage like the tee, is
+  // shared by both processes and survives restarts. Opt-in by `cacheDir` (both
+  // composition roots pass it) or `remoteDir`; a provider built with only a
+  // `teeDir` (the unit fixtures) keeps nothing on disk.
+  const remoteDir = options.remoteDir !== undefined
+    ? options.remoteDir
+    : options.cacheDir ? path.join(options.cacheDir, 'usage-remote') : null;
+  const writeFileAtomic = options.writeFileAtomic || defaultWriteFileAtomic;
+  // Renewing an idle plan's lapsed access token (renewTokenWithCli). On by
+  // default only for a provider reading the real machine: the real endpoint,
+  // real files, and a `cacheDir`, which only the two composition roots pass
+  // (main/index.js, server/compose.js). Every fixture that injects a reader or
+  // a fetcher, or names only a `teeDir`, gets none unless it passes
+  // `renewLapsedToken` itself; E2E and HARBOR_NO_USAGE_FETCH pass
+  // fetchRemoteUsage: null.
+  const renewToken = options.renewLapsedToken !== undefined
+    ? options.renewLapsedToken
+    : (options.fetchRemoteUsage === undefined && !options.readFile && options.cacheDir)
+      ? (home) => renewTokenWithCli(home, { cwdRoot: options.cacheDir || teeDir })
+      : null;
+  const renewCooldownMs = options.renewCooldownMs ?? RENEW_COOLDOWN_MS;
+  const renewAttemptAt = new Map();
+  const renewing = new Set();
+  const renewResult = new Map();
+  const renewQueue = [];
+  let renewActive = 0;
+  let renewDisabled = null;
 
   const stampMs = (sample) => {
     const parsed = sample?.updatedAt ? Date.parse(sample.updatedAt) : NaN;
     return Number.isFinite(parsed) ? parsed : 0;
   };
+
+  async function readRemoteRecord(account) {
+    if (!remoteDir) return null;
+    try {
+      const record = JSON.parse(await readFile(path.join(remoteDir, `${account}.json`), 'utf8'));
+      return record && typeof record === 'object' ? record : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Merge, never overwrite blindly: the other process may have written a
+  // fresher reading or a longer wait since this one last looked.
+  async function writeRemoteRecord(account, change) {
+    if (!remoteDir) return;
+    const current = (await readRemoteRecord(account)) || {};
+    const next = { version: 1 };
+    const keepCurrent = current.payload && (!change.payload || stampMs(current) > stampMs(change));
+    if (keepCurrent) { next.payload = current.payload; next.updatedAt = current.updatedAt; }
+    else if (change.payload) { next.payload = change.payload; next.updatedAt = change.updatedAt; }
+    const waits = [current.waitUntil, change.waitUntil].filter(finiteNumber);
+    // A successful read ends any wait it outlived; a newer wait always wins.
+    const waitUntil = change.payload && !keepCurrent && !finiteNumber(change.waitUntil)
+      ? null
+      : waits.length ? Math.max(...waits) : null;
+    if (waitUntil) next.waitUntil = waitUntil;
+    const renewAt = [current.renewAttemptAt, change.renewAttemptAt].filter(finiteNumber);
+    if (renewAt.length) next.renewAttemptAt = Math.max(...renewAt);
+    try {
+      await writeFileAtomic(path.join(remoteDir, `${account}.json`), JSON.stringify(next));
+    } catch {
+      // A failed write costs only the sharing; this process keeps its memory.
+    }
+  }
 
   function assertAccount(account) {
     if (!Object.hasOwn(homes, account)) throw new Error(`unknown account: ${account}`);
@@ -232,7 +416,42 @@ function createUsageProvider(options = {}) {
     }
   }
 
+  // One renewal per plan per cooldown, shared with the other process through
+  // the store, at most RENEW_CONCURRENCY CLI runs at once. Never awaited by
+  // getUsage: a run takes 5 to 35 s, and the rail's read waits on every plan.
+  async function scheduleRenew(account, nowMs, stored) {
+    if (typeof renewToken !== 'function' || renewDisabled || renewing.has(account)) return;
+    const last = Math.max(renewAttemptAt.get(account) || 0, finiteNumber(stored?.renewAttemptAt) ? stored.renewAttemptAt : 0);
+    if (nowMs - last < renewCooldownMs) return;
+    renewAttemptAt.set(account, nowMs);
+    renewing.add(account);
+    await writeRemoteRecord(account, { renewAttemptAt: nowMs });
+    renewQueue.push(account);
+    pumpRenewals();
+  }
+  function pumpRenewals() {
+    while (renewActive < RENEW_CONCURRENCY && renewQueue.length) {
+      const account = renewQueue.shift();
+      renewActive += 1;
+      Promise.resolve(renewToken(homes[account]))
+        .catch((error) => ({ ok: false, reason: error?.message || 'renewal failed' }))
+        .then((result) => {
+          renewResult.set(account, result || { ok: false, reason: 'renewal failed' });
+          if (result?.modelCall) renewDisabled = result.reason;
+          // A renewed token is read on the very next getUsage, not after the
+          // endpoint cooldown the lapsed attempt started.
+          if (result?.ok) { lastRemoteAttempt.delete(account); remoteUnavailable.delete(account); }
+        })
+        .finally(() => { renewing.delete(account); renewActive -= 1; pumpRenewals(); });
+    }
+  }
+
   return {
+    // Settles once every queued renewal has finished (tests and probes).
+    async settleRenewals() {
+      while (renewing.size) await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+
     recordStatuslinePayload(account, payload) {
       assertAccount(account);
       samples.set(account, { payload, updatedAt: now().toISOString() });
@@ -261,32 +480,80 @@ function createUsageProvider(options = {}) {
         : tee
           ? { payload: tee.payload, updatedAt: tee.updatedAt, email: email || tee.email }
           : null;
-      const remote = remoteSamples.get(account);
+      const stored = await readRemoteRecord(account);
+      let remote = remoteSamples.get(account);
+      if (stored?.payload && (!remote || stampMs(stored) > stampMs(remote))) {
+        remote = { payload: stored.payload, updatedAt: stored.updatedAt };
+        remoteSamples.set(account, remote);
+      }
       if (remote && (!chosen || stampMs(remote) > stampMs(chosen))) {
         chosen = { payload: remote.payload, updatedAt: remote.updatedAt, email };
       }
+      const waitUntil = Math.max(remoteWaitUntil.get(account) || 0, finiteNumber(stored?.waitUntil) ? stored.waitUntil : 0);
 
       const age = chosen ? nowMs - stampMs(chosen) : Infinity;
       if (age > staleAfterMs && typeof fetchRemoteUsage === 'function'
+        && nowMs >= waitUntil
         && nowMs - (lastRemoteAttempt.get(account) || 0) >= remoteCooldownMs) {
         lastRemoteAttempt.set(account, nowMs);
         const fetched = await Promise.resolve(fetchRemoteUsage(homes[account])).catch(() => null);
         if (fetched?.unavailable) remoteUnavailable.set(account, fetched);
+        if (fetched?.tokenLapsed) await scheduleRenew(account, nowMs, stored);
+        if (finiteNumber(fetched?.retryAfterMs)) {
+          const until = nowMs + fetched.retryAfterMs;
+          remoteWaitUntil.set(account, until);
+          await writeRemoteRecord(account, { waitUntil: until });
+        }
         if (fetched?.payload) {
           remoteUnavailable.delete(account);
+          remoteWaitUntil.delete(account);
           remoteSamples.set(account, fetched);
           chosen = { payload: fetched.payload, updatedAt: fetched.updatedAt, email };
+          await writeRemoteRecord(account, { payload: fetched.payload, updatedAt: fetched.updatedAt });
         }
       }
 
       if (!chosen) return { ...(remoteUnavailable.get(account) || { unavailable: true, reason: NO_SAMPLE_REASON }), email };
-      return usageFromStatuslinePayload(chosen.payload, {
+      const result = usageFromStatuslinePayload(chosen.payload, {
         email: chosen.email || email,
         updatedAt: chosen.updatedAt,
         nowMs,
       });
+      if (result.unavailable || nowMs - stampMs(chosen) <= SHOWN_STALE_MS) return result;
+      // Old enough that the number is only a floor: say so, and say why no
+      // newer reading exists, so the meter never passes for current.
+      const activeWait = Math.max(remoteWaitUntil.get(account) || 0, waitUntil);
+      result.stale = true;
+      if (renewing.has(account)) {
+        result.staleReason = 'Harbor is renewing this idle plan\'s sign-in through the Claude CLI (no usage cost); the live reading follows within a minute';
+      } else if (activeWait > nowMs) {
+        result.staleReason = 'Claude\'s usage service asked Harbor to pause reads for this plan (HTTP 429)';
+        result.nextReadAt = new Date(activeWait).toISOString();
+      } else if (typeof fetchRemoteUsage !== 'function') {
+        result.staleReason = 'This Harbor does not read Claude\'s usage service';
+      } else if (renewResult.get(account) && !renewResult.get(account).ok) {
+        result.staleReason = `Harbor could not renew this idle plan's sign-in through the Claude CLI: ${renewResult.get(account).reason}`;
+      } else if (remoteUnavailable.get(account)?.reason) {
+        result.staleReason = remoteUnavailable.get(account).reason;
+      }
+      return result;
     },
   };
+}
+
+// tmp + rename, so a reader in the other process never sees half a file; the
+// tmp is removed when the rename fails, so a failed write leaves nothing
+// behind (the statusline tee's leftover `.tmp-*` files are that lesson).
+async function defaultWriteFileAtomic(file, text) {
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}`;
+  try {
+    await fs.promises.writeFile(tmp, text, 'utf8');
+    await fs.promises.rename(tmp, file);
+  } catch (error) {
+    await fs.promises.rm(tmp, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 module.exports = {
@@ -295,8 +562,13 @@ module.exports = {
   NOT_CLAUDE_REASON,
   STALE_AFTER_MS,
   REMOTE_COOLDOWN_MS,
+  SHOWN_STALE_MS,
+  DEFAULT_RETRY_AFTER_MS,
   createUsageProvider,
   fetchOauthUsage,
   keychainServicesFor,
+  parseRetryAfter,
+  renewTokenWithCli,
+  RENEW_COOLDOWN_MS,
   usageFromStatuslinePayload,
 };

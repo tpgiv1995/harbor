@@ -790,6 +790,7 @@ button { font-family: inherit; }
 }
 .plan-pick-use.hi { color: var(--warn); }
 .plan-pick-use.max { color: var(--err-text); }
+.plan-pick-use.stale { opacity: .6; }
 
 .plan-pick-sep {
   height: 1px;
@@ -1783,6 +1784,11 @@ button { font-family: inherit; }
 .rm-g.hi b { color: var(--warn); }
 .rm-g.max s { background: var(--err); }
 .rm-g.max b { color: var(--err-text); }
+/* A stale reading (usage.js SHOWN_STALE_MS) is only a floor: the number keeps
+   its "+" and its level colour but dims, and the bar fades the way the team
+   chart fades a stale plan, so it never draws like a live reading. */
+.rm-g.stale b { opacity: .6; }
+.rm-g.stale s { opacity: .4; }
 
 /* Below 276px the 5-hour reset steps aside to its tooltip rather than letting
    the row clip: a 5-hour window resets again the same day, while the weekly

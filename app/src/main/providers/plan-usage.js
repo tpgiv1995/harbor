@@ -652,7 +652,7 @@ function createPlanUsageProvider({
       if (!reason) {
         if (!windows.length) reason = 'No Claude plan windows reported.';
         else if (!stamp(sample.updatedAt)) reason = 'Usage sample has no timestamp.';
-        else if (time - stamp(sample.updatedAt) > STALE_MS) reason = 'Usage sample is older than three minutes.';
+        else if (time - stamp(sample.updatedAt) > STALE_MS) reason = sample.staleReason ? `Usage sample is older than three minutes: ${sample.staleReason}.` : 'Usage sample is older than three minutes.';
       }
       return {
         provider: 'claude',

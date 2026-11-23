@@ -4,17 +4,19 @@ import { planName } from '../../../src/shared/plan-options.cjs';
 import { useUsage } from './use-usage.js';
 import './plan.css';
 
-const { resetBadge, resetTooltip } = resetFormat;
+const { resetBadge, resetTooltip, usageText, ageText } = resetFormat;
 // Each card is named from the configured plan list (`profiles`, the list the
 // New session sheet offers), so it reads "Claude C" and "Ren 2" as the desktop
 // does. A fixed two-name table here (Personal, Team) title-cased every other id
 // into "Claudec" and "Ren2" until 2026-11-19; an id the list does not name, or
 // a list not loaded yet, still renders under its own id.
-const pct = (value) => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)}%` : '—';
-
-function Meter({ label, value, resetsAt, rolled, kind }) {
-  return <div className="plan-meter" title={resetTooltip({ window: kind, pct: value, resetsAt, rolled })}>
-    <span>{label}</span><strong>{pct(value)}</strong><time>{resetBadge(resetsAt, { window: kind }) || (rolled ? 'reset' : 'reset unavailable')}</time>
+// A stale reading (usage.js, 2026-11-23) is a floor: "20%+", dimmed, with how
+// old it is in place of nothing, the same rule the desktop rail follows.
+function Meter({ label, value, resetsAt, rolled, kind, data }) {
+  const stale = !!data.stale && typeof value === 'number' && Number.isFinite(value);
+  const tip = resetTooltip({ window: kind, pct: value, resetsAt, rolled, stale, updatedAt: data.updatedAt, staleReason: data.staleReason, nextReadAt: data.nextReadAt });
+  return <div className={`plan-meter${stale ? ' stale' : ''}`} title={tip}>
+    <span>{label}</span><strong>{usageText(value, { stale, empty: '—' })}</strong><time>{resetBadge(resetsAt, { window: kind }) || (rolled ? 'reset' : 'reset unavailable')}</time>
   </div>;
 }
 
@@ -34,8 +36,9 @@ export function PlanSheet({ open, onClose, client, session, profiles }) {
         {error ? <p className="sheet-error" role="alert">{error}</p> : null}
         <div className="plan-list">{ids.map((id) => { const data = usage[id] || {}; const active = current === id; return <article className={`plan-card${active ? ' active' : ''}`} key={id}>
           <header><div><strong>{planName(profiles, id)}</strong>{active ? <span>This session</span> : null}</div><small>{data.email || emails[id] || 'Email unavailable'}</small></header>
-          <Meter label="5 hour" value={data.fiveHourPct} resetsAt={data.fiveHourResetsAt} rolled={data.fiveHourRolled} kind="fiveHour" />
-          <Meter label="Weekly" value={data.weeklyPct} resetsAt={data.weeklyResetsAt} rolled={data.weeklyRolled} kind="weekly" />
+          <Meter label="5 hour" value={data.fiveHourPct} resetsAt={data.fiveHourResetsAt} rolled={data.fiveHourRolled} kind="fiveHour" data={data} />
+          <Meter label="Weekly" value={data.weeklyPct} resetsAt={data.weeklyResetsAt} rolled={data.weeklyRolled} kind="weekly" data={data} />
+          {data.stale ? <p className="plan-stale">Last read {ageText(data.updatedAt)}; it may be higher now.</p> : null}
         </article>; })}</div>
         <p className="plan-footnote">Choose a plan when starting a session. A live session stays attached to the account that owns it.</p>
       </div>

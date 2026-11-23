@@ -83,3 +83,44 @@ test('a rolled window says so', () => {
   const tip = resetTooltip({ window: 'fiveHour', pct: 0, rolled: true });
   assert.match(tip, /already reset/);
 });
+
+// 2026-11-23: a stale reading is a floor (usage only goes up inside a window),
+// so every plan surface prints it as "N%+" and the tooltip says how old it is.
+const { usageText, ageText } = require('../../src/renderer/sidebar/usage-reset.cjs');
+
+test('usageText: a stale reading carries a "+", a live one and a full one do not', () => {
+  assert.equal(usageText(20), '20%');
+  assert.equal(usageText(20.4, { stale: true }), '20%+');
+  assert.equal(usageText(100, { stale: true }), '100%');
+  assert.equal(usageText(null, { stale: true }), '--');
+  assert.equal(usageText(undefined, { empty: '—' }), '—');
+});
+
+test('resetTooltip: a stale reading says it is a floor, its age, why, and the next read', () => {
+  const nowMs = new Date(2026, 10, 23, 12, 40).getTime();
+  const tip = resetTooltip({
+    window: 'weekly',
+    pct: 20,
+    resetsAt: at(2026, 11, 28, 2),
+    stale: true,
+    updatedAt: new Date(2026, 10, 21, 4, 0).toISOString(),
+    staleReason: 'Claude\'s usage service asked Harbor to pause reads for this plan (HTTP 429)',
+    nextReadAt: new Date(2026, 10, 23, 12, 53).toISOString(),
+    nowMs,
+  });
+  assert.match(tip, /at least 20% used/);
+  assert.match(tip, /last read 2d ago, so it may be higher now/);
+  assert.match(tip, /HTTP 429/);
+  assert.match(tip, /next read after 12:53pm/);
+  // A live reading keeps the old wording exactly.
+  const live = resetTooltip({ window: 'weekly', pct: 20, resetsAt: at(2026, 11, 28, 2), nowMs });
+  assert.doesNotMatch(live, /at least|last read/);
+});
+
+test('ageText picks the coarsest honest unit', () => {
+  const nowMs = Date.parse('2026-11-23T18:00:00Z');
+  assert.equal(ageText('2026-11-23T17:20:00Z', nowMs), '40m ago');
+  assert.equal(ageText('2026-11-23T05:00:00Z', nowMs), '13h ago');
+  assert.equal(ageText('2026-11-21T10:00:00Z', nowMs), '2d ago');
+  assert.equal(ageText('nonsense', nowMs), 'at an unknown time');
+});

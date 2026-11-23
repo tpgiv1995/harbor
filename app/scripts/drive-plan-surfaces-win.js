@@ -164,6 +164,17 @@ async function main() {
   }
   const profiles = realConfig.profiles || [];
   const claudeProfiles = profiles.filter((p) => (p.provider || 'claude') === 'claude');
+  // Stale readings (2026-11-23, Pat: the rail said Claude C's week was about 20% while it was
+  // at 99%). The copied statusline files are real and mostly old, and E2E mode reads no endpoint,
+  // so they show as stale; the FIRST Claude plan with a copied file is re-stamped "now" (in this
+  // temp copy only) so step 2c sees a fresh row beside the stale ones.
+  const freshPlan = claudeProfiles.find((p) => fs.existsSync(path.join(cacheDir, `usage-${p.id}.json`)));
+  if (freshPlan) {
+    const file = path.join(cacheDir, `usage-${freshPlan.id}.json`);
+    const tee = JSON.parse(fs.readFileSync(file, 'utf8'));
+    tee.updated_at = new Date().toISOString();
+    fs.writeFileSync(file, JSON.stringify(tee));
+  }
   const launch = railLaunchPlan(profiles);
   const primary = railPrimaryPlan(launch.direct, null);
   const otherProfiles = profiles.filter((p) => p.provider === launch.otherProvider);
@@ -392,6 +403,56 @@ async function main() {
     }
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 956, height: 574, deviceScaleFactor: 1.8, mobile: false });
     await sleep(300);
+
+    // 2c. A stale reading draws as a floor: "N%+" (no plus at 100% or more), dimmed, and its
+    // tooltip says how old it is and why; a fresh reading draws exactly as before. The plan
+    // picker carries the same marks. Checked against the app's own usage read, row by row.
+    facts.stale = await cdp.eval(`(async () => {
+      const usage = await window.harbor.usage.getAll();
+      const ids = [...document.querySelectorAll('.rail-meters .rm-row:not(.rm-sys)')].map((row) => row.dataset.account);
+      return ids.map((id) => {
+        const row = document.querySelector('.rail-meters .rm-row[data-account="' + id + '"]');
+        const groups = [...row.querySelectorAll('.rm-g')];
+        const d = usage[id] || {};
+        return { id, stale: Boolean(d.stale), weeklyPct: d.weeklyPct ?? null, staleReason: d.staleReason || null,
+          texts: groups.map((g) => g.querySelector('b').textContent.trim()),
+          marked: groups.map((g) => g.classList.contains('stale')),
+          fade: groups.map((g) => getComputedStyle(g.querySelector('b')).opacity),
+          rowTip: row.title, weekTip: groups[1]?.title || '' };
+      });
+    })()`);
+    const staleRows = facts.stale.filter((r) => r.stale);
+    const freshRows = facts.stale.filter((r) => !r.stale && r.weeklyPct != null);
+    if (!staleRows.length) problems.push('no stale meter row to check (expected the copied old readings to be stale)');
+    if (freshPlan && !freshRows.some((r) => r.id === freshPlan.id)) problems.push(`the re-stamped plan ${freshPlan.id} is not fresh`);
+    for (const r of facts.stale) {
+      r.texts.forEach((text, i) => {
+        const known = text !== '--';
+        const wantPlus = r.stale && known && !/^1\d\d%|^[2-9]\d\d%/.test(text);
+        if (known && wantPlus !== text.endsWith('+')) problems.push(`${r.id} meter ${i} reads "${text}" (stale: ${r.stale})`);
+        if (known && r.marked[i] !== r.stale) problems.push(`${r.id} meter ${i} stale mark is ${r.marked[i]}, data says ${r.stale}`);
+        if (known && r.stale && Number(r.fade[i]) >= 1) problems.push(`${r.id} meter ${i} is not dimmed`);
+      });
+      if (r.stale && !/last read/.test(r.rowTip)) problems.push(`${r.id} row tooltip does not say when it was last read: ${r.rowTip}`);
+      if (r.stale && r.weeklyPct != null && !/at least .*last read .* ago, so it may be higher now/.test(r.weekTip)) problems.push(`${r.id} weekly tooltip: ${r.weekTip}`);
+      if (!r.stale && /at least|last read/.test(r.weekTip)) problems.push(`${r.id} is fresh but its tooltip reads stale: ${r.weekTip}`);
+    }
+    shots.push(await cdp.shot('1e-meters-stale-marks'));
+    await cdp.eval(click('.rail-head .launch-more'));
+    await waitFor(cdp, 'Boolean(document.querySelector(".plan-picker .plan-pick"))', 'the plan picker (stale marks)');
+    await sleep(250);
+    facts.pickerStale = await cdp.eval(`[...document.querySelectorAll('.plan-picker .plan-pick:not(.plan-pick-other)')].map((row) => ({
+      id: row.dataset.plan, uses: [...row.querySelectorAll('.plan-pick-use')].map((u) => u.textContent.trim() + (u.classList.contains('stale') ? ' (dim)' : '')) }))`);
+    for (const r of facts.stale) {
+      const pick = facts.pickerStale.find((p) => p.id === r.id);
+      if (!pick) continue;
+      const shown = pick.uses.map((u) => u.replace(' (dim)', ''));
+      if (JSON.stringify(shown) !== JSON.stringify(r.texts)) problems.push(`picker row ${r.id} reads ${shown.join('/')} but its meters read ${r.texts.join('/')}`);
+      if (r.stale && r.texts.some((t) => t !== '--') && !pick.uses.some((u) => u.endsWith('(dim)'))) problems.push(`picker row ${r.id} is stale but not dimmed`);
+    }
+    shots.push(await cdp.shot('1f-plan-picker-stale-marks'));
+    await cdp.eval(escape);
+    await sleep(250);
 
     // 3. File menu: one "New <plan> session" per profile.
     await cdp.eval(click('.app-menu-btn'));

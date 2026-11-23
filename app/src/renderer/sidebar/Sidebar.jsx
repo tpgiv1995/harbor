@@ -14,7 +14,7 @@ import {
   resumeCommandForProfile, railLaunchPlan, railPrimaryPlan, planForKey, RAIL_DEFAULT_WIDTH, profileStyle,
 } from '../profiles.cjs';
 import { ViewSwitch } from '../ViewSwitch.jsx';
-import { resetBadge, resetTooltip } from './usage-reset.cjs';
+import { resetBadge, resetTooltip, usageText } from './usage-reset.cjs';
 import { collapseForView, planCollapseAll } from './collapse-policy.cjs';
 import { railStatus } from './rail-status.cjs';
 import RenameField, { PencilIcon } from '../RenameField.jsx';
@@ -248,14 +248,16 @@ function AccountBadge({ home, profiles }) {
 // `short` marks the 5-hour group: it is the one that gives up its inline reset
 // badge first when the rail is dragged narrow, because a 5-hour window resets
 // again within the day while the weekly one is the planning number.
-function MeterBar({ pct, reset, title, short = false }) {
+// `stale` (usage.js, 2026-11-23): the reading is old enough to be only a
+// floor, so the number carries a "+" and the meter dims; the tooltip says how
+// old and why. Before this, a two-day-old 20% drew exactly like a live one.
+function MeterBar({ pct, reset, title, short = false, stale = false }) {
   const has = typeof pct === 'number' && Number.isFinite(pct);
-  const shown = has ? Math.round(pct) : null;
   const fill = has ? Math.max(0, Math.min(100, pct)) : 0;
   const level = !has ? '' : pct >= 100 ? ' max' : pct >= 75 ? ' hi' : '';
   return (
-    <span className={`rm-g${short ? ' rm-g-5h' : ''}${level}`} title={title}>
-      <b>{has ? `${shown}%` : '--'}</b>
+    <span className={`rm-g${short ? ' rm-g-5h' : ''}${level}${has && stale ? ' stale' : ''}`} title={title}>
+      <b>{usageText(pct, { stale })}</b>
       {reset ? <em>{reset}</em> : null}
       <i aria-hidden="true"><s style={{ width: `${fill}%` }} /></i>
     </span>
@@ -309,7 +311,8 @@ function RailMeters({ profiles: allProfiles, usage = {} }) {
         const tooltip = [
           `${profile.label}${data?.email ? `: ${data.email}` : ''}`,
           typeof data?.cost === 'number' ? `last session $${data.cost.toFixed(2)}` : null,
-          data?.updatedAt ? `updated ${formatRelative(data.updatedAt)}` : null,
+          data?.updatedAt ? `${data?.stale ? 'last read' : 'updated'} ${formatRelative(data.updatedAt)}` : null,
+          data?.stale ? (data?.staleReason || 'no newer reading yet') : null,
           data?.unavailable ? (data?.reason || 'no data yet') : null,
         ].filter(Boolean).join(' · ') || undefined;
         const fiveHourBadge = resetBadge(data?.fiveHourResetsAt, { window: 'fiveHour' });
@@ -330,9 +333,11 @@ function RailMeters({ profiles: allProfiles, usage = {} }) {
                 pct: data?.fiveHourPct,
                 resetsAt: data?.fiveHourResetsAt,
                 rolled: data?.fiveHourRolled,
+                stale: data?.stale, updatedAt: data?.updatedAt, staleReason: data?.staleReason, nextReadAt: data?.nextReadAt,
               })}
               reset={fiveHourBadge ? `↻${fiveHourBadge}` : ''}
               short
+              stale={data?.stale}
             />
             <MeterBar
               pct={data?.weeklyPct}
@@ -341,8 +346,10 @@ function RailMeters({ profiles: allProfiles, usage = {} }) {
                 pct: data?.weeklyPct,
                 resetsAt: data?.weeklyResetsAt,
                 rolled: data?.weeklyRolled,
+                stale: data?.stale, updatedAt: data?.updatedAt, staleReason: data?.staleReason, nextReadAt: data?.nextReadAt,
               })}
               reset={weeklyBadge ? `↻${weeklyBadge}` : ''}
+              stale={data?.stale}
             />
           </div>
         );
@@ -1358,7 +1365,8 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
             const current = profile.id === primaryPlan?.id;
             const email = accountEmails[profile.id] || data?.email;
             const level = (pct) => (typeof pct !== 'number' ? '' : pct >= 100 ? ' max' : pct >= 75 ? ' hi' : '');
-            const shown = (pct) => (typeof pct === 'number' && Number.isFinite(pct) ? `${Math.round(pct)}%` : '--');
+            const shown = (pct) => usageText(pct, { stale: data?.stale });
+            const dim = (pct) => (data?.stale && typeof pct === 'number' && Number.isFinite(pct) ? ' stale' : '');
             return (
               <button
                 key={profile.id}
@@ -1370,16 +1378,16 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
                 title={[
                   `New ${profile.label} session${planPicker?.folder ? ` in ${planPicker.folder}` : ''} (${profile.letter})`,
                   email || null,
-                  resetTooltip({ window: 'fiveHour', pct: data?.fiveHourPct, resetsAt: data?.fiveHourResetsAt, rolled: data?.fiveHourRolled }),
-                  resetTooltip({ window: 'weekly', pct: data?.weeklyPct, resetsAt: data?.weeklyResetsAt, rolled: data?.weeklyRolled }),
+                  resetTooltip({ window: 'fiveHour', pct: data?.fiveHourPct, resetsAt: data?.fiveHourResetsAt, rolled: data?.fiveHourRolled, stale: data?.stale, updatedAt: data?.updatedAt, staleReason: data?.staleReason, nextReadAt: data?.nextReadAt, }),
+                  resetTooltip({ window: 'weekly', pct: data?.weeklyPct, resetsAt: data?.weeklyResetsAt, rolled: data?.weeklyRolled, stale: data?.stale, updatedAt: data?.updatedAt, staleReason: data?.staleReason, nextReadAt: data?.nextReadAt, }),
                 ].filter(Boolean).join('\n')}
                 onClick={() => pickPlan(profile)}
               >
                 <span className="rail-menu-mark" aria-hidden="true">{current ? '✓' : ''}</span>
                 <span className="profile-badge plan-pick-badge" aria-hidden="true">{profile.letter}</span>
                 <span className="rail-menu-label">{profile.label}</span>
-                <span className={`plan-pick-use${level(data?.fiveHourPct)}`}>{shown(data?.fiveHourPct)}</span>
-                <span className={`plan-pick-use${level(data?.weeklyPct)}`}>{shown(data?.weeklyPct)}</span>
+                <span className={`plan-pick-use${level(data?.fiveHourPct)}${dim(data?.fiveHourPct)}`}>{shown(data?.fiveHourPct)}</span>
+                <span className={`plan-pick-use${level(data?.weeklyPct)}${dim(data?.weeklyPct)}`}>{shown(data?.weeklyPct)}</span>
               </button>
             );
           })}

@@ -71,20 +71,48 @@ const WINDOW_LABEL = { fiveHour: '5-hour window', weekly: 'weekly window' };
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+// How long ago a reading was taken, coarsest honest unit: "40m ago", "13h ago".
+function ageText(updatedAt, nowMs = Date.now()) {
+  const time = typeof updatedAt === 'number' ? updatedAt : Date.parse(updatedAt);
+  if (!Number.isFinite(time)) return 'at an unknown time';
+  const minutes = Math.max(0, Math.floor((nowMs - time) / (60 * MS)));
+  if (minutes < 60) return `${Math.max(1, minutes)}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+// The percentage as every plan surface prints it. A STALE reading (usage.js
+// `stale`, 2026-11-23) is a floor, because usage within a window only goes up,
+// so it carries a "+": "20%+" reads as "at least 20%". This is the Claude C
+// case, where the rail said 20% for two days while the plan sat at 99%. At or
+// past 100% the plus says nothing more and is left off.
+function usageText(pct, { stale = false, empty = '--' } = {}) {
+  if (typeof pct !== 'number' || !Number.isFinite(pct)) return empty;
+  const shown = Math.round(pct);
+  return stale && shown < 100 ? `${shown}%+` : `${shown}%`;
+}
+
 // The hover text: the same instant spelled out, plus how far away it is. Never
 // invents a percentage; when the percent is unknown the tooltip says so rather
-// than implying zero.
+// than implying zero. A stale reading says it is a floor, how old it is, why no
+// newer one exists, and when Harbor may read again.
 function resetTooltip({
   window = 'weekly',
   pct = null,
   resetsAt = null,
   rolled = false,
+  stale = false,
+  updatedAt = null,
+  staleReason = null,
+  nextReadAt = null,
   nowMs = Date.now(),
 } = {}) {
   const parts = [WINDOW_LABEL[window] || WINDOW_LABEL.weekly];
-  parts.push(typeof pct === 'number' && Number.isFinite(pct)
-    ? `${Math.round(pct)}% used`
-    : 'usage not reported yet');
+  const known = typeof pct === 'number' && Number.isFinite(pct);
+  parts.push(!known
+    ? 'usage not reported yet'
+    : stale ? `at least ${Math.round(pct)}% used` : `${Math.round(pct)}% used`);
   if (resetsAt) {
     const date = new Date(resetsAt * MS);
     if (!Number.isNaN(date.getTime())) {
@@ -93,7 +121,15 @@ function resetTooltip({
     }
   }
   if (rolled) parts.push('window already reset; nothing used since');
+  if (stale && known) {
+    parts.push(`last read ${ageText(updatedAt, nowMs)}, so it may be higher now`);
+    if (staleReason) parts.push(staleReason);
+    const next = nextReadAt ? new Date(nextReadAt) : null;
+    if (next && !Number.isNaN(next.getTime()) && next.getTime() > nowMs) {
+      parts.push(`next read after ${resetBadge(next.getTime() / MS, { window: 'fiveHour', nowMs })}`);
+    }
+  }
   return parts.join(' · ');
 }
 
-module.exports = { resetBadge, resetTooltip, clockText, relativeText };
+module.exports = { resetBadge, resetTooltip, usageText, ageText, clockText, relativeText };
