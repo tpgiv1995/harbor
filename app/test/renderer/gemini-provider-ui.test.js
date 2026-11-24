@@ -111,15 +111,19 @@ test('a Gemini plan is a choice only between two roots; Cursor never; Claude and
 
 // -- Window: terminal fallback, read-only rule, plan badge -------------------------------------------------
 
-test('a live Gemini pane with no transcript shows its terminal (D12: first-run screens are answered there)', () => {
+// 2026-11-24 (Pat, on a new Gemini window that opened on agy's colour page in a raw terminal: "you didn't even bother
+// to build out a harbor screen for gemini"): a new Gemini window is the designed window, like codex and cursor, and
+// Google's first-run pages come up as the Gemini setup card (GeminiSetupCard.jsx, main/gemini-first-run.js).
+test('a new Gemini pane with no transcript yet shows the designed window, not its terminal', () => {
   const PANE = { paneId: 'p1' };
-  for (const id of ['live:p1', 'pane:p1']) {
-    const view = terminalView({ session: { id, provider: 'gemini' }, data: null, pane: PANE, tty: false });
-    assert.equal(view.showTerminal, true, id);
-    assert.equal(view.fallback, true, id);
+  for (const provider of ['gemini', 'codex', 'cursor', 'claude']) {
+    const view = terminalView({ session: { id: 'pane:p1', provider }, data: null, pane: PANE, tty: false });
+    assert.equal(view.showTerminal, false, provider);
+    assert.equal(view.fallback, false, provider);
   }
-  // The tile's registration makes the SAME decision (one function), so the terminal is fed.
+  // A live pane no evidence named still falls back, as for codex and cursor (nothing else can show it).
   assert.equal(terminalView({ session: { id: 'live:p1', provider: 'gemini' }, data: { missing: true }, pane: PANE }).fallback, true);
+  assert.deepEqual(NON_CLAUDE_PROVIDERS, ['codex', 'cursor', 'gemini']);
 });
 
 test('a Gemini window WITH a transcript, or without a pane, does not fall back', () => {
@@ -131,18 +135,24 @@ test('a Gemini window WITH a transcript, or without a pane, does not fall back',
   assert.equal(terminalView({ session: named, data: { blocks: [{}] }, pane: PANE, tty: true }).showTerminal, true);
 });
 
-test('only Gemini widens the fallback to a provisional pane: codex and cursor keep their rule', () => {
-  const PANE = { paneId: 'p1' };
-  for (const provider of ['codex', 'cursor', 'claude']) {
-    assert.equal(terminalView({ session: { id: 'pane:p1', provider }, data: null, pane: PANE }).showTerminal, false, provider);
-  }
-  assert.deepEqual(NON_CLAUDE_PROVIDERS, ['codex', 'cursor', 'gemini']);
-});
-
-test('the fallback note says where Google’s first-run screens are answered, for Gemini only', () => {
-  assert.equal(terminalFallbackNote('Gemini'), 'this gemini pane has not named its session yet; showing its terminal. Answer Google\'s first-run screens here');
+test('the fallback note is the same for every provider; first-run pages are a card, never "answer them here"', () => {
+  assert.equal(terminalFallbackNote('Gemini'), 'this gemini pane has not named its session yet; showing its terminal');
   assert.equal(terminalFallbackNote('Codex'), 'this codex pane has not named its session yet; showing its terminal');
   assert.equal(terminalFallbackNote('Cursor'), 'this cursor pane has not named its session yet; showing its terminal');
+});
+
+test('a Gemini window mounts the answer card, so its setup card and questions show in the window', () => {
+  const tile = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'renderer', 'stage', 'SessionTile.jsx'), 'utf8');
+  assert.match(tile, /session\.provider === 'claude' \|\| session\.provider === 'gemini'\) \? \(/);
+});
+
+test('the Gemini setup card counts as a dialog waiting on you, on the desktop and the phone', () => {
+  const { liveDialog } = require('../../src/renderer/stage/dialog-state.cjs');
+  const setup = { kind: 'gemini-setup', page: 'scheme', schemes: [{ label: 'terminal', selected: true }] };
+  assert.equal(liveDialog(setup), setup);
+  const phone = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'src', 'ask', 'AskCard.jsx'), 'utf8');
+  assert.match(phone, /GeminiSetupCard/);
+  assert.match(phone, /kind === 'gemini-setup'/);
 });
 
 test('a dead Gemini session with an unknown folder is read-only, like codex and cursor; Claude is not', () => {

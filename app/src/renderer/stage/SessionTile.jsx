@@ -480,7 +480,11 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           sessionId={session.id}
           blocks={blocks}
           header={header}
-          empty={data && !data.missing
+          // A question on screen before the first message (Gemini's one-time setup, a folder-trust
+          // question) is answered in the card below; "type below" would send into a refusal (2026-11-24).
+          empty={awaitingAnswer && !(data && !data.missing)
+            ? 'Answer the card below first. This session starts after that.'
+            : data && !data.missing
             ? 'No conversation in this session yet.'
             : String(session.id).startsWith('pane:')
               ? 'Fresh session. Type below to start it.'
@@ -489,7 +493,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
                 : 'Loading transcript…'}
           // Nothing to read yet and a live pane behind it: the terminal is one
           // click away, never a hunt for the header toggle.
-          emptyAction={pane && !readOnly && noTranscript ? (
+          emptyAction={pane && !readOnly && noTranscript && !awaitingAnswer ? (
             <button
               type="button"
               className="conv-empty-act"
@@ -517,7 +521,9 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           onAnswer={(id, payload) => window.harbor.asks.answer({ id, ...payload })}
           onDecline={(id, reason) => window.harbor.asks.decline({ id, reason })}
         />
-      ) : pane && !readOnly && session.provider === 'claude' ? (
+      ) : pane && !readOnly && (session.provider === 'claude' || session.provider === 'gemini') ? (
+        // Gemini too (2026-11-24): its first-run pages are the setup card, and its own permission
+        // and folder-trust questions the answer panel (test/main/gemini-window-card.test.js).
         // Mounted behind the raw terminal too, watching only, so a window left
         // on >_ still turns the taskbar amber when a prompt appears.
         // blockedHint is the evidence OTHER than this card's own verdict: fed

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { ModelSwitchCard } from './ModelSwitchCard.jsx';
+import { GeminiSetupCard } from './GeminiSetupCard.jsx';
 import { ScrapedPermissionCard, PermissionFeedbackFailure } from './PermissionCard.jsx';
 import { dialogStore } from './use-dialog-state.js';
 import { liveDialog as live } from './dialog-state.cjs';
@@ -31,7 +32,7 @@ import {
 // only renders and dispatches.
 
 // Actions that leave the dialog up, so the card re-reads instead of clearing.
-const KEEP = new Set(['key', 'raw', 'toggle', 'notes']);
+const KEEP = new Set(['key', 'raw', 'toggle', 'notes', 'gemini-scheme', 'gemini-terms']);
 
 // The raw screen is rendered SCROLLED TO THE BOTTOM, because the actionable line
 // is always the last one and the box is shorter than the screen it shows
@@ -251,7 +252,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
     return () => { alive = false; if (timer) clearTimeout(timer); };
   }, [paneId, sessionId, blockedHint, watchOnly]);
 
-  const sheet = useMemo(() => menu?.kind === 'model-switch' ? null : buildSheet(menu), [menu]);
+  const sheet = useMemo(() => (menu?.kind === 'model-switch' || menu?.kind === 'gemini-setup') ? null : buildSheet(menu), [menu]);
   const sheetRef = useRef(sheet);
   sheetRef.current = sheet;
   const identity = sheetIdentity(sheet);
@@ -403,6 +404,7 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
   if (failedFeedback) return <PermissionFeedbackFailure {...failedFeedback} onClose={() => setFailedFeedback(null)} />;
   if (!menu) return null;
   if (menu.kind === 'model-switch') return <ModelSwitchCard menu={menu} busy={busy} error={error} onAction={run} />;
+  if (menu.kind === 'gemini-setup') return <GeminiSetupCard menu={menu} busy={busy} error={error} onAction={run} />;
   if (menu.permission) return <ScrapedPermissionCard key={`${sessionId}:${menu.question}`} menu={menu} busy={busy} error={error} onAction={run} />;
 
   // The no-dead-end panel: an unrecognized blocker shows its raw screen tail

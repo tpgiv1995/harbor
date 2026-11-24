@@ -17,8 +17,9 @@
 // The poll results the card shows, which are exactly the ones that mean the
 // session is waiting on you: a model switch, a menu with options (permission,
 // question, resume), or the unrecognized-prompt panel.
+// Gemini's first-run setup card (2026-11-24) is one too: the session waits on Pat's answer.
 function liveDialog(next) {
-  return next && (next.kind === 'model-switch' || next.options?.length || next.fallback) ? next : null;
+  return next && (next.kind === 'model-switch' || next.kind === 'gemini-setup' || next.options?.length || next.fallback) ? next : null;
 }
 
 function createDialogStore() {

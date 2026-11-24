@@ -167,8 +167,8 @@ function GeminiCard({ state, patch, providers, errors }) {
             </button>
           </div>
           <p className="setup-note-fine">
-            The first time agy runs it shows Google's own setup and terms screens: answer them in the
-            session's terminal (the &gt;_ button on its window). Harbor does not answer them for you.
+            The first time agy runs it shows Google's own setup and terms screens: they appear as a
+            Gemini setup card in the session's window, for you to answer. Harbor does not answer them for you.
           </p>
           {note ? (
             <div className={`setup-note ${note.kind === 'ok' ? '' : 'warn'}`}>

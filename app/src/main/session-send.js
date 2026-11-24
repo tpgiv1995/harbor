@@ -16,6 +16,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { StringDecoder } = require('node:string_decoder');
 const { parseMenu, menuArrowToward, MENU_KEYS } = require('./menu-parse.js');
+const { parseGeminiFirstRun, answerGeminiFirstRun, isGeminiFirstRunAction } = require('./gemini-first-run.js');
 const { parseGenericList, locateRow } = require('./generic-list.js');
 const { parseWorkMeter } = require('./work-meter.js');
 const { isDividerLine, isPromptEdgeLine } = require('../shared/divider.cjs');
@@ -2979,12 +2980,12 @@ function createSessionSend(deps) {
   const geminiNeedsAnswerError = (kind, { late = false } = {}) => {
     const first = kind === 'first-run';
     const error = new Error(first
-      ? 'Gemini is on its first-run screens (colour scheme, Terms of Service & Data Use). Those choices are yours to make, so Harbor typed and sent nothing. Your text is kept. Open the >_ terminal for this window, answer them there, then send again'
+      ? 'Gemini is on its first-run screens (colour scheme, Terms of Service & Data Use). Those choices are yours to make, so Harbor typed and sent nothing. Your text is kept. Answer them in the Gemini setup card in this window, then send again'
       : kind === 'trust'
-        ? 'Gemini is asking whether to trust this folder, so Harbor typed and sent nothing. Your text is kept. Open the >_ terminal for this window and answer it there, then send again'
+        ? 'Gemini is asking whether to trust this folder, so Harbor typed and sent nothing. Your text is kept. Answer it in the panel in this window, then send again'
         : late
-          ? 'A question appeared in Gemini while Harbor was typing, so it did not press Enter and nothing was sent. Your text is kept. Open the >_ terminal for this window and answer the question there first'
-          : 'Gemini is waiting on a question (a permission or a choice), so Harbor typed and sent nothing; keys typed there would answer it. Your text is kept. Open the >_ terminal for this window and answer it there, then send again');
+          ? 'A question appeared in Gemini while Harbor was typing, so it did not press Enter and nothing was sent. Your text is kept. Answer the question in the panel in this window first'
+          : 'Gemini is waiting on a question (a permission or a choice), so Harbor typed and sent nothing; keys typed there would answer it. Your text is kept. Answer it in the panel in this window, then send again');
     error.code = first ? 'GEMINI_FIRST_RUN' : 'GEMINI_NEEDS_ANSWER';
     return error;
   };
@@ -4090,6 +4091,18 @@ function createSessionSend(deps) {
   const readFallback = async (pane, blockedHint, { observe = false } = {}) => {
     const paneId = pane.paneId;
     const screen = await readScreen(paneId, MENU_READ_LINES);
+    // Gemini's first-run pages (colour scheme, Terms of Service & Data Use) are a card of their own
+    // (gemini-first-run.js, 2026-11-24), read off the VISIBLE grid: agy redraws the whole page, so the recent
+    // buffer can hold an older pointer. The extra read happens only while such a page is up.
+    if (GEMINI_FIRST_RUN_RE.test(screen)) {
+      let grid = '';
+      try { grid = await readPane(paneId, MENU_READ_LINES, 'visible'); } catch { grid = ''; }
+      const setup = parseGeminiFirstRun(grid) || parseGeminiFirstRun(screen);
+      if (setup) return setup;
+    }
+    // agy's slash-command completion list hangs under its own drawn prompt while "/" is typed: a draft being
+    // completed, not a question, so no panel (measured on test/fixtures/gemini-box, 2026-11-24).
+    if (geminiPromptBox(screen)?.menuOpen) return null;
     const blocked = classifyBlocked(screen, blockedHint);
     if (!blocked) return null;
     // Claude's own first-run notices are handled here rather than shown: one
@@ -4893,6 +4906,14 @@ function createSessionSend(deps) {
     terminalBridge.holdControl?.(paneId);
     try {
       await acquireControl(paneId, workspaceId);
+      // The Gemini setup card's clicks: each key only after a fresh read of the grid proves where the pointer is.
+      if (isGeminiFirstRunAction(action)) {
+        return await answerGeminiFirstRun(action, {
+          read: () => readPane(paneId, MENU_READ_LINES, 'visible'),
+          type: (bytes) => typeInto(paneId, workspaceId, bytes),
+          sleep,
+        });
+      }
       if (action.type === 'sheet') return await deliverSheet(paneId, workspaceId, action, ask);
       if (action.type === 'chat') return await chatAbout(paneId, workspaceId, action, ask);
       if (action.type === 'notes') return await noteOn(paneId, workspaceId, action, ask);

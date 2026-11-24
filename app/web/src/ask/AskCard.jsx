@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import './ask.css';
 import { CONNECTION } from '../rpc/client.js';
 import { ModelSwitchCard } from '../../../src/renderer/stage/ModelSwitchCard.jsx';
+import { GeminiSetupCard } from '../../../src/renderer/stage/GeminiSetupCard.jsx';
 import { ScrapedPermissionCard, PermissionFeedbackFailure } from '../../../src/renderer/stage/PermissionCard.jsx';
 
 // The phone's answer card: renders whatever `session:menu-state` returns and
@@ -66,7 +67,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
       if (!busyRef.current && !hidden() && linked) {
         try {
           const next = await client.call('session:menu-state', { pane: paneRef.current, sessionId, blockedHint: blockedRef.current });
-          if (live && !busyRef.current) setMenu(next && (next.kind === 'model-switch' || next.options?.length || next.fallback) ? next : null);
+          if (live && !busyRef.current) setMenu(next && (next.kind === 'model-switch' || next.kind === 'gemini-setup' || next.options?.length || next.fallback) ? next : null);
         } catch (error) {
           if (live && !/not connected|connection dropped/.test(String(error?.message))) setMenu(null);
         }
@@ -85,7 +86,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
 
   const refresh = async () => {
     const next = await client.call('session:menu-state', { pane, sessionId, blockedHint: blockedRef.current });
-    setMenu(next && (next.kind === 'model-switch' || next.options?.length || next.fallback) ? next : null);
+    setMenu(next && (next.kind === 'model-switch' || next.kind === 'gemini-setup' || next.options?.length || next.fallback) ? next : null);
   };
 
   const answer = async (action) => {
@@ -96,7 +97,7 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
     // of clearing. Everything else ends the question, where clearing
     // optimistically is what makes the card disappear the instant the answer
     // lands rather than one poll later.
-    const keepsCardUp = action.type === 'toggle' || Boolean(menu?.permission);
+    const keepsCardUp = action.type === 'toggle' || action.type === 'gemini-scheme' || action.type === 'gemini-terms' || Boolean(menu?.permission);
     setAnswerError(null);
     if (!keepsCardUp) setMenu(null);
     try {
@@ -148,6 +149,8 @@ export function AskCard({ client, pane, sessionId, blockedHint }) {
   if (failedFeedback) return <div className="phone-hook-prompt"><PermissionFeedbackFailure {...failedFeedback} device="phone" onClose={() => setFailedFeedback(null)} /></div>;
   if (!menu) return null;
   if (menu.kind === 'model-switch') return <ModelSwitchCard menu={menu} busy={busy} error={answerError} onAction={answer} />;
+  // Gemini's first-run pages, answered from the phone the same way (2026-11-24).
+  if (menu.kind === 'gemini-setup') return <GeminiSetupCard menu={menu} busy={busy} error={answerError} onAction={answer} />;
   if (menu.permission) return <div className="phone-hook-prompt"><ScrapedPermissionCard key={`${sessionId}:${menu.question}`}
     menu={menu} device="phone" busy={busy} error={answerError} onAction={answer} /></div>;
 

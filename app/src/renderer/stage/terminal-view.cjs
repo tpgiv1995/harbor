@@ -25,12 +25,12 @@ function terminalView({ session, data, pane, tty } = {}) {
   // no evidence resolved). With no id there is no transcript to render, and
   // the terminal is the only truthful view of what that agent is doing.
   //
-  // Gemini (2026-11-23, DESIGN D12) also falls back for a PROVISIONAL pane: a profile that never ran
-  // agy shows Google's colour-scheme and Terms screens before any conversation exists, the person
-  // answers them (Harbor never does), and a send refuses until they have. That answer is typed in
-  // this terminal, so a Gemini pane with no transcript yet must show it, not an empty window.
+  // Gemini's provisional pane (2026-11-24) is the designed window, like codex and cursor. Until then
+  // (2026-11-23, DESIGN D12) it fell back to its terminal so Google's first-run pages could be answered
+  // there; Pat opened a new Gemini window onto a raw terminal and called it no Harbor screen at all.
+  // Those pages are now the Gemini setup card in the window (GeminiSetupCard.jsx, main/gemini-first-run.js).
   const id = String(session?.id || '');
-  const unnamed = id.startsWith('live:') || (session?.provider === 'gemini' && id.startsWith('pane:'));
+  const unnamed = id.startsWith('live:');
   const fallback = Boolean(hasPane && nonClaude && noTranscript && unnamed);
   return {
     fallback,
@@ -59,11 +59,10 @@ function headerKeepsKeys({ showTerminal = false, onButton = false } = {}) {
   return Boolean(showTerminal && onButton);
 }
 
-// The line above a fallback terminal. Gemini's says where its first-run screens are answered.
+// The line above a fallback terminal (Gemini's first-run pages are the setup card, never answered here).
 function terminalFallbackNote(label) {
   const name = String(label || '').toLowerCase();
-  const base = `this ${name} pane has not named its session yet; showing its terminal`;
-  return name === 'gemini' ? `${base}. Answer Google's first-run screens here` : base;
+  return `this ${name} pane has not named its session yet; showing its terminal`;
 }
 
 module.exports = { terminalView, terminalFallbackNote, NON_CLAUDE_PROVIDERS, windowClickArms, headerKeepsKeys };

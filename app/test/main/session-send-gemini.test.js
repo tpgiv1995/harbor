@@ -521,7 +521,7 @@ test('a permission question owns the keys: nothing is typed, and Harbor says whe
   geminiPane(h, { dialog: 'agy-1.5.14-permission-prompt-120.txt' });
   const s = createSessionSend(h.deps);
   await assert.rejects(s.send({ sessionId: 'pane:pane-1', provider: 'gemini', text: '1', pane: target }),
-    (error) => error.code === 'GEMINI_NEEDS_ANSWER' && /Gemini is waiting on a question/.test(error.message) && /terminal/.test(error.message));
+    (error) => error.code === 'GEMINI_NEEDS_ANSWER' && /Gemini is waiting on a question/.test(error.message) && /panel in this window/.test(error.message));
   assert.deepEqual(typedKeys(h), [], 'a typed "1" would have approved the command');
 });
 
@@ -531,7 +531,7 @@ test('the first-run colour scheme and Terms screens are the person\'s consent: r
     geminiPane(h, { dialog: name });
     const s = createSessionSend(h.deps);
     await assert.rejects(s.send({ sessionId: 'pane:pane-1', provider: 'gemini', text: 'hello', pane: target }),
-      (error) => error.code === 'GEMINI_FIRST_RUN' && /first-run/.test(error.message) && /Terms of Service/.test(error.message));
+      (error) => error.code === 'GEMINI_FIRST_RUN' && /first-run/.test(error.message) && /Terms of Service/.test(error.message) && /setup card in this window/.test(error.message));
     assert.deepEqual(typedKeys(h), [], name);
   }
 });
