@@ -328,13 +328,22 @@ async function main() {
     //    the machine's: the process scan is off (HARBOR_TEAM_NO_PROCESS_SCAN).
     await page.locator('.view-switch-btn', { hasText: 'Orch' }).first()
       .click({ timeout: 5000 }).catch(() => {});
-    await page.waitForFunction(() => document.querySelectorAll('.tc-card').length >= 5, null, { timeout: 30000 }).catch(() => {});
+    await page.waitForFunction(() => document.querySelectorAll('.tc-card').length >= 6, null, { timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(2500);
     const teamCards = await page.locator('.tc-card').count();
-    if (teamCards < 5) {
+    if (teamCards < 6) {
       if (process.env.HARBOR_SHOT_FAIL_DIR) await page.screenshot({ path: path.join(process.env.HARBOR_SHOT_FAIL_DIR, 'orch-fail.png') }).catch(() => {});
-      throw new Error(`the Team chart drew ${teamCards} of the 5 invented workers`);
+      throw new Error(`the Team chart drew ${teamCards} of the 6 invented workers`);
     }
+    // Every provider has a card with its own mark (the Gemini worker joined 2026-11-24), and an invented team that is
+    // working normally carries no warning badge: a badge in the README picture reads as Harbor reporting a fault.
+    const chart = await page.evaluate(() => ({
+      logos: [...document.querySelectorAll('.tc-card .tc-logo img')].map((img) => img.getAttribute('alt')),
+      warnings: [...document.querySelectorAll('.tc-card .tc-warn-count')].map((el) => el.closest('.tc-card')?.querySelector('.tc-name')?.textContent),
+    }));
+    const missingMarks = ['Claude', 'Codex', 'Cursor', 'Gemini'].filter((label) => !chart.logos.some((alt) => (alt || '').includes(label)));
+    if (missingMarks.length) throw new Error(`the Team chart has no card with the ${missingMarks.join(', ')} mark (${chart.logos.join(', ')})`);
+    if (chart.warnings.length) throw new Error(`the Team chart shows warning badges on: ${chart.warnings.join('; ')}`);
     await shot('orch');
 
     // 6. Files (Artifacts): discovered from transcripts, rendered inline. The

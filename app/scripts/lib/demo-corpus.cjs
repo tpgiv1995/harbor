@@ -960,7 +960,9 @@ const TEAM = [
     ],
   },
   {
-    key: 'notes', provider: 'claude', dir: 'demo/harbor', launcher: 'claude-worker', home: '.claude-team', parent: 'lead',
+    // Each worker in its own sub-folder, as lane workers run: two in one folder is Harbor's real "two writers" warning,
+    // which drew a warning badge on three cards of the README picture (2026-11-24).
+    key: 'notes', provider: 'claude', dir: 'demo/harbor/docs', launcher: 'claude-worker', home: '.claude-team', parent: 'lead',
     title: 'Write the per-platform install notes', model: 'claude-sonnet-5-5', effort: 'high', ends: 'working', ageMin: 31,
     blocks: [
       ['user', 'Write the install notes for Windows, macOS and Linux, including what the unsigned-build warnings look like.'],
@@ -969,12 +971,16 @@ const TEAM = [
     ],
   },
   {
-    key: 'checksums', provider: 'codex', dir: 'demo/harbor', launcher: 'astra-run', parent: 'lead',
+    key: 'checksums', provider: 'codex', dir: 'demo/harbor/build', launcher: 'astra-run', parent: 'lead',
     title: 'Check two builds produce the same checksums', model: 'gpt-6.2-sol', effort: 'high', ageMin: 24,
   },
   {
     key: 'download-page', provider: 'cursor', dir: 'demo/site', launcher: 'cursor-worker', parent: 'lead',
     title: 'Put the 0.2.0 installers on the download page', model: 'composer-2.5', ageMin: 18,
+  },
+  {
+    key: 'page-check', provider: 'gemini', dir: 'demo/site/checks', launcher: 'gemini-worker', parent: 'lead',
+    title: 'Check the download page at phone and desktop widths', model: 'gemini-4-neon', effort: 'high', ageMin: 9,
   },
   {
     key: 'limiter', provider: 'claude', dir: 'demo/notes-api', launcher: 'claude-worker', home: '.claude',

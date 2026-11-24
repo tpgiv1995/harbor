@@ -124,7 +124,8 @@ function composition(shots) {
 
 async function main() {
   const { _electron: electron } = require('@playwright/test');
-  const root = prepareRoot(process.env.HARBOR_SHOT_ROOT || `${DEFAULT_ROOT}-phone`);
+  // Outside the checkout, not app/verify: see OUTSIDE_BASE in lib/capture-runtime.cjs (the phone groups by project root).
+  const root = prepareRoot(process.env.HARBOR_SHOT_ROOT || path.join(require('./lib/capture-runtime.cjs').OUTSIDE_BASE, 'harbor-demo-phone'));
 
   const isolated = captureEnv(root);
   const userData = path.join(root, 'userData');
@@ -218,15 +219,13 @@ async function main() {
     // deliberately ignored by the product's scroll-intent handler.
     await page.waitForTimeout(600);
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.invalidate());
-    await page.evaluate(() => Promise.race([
-      new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
-        const node = document.querySelector('.conv');
-        node.scrollTop = 0;
-        node.dispatchEvent(new Event('scroll', { bubbles: true }));
-        resolve();
-      }))),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('phone animation frames did not settle')), 3000)),
-    ]));
+    // Scroll to the top with a REAL wheel (2026-11-24). Since 3ddb156b the phone keeps each chat's place and only a
+    // person's own input (wheel, pointer, keys) moves it (use-conversation-scroll.js); a programmatic scrollTop is put
+    // back, which is how this capture stopped at "phone must show both sides".
+    const convBox = await page.locator('.conv').boundingBox();
+    if (!convBox) throw new Error('phone conversation has no box to scroll');
+    await page.mouse.move(convBox.x + convBox.width / 2, convBox.y + convBox.height / 2);
+    for (let i = 0; i < 4; i += 1) { await page.mouse.wheel(0, -4000); await page.waitForTimeout(150); }
     await page.waitForTimeout(600);
     const framing = await page.locator('.conv').evaluate(node => {
       const box = node.getBoundingClientRect();
@@ -298,6 +297,8 @@ async function main() {
     await stopChild(daemon);
     reportIsolation(root);
     fs.rmSync(ownedRoot(root), { recursive: true, force: true });
+    // ~/harbor-capture holds nothing else, so it goes too once empty (rmdir refuses a folder with anything left in it).
+    if (path.dirname(root) === require('./lib/capture-runtime.cjs').OUTSIDE_BASE) { try { fs.rmdirSync(path.dirname(root)); } catch { /* not empty */ } }
   }
 }
 

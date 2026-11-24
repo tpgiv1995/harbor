@@ -108,3 +108,21 @@ before it ran, and each failure is now either fixed or checked:
 When the app exits before its first window, the capture now prints Electron's
 own output and the original error; teardown no longer replaces it with a
 Playwright error about a closed connection.
+
+The 2026-11-24 recapture (Gemini as the fourth provider) found three more:
+
+- The phone capture's root lives in `~/harbor-capture`, not `app/verify`.
+  The phone folds every folder under `<drive>:\dev\<name>` into that project
+  (`shared/project-root.cjs`, rule 1), and `app/verify` always sits inside the
+  checkout, so the six demo projects drew as one "demo" group with the
+  capture's own path on every row. A Temp folder does not work either: the
+  phone hides those as scratch and showed "No sessions match." The capture
+  deletes the folder when it finishes; `test/capture-root.test.js` pins the
+  rule.
+- The phone keeps each chat's place and moves only on a person's own input
+  (wheel, pointer, keys), so the capture scrolls to the top with a real mouse
+  wheel; a programmatic `scrollTop` is put back.
+- The Team chart's invented workers each run in their own sub-folder. Two in
+  one folder is Harbor's real "two writers" warning, which put a warning badge
+  on three cards; the capture now refuses a picture with any badge, or without
+  a card for each provider.

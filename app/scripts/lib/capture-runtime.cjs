@@ -1,17 +1,26 @@
 'use strict';
 
-// Screenshot helpers own only app/verify/harbor-* directories and child PIDs.
+// Screenshot helpers own only harbor-* directories directly inside app/verify (or ~/harbor-capture) and child PIDs.
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const APP_ROOT = path.resolve(__dirname, '../..');
 const VERIFY = path.join(APP_ROOT, 'verify');
+// A capture whose pictures group folders by project sits in ~/harbor-capture (2026-11-24). It must be OUTSIDE any
+// <drive>:\dev\<name> or ~/dev/<name> folder, because the phone folds every folder under one into that project
+// (shared/project-root.cjs rule 1) and app/verify always sits inside the checkout: a phone capture there showed all six
+// demo projects as one "demo" group with the capture's own path on every row. It must not be under a Temp/tmp folder
+// either, because the phone hides those as scratch (shared/sidebar-model.cjs isScratchProject): "No sessions match."
+// Pinned for children through CAPTURE_OUTSIDE_BASE, because a capture child's home is the root itself.
+const OUTSIDE_BASE = process.env.CAPTURE_OUTSIDE_BASE || path.join(os.homedir(), 'harbor-capture');
 
 function ownedRoot(root) {
   const target = path.resolve(root);
-  if (path.dirname(target) !== VERIFY || !/^harbor-[\w.-]+$/.test(path.basename(target))) {
-    throw new Error(`capture root must be a harbor-* directory directly inside ${VERIFY}`);
+  const base = path.dirname(target);
+  if ((base !== VERIFY && base !== OUTSIDE_BASE) || !/^harbor-[\w.-]+$/.test(path.basename(target))) {
+    throw new Error(`capture root must be a harbor-* directory directly inside ${VERIFY} or ${OUTSIDE_BASE}`);
   }
   if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) throw new Error('capture root cannot be a link');
   return target;
@@ -26,6 +35,7 @@ function captureEnv(root, inherited = process.env) {
   }
   const temp = path.join(target, 'tmp');
   fs.mkdirSync(temp, { recursive: true });
+  env.CAPTURE_OUTSIDE_BASE = OUTSIDE_BASE;
   const socket = process.platform === 'win32'
     ? `\\\\.\\pipe\\harbor-shot-${crypto.createHash('sha256').update(target).digest('hex').slice(0, 18)}`
     : path.join(target, 'sessiond', 'sessiond.sock');
@@ -109,5 +119,5 @@ function reportIsolation(root) {
   }
 }
 
-module.exports = { APP_ROOT, VERIFY, ownedRoot, captureEnv, underDisplay, stopChild, closeApp, assertHidden, reportIsolation,
+module.exports = { APP_ROOT, VERIFY, OUTSIDE_BASE, ownedRoot, captureEnv, underDisplay, stopChild, closeApp, assertHidden, reportIsolation,
   hiddenMain: path.join(__dirname, 'hidden-electron.cjs') };
