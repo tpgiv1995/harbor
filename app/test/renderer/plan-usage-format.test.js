@@ -33,8 +33,9 @@ test('plan-usage format preserves sub-one usage for every provider and keeps Cur
   }
   const cursor = formatWindow({ kind: 'monthly', usedPct: 0.4, includedPct: 0.4,
     autoPct: 0, apiPct: 0.4, unit: 'USD', used: 5, limit: 20 }, now);
-  assert.equal(cursor.label, 'Included <1%');
-  assert.equal(cursor.tooltip, 'Included <1% used; Auto 0% used; API <1% used; reset unknown');
+  // Both pools by name since 2026-11-24 (OO 695): the blend alone read as room while the frontier pool was spent.
+  assert.equal(cursor.label, 'Frontier <1% · Auto 0%');
+  assert.equal(cursor.tooltip, 'Frontier models (Opus, Sonnet, GPT, Gemini, Fable) <1% used; Auto and Composer 0% used; reset unknown');
   assert.ok(!JSON.stringify(cursor).includes('$'));
   const missing = formatWindow({ kind: 'monthly', usedPct: 3, includedPct: 3, autoPct: null, apiPct: null }, now);
   assert.ok(!missing.tooltip.includes('Auto'));

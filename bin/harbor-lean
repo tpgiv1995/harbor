@@ -9,7 +9,7 @@
 // were tight.
 //
 //   node bin/harbor-lean                         the setting, seats and routing
-//   node bin/harbor-lean --task image [--large] [--complex]  where ONE task goes (kinds:
+//   node bin/harbor-lean --task image [--large] [--complex] [--model <id>]  where ONE task goes (kinds:
 //                                                image, mechanical, build,
 //                                                connected, review, general)
 //   node bin/harbor-lean --task build [--project <folder>]   a test-backed build: Cursor
@@ -32,7 +32,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const app = path.join(path.dirname(__dirname), 'app', 'src');
-const { TASK_KINDS, GPT_MAX_PCT, leanMode, leanRoute, leanVerdict, cursorFromPlans, matchProject, projectRows } = require(path.join(app, 'shared', 'provider-lean.cjs'));
+const { TASK_KINDS, GPT_MAX_PCT, leanMode, leanRoute, leanVerdict, cursorFromPlans, cursorModelPool, cursorPoolsText, matchProject, projectRows } = require(path.join(app, 'shared', 'provider-lean.cjs'));
 const { resolveLeanFile, readLean } = require(path.join(app, 'main', 'providers', 'provider-lean.js'));
 const { createPlanUsageProvider } = require(path.join(app, 'main', 'providers', 'plan-usage.js'));
 const { defaultConfigFile } = require(path.join(app, 'shared', 'tasks-file.cjs'));
@@ -148,9 +148,13 @@ const projectFacts = (project) => (project ? { id: project.id, label: project.la
       console.error(`harbor-lean: unknown task kind "${task}". Kinds: ${TASK_KINDS.map((kind) => kind.id).join(', ')}`);
       process.exit(2);
     }
-    const route = leanRoute(setting.mode, task, list, { large, cursor, complex, project });
+    // --model <id>: the model the job will run on. Cursor keeps two pools (Auto and Composer; the named frontier
+    // models), and a job can only go where its own pool has room (OO 695, 2026-11-24).
+    const model = argValue('--model') || null;
+    const route = leanRoute(setting.mode, task, list, { large, cursor, complex, project, model });
     if (json) {
-      console.log(JSON.stringify({ mode: setting.mode, task, large, complex, folder, project: projectFacts(project), route }, null, 2));
+      console.log(JSON.stringify({ mode: setting.mode, task, large, complex, folder, project: projectFacts(project), model, cursorPool: cursorModelPool(model),
+        cursor: { pools: cursor.pools || cursor.lastGood?.pools || null, resetsAt: cursor.resetsAt || cursor.lastGood?.resetsAt || null, text: cursorPoolsText(cursor) }, route }, null, 2));
       return;
     }
     console.log(`${task}${large ? ' (large)' : ''}${complex ? ' (complex)' : ''}: ${routeText(route)}`);
@@ -198,11 +202,14 @@ const projectFacts = (project) => (project ? { id: project.id, label: project.la
       : "the plan's ChatGPT Settings, Usage page";
     console.log(`Reset waiting: ${s.label} is ${Math.round(s.weeklyPct)}% used and has ${s.resetsAvailable} reset${s.resetsAvailable === 1 ? '' : 's'}. When it runs out, apply one with ${how}, before any of its work goes to Claude.`);
   }
+  // Both pools by name when Cursor reports them (OO 695): its blended total read as room while the frontier pool was
+  // spent. The blend is printed only when the pools are not known.
+  const cursorPools = cursorPoolsText(cursor);
   const cursorPct = cursor.monthlyPct === null ? `unknown (${cursor.reason})` : (cursor.monthlyPct > 0 && cursor.monthlyPct < 1 ? '<1%' : `${Math.round(cursor.monthlyPct)}%`);
-  console.log(`Cursor this month: ${cursorPct}`);
+  console.log(`Cursor this month: ${cursor.monthlyPct !== null && cursorPools ? cursorPools : cursorPct}`);
   // OO 568: when the live read fails, routing leans on the last good reading and the stored sign-in key.
   if (cursor.monthlyPct === null && typeof cursor.keyPresent === 'boolean') {
-    const last = cursor.lastGood ? `${cursor.lastGood.monthlyPct}% at ${cursor.lastGood.at}` : 'none';
+    const last = cursor.lastGood ? `${cursorPoolsText(cursor) || `${cursor.lastGood.monthlyPct}%`} at ${cursor.lastGood.at}` : 'none';
     console.log(`Cursor's last good reading: ${last}; sign-in key ${cursor.keyPresent ? 'stored' : 'not stored'}.`);
   }
   // Cursor's browser sign-in lapses every 60 days and never renews itself, and a
@@ -228,7 +235,7 @@ const projectFacts = (project) => (project ? { id: project.id, label: project.la
       console.log(`  ${p.label} (${p.enabled ? 'on' : 'off'}): test-backed builds go to ${p.target}${p.note ? ` (${p.note})` : ''}. Folders: ${p.folders.join(', ')}`);
     }
   }
-  console.log('One task: node bin/harbor-lean --task <kind> [--large] [--complex] [--project <folder>]');
+  console.log('One task: node bin/harbor-lean --task <kind> [--large] [--complex] [--project <folder>] [--model <id>]');
 })().catch((error) => {
   console.error(`harbor-lean: ${error.message}`);
   process.exit(1);

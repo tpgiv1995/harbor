@@ -97,6 +97,28 @@ function cleanTitle(value) {
   return trimmed;
 }
 
+// A RELAY HEADER NAMES THE SENDER, NOT THE WORK (2026-11-24). A brief that opens "From the Dispatcher (…, session
+// 512a…), 04:16:47Z Nov 24. FIRST: …" or "From dispatcher-2 (512a79cb), 04:34Z Nov 24. RESUME of …" made every lane
+// the Dispatcher started a card called "From the Dispatcher" (eleven at once, plus a duplicate-name warning). A first
+// line that starts "From " and carries a session id or a clock time within its first 160 characters is such a header;
+// "From scratch, rebuild the parser" is not.
+function isRelayHeader(value) {
+  const line = (String(value || '').split(/\r?\n/).find((text) => text.trim()) || '').trim().replace(/^\*\*/, '');
+  if (!/^(?:message\s+)?from\s+\S/i.test(line)) return false;
+  const head = line.slice(0, 160);
+  return /\b[0-9a-f]{8}(?:-[0-9a-f]{4}){0,4}\b/i.test(head) || /\b\d{1,2}:\d{2}(?::\d{2})?Z\b/.test(head);
+}
+
+// The lane a worker runs in, from its folder: C:\dev\.orch\x\scratch\daily-test is "daily-test". A generic last
+// folder (an Astra run works in <lane>\start) gives way to its parent.
+const GENERIC_FOLDERS = new Set(['start', 'work', 'run', 'out', 'tmp', 'temp', 'app', 'src', 'repo', 'workspace']);
+function laneFolderName(cwd) {
+  const parts = slashes(cwd).replace(/\/+$/, '').split('/').filter(Boolean);
+  let name = parts.at(-1) || null;
+  if (name && GENERIC_FOLDERS.has(name.toLowerCase()) && parts.length > 1) name = parts.at(-2);
+  return name && !/^[A-Za-z]:$/.test(name) ? name : null;
+}
+
 // "claude-opus-5-5" reads "Opus 5.5"; "gpt-6-astra" reads "GPT-6 Astra".
 // Unknown ids are shown as recorded, never guessed.
 function modelLabel(id) {
@@ -279,7 +301,8 @@ function deriveTeam(inputs = {}, now = Date.now()) {
       launchModel: child.model || null,
       launchEffort: child.effort || null,
       launchHome: homeForDir(child.home),
-      launchTitle: child.title ? cleanTitle(child.title) : null,
+      launchTitle: child.title && !isRelayHeader(child.title) ? cleanTitle(child.title) : null,
+      relayBrief: isRelayHeader(child.title),
       lane: child.lane || null,
     });
     const parentId = launchParent(launch);
@@ -312,7 +335,8 @@ function deriveTeam(inputs = {}, now = Date.now()) {
       launchModel: proc.model || null,
       launchEffort: proc.effort || null,
       launchHome: proc.home ? homeForDir(proc.home) || (homes.some((h) => h.id === proc.home) ? proc.home : null) : null,
-      launchTitle: proc.title ? cleanTitle(proc.title) : null,
+      launchTitle: proc.title && !isRelayHeader(proc.title) ? cleanTitle(proc.title) : null,
+      relayBrief: isRelayHeader(proc.title),
     });
     if (proc.paneId) {
       const paneMember = paneBySession.has(proc.paneId) ? proc.paneId : [...paneBySession.entries()].find(([, pane]) => pane.paneId === proc.paneId)?.[0];
@@ -375,7 +399,7 @@ function deriveTeam(inputs = {}, now = Date.now()) {
         id = byCwd?.id || null;
       }
       if (entry.name) nameToId.set(entry.name, id);
-      if (!id) { declaredAbsent.push({ name: entry.name || entry.session || 'member', role: entry.role || null, file: declaration.file }); continue; }
+      if (!id) { declaredAbsent.push({ name: entry.name || entry.session || 'member', role: entry.role || null, file: declaration.file, root: declaration.root || null, session: entry.session || null }); continue; }
       declaredBy.set(id, { name: entry.name || null, role: entry.role || null, file: declaration.file, team: declaration.title || null });
       if (entry.top === true) declaredTop.add(id);
     }
@@ -408,14 +432,17 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     member.model = fact?.model || member.launchModel || row.model || null;
     member.modelLabel = modelLabel(member.model);
     member.effort = fact?.effort || member.launchEffort || null;
+    const relay = member.relayBrief || isRelayHeader(row.firstPrompt);
     member.name = declared?.name
       || member.launchTitle
-      || (row.title ? cleanTitle(row.title) : null)
+      // A lane briefed by a relay header ("From the Dispatcher (…)") is named by its lane, never by the header.
+      || (relay ? member.lane || (member.cwd ? laneFolderName(member.cwd) : null) : null)
+      || (row.title && !isRelayHeader(row.title) ? cleanTitle(row.title) : null)
       || row.nickname
-      || (row.firstPrompt ? cleanTitle(row.firstPrompt) : null)
+      || (row.firstPrompt && !isRelayHeader(row.firstPrompt) ? cleanTitle(row.firstPrompt) : null)
       // A worker only the process table knows has no title yet; its worktree
       // folder (foundation-rebuild-L5) says more than "Untitled session".
-      || (member.runMode === 'worker' && member.cwd ? slashes(member.cwd).replace(/\/+$/, '').split('/').at(-1) || null : null)
+      || (member.runMode === 'worker' && member.cwd ? laneFolderName(member.cwd) : null)
       || (member.provider === 'cursor' ? 'Cursor worker' : member.provider === 'gemini' ? 'Gemini worker' : 'Untitled session');
     member.role = declared?.role || null;
     member.declaredTeam = declared?.team || null;
@@ -633,7 +660,10 @@ function deriveTeam(inputs = {}, now = Date.now()) {
   for (const [, ids] of byName) if (ids.length > 1 && members.get(ids[0]).name !== 'Untitled session') warn({ kind: 'duplicate-name', name: members.get(ids[0]).name, memberIds: ids });
   // Possibly stuck: an open tool older than ten minutes.
   for (const member of live) {
-    const open = member.openTools.filter((tool) => tool.startedMs && now - tool.startedMs >= STUCK_TOOL_MS);
+    // Past the time the tool asked for itself (plus a minute for the harness to write its result), never under the
+    // ten-minute floor (2026-11-24: every Dispatcher lane running a deliberate one-to-four-hour job carried a badge).
+    const open = member.openTools.filter((tool) => tool.startedMs
+      && now - tool.startedMs >= Math.max(STUCK_TOOL_MS, Number.isFinite(tool.timeoutMs) ? tool.timeoutMs + 60_000 : 0));
     if (open.length) warn({ kind: 'tool-stuck', memberIds: [member.id], tool: open[0].name, sinceMs: open[0].startedMs });
   }
   // A pane alive with nothing happening for 30 minutes and nothing open.
@@ -655,13 +685,29 @@ function deriveTeam(inputs = {}, now = Date.now()) {
   // Not before the pane list has arrived (Harbor just started): every pane
   // member would read as absent for a moment, which is not news. One warning
   // per file and name, however many root spellings read the file.
+  // NOT RUNNING IS NOT A FAULT (2026-11-24, Pat: "a lot of these team warnings are annoying", then "fix our fucking
+  // shit"). A team's headless lanes run once per message and exit between, so a TEAM.json member with no live agent is
+  // usually between runs: one Carrier Bridge file drew thirteen warning lines, one for a Navigator that had run a minute
+  // earlier. Each file is now ONE note in its project naming who is not running and when each last ran (main supplies
+  // `declaredActivity`, session id -> last write); a stale thread id still shows, as a long "last ran", or as no
+  // record at all. Notes are not warnings: no card badge, no "Warnings only" hit.
+  const notes = [];
   if (inputs.panesKnown !== false) {
-    const said = new Set();
+    const byFile = new Map();
     for (const absent of declaredAbsent) {
-      const key = `${absent.file}|${absent.name}`;
-      if (said.has(key)) continue;
-      said.add(key);
-      warn({ kind: 'declared-absent', memberIds: [], name: absent.name, file: absent.file });
+      const key = slashes(absent.file).toLowerCase();
+      if (!byFile.has(key)) byFile.set(key, { file: absent.file, root: absent.root, names: new Map() });
+      const entry = byFile.get(key);
+      if (entry.names.has(absent.name)) continue;
+      const last = absent.session ? inputs.declaredActivity?.[absent.session] : null;
+      entry.names.set(absent.name, { name: absent.name, role: absent.role, lastActiveMs: Number.isFinite(last) && last > 0 ? last : null });
+    }
+    for (const [key, entry] of byFile) {
+      const rootCwd = entry.root ? canonicalProjectCwd(entry.root) : null;
+      const list = [...entry.names.values()];
+      const rank = (m) => (m.lastActiveMs == null ? -1 : m.lastActiveMs);
+      list.sort((a, b) => rank(b) - rank(a));
+      notes.push({ id: `declared-resting:${key}`, kind: 'declared-resting', file: entry.file, project: rootCwd ? projectLabel(rootCwd) : null, members: list });
     }
   }
   if ((inputs.declarations || []).length) {
@@ -759,6 +805,7 @@ function deriveTeam(inputs = {}, now = Date.now()) {
     members: Object.fromEntries([...members.values()].filter((m) => m.alive).map((m) => [m.id, m])),
     edges: drawn.filter((edge) => members.get(edge.from)?.alive && members.get(edge.to)?.alive),
     warnings,
+    notes,
     runs,
     ended,
   };
@@ -766,5 +813,5 @@ function deriveTeam(inputs = {}, now = Date.now()) {
 
 module.exports = {
   IDLE_ROW_MS, ENDED_WINDOW_MS, STUCK_TOOL_MS, QUIET_PANE_MS, PLAN_NEAR_LIMIT_PCT, MANY_TEST_RUNS, USAGE_STALE_MS, SUB_WINDOW_MS, SUB_LOOSE_FRAME_MS,
-  canonicalProjectCwd, cleanTitle, modelLabel, argvValue, memberStatus, deriveTeam, subWorkerName, subWorkerActive,
+  canonicalProjectCwd, cleanTitle, isRelayHeader, laneFolderName, modelLabel, argvValue, memberStatus, deriveTeam, subWorkerName, subWorkerActive,
 };

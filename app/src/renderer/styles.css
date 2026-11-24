@@ -10815,7 +10815,7 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 }
 /* A frame takes its width from its cards; warnings, runs and the idle row
    wrap inside that width instead of stretching the frame. */
-.tc-frame:has(.tc-forest) :is(.tc-project-warnings, .tc-run, .tc-idle) { contain: inline-size; }
+.tc-frame:has(.tc-forest) :is(.tc-project-warnings, .tc-resting, .tc-run, .tc-idle) { contain: inline-size; }
 .tc-frame:not(:has(.tc-forest)) { max-width: min(100%, 720px); }
 .tc-project-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
 /* Frame text keeps a readable size when the board is zoomed out: below
@@ -10829,6 +10829,10 @@ ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:not([type]) ol.md-list:
 .tc-project-warnings li, .tcd-warnings li { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; line-height: 1.45; color: #e9d9ad; }
 .tc-project-warnings svg, .tcd-warnings svg { flex: none; margin-top: 1px; color: var(--warn); width: 14px; height: 14px; }
 .tc-machine-warnings li { font-size: 12.5px; }
+/* A project's "not running now" line (2026-11-24): quiet text, not a warning. */
+.tc-resting { margin: 0; font-size: 12px; line-height: 1.45; color: var(--sub); }
+.tc-frame .tc-resting { font-size: max(11.5px, calc(10px / var(--z, 1))); }
+.tc-machine-resting { font-size: 12.5px; }
 
 .tc-run { display: grid; gap: 6px; padding: 9px 11px; border: 1px solid var(--ln); border-radius: 9px; background: rgba(255, 255, 255, 0.02); }
 .tc-run-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }

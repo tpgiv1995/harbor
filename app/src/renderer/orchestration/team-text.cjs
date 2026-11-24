@@ -194,6 +194,16 @@ function warningText(warning, members, profiles, now) {
   }
 }
 
+// The project's one "not running now" line (team-model notes, 2026-11-24): TEAM.json members with no live agent,
+// newest first, each with when it last ran. Quiet text, never a warning: a headless lane between runs is normal.
+function restingText(note, now) {
+  const list = (note?.members || []).map((m) => {
+    const when = m.lastActiveMs ? ago(m.lastActiveMs, now) : null;
+    return when ? `${m.name} (ran ${when === '<1m' ? 'under a minute' : when} ago)` : `${m.name} (no session on record)`;
+  });
+  return list.length ? `Named in TEAM.json, not running now: ${list.join(', ')}.` : '';
+}
+
 function edgeTitle(edge, members) {
   const from = members[edge.from]?.name || 'An agent';
   const to = members[edge.to]?.name || 'this agent';
@@ -258,4 +268,4 @@ function clockText(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-module.exports = { EFFORT_STEPS, STATE_FILTERS, ago, statusText, subStatus, subCountText, subSourceText, subWorkersOf, expireSubWorkers, effortStep, runModeText, warningText, edgeTitle, filterTeam, countsText, clockText, resetText, homeLabel };
+module.exports = { EFFORT_STEPS, STATE_FILTERS, ago, statusText, subStatus, subCountText, subSourceText, subWorkersOf, expireSubWorkers, effortStep, runModeText, warningText, restingText, edgeTitle, filterTeam, countsText, clockText, resetText, homeLabel };

@@ -5,7 +5,7 @@ import { AgentCard, AgentChip } from './AgentCard.jsx';
 import { AgentDrawer } from './AgentDrawer.jsx';
 import { SubTray, SUB_TRAY_CAP } from './SubWorkers.jsx';
 import { WarnIcon, PinIcon, StatusIcon, CloseIcon, MinusIcon, PlusIcon, FitIcon } from './TeamIcons.jsx';
-import { STATE_FILTERS, filterTeam, countsText, warningText, edgeTitle, clockText, ago, homeLabel, expireSubWorkers } from './team-text.cjs';
+import { STATE_FILTERS, filterTeam, countsText, warningText, restingText, edgeTitle, clockText, ago, homeLabel, expireSubWorkers } from './team-text.cjs';
 import { connectorPaths } from './team-layout.cjs';
 import { etaText, groupBatches, runCounts, waitingText } from './orch-text.cjs';
 
@@ -492,10 +492,18 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
         // pane, a TEAM.json member nobody matches) still get said.
         const placed = new Set(sections.flatMap((section) => section.warningIds));
         const loose = (team?.warnings || []).filter((w) => !placed.has(w.id) && PROJECT_WARNINGS.has(w.kind) && !(w.memberIds || []).length);
-        return loose.length && !pinView ? (
-          <ul className="tc-project-warnings tc-machine-warnings">
-            {loose.map((w) => <li key={w.id}><WarnIcon /><span>{warningText(w, members, profiles, now)}</span></li>)}
-          </ul>
+        // A TEAM.json whose project has no frame on the board says its "not running now" line here, quietly.
+        const shown = new Set(sections.map((section) => section.project));
+        const restingLoose = (team?.notes || []).filter((note) => note.kind === 'declared-resting' && !shown.has(note.project));
+        return (loose.length || restingLoose.length) && !pinView ? (
+          <>
+            {loose.length ? (
+              <ul className="tc-project-warnings tc-machine-warnings">
+                {loose.map((w) => <li key={w.id}><WarnIcon /><span>{warningText(w, members, profiles, now)}</span></li>)}
+              </ul>
+            ) : null}
+            {restingLoose.map((note) => <p className="tc-resting tc-machine-resting" key={note.id}>{note.project ? `${note.project}: ` : ''}{restingText(note, now)}</p>)}
+          </>
         ) : null;
       })()}
       {team && sections.length ? (
@@ -513,6 +521,9 @@ export function TeamChart({ onPick, onOpenSession, focusId }) {
                     {projectWarnings.map((w) => <li key={w.id}><WarnIcon /><span>{warningText(w, members, profiles, now)}</span></li>)}
                   </ul>
                 ) : null}
+                {(team.notes || []).filter((note) => note.kind === 'declared-resting' && note.project === section.project).map((note) => (
+                  <p className="tc-resting" key={note.id}>{restingText(note, now)}</p>
+                ))}
                 {(runsByProject.get(section.project) || []).map((run) => <RunSummary key={run.queueId || run.workspace} run={run} onPick={pinView ? null : onPick} />)}
                 {section.roots.length ? <div className="tc-forest">{section.roots.map((id) => <TreeNode key={id} id={id} ctx={ctx} />)}</div> : null}
                 <SubTray loose entries={section.loose} now={now} expanded={openTrays.has(`loose:${section.project}`)} onToggle={() => toggleTray(`loose:${section.project}`)} onOpen={(entry) => ctx.openSub(entry, null)} />

@@ -50,6 +50,22 @@ function formatWindow(w, nowMs = Date.now()) {
   }
   let color = 'var(--fnt)';
   if (finite(w.usedPct)) color = w.usedPct >= 75 ? 'var(--warn)' : 'var(--accent)';
+  // CURSOR'S TWO POOLS (2026-11-24, OO 695): the blended "Included 8%" read as room while the frontier pool was
+  // spent and every Opus, Sonnet, GPT, Gemini and Fable call refused. The row names both pools and the bar shows the
+  // fuller one; a spent pool says "spent", never a small number.
+  if (finite(w.apiPct) || finite(w.autoPct)) {
+    const frontierSpent = finite(w.apiPct) && w.apiPct >= 100;
+    const fuller = Math.max(finite(w.apiPct) ? w.apiPct : 0, finite(w.autoPct) ? w.autoPct : 0);
+    const frontierText = frontierSpent ? 'Frontier spent' : `Frontier ${percentage(w.apiPct)}`;
+    const relative = instant ? ` (${relativeText(w.resetsAt * 1000, nowMs)})` : '';
+    return {
+      label: `${frontierText} · Auto ${percentage(w.autoPct)}`,
+      reset,
+      tooltip: `Frontier models (Opus, Sonnet, GPT, Gemini, Fable) ${percentage(w.apiPct)} used${frontierSpent ? ', spent' : ''}; Auto and Composer ${percentage(w.autoPct)} used; ${reset}${relative}`,
+      width: Math.max(0, Math.min(100, fuller)),
+      color: fuller >= 75 ? 'var(--warn)' : 'var(--accent)',
+    };
+  }
   return {
     label: `${label} ${pct}`,
     reset,

@@ -153,10 +153,35 @@ for (const f of selected) {
   console.log('  ' + rel + (isSerialPty(f) ? '   (serial pty pass)' : ''));
 }
 
+// THE FILE LIST MUST FIT ONE WINDOWS COMMAND LINE (2026-11-24). Every file went to one `node --test` as a full path,
+// and in the publish snapshot (C:\Users\<you>\AppData\Local\Temp\harbor-publish-<id>\app\test\...) 349 files made
+// about 34,100 characters, past Windows' 32,767 limit: the spawn failed, printed nothing, and the gate went RED twice
+// with no failing test named. Files are now passed relative to app/ (about 13,000 characters here), the pass splits
+// into groups when a list would still be too long, and a spawn that cannot start says why.
+const APP_DIR = path.join(__dirname, '..');
+const MAX_ARGS_CHARS = 28_000;
+function groupsOf(files) {
+  const groups = [[]];
+  let length = 0;
+  for (const file of files.map((f) => path.relative(APP_DIR, f))) {
+    if (groups.at(-1).length && length + file.length + 3 > MAX_ARGS_CHARS) { groups.push([]); length = 0; }
+    groups.at(-1).push(file);
+    length += file.length + 3;
+  }
+  return groups;
+}
+function runGroup(args, files, options) {
+  const result = spawnSync(process.execPath, [...args, ...files], { cwd: APP_DIR, ...options });
+  if (result.error) console.error(`test runner could not start (${files.length} file(s)): ${result.error.message}`);
+  return result.status == null ? 1 : result.status;
+}
+
 let status = 0;
 if (parallelFiles.length > 0) {
-  const result = spawnSync(process.execPath, ['--test', ...HANG_FLAGS, ...parallelFiles], { stdio: 'inherit', env: childEnv() });
-  status = result.status == null ? 1 : result.status;
+  for (const group of groupsOf(parallelFiles)) {
+    const groupStatus = runGroup(['--test', ...HANG_FLAGS], group, { stdio: 'inherit', env: childEnv() });
+    if (groupStatus !== 0 && status === 0) status = groupStatus;
+  }
 }
 if (serialFiles.length > 0) {
   // The serial pass otherwise launches INTO the parallel pass's teardown
@@ -184,18 +209,17 @@ if (serialFiles.length > 0) {
     if (Date.now() >= deadline) console.log('serial pty pass: console hosts never settled within 30s; proceeding anyway');
   }
   console.log(`serial pty pass: ${serialFiles.length} file(s), one at a time`);
-  const result = spawnSync(
-    process.execPath,
-    ['--test', '--test-concurrency=1', ...HANG_FLAGS, ...serialFiles],
-    {
+  let serialStatus = 0;
+  for (const group of groupsOf(serialFiles)) {
+    const groupStatus = runGroup(['--test', '--test-concurrency=1', ...HANG_FLAGS], group, {
       stdio: 'inherit',
       // A lone pty file still shares the machine with whatever the parallel
       // pass left draining, so its deadline is sized for that reality unless
       // the caller already chose one.
       env: childEnv({ HARBOR_TEST_SLOW_PTY_MS: process.env.HARBOR_TEST_SLOW_PTY_MS || '90000' }),
-    },
-  );
-  const serialStatus = result.status == null ? 1 : result.status;
+    });
+    if (groupStatus !== 0 && serialStatus === 0) serialStatus = groupStatus;
+  }
   if (serialStatus !== 0) status = status === 0 ? serialStatus : status;
 }
 process.exit(status);

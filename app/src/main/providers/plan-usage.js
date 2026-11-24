@@ -478,8 +478,11 @@ function createPlanUsageProvider({
   const cursorLastFile = env.HARBOR_CURSOR_LAST_FILE || path.join(home, '.harbor', 'cursor-usage-last.json');
   async function cursorLastGood() {
     const saved = await readJson(cursorLastFile);
-    return saved && finite(saved.monthlyPct) && saved.monthlyPct >= 0 && typeof saved.at === 'string' && !Number.isNaN(Date.parse(saved.at))
-      ? { monthlyPct: saved.monthlyPct, at: saved.at } : null;
+    if (!(saved && finite(saved.monthlyPct) && saved.monthlyPct >= 0 && typeof saved.at === 'string' && !Number.isNaN(Date.parse(saved.at)))) return null;
+    // The two pools ride with the reading (2026-11-24, OO 695), so a failed live read cannot route onto a spent pool.
+    return { monthlyPct: saved.monthlyPct, at: saved.at,
+      ...(finite(saved.autoPct) ? { autoPct: saved.autoPct } : {}), ...(finite(saved.apiPct) ? { apiPct: saved.apiPct } : {}),
+      ...(finite(saved.resetsAt) ? { resetsAt: saved.resetsAt } : {}) };
   }
   async function saveCursorLastGood(sample) {
     const monthly = (sample?.windows || []).find((w) => w && w.kind === 'monthly');
@@ -487,10 +490,12 @@ function createPlanUsageProvider({
     try {
       const prior = await readJson(cursorLastFile);
       // Harbor reads every few minutes: an unchanged reading is rewritten only when the saved one is 10 minutes old.
-      if (prior && prior.monthlyPct === monthly.usedPct && now() - Date.parse(prior.at) < 10 * 60_000) return;
+      if (prior && prior.monthlyPct === monthly.usedPct && prior.apiPct === monthly.apiPct && prior.autoPct === monthly.autoPct && now() - Date.parse(prior.at) < 10 * 60_000) return;
       await io.mkdir(path.dirname(cursorLastFile), { recursive: true });
       const tmp = `${cursorLastFile}.${process.pid}.tmp`;
-      await io.writeFile(tmp, JSON.stringify({ monthlyPct: monthly.usedPct, at: sample.updatedAt }));
+      await io.writeFile(tmp, JSON.stringify({ monthlyPct: monthly.usedPct, at: sample.updatedAt,
+        ...(finite(monthly.autoPct) ? { autoPct: monthly.autoPct } : {}), ...(finite(monthly.apiPct) ? { apiPct: monthly.apiPct } : {}),
+        ...(finite(monthly.resetsAt) ? { resetsAt: monthly.resetsAt } : {}) }));
       await io.rename(tmp, cursorLastFile);
     } catch { /* best effort: the next good read writes it */ }
   }

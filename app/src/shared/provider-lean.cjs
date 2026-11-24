@@ -202,6 +202,47 @@ function pctText(pct) {
 
 const finitePct = (value) => typeof value === 'number' && Number.isFinite(value);
 
+// CURSOR HAS TWO POOLS (2026-11-24, Carrier Bridge OO 695; Pat: "we've been going off of you saying we were at like
+// 5-6% this whole time... thats 100% on you"). Cursor's usage call reports a blended totalPercentUsed (8.2% that
+// night), autoPercentUsed (Auto and Composer, 0.5%) and apiPercentUsed (the named frontier models, 100%). Harbor routed
+// and printed the blend, so a team read room while Opus, Sonnet, GPT, Gemini and Fable all refused "You've hit your
+// usage limit". A job now runs on the pool of the model it will use: no --model is Cursor's Auto, as are composer-*
+// and Cursor's own cursor-* models (cursor-grok-4.5 answered with the frontier pool spent); anything else named is a
+// frontier model.
+const CURSOR_FRONTIER = 'Opus, Sonnet, GPT, Gemini, Fable';
+function cursorModelPool(model) {
+  const id = String(model || '').trim().toLowerCase();
+  if (!id || id === 'auto' || id === 'default' || id.startsWith('composer') || id.startsWith('cursor-')) return 'auto';
+  return 'frontier';
+}
+const poolOf = (pct) => (finitePct(pct) ? { usedPct: pct, spent: pct >= 100 } : null);
+function cursorPoolsFrom(source) {
+  const auto = poolOf(source?.autoPct);
+  const frontier = poolOf(source?.apiPct);
+  return auto || frontier ? { auto, frontier } : null;
+}
+// Cursor's own refusal names the cycle's end by its UTC date ("ends on 12/23/2026"); say the same day.
+function resetDay(resetsAt) {
+  if (!finitePct(resetsAt) || resetsAt <= 0) return null;
+  return new Date(resetsAt * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+function poolWhy(pool, entry, resetsAt) {
+  const day = resetDay(resetsAt);
+  const state = entry.spent ? `spent${day ? ` until ${day}` : ''}` : `${pctText(entry.usedPct)} used this month`;
+  return pool === 'frontier'
+    ? `Cursor's frontier models (${CURSOR_FRONTIER}) are ${state} (${pctText(entry.usedPct)} of that pool). Models that answer: Auto (no --model) and Cursor's own composer-* and cursor-* models.`
+    : `Cursor's Auto and Composer pool is ${state} (${pctText(entry.usedPct)} of that pool). Frontier models still answer: name one with --model (claude-*, gpt-*, gemini-*).`;
+}
+// Both pools in plain words for bin/harbor-lean and the menu's notes, or null when they are not known.
+function cursorPoolsText(cursor) {
+  const live = cursor && finitePct(cursor.monthlyPct);
+  const pools = live ? cursor.pools : cursor?.lastGood?.pools;
+  if (!pools) return null;
+  const resetsAt = live ? cursor.resetsAt : cursor?.lastGood?.resetsAt;
+  const part = (entry) => (entry ? `${pctText(entry.usedPct)} used${entry.spent ? `, spent${resetDay(resetsAt) ? ` until ${resetDay(resetsAt)}` : ''}` : ''}` : 'unknown');
+  return `Auto and Composer ${part(pools.auto)}; frontier models (${CURSOR_FRONTIER}) ${part(pools.frontier)}`;
+}
+
 const hasReset = (seat) => Number.isSafeInteger(seat.resetsAvailable) && seat.resetsAvailable > 0;
 
 // A seat holding a reset is not out (Pat's standing rule, 2026-09-16: spend a
@@ -244,8 +285,12 @@ function lastAtText(at) {
 //              read it): no room;
 //   never      the read failed, the key is stored, and there was never a good reading: no room;
 //   unread     nothing is known (usage checks off, or an older caller): no room.
-function cursorState(cursor) {
+function cursorState(cursor, model = null) {
+  const pool = cursorModelPool(model);
   if (cursor && finitePct(cursor.monthlyPct)) {
+    // The job's own pool decides when Cursor reported its pools; the blend only when it did not.
+    const mine = cursor.pools?.[pool];
+    if (mine) return mine.usedPct < CURSOR_MAX_PCT && !mine.spent ? { room: true, usage: 'live' } : { room: false, usage: 'live', why: poolWhy(pool, mine, cursor.resetsAt) };
     return cursor.monthlyPct < CURSOR_MAX_PCT ? { room: true, usage: 'live' } : { room: false, usage: 'live', why: `Cursor is at least ${CURSOR_MAX_PCT}% used this month.` };
   }
   if (cursor?.signedOut) return { room: false, usage: 'signed-out', why: 'Cursor is signed out; sign it in again with cursor-agent login.' };
@@ -254,17 +299,21 @@ function cursorState(cursor) {
   const last = cursor.lastGood;
   if (!last || !finitePct(last.monthlyPct)) return { room: false, usage: 'never', why: "Cursor's usage could not be read and there is no earlier good reading." };
   const when = `${lastPctText(last.monthlyPct)} (${lastAtText(last.at)})`;
-  if (last.monthlyPct >= CURSOR_MAX_PCT) {
+  const lastMine = last.pools?.[pool];
+  if (lastMine && (lastMine.spent || lastMine.usedPct >= CURSOR_MAX_PCT)) {
+    return { room: false, usage: 'last-full', why: `Cursor's usage could not be read; on its last good reading (${lastAtText(last.at)}) ${poolWhy(pool, lastMine, last.resetsAt).replace(/^Cursor's /, 'its ')}` };
+  }
+  if (!lastMine && last.monthlyPct >= CURSOR_MAX_PCT) {
     return { room: false, usage: 'last-full', why: `Cursor's usage could not be read, and its last good reading was ${when}, at least ${CURSOR_MAX_PCT}%.` };
   }
   return { room: true, usage: 'last-good', note: `Cursor's usage could not be read just now; its last good reading was ${when} and its sign-in key is stored, so it stays on.` };
 }
 
-const cursorHasRoom = (cursor) => cursorState(cursor).room;
+const cursorHasRoom = (cursor, model = null) => cursorState(cursor, model).room;
 
-// Why Cursor cannot take work right now: full, signed out, no key, or unreadable.
-function cursorMissReason(cursor) {
-  return cursorState(cursor).why || "Cursor's usage could not be read.";
+// Why Cursor cannot take work right now: its pool spent or full, signed out, no key, or unreadable.
+function cursorMissReason(cursor, model = null) {
+  return cursorState(cursor, model).why || "Cursor's usage could not be read.";
 }
 
 // One task's route. seats: [{ label, weeklyPct }] for the codex homes; cursor:
@@ -277,7 +326,7 @@ function cursorMissReason(cursor) {
 // override the work's folder belongs to (matchProject), read only by `build`.
 // Returns { side: 'claude' | 'gpt' | 'cursor', seat, kind, reason }, plus
 // `project` (the override's id, or null) for a build.
-function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex = false, project = null } = {}) {
+function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex = false, project = null, model = null } = {}) {
   const id = normalizeLean(mode);
   const kind = taskKind(kindId);
   const { best, open, spare } = seatFacts(seats);
@@ -291,24 +340,24 @@ function leanRoute(mode, kindId, seats, { large = false, cursor = null, complex 
     const override = project && project.build === 'cursor' && project.enabled !== false ? project : null;
     if (!override) return { ...general, kind: kind.id, project: null };
     if (id === 'claude-only') return { ...general, kind: kind.id, project: override.id };
-    const state = cursorState(cursor);
+    const state = cursorState(cursor, model);
     if (state.room) {
       const why = `${override.label} sends test-backed builds to Cursor: ${kind.projectWhy}`;
       return { side: 'cursor', seat: cursor, kind: kind.id, project: override.id, usage: state.usage, reason: state.note ? `${state.note} ${why}` : why };
     }
-    return { ...general, kind: kind.id, project: override.id, reason: `${cursorMissReason(cursor)} ${general.reason}` };
+    return { ...general, kind: kind.id, project: override.id, reason: `${cursorMissReason(cursor, model)} ${general.reason}` };
   }
   if (id === 'claude-only') return claude('Heavy lifting is Claude only.');
   if (kind.side === 'claude') return claude(kind.why);
   if (kind.side === 'cursor') {
-    const state = cursorState(cursor);
+    const state = cursorState(cursor, model);
     if (state.room && !complex) {
       return { side: 'cursor', seat: cursor, kind: kind.id, usage: state.usage, reason: state.note ? `${state.note} ${kind.why}` : kind.why };
     }
     // Too complex for Cursor, or Cursor full or unreadable: the work is
     // ordinary general work again.
     const fallback = leanRoute(id, 'general', seats, { large });
-    const why = complex ? 'Too complex for Cursor: the changes need judgement or a hard-to-check result.' : cursorMissReason(cursor);
+    const why = complex ? 'Too complex for Cursor: the changes need judgement or a hard-to-check result.' : cursorMissReason(cursor, model);
     return { ...fallback, kind: kind.id, reason: `${why} ${fallback.reason}` };
   }
   if (kind.side === 'gpt' || id === 'lean-openai') {
@@ -329,7 +378,8 @@ function routeRow(label, route) {
   if (route.side === 'cursor') {
     // On the last good reading (OO 568) there is no live percent to show: say so, and show that reading.
     const last = route.usage === 'last-good' && route.seat.lastGood;
-    const note = last ? `live read failed; last good reading ${lastPctText(last.monthlyPct)} (${lastAtText(last.at)})` : `${pctText(route.seat.monthlyPct)} used this month`;
+    const pools = cursorPoolsText(route.seat);
+    const note = last ? `live read failed; last good reading ${pools || lastPctText(last.monthlyPct)} (${lastAtText(last.at)})` : pools || `${pctText(route.seat.monthlyPct)} used this month`;
     return { label, target: route.seat.label || 'Cursor', note };
   }
   return { label, target: 'Claude', note: null };
@@ -409,10 +459,17 @@ function cursorFromPlans(plans) {
   if (!plan) return null;
   const monthly = (plan.windows || []).find((w) => w && w.kind === 'monthly');
   const last = plan.lastGood;
-  const lastGood = last && finitePct(last.monthlyPct) && typeof last.at === 'string' ? { monthlyPct: last.monthlyPct, at: last.at } : null;
+  const lastPools = last ? cursorPoolsFrom(last) : null;
+  const lastGood = last && finitePct(last.monthlyPct) && typeof last.at === 'string'
+    ? { monthlyPct: last.monthlyPct, at: last.at, ...(lastPools ? { pools: lastPools } : {}), ...(finitePct(last.resetsAt) ? { resetsAt: last.resetsAt } : {}) }
+    : null;
+  const livePools = !plan.unavailable && monthly ? cursorPoolsFrom(monthly) : null;
   return {
     label: plan.label || 'Cursor',
     monthlyPct: plan.unavailable || !monthly ? null : monthly.usedPct,
+    // The two pools (Auto and Composer; the named frontier models) and the cycle's end, when Cursor reported them.
+    ...(livePools ? { pools: livePools } : {}),
+    ...(monthly && finitePct(monthly.resetsAt) ? { resetsAt: monthly.resetsAt } : {}),
     signedOut: Boolean(plan.signedOut),
     // Present only when the reader checked (OO 568): whether the sign-in key is stored, and the last good reading.
     ...(typeof plan.keyPresent === 'boolean' ? { keyPresent: plan.keyPresent } : {}),
@@ -437,4 +494,6 @@ module.exports = {
   projectRows,
   seatsFromPlans,
   cursorFromPlans,
+  cursorModelPool,
+  cursorPoolsText,
 };

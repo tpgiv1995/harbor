@@ -109,6 +109,9 @@ function applyClaudeRow(fold, row) {
     for (const part of Array.isArray(row.message?.content) ? row.message.content : []) {
       if (part?.type === 'tool_use' && part.id) {
         fold.open[part.id] = { name: part.name || 'Tool', startedMs: Number.isFinite(ms) ? ms : null, summary: actionSummary(part.name || '', part.input) };
+        // The time the call asked for itself (Bash's `timeout`, ms): a deliberate one-hour job is not stuck at ten minutes.
+        const asked = Number(part.input?.timeout);
+        if (Number.isFinite(asked) && asked > 0) fold.open[part.id].timeoutMs = asked;
         pushAction(fold, { name: part.name || 'Tool', summary: fold.open[part.id].summary, atMs: Number.isFinite(ms) ? ms : null });
       } else if (part?.type === 'text' && part.text?.trim()) {
         fold.lastText = clip(part.text, CLIP_TEXT);

@@ -651,3 +651,23 @@ test('plan-usage-network reports no stored key for a Cursor sign-in without one'
   assert.equal(row.keyPresent, false);
   assert.deepEqual(row.lastGood, { monthlyPct: 3, at: '2026-09-30T12:00:00.000Z' });
 });
+
+// OO 695 (2026-11-24): the saved reading keeps Cursor's two pools and the cycle's end, so a failed live read still
+// knows the frontier pool is spent and routing cannot send a frontier model to Cursor on the blended total.
+test('plan-usage-network keeps both Cursor pools in the last good reading', async (t) => {
+  const f = fixture(t);
+  f.cursor(NOW / 1000 + 3000, { apiKey: 'synthetic-cursor-api-key' });
+  let fail = false;
+  const end = String(NOW + 29 * 86_400_000);
+  f.dispatch(() => (fail ? { ok: false, status: 500, json: async () => ({}) }
+    : response({ billingCycleEnd: end, planUsage: { totalPercentUsed: 8.17, autoPercentUsed: 0.51, apiPercentUsed: 100 } })));
+  const provider = f.provider({ usageProvider: { getUsage: async () => ({}) } });
+  await provider.getPlans();
+  const saved = JSON.parse(fs.readFileSync(path.join(f.root, '.harbor', 'cursor-usage-last.json'), 'utf8'));
+  assert.deepEqual(saved, { monthlyPct: 8.17, at: new Date(NOW).toISOString(), autoPct: 0.51, apiPct: 100, resetsAt: Number(end) / 1000 });
+  fail = true;
+  f.advance(61_000);
+  const lost = await provider.getPlans();
+  assert.deepEqual(plan(lost, 'cursor').lastGood, { monthlyPct: 8.17, at: new Date(NOW).toISOString(), autoPct: 0.51, apiPct: 100, resetsAt: Number(end) / 1000 });
+  f.clean(lost);
+});

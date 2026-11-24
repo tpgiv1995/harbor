@@ -179,10 +179,11 @@ test('TEAM.json adds names, roles and a reviews line, and is optional', () => {
   assert.equal(team.members[LEAD].role, 'Technical owner');
   assert.equal(team.members[WORKER_A].name, 'a1');
   assert.ok(team.edges.some((e) => e.kind === 'reviews' && e.from === REVIEWER && e.to === WORKER_A));
-  assert.ok(team.warnings.some((w) => w.kind === 'declared-absent' && w.name === 'ghost'));
+  assert.ok(team.notes.some((n) => n.kind === 'declared-resting' && n.members.some((m) => m.name === 'ghost')));
   // Without a declaration the chart is complete and raises nothing about roles.
   const plain = deriveTeam(baseInputs(), NOW);
-  assert.equal(plain.warnings.some((w) => ['declared-absent', 'undeclared'].includes(w.kind)), false);
+  assert.equal(plain.warnings.some((w) => w.kind === 'undeclared'), false);
+  assert.equal(plain.notes.length, 0);
   assert.equal(plain.members[LEAD].role, null);
 });
 
@@ -290,10 +291,10 @@ test('a worker with no title yet is named by its worktree folder, not "Untitled 
 test('a declared member is not called absent before the pane list arrives, and is called absent once per file', () => {
   const declaration = { file: 'C:\\dev\\lighthouse\\docs\\orchestration\\x\\TEAM.json', root: 'C:\\dev\\lighthouse', members: [{ name: 'ghost', session: '99999999-9999-4999-8999-999999999999' }] };
   const booting = deriveTeam({ ...baseInputs(), panes: [], panesKnown: false, declarations: [declaration] }, NOW);
-  assert.equal(booting.warnings.some((w) => w.kind === 'declared-absent'), false, 'nothing is absent while Harbor is still starting');
+  assert.equal(booting.notes.length, 0, 'nothing is absent while Harbor is still starting');
   // The same file read under two spellings of one root.
   const twice = deriveTeam({ ...baseInputs(), panesKnown: true, declarations: [declaration, { ...declaration, root: 'C:/dev/lighthouse' }] }, NOW);
-  assert.equal(twice.warnings.filter((w) => w.kind === 'declared-absent').length, 1);
+  assert.equal(twice.notes.length, 1);
 });
 
 // SUB-WORKERS ON THE CHART (2026-11-03). Every name and id below is invented.

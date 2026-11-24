@@ -551,6 +551,20 @@ function createTeamProvider(options = {}) {
     return { panes, sessions, sessionHomes };
   }
 
+  function declaredActivity() {
+    const out = {};
+    for (const declaration of declarations) {
+      for (const entry of declaration.members || []) {
+        const id = entry.session;
+        if (!id || Object.hasOwn(out, id)) continue;
+        const row = bridge?.getHistoryRow?.(id);
+        const last = row ? (row.lastWriteMs || row.meta?.mt || localStampMs(row.lastActive)) : null;
+        if (Number.isFinite(last) && last > 0) out[id] = last;
+      }
+    }
+    return out;
+  }
+
   function recompute() {
     if (closed) return;
     const { panes, sessions, sessionHomes } = collectInputs();
@@ -579,6 +593,9 @@ function createTeamProvider(options = {}) {
       subSessions: recentSubSessions(bridge?.getHistoryRows?.() || [], now()),
       runs,
       declarations,
+      // When each TEAM.json member last ran (session id -> last write), for the project's "not running now" note: a
+      // headless lane between runs reads "1m ago", a stale thread id reads days, an unknown one reads no record.
+      declaredActivity: declaredActivity(),
       ended,
       projectLabel,
     }, now());
