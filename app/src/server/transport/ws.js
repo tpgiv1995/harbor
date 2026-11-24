@@ -349,6 +349,11 @@ const HEARTBEAT_MS = 30_000;
 // not stuck behind the healthy-path cache.
 const SELF_ORIGIN_HOSTS_TTL_MS = 30_000;
 const SELF_ORIGIN_HOSTS_EMPTY_TTL_MS = 2_000;
+// How long the last GOOD host list outlives reads that come back empty (2026-11-24). The resolver answers a
+// `tailscale status` timeout with an empty list, not an error, so a loaded machine (a 4.6 s event-loop stall, a 5 s
+// status deadline) made this server refuse its own phone as a "foreign Origin" for two and a half minutes. A read that
+// failed is not evidence the node lost its name; ten minutes of empty reads is.
+const SELF_ORIGIN_HOSTS_STALE_GRACE_MS = 600_000;
 
 // Factored out (2026-09-19) so `server/http/request-guard.js` can ask
 // the same question ("what hostnames answer for this server right now") that
@@ -363,23 +368,29 @@ function createSelfOriginHostsCache({
   initial = [],
   ttlMs = SELF_ORIGIN_HOSTS_TTL_MS,
   emptyTtlMs = SELF_ORIGIN_HOSTS_EMPTY_TTL_MS,
+  staleGraceMs = SELF_ORIGIN_HOSTS_STALE_GRACE_MS,
+  now: clock = Date.now,
 } = {}) {
   let cachedHosts = Array.isArray(initial) ? initial : [];
-  let cachedAt = resolveSelfOriginHosts ? 0 : Date.now();
+  let cachedAt = resolveSelfOriginHosts ? 0 : clock();
+  let goodAt = cachedHosts.length ? clock() : 0;
   return async function currentSelfOriginHosts() {
     if (typeof resolveSelfOriginHosts !== 'function') return cachedHosts;
-    const now = Date.now();
+    const now = clock();
     const ttl = cachedHosts.length === 0 ? emptyTtlMs : ttlMs;
     if (cachedAt && (now - cachedAt) < ttl) return cachedHosts;
     try {
-      const next = await resolveSelfOriginHosts();
-      cachedHosts = Array.isArray(next) ? next : [];
+      const answer = await resolveSelfOriginHosts();
+      const next = Array.isArray(answer) ? answer : [];
+      if (next.length) { cachedHosts = next; goodAt = clock(); }
+      // An empty read keeps the last good list inside the grace (a timed-out status call), and is believed past it.
+      else if (!goodAt || clock() - goodAt >= staleGraceMs) cachedHosts = [];
     } catch {
       // Fail closed to whatever we last knew (possibly empty): a discovery
       // error must not widen the allowlist, and must not refuse loopback /
       // bound-host origins that never depended on MagicDNS.
     }
-    cachedAt = Date.now();
+    cachedAt = clock();
     return cachedHosts;
   };
 }
