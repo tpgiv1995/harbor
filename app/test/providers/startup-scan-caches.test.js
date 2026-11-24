@@ -208,11 +208,16 @@ test('an older facts write that lands late never leaves older facts on disk', as
   const realRename = fsp.rename;
   let release; const gate = new Promise((resolve) => { release = resolve; });
   let paused = 0;
-  fsp.rename = async (...args) => { if (String(args[1]) === factsCacheFile && paused++ === 0) await gate; return realRename(...args); };
+  // Wait for B to actually reach its rename, never a fixed delay: on a loaded
+  // machine B can take longer than any timer, the pause then catches C's write
+  // instead, and the test waits forever for a release that comes after it
+  // (it hung the 2026-11-23 publish gate for its full ten minutes).
+  let pausedAt; const pausedSignal = new Promise((resolve) => { pausedAt = resolve; });
+  fsp.rename = async (...args) => { if (String(args[1]) === factsCacheFile && paused++ === 0) { pausedAt(); await gate; } return realRename(...args); };
   t.after(() => { fsp.rename = realRename; });
   writeRollout(rollout, 'Version B of the prompt.'); fs.utimesSync(rollout, STAMP_S + 60, STAMP_S + 60);
   const writingB = history.listSessions(); // pauses at B's rename
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await pausedSignal;
   writeRollout(rollout, 'Version C of the prompt.'); fs.utimesSync(rollout, STAMP_S + 120, STAMP_S + 120);
   await history.listSessions();
   history.close();

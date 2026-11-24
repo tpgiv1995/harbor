@@ -24,7 +24,7 @@ const { createHistoryProvider } = require('./providers/history.js');
 const { createSystemMemoryProvider } = require('./providers/system-memory.js');
 const { createAskInbox } = require('./providers/ask-inbox.js');
 const { createTitlesProvider, createDescriber, scheduleTitler: scheduleTitlesProvider } = require('./providers/titles.js');
-const { createConfigStore } = require('./config/store.js');
+const { createConfigStore, resolveConfigFile } = require('./config/store.js');
 const { createLaunchActions } = require('./actions/launch.js');
 const {
   createSessionOwnerProbe,

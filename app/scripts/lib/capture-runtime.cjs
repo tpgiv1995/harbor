@@ -50,6 +50,11 @@ function captureEnv(root, inherited = process.env) {
     HARBOR_NO_USAGE_FETCH: '1', HARBOR_NO_MODEL_DISCOVERY: '1', HARBOR_NO_UPDATE_CHECK: '1',
     HARBOR_NO_SEND_LOG: '1', HARBOR_NO_PERF_LOG: '1', ELECTRON_DISABLE_GPU: '1',
     HARBOR_TAILNET_LOGINS: 'none',
+    // These two read the REAL profile (os.userInfo), not HOME, because workers in
+    // shadow homes write there; a relocated HOME does not move them, only these do.
+    HARBOR_TEAM_LAUNCHES_FILE: path.join(target, 'team-launches.jsonl'), HARBOR_LANES_DIR: path.join(target, 'lanes'),
+    // The Team chart reads the machine's process table, which no HOME isolates.
+    HARBOR_TEAM_NO_PROCESS_SCAN: '1',
   };
 }
 
@@ -80,9 +85,13 @@ async function stopChild(child) {
 
 async function closeApp(app) {
   if (!app) return;
-  const child = app.process();
+  // process() throws once Playwright has lost the app (it crashed or never
+  // finished connecting). Teardown must not throw then: an error here replaces
+  // the failure that actually stopped the capture.
+  let child = null;
+  try { child = app.process(); } catch (error) { console.log(`app connection already gone at teardown: ${error.message}`); }
   await Promise.race([app.close().catch(() => {}), new Promise(r => setTimeout(r, 5000))]);
-  await stopChild(child);
+  if (child) await stopChild(child);
 }
 
 async function assertHidden(app) {

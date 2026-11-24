@@ -94,7 +94,7 @@ const SESSIONS = [
     provider: 'claude',
     dir: 'demo/harbor',
     title: 'Wire the release workflow',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     ends: 'idle',
     blocks: [
       ['user', 'The tagged build produces installers but nothing publishes them. Wire the release step and tell me what it will and will not do.'],
@@ -114,7 +114,7 @@ const SESSIONS = [
     provider: 'codex',
     dir: 'demo/notes-api',
     title: 'Port the rate limiter onto the shared cache',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6.2-sol',
     ends: 'working',
     blocks: [
       ['user', 'Move the limiter off the per-process map and onto the shared cache, then show me what breaks under two workers.'],
@@ -131,7 +131,7 @@ const SESSIONS = [
     provider: 'cursor',
     dir: 'demo/site',
     title: 'Tighten the mobile nav breakpoints',
-    model: 'composer-1',
+    model: 'composer-2.5',
     ends: 'idle',
     blocks: [
       ['user', 'The nav collapses too late. Between 700 and 820 it overlaps the logo.'],
@@ -147,7 +147,7 @@ const SESSIONS = [
     provider: 'claude',
     dir: 'demo/notes-api',
     title: 'Rate limiter drops the first request',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     ends: 'working',
     blocks: [
       ['user', 'The rate limiter rejects the very first request from a new client. Only sometimes.'],
@@ -162,7 +162,7 @@ const SESSIONS = [
     provider: 'claude',
     dir: 'demo/site',
     title: 'Dark mode reads wrong on system default',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     ends: 'idle',
     blocks: [
       ['user', 'Dark mode is fine when you pick it, wrong when the OS picks it.'],
@@ -188,7 +188,7 @@ const SESSIONS = [
     provider: 'claude',
     dir: 'demo/notes-api',
     title: 'Migrate the fixtures',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     ends: 'idle',
     blocks: [
       ['user', 'Move the fixtures off the shared database.'],
@@ -555,7 +555,7 @@ function writeClaudeSession(session, { projectsDir, cwd, outDir, id, startMs }) 
   session.blocks.forEach(([kind, spec], n) => {
     const uuid = `${id.slice(0, 30)}${String(n).padStart(6, '0')}`;
     const timestamp = new Date(startMs + n * MINUTE).toISOString();
-    const base = { uuid, sessionId: id, cwd, timestamp };
+    const base = { uuid, sessionId: id, cwd, timestamp, ...(session.entrypoint ? { entrypoint: session.entrypoint } : {}) };
     if (kind === 'user') {
       lines.push(JSON.stringify({
         ...base,
@@ -840,7 +840,7 @@ function buildCorpus(root, options = {}) {
   const delegateDir = path.join(root, 'delegate');
   fs.mkdirSync(projectsDir, { recursive: true });
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ model: 'claude-opus-5' }));
+  fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({ model: 'claude-opus-5-5' }));
 
   const sessions = SESSIONS.map((session, index) => {
     const id = uuidFor(index);
@@ -890,6 +890,87 @@ function buildCorpus(root, options = {}) {
   }, null, 2)}\n`);
 
   return { root, projectsDir, home, delegateDir, sessions, workspace };
+}
+
+// THE TEAM CHART (the Orch view's opening page since 2026-11-02). It draws
+// who launched whom from launch records and the machine's process table, so a
+// capture cannot use the real one: that is how an isolated Harbor once charted
+// the real workers running beside it. These invented workers reach the chart
+// through HARBOR_TEAM_PROCESS_FIXTURE (providers/team.js), each Claude one with
+// a headless (sdk-cli) transcript so its card shows live state the way a real
+// worker's does. Every name, folder and prompt here is invented.
+const TEAM = [
+  {
+    key: 'lead', provider: 'claude', dir: 'demo/harbor', launcher: 'claude-worker', home: '.claude',
+    title: 'Release lead: ship 0.2.0', model: 'claude-opus-5-5', effort: 'xhigh', ends: 'working', ageMin: 52,
+    blocks: [
+      ['user', 'Ship 0.2.0. Split the release work across the team, keep release-checklist.md current, and tell me what is left.'],
+      ['assistant', 'Three workers are on it: install notes, the checksum comparison and the download page. I am folding their results into the checklist as they land.'],
+      ['bash', 'git log --oneline v0.1.0..HEAD'],
+    ],
+  },
+  {
+    key: 'notes', provider: 'claude', dir: 'demo/harbor', launcher: 'claude-worker', home: '.claude-team', parent: 'lead',
+    title: 'Write the per-platform install notes', model: 'claude-sonnet-5-5', effort: 'high', ends: 'working', ageMin: 31,
+    blocks: [
+      ['user', 'Write the install notes for Windows, macOS and Linux, including what the unsigned-build warnings look like.'],
+      ['assistant', 'Windows and macOS are drafted. Checking the Linux AppImage steps against a clean machine before I write them down.'],
+      ['bash', 'npm run dist -- --linux AppImage'],
+    ],
+  },
+  {
+    key: 'checksums', provider: 'codex', dir: 'demo/harbor', launcher: 'astra-run', parent: 'lead',
+    title: 'Check two builds produce the same checksums', model: 'gpt-6.2-sol', effort: 'high', ageMin: 24,
+  },
+  {
+    key: 'download-page', provider: 'cursor', dir: 'demo/site', launcher: 'cursor-worker', parent: 'lead',
+    title: 'Put the 0.2.0 installers on the download page', model: 'composer-2.5', ageMin: 18,
+  },
+  {
+    key: 'limiter', provider: 'claude', dir: 'demo/notes-api', launcher: 'claude-worker', home: '.claude',
+    title: 'Load test the shared limiter', model: 'claude-opus-5-5', effort: 'high', ends: 'idle', ageMin: 44,
+    blocks: [
+      ['user', 'Load test the shared limiter at 8 workers and tell me if the p95 moved.'],
+      ['bash', { command: 'node bench/limiter.js --workers 8', result: 'p95 41 ms (was 43 ms)' }],
+      ['assistant', 'p95 is 41 ms against 43 ms before the change; the cliff at the start of a window is gone.'],
+    ],
+  },
+];
+
+// Writes the team's transcripts and the fixture file; returns the file path.
+function seedTeam(root, { projectsDir, home }, now = Date.now()) {
+  const ids = new Map(TEAM.map((member, n) => [member.key, uuidFor(100 + n)]));
+  const launches = TEAM.map((member, n) => {
+    const id = ids.get(member.key);
+    const cwd = path.join(home, member.dir);
+    fs.mkdirSync(cwd, { recursive: true });
+    const startMs = now - member.ageMin * MINUTE;
+    if (member.provider === 'claude') {
+      // Steps a minute apart from the start; the newest lands about a minute ago.
+      const stepStart = now - (member.blocks.length + 1) * MINUTE;
+      writeClaudeSession({ ...member, entrypoint: 'sdk-cli' }, { projectsDir, cwd, outDir: path.join(cwd, 'out'), id, startMs: stepStart });
+    }
+    return {
+      launch: `demo-launch-${n + 1}`,
+      launcher: member.launcher,
+      pid: 41000 + n * 2,
+      childPid: 41001 + n * 2,
+      parent: member.parent ? { session: ids.get(member.parent) } : null,
+      child: {
+        session: member.provider === 'claude' ? id : null,
+        provider: member.provider,
+        model: member.model,
+        effort: member.effort || null,
+        home: member.home ? path.join(home, member.home) : null,
+        cwd,
+        title: member.title,
+      },
+      startedMs: startMs,
+    };
+  });
+  const file = path.join(root, 'team-fixture.json');
+  fs.writeFileSync(file, `${JSON.stringify({ processes: [], launches }, null, 2)}\n`);
+  return file;
 }
 
 // The isolated config an app or server reads for these captures. Every provider
@@ -986,6 +1067,7 @@ module.exports = {
   seedBoard,
   seedAsk,
   seedUsage,
+  seedTeam,
   mungedClaudeDir,
   mungedCursorDir,
   QUEUE_ID,

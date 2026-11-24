@@ -49,7 +49,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const {
-  prepareRoot, buildCorpus, buildVideoArtifacts, buildConfig, seedTasks, seedUsage, seedNotes, seedBoard, seedAsk, DEFAULT_ROOT,
+  prepareRoot, buildCorpus, buildVideoArtifacts, buildConfig, seedTasks, seedUsage, seedTeam, seedNotes, seedBoard, seedAsk, DEFAULT_ROOT,
 } = require('./lib/demo-corpus.cjs');
 const { renderHtmlToPng } = require('./lib/render-html.cjs');
 
@@ -151,6 +151,8 @@ async function main() {
   seedNotes(REPO_ROOT, root, isolated);
   await seedBoard(REPO_ROOT, root, isolated);
   seedUsage(cacheDir);
+  // Invented workers for the Team chart, read instead of the machine's process table.
+  const teamFixture = seedTeam(root, corpus);
   await buildVideoArtifacts(sessions, { renderHtmlToPng });
 
   // Its own daemon, in its own directory, so the shot shows a connected app and
@@ -173,10 +175,15 @@ async function main() {
     args: [hiddenMain, `--user-data-dir=${userData}`, `--force-device-scale-factor=${SCALE}`],
     cwd: APP_ROOT,
     timeout: 120000,
-    env: { ...isolated, HARBOR_SHOT_ROOT: root, HARBOR_E2E_ASK_OWN_ALL: '1',
+    env: { ...isolated, HARBOR_SHOT_ROOT: root, HARBOR_E2E_ASK_OWN_ALL: '1', HARBOR_TEAM_PROCESS_FIXTURE: teamFixture,
       HARBOR_E2E_FAKE_DIALOG: path.join(home, 'demo', 'harbor') },
   });
 
+    // Electron's own output, so an app that exits before its first window says why.
+    const proc = app.process();
+    proc.stdout?.on('data', (d) => process.stdout.write(`[electron] ${d}`));
+    proc.stderr?.on('data', (d) => process.stderr.write(`[electron] ${d}`));
+    proc.on('exit', (code, signal) => process.stderr.write(`[electron] exited code=${code} signal=${signal}\n`));
     const page = await app.firstWindow({ timeout: 60000 });
     page.setDefaultTimeout(15000);
     await page.waitForSelector('.rail', { timeout: 60000 });
@@ -252,8 +259,10 @@ async function main() {
     // every single one was Claude, which is a picture of a different product.
     // If a provider scanner ever goes quiet again, this fails loudly instead of
     // publishing a single-vendor stage that looks fine.
-    const onStage = await page.evaluate(() => document.body.innerText || '');
-    const missing = ['CLAUDE', 'CODEX', 'CURSOR'].filter((who) => !onStage.toUpperCase().includes(who));
+    // Read from each window's model chip: since the 2026-11-09 layout no reply
+    // carries a "Claude" / "Codex" line, so the stage text names no vendor.
+    const chips = await page.evaluate(() => [...document.querySelectorAll('.model-chip[data-provider]')].map((el) => el.dataset.provider));
+    const missing = ['claude', 'codex', 'cursor'].filter((who) => !chips.includes(who)).map((who) => who.toUpperCase());
     if (missing.length) {
       throw new Error(`the stage does not show ${missing.join(' or ')}; a single-vendor stage is exactly what this capture replaced`);
     }
@@ -291,9 +300,10 @@ async function main() {
     }));
     console.log(`capture model source: ${JSON.stringify({ ...modelProof,
       fixtureSettings: JSON.parse(fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8')),
-      source: 'renderer/index.jsx FALLBACK_NEW_SESSION_DEFAULT -> readNewSessionDefault -> openNewSession',
+      source: 'renderer/index.jsx readNewSessionDefault (nothing stored on a fresh profile) -> resolveNewSessionDefaults(options) -> openNewSession',
     })}`);
-    if (modelProof.storedDefault.model !== 'claude-opus-4-8' || modelProof.renderedModel !== 'Opus 4.8') throw new Error('fresh launch model provenance or label changed');
+    // A fresh profile stores no default; the form shows the newest Opus the options offer.
+    if ((modelProof.storedDefault && modelProof.storedDefault.model !== 'claude-opus-5-5') || modelProof.renderedModel !== 'Opus 5.5') throw new Error('fresh launch model provenance or label changed');
     if (await page.locator('.new-session-popover').count()) await shot('session-config');
     else process.stdout.write('SKIPPED session-config: the launch popover did not open\n');
     await page.keyboard.press('Escape').catch(() => {});
@@ -311,21 +321,20 @@ async function main() {
     await page.waitForTimeout(1200);
     await shot('tasks');
 
-    // 5. Orchestration: the queue for the project the stage is already showing,
-    //    read from a delegate state directory this run owns.
+    // 5. Orchestration: the Team chart, which is what the Orch view opens on
+    //    since 2026-11-02 (the batch list is one click further, behind a run's
+    //    "Open run"). Its workers are the invented team from seedTeam, never
+    //    the machine's: the process scan is off (HARBOR_TEAM_NO_PROCESS_SCAN).
     await page.locator('.view-switch-btn', { hasText: 'Orch' }).first()
       .click({ timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(900);
-    await page.locator('.orch-picker-row').filter({ hasText: 'harbor' }).first()
-      .click({ timeout: 8000 }).catch(() => {});
-    await page.waitForSelector('.orch-batch-card', { timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(1200);
-    const batchCards = await page.locator('.orch-batch-card').count();
-    if (await page.locator('.orch-batch-expand').count() !== 5) throw new Error('missing orchestration details');
-    await page.locator('.orch-batch-expand').first().click();
-    await page.locator('.orch-batch-excerpt').first().waitFor();
-    if (batchCards > 0) await shot('orch');
-    else process.stdout.write('SKIPPED orch: no batch cards rendered\n');
+    await page.waitForFunction(() => document.querySelectorAll('.tc-card').length >= 5, null, { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(2500);
+    const teamCards = await page.locator('.tc-card').count();
+    if (teamCards < 5) {
+      if (process.env.HARBOR_SHOT_FAIL_DIR) await page.screenshot({ path: path.join(process.env.HARBOR_SHOT_FAIL_DIR, 'orch-fail.png') }).catch(() => {});
+      throw new Error(`the Team chart drew ${teamCards} of the 5 invented workers`);
+    }
+    await shot('orch');
 
     // 6. Files (Artifacts): discovered from transcripts, rendered inline. The
     //    thumbnails are generated on demand by the main side, so wait for the
@@ -417,6 +426,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`capture-screenshot failed: ${error.message}\n`);
+  process.stderr.write(`capture-screenshot failed: ${error.stack || error.message}\n`);
   process.exit(1);
 });

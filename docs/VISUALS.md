@@ -78,3 +78,33 @@ server ask Tailscale for this workstation's real login, even with HOME relocated
 The shared capture environment disables that discovery and uses its fixture
 token. Memory telemetry is also synthetic; the memory chip itself is existing
 TitleBar UI, and plan-usage meters remain in the rail.
+
+The November 2026 recapture (the first since September) failed four ways
+before it ran, and each failure is now either fixed or checked:
+
+- Run from a checkout outside `C:\dev\.orch`. The rail files any cwd with a
+  `.orch` segment under Orchestration, so a capture from an orchestration
+  worktree shows every demo session in one "Orchestration" group.
+- Two readers ignore HOME on purpose and read the real profile
+  (`os.userInfo`), because workers in shadow homes write there: the Team
+  chart's launch records and the workspace-pool state. The capture sets
+  HARBOR_TEAM_LAUNCHES_FILE and HARBOR_LANES_DIR inside its root; the home
+  guard caught the first one as a blocked read of the real
+  `~/.harbor/team-launches.jsonl`.
+- The Team chart lists workers from the machine's process table, which no
+  HOME isolates, so an isolated Harbor charted the real workers running beside
+  it, with their real project names. HARBOR_TEAM_NO_PROCESS_SCAN=1 (set by the
+  capture) leaves the table unread; `test/providers/team-process-scan.test.js`
+  pins it. The Orch shot is the Team chart itself (what the Orch view opens on),
+  drawn from invented workers: `seedTeam` in demo-corpus.cjs writes a lead, the
+  workers it launched and their headless transcripts, and HARBOR_TEAM_PROCESS_FIXTURE
+  hands them to the chart in place of the process table. An earlier attempt
+  clicked through to the batch list, which is not the view anyone opens.
+- Replies carry no "Claude" or "Codex" line since the 2026-11-09 layout, so
+  the every-provider check reads each window's model chip (`data-provider`)
+  instead of the stage text. A fresh profile stores no new-session default and
+  shows the newest Opus the options offer.
+
+When the app exits before its first window, the capture now prints Electron's
+own output and the original error; teardown no longer replaces it with a
+Playwright error about a closed connection.

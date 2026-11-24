@@ -100,7 +100,7 @@ function ModelChip({ model, effort, provider = 'claude', home, profiles, onClick
   const identity = providerIdentity(provider);
   const label = model?.name || identity.label;
   return (
-    <button type="button" className={`model model-chip tone-${model?.tone || 'other'}`} title="Configure this session" onClick={(event) => { event.stopPropagation(); onClick(); }}>
+    <button type="button" className={`model model-chip tone-${model?.tone || 'other'}`} data-provider={provider} title="Configure this session" onClick={(event) => { event.stopPropagation(); onClick(); }}>
       <img className="logomk" src={identity.logo} alt="" aria-hidden="true" />
       {/* Its own box so a narrow window shortens the model name and keeps the
           effort tag and plan badge whole (styles.css, the 300px tier). */}

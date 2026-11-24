@@ -274,6 +274,8 @@ function createTeamProvider(options = {}) {
   let worker = null;
   let facts = {};
   let processes = [];
+  let fixtureLaunches = [];
+  const launchList = () => (fixtureLaunches.length ? [...launches.list(), ...fixtureLaunches] : launches.list());
   let usage = {};
   let runs = [];
   let runsAt = 0;
@@ -331,7 +333,23 @@ function createTeamProvider(options = {}) {
   // headless member finishing a turn.
   async function discover() {
     const request = bridge?.daemonRequest;
-    if (!request || platform !== 'win32') { processes = []; return; }
+    // A harness's own process table (the README capture's invented workers),
+    // read INSTEAD of the machine's: rows in the shape `found` holds below.
+    if (env.HARBOR_TEAM_PROCESS_FIXTURE) {
+      let doc = null;
+      try { doc = JSON.parse(await fsp.readFile(env.HARBOR_TEAM_PROCESS_FIXTURE, 'utf8')); } catch { doc = null; }
+      const rows = (list) => (Array.isArray(list) ? list.filter((row) => row && typeof row === 'object') : []);
+      const fixture = rows(Array.isArray(doc) ? doc : doc?.processes);
+      // Launch records in the reader's entry shape; their invented pids are
+      // never probed, so each counts as alive.
+      fixtureLaunches = rows(doc?.launches).map((entry) => ({ ...entry, alive: !entry.endedMs }));
+      if (JSON.stringify(fixture) !== JSON.stringify(processes)) { processes = fixture; scheduleRecompute(); }
+      return;
+    }
+    // The process table is the whole machine's, whatever store this Harbor
+    // reads: an isolated Harbor (the README capture) would chart the real
+    // workers running beside it, real project names included.
+    if (!request || platform !== 'win32' || env.HARBOR_TEAM_NO_PROCESS_SCAN === '1') { processes = []; return; }
     const panes = bridge.getLivePanes?.() || [];
     const panePids = new Map(panes.filter((p) => p.pid).map((p) => [p.pid, p.pane_id]));
     const found = [];
@@ -515,7 +533,7 @@ function createTeamProvider(options = {}) {
     });
     const sessions = {};
     const sessionHomes = {};
-    const want = new Set([...panes.map((p) => p.sessionId), ...launches.list().map((l) => l.child?.session), ...processes.map((p) => p.sessionId)].filter(Boolean));
+    const want = new Set([...panes.map((p) => p.sessionId), ...launchList().map((l) => l.child?.session), ...processes.map((p) => p.sessionId)].filter(Boolean));
     for (const group of bridge?.listDelegations?.() || []) { want.add(group.parentId); for (const agent of group.agents || []) if (agent.sessionId) want.add(agent.sessionId); }
     for (const id of want) {
       const row = bridge?.getHistoryRow?.(id);
@@ -542,7 +560,7 @@ function createTeamProvider(options = {}) {
       // Harbor starts), a TEAM.json member that is a pane cannot match yet.
       panesKnown: panes.length > 0,
       panes,
-      launches: launches.list(),
+      launches: launchList(),
       processes,
       sessions,
       facts,
@@ -568,7 +586,7 @@ function createTeamProvider(options = {}) {
     let endedChanged = false;
     for (const [id, member] of previousLive) {
       if (live.has(id)) continue;
-      const launch = launches.list().find((entry) => (entry.child?.session || `launch:${entry.launch}`) === id);
+      const launch = launchList().find((entry) => (entry.child?.session || `launch:${entry.launch}`) === id);
       const outcome = launch?.endedMs ? (launch.exit === 0 ? 'finished' : launch.exit != null ? `exited with code ${launch.exit}` : 'stopped')
         : member.runMode === 'pane' ? 'pane closed' : 'ended';
       ended = ended.filter((entry) => entry.id !== id);
