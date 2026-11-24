@@ -166,7 +166,7 @@ export function AgentDrawer({ member, team, now, profiles, onClose, onSelect, on
             <Row label="Process">{member.pid ? <span className="tcd-mono">{member.pid}</span> : null}</Row>
             <Row label="Started">{member.createdMs ? `${clockText(member.createdMs)} (${ago(member.createdMs, now)} ago)` : null}</Row>
             <Row label="Last activity">{member.lastEventMs ? `${clockText(member.lastEventMs)} (${ago(member.lastEventMs, now)} ago)` : null}</Row>
-            <Row label="Session">{member.sessionId ? <span className="tcd-mono">{member.sessionId}</span> : <span className="tcd-muted">none recorded (Cursor records no session id)</span>}</Row>
+            <Row label="Session">{member.sessionId ? <span className="tcd-mono">{member.sessionId}</span> : <span className="tcd-muted">{member.provider === 'cursor' ? 'none recorded (Cursor records no session id)' : 'none recorded'}</span>}</Row>
           </dl>
         </section>
       </div>

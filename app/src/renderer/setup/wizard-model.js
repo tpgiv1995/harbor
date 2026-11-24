@@ -37,6 +37,8 @@ export const {
   removeProfile,
   reconcileDefaults,
   reconcileSymlinks,
+  defaultsFor,
+  GEMINI_FALLBACK,
 } = model;
 
 export default model;

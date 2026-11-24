@@ -20,10 +20,11 @@
 // WHY THE PICTURES LOOK LIKE THIS, which is a requirement and not a preference:
 //
 // - EVERY PROVIDER IS ON THE STAGE. The first four windows opened are claude,
-//   codex, cursor, claude, because a picture of a stage full of one vendor's
+//   codex, cursor, gemini, because a picture of a stage full of one vendor's
 //   sessions describes a different product from the one this is. The corpus
-//   plants real codex rollouts and cursor transcripts in the fixture HOME and
-//   the real scanners find them; nothing here fakes a provider row.
+//   plants real codex rollouts, cursor transcripts and gemini conversations in
+//   the fixture HOME and the real scanners find them; nothing here fakes a
+//   provider row.
 // - CAPTURED AT 2x, VIA THE WINDOW AND NEVER VIA THE VIEWPORT.
 //   --force-device-scale-factor=2 gives a 1600x1000 layout a 3200x2000 backing
 //   store, which is what makes README text sharp. `page.setViewportSize()`
@@ -204,7 +205,7 @@ async function main() {
     // picture.
     await page.locator('[data-filter="all"]').click().catch(() => {});
     await page.waitForSelector('.sidebar-project-wrap .pg-label', { timeout: 45000 });
-    // Codex and cursor rows arrive from a second scanner (provider-history),
+    // Codex, cursor and gemini rows arrive from a second scanner (provider-history),
     // so wait for the rail to hold as many rows as the corpus has sessions
     // rather than for the first one.
     await page.waitForTimeout(1200);
@@ -219,7 +220,7 @@ async function main() {
     process.stdout.write(`rail rows: ${railRows} (corpus sessions: ${sessions.length})\n`);
     if (railRows < sessions.length) {
       throw new Error(
-        `the rail listed ${railRows} of ${sessions.length} sessions; the codex and cursor rows come from a`
+        `the rail listed ${railRows} of ${sessions.length} sessions; the codex, cursor and gemini rows come from a`
         + ' second scanner (provider-history) and a picture missing them is the single-vendor stage this'
         + ' capture exists to replace',
       );
@@ -262,7 +263,7 @@ async function main() {
     // Read from each window's model chip: since the 2026-11-09 layout no reply
     // carries a "Claude" / "Codex" line, so the stage text names no vendor.
     const chips = await page.evaluate(() => [...document.querySelectorAll('.model-chip[data-provider]')].map((el) => el.dataset.provider));
-    const missing = ['claude', 'codex', 'cursor'].filter((who) => !chips.includes(who)).map((who) => who.toUpperCase());
+    const missing = ['claude', 'codex', 'cursor', 'gemini'].filter((who) => !chips.includes(who)).map((who) => who.toUpperCase());
     if (missing.length) {
       throw new Error(`the stage does not show ${missing.join(' or ')}; a single-vendor stage is exactly what this capture replaced`);
     }

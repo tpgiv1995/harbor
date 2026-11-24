@@ -16,7 +16,7 @@ import { sessionModelOptions, sessionEffortOptions } from '../../session-model-o
 // through the same derive-and-validate the save runs, so what the user reads is
 // what gets written, and a config the schema would reject is reported here
 // rather than after the button.
-const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' };
+const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor', gemini: 'Gemini' };
 
 export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onPreview, saveError }) {
   const shown = showErrors ? errors : [];
@@ -40,7 +40,7 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
     () => model.configFromWizard(state, baseConfig || {}),
     [state, baseConfig],
   );
-  const unconfirmed = /^(claude|codex|cursor) executable not found/.exec(previewError || saveError || '')?.[1];
+  const unconfirmed = /^(claude|codex|cursor|gemini) executable not found/.exec(previewError || saveError || '')?.[1];
   const unconfirmedPath = unconfirmed && config.providers[unconfirmed]?.bin;
   const approvals = Object.entries(config.setup?.executableApprovals || {});
 
@@ -75,6 +75,16 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
     }
   }, [providerOptions, choice.effort, state.defaults.effort, patch]);
 
+  // A saved or carried-over Gemini default the registry does not offer (a model id agy no longer lists)
+  // would launch agy on a model it does not have: move it to
+  // the registry's own default family once the registry has loaded.
+  useEffect(() => {
+    if (state.defaults.provider !== 'gemini' || !providerOptions?.models?.length) return;
+    if (providerOptions.models.some((row) => row.value === state.defaults.model)) return;
+    const next = model.defaultsFor('gemini', registry);
+    patch(prev => ({ ...prev, defaults: { ...prev.defaults, ...next } }));
+  }, [providerOptions, state.defaults.provider, state.defaults.model, patch]);
+
   const set = (patchObj) => patch((prev) => ({ ...prev, defaults: { ...prev.defaults, ...patchObj } }));
 
   return (
@@ -93,10 +103,12 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
             onChange={(provider) => {
               const next = registry[provider]?.models?.[0]?.value
                 || (provider === 'claude' ? 'opus' : 'default');
+              // Gemini starts from its registry's own default model and effort (agy's default is high).
+              const gemini = provider === 'gemini' ? model.defaultsFor('gemini', registry) : null;
               set({
                 provider,
-                model: next,
-                effort: provider === 'codex' ? 'medium' : (provider === 'cursor' ? 'default' : 'xhigh'),
+                model: gemini ? gemini.model : next,
+                effort: gemini ? gemini.effort : (provider === 'codex' ? 'medium' : (provider === 'cursor' ? 'default' : 'xhigh')),
               });
             }}
           />
@@ -173,8 +185,8 @@ export function DefaultsStep({ state, patch, baseConfig, errors, showErrors, onP
           </p>
         ))}
         <p className="setup-note-fine">
-          No credential appears anywhere in this file, and none ever will. Claude, Codex and Cursor
-          each keep their own sign-in; Harbor only records which folder holds each one.
+          No credential appears anywhere in this file, and none ever will. Claude, Codex, Cursor and
+          Gemini each keep their own sign-in; Harbor only records which folder holds each one.
         </p>
       </div>
     </div>

@@ -531,6 +531,27 @@ test('a configHome matching an already-saved profile launches even outside the h
   await fsp.rm(outsideDir, { recursive: true, force: true });
 });
 
+// Gemini (2026-11-23): agy's state root is a home Harbor knows about once detection found it, exactly as a
+// detected codex or cursor home is, so a root outside the user's folder can still be signed in from the wizard.
+test('a detected Gemini root outside the home directory is a known home for sign-in; a stranger still is not', async () => {
+  const calls = [];
+  const outsideDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'harbor-setup-agy-'));
+  const { dir, ipc } = await harness({
+    detectEnvironment: async () => ({ claudeHomes: [], providers: { gemini: { found: true, path: 'agy', home: outsideDir } } }),
+    launchLogin: async (provider, options) => { calls.push({ provider, ...options }); return { ok: true, launched: true, pid: 1 }; },
+  });
+  const ok = await ipc.invoke('setup:login', { provider: 'gemini', configHome: outsideDir });
+  assert.equal(ok.ok, true, ok.reason);
+  assert.equal(calls[0].provider, 'gemini');
+  assert.equal(calls[0].configHome, outsideDir);
+  const stranger = await ipc.invoke('setup:login', { provider: 'gemini', configHome: path.win32.resolve('D:\\somewhere-else') });
+  assert.equal(stranger.ok, false);
+  assert.equal(stranger.code, 'HOME_NOT_KNOWN');
+  assert.match(stranger.manualCommand, /agy/);
+  await fsp.rm(dir, { recursive: true, force: true });
+  await fsp.rm(outsideDir, { recursive: true, force: true });
+});
+
 test('detection failing is survivable: the wizard is told, not crashed', async () => {
   const { dir, ipc } = await harness({
     detectEnvironment: async () => { throw new Error('no /proc on this machine'); },

@@ -347,7 +347,7 @@ class Pool {
     });
   }
   sessionKey(options) {
-    insist(['claude', 'codex', 'cursor'].includes(options.provider) && typeof options.configHome === 'string' && path.isAbsolute(options.configHome) && options.session, 'INVALID_ARGUMENT', 'provider, absolute config-home and session are required');
+    insist(['claude', 'codex', 'cursor', 'gemini'].includes(options.provider) && typeof options.configHome === 'string' && path.isAbsolute(options.configHome) && options.session, 'INVALID_ARGUMENT', 'provider, absolute config-home and session are required');
     return lookup.sessionKey(options);
   }
   bindSession(options) {

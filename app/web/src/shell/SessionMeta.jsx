@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import turnMeta from '../../../src/renderer/stage/turn-meta.cjs';
 import cacheFreshnessHelpers from '../../../src/renderer/stage/cache-freshness.cjs';
 import { contextFact, statusFact } from './session-facts.js';
+import { providerLabel } from '../provider-labels.cjs';
 
 // The session facts under the phone header (2026-10-11, Pat: the phone
 // "doesnt show like session context or stuff like that"). Every fact here was
@@ -77,8 +78,8 @@ export function useSessionFacts({ client, session, header, pane, background = nu
   const now = useClock(15000);
   const meter = useWorkMeter(client, session, pane, Boolean(header?.working), header?.lastPrompt || null);
   if (!session) return null;
-  const providerLabel = { codex: 'Codex', cursor: 'Cursor' }[session.provider] || 'Claude';
-  const context = contextFact(header, providerLabel) || (typeof session.contextPct === 'number' ? contextFact({ contextPct: session.contextPct }) : null);
+  const providerName = providerLabel(session.provider, 'Claude');
+  const context = contextFact(header, providerName) || (typeof session.contextPct === 'number' ? contextFact({ contextPct: session.contextPct }) : null);
   // Background work ("7 tasks running") is what the session is doing while its
   // turn is over, so it IS the status; it used to take a row of its own.
   const status = background && !header?.working && !header?.blocked

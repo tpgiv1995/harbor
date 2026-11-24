@@ -41,7 +41,11 @@
 //    filled with the real machine's sessions, including real client names. The
 //    same fact is the reason this file can PLANT codex and cursor sessions: it
 //    writes them into the fixture HOME, in the exact store layout each provider
-//    uses, and the real scanner finds them the way it finds real ones.
+//    uses, and the real scanner finds them the way it finds real ones. Gemini
+//    (Google's Antigravity CLI) is the same: its store is
+//    ~/.gemini/antigravity-cli, so the planted conversation sits in the fixture
+//    HOME under brain/<id>/.system_generated/logs, with the side files a typed
+//    (not print-mode) conversation has (annotations, history, summaries).
 //
 // 4. ARTIFACTS ROOTS ARE TRANSCRIPT ROOTS, NOT OUTPUT DIRECTORIES.
 //    `HARBOR_ARTIFACTS_ROOTS` is where artifacts.js looks for `*.jsonl` to read
@@ -49,8 +53,8 @@
 //    finds no transcripts at all, so the Files view was honestly empty and the
 //    capture skipped its own screenshot for weeks. It is also why every artifact
 //    in this corpus is written by a CLAUDE session: artifacts.js scans the
-//    claude transcript store only, so a file produced by a codex or cursor
-//    session would be named in a transcript the scan never reads, and the
+//    claude transcript store only, so a file produced by a codex, cursor or
+//    gemini session would be named in a transcript the scan never reads, and the
 //    picture would promise a card that the product does not draw.
 //
 // 5. AN ARTIFACT NEEDS BOTH HALVES. A file counts when a recent transcript
@@ -76,9 +80,9 @@ const DEFAULT_ROOT = path.join(VERIFY, 'harbor-demo');
 // The conversations.
 //
 // Ordinary-looking open-source work on three invented projects, across all
-// three providers Harbor drives. Order matters: the capture opens windows in
+// four providers Harbor drives. Order matters: the capture opens windows in
 // this order, and the first four are deliberately claude / codex / cursor /
-// claude so that no picture of the stage can show a single-vendor tool.
+// gemini so that no picture of the stage can show a single-vendor tool.
 //
 // `ends` decides whether a session reads as working or idle, which is a fact
 // about the transcript and not a decoration: 'working' leaves a tool call
@@ -143,6 +147,30 @@ const SESSIONS = [
     ],
   },
   {
+    // The fourth window: Google's Antigravity CLI. Its calls are agy's own tool
+    // names (read_file, replace_file_content, run_command), drawn with the same
+    // verbs as every other provider's. It writes no artifact (note 4).
+    key: 'fixtures',
+    provider: 'gemini',
+    dir: 'demo/notes-api',
+    title: 'Migrate the fixtures',
+    model: 'gemini-4-neon-high',
+    ends: 'idle',
+    blocks: [
+      ['user', 'Move the fixtures off the shared database.'],
+      ['assistant', 'Every suite seeds the same database file, so a run depends on what the previous one left behind. Reading how the seed is built before I change it.'],
+      ['read', { file: 'test/support/seed.js' }],
+      ['assistant', 'The seed opens one fixed path. I am making it build a database per suite and delete it afterwards, so nothing carries over.'],
+      ['edit', {
+        file: 'test/support/seed.js',
+        old: 'const db = open(SHARED_DB_PATH);',
+        new: 'const db = open(tempDbPath(suiteName));\nafter(() => remove(db));',
+      }],
+      ['shell', 'npm test'],
+      ['assistant', 'All 412 tests pass with isolated fixtures. Coverage moved by a tenth of a point, which is the honest answer: isolated fixtures make the suite trustworthy, not larger.'],
+    ],
+  },
+  {
     key: 'rate-limiter',
     provider: 'claude',
     dir: 'demo/notes-api',
@@ -183,20 +211,6 @@ const SESSIONS = [
       ['assistant', 'theme-transition.mp4 is the same page crossfading between the two palettes, which is easier to review than two screenshots side by side when what you are checking is whether anything jumps.'],
     ],
   },
-  {
-    key: 'fixtures',
-    provider: 'claude',
-    dir: 'demo/notes-api',
-    title: 'Migrate the fixtures',
-    model: 'claude-opus-5-5',
-    ends: 'idle',
-    blocks: [
-      ['user', 'Move the fixtures off the shared database.'],
-      ['assistant', 'Done. Each suite now builds its own, so a run cannot depend on what another one left behind.'],
-      ['write', { file: '{OUT}/coverage-report.html', lines: 52 }],
-      ['assistant', 'coverage-report.html is the run after the split. Coverage moved by a tenth of a point, which is the honest answer: isolated fixtures make the suite trustworthy, not larger.'],
-    ],
-  },
 ];
 
 // Which session writes which artifact, and what goes in it. Authored rather
@@ -208,7 +222,6 @@ const SESSIONS = [
 const ARTIFACTS = [
   { session: 'release-workflow', name: 'release-checklist.pdf', kind: 'typst' },
   { session: 'rate-limiter', name: 'latency-p95.svg', kind: 'svg' },
-  { session: 'fixtures', name: 'coverage-report.html', kind: 'html' },
   { session: 'dark-mode', name: 'palette-preview.html', kind: 'html' },
   { session: 'dark-mode', name: 'contrast-audit.svg', kind: 'svg' },
   { session: 'dark-mode', name: 'theme-transition.mp4', kind: 'video' },
@@ -246,41 +259,6 @@ const PALETTE_HTML = `<!doctype html><meta charset="utf-8"><title>Palette previe
   <tr><td><code>--bg</code></td><td>#ffffff</td><td>#0d0f13</td><td>:root, then the query</td></tr>
   <tr><td><code>--card</code></td><td>#f3f4f6</td><td>#171a20</td><td>:root, then the query</td></tr>
   <tr><td><code>--accent</code></td><td>#3b82f6</td><td>#6ea8fe</td><td>:root, then the query</td></tr>
-</table>
-`;
-
-const COVERAGE_HTML = `<!doctype html><meta charset="utf-8"><title>Suite coverage after the fixture split</title>
-<style>
- :root{--bg:#ffffff;--fg:#14161a;--muted:#5c6370;--line:#e4e6ea;--ok:#1f9d55;--warn:#c98a12}
- @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0d0f13;--fg:#e8e9ec;--muted:#8b909a;--line:#242832;--ok:#4ade80;--warn:#facc15}}
- body{margin:0;font:15px/1.6 ui-sans-serif,system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:44px 48px}
- h1{font-size:23px;font-weight:620;margin:0 0 5px;letter-spacing:-.01em}
- p.lede{color:var(--muted);margin:0 0 28px}
- .totals{display:flex;gap:40px;margin-bottom:30px}
- .t b{display:block;font-size:31px;font-weight:640;letter-spacing:-.02em}
- .t span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
- table{border-collapse:collapse;width:100%;font-size:13.5px}
- th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
- th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:560}
- td.n{text-align:right;font-variant-numeric:tabular-nums}
- .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;width:160px}
- .bar i{display:block;height:100%;background:var(--ok)}
- .bar.w i{background:var(--warn)}
- code{font:12.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
-</style>
-<h1>Suite coverage after the fixture split</h1>
-<p class="lede">Every suite builds its own fixtures. 412 tests, no shared database.</p>
-<div class="totals">
-  <div class="t"><b>96.4%</b><span>statements</span></div>
-  <div class="t"><b>91.2%</b><span>branches</span></div>
-  <div class="t"><b>0</b><span>shared fixtures</span></div>
-</div>
-<table>
-  <tr><th>File</th><th>Statements</th><th></th><th class="n">Uncovered</th></tr>
-  <tr><td><code>limiter/window.js</code></td><td>98.9%</td><td><div class="bar"><i style="width:99%"></i></div></td><td class="n">3</td></tr>
-  <tr><td><code>limiter/cache-key.js</code></td><td>100%</td><td><div class="bar"><i style="width:100%"></i></div></td><td class="n">0</td></tr>
-  <tr><td><code>notes/store.js</code></td><td>94.1%</td><td><div class="bar"><i style="width:94%"></i></div></td><td class="n">9</td></tr>
-  <tr><td><code>notes/index.js</code></td><td>78.6%</td><td><div class="bar w"><i style="width:79%"></i></div></td><td class="n">21</td></tr>
 </table>
 `;
 
@@ -739,6 +717,77 @@ function writeCursorSession(session, { home, cwd, id, startMs }) {
   return file;
 }
 
+// Gemini's (Google Antigravity CLI) store layout and step shapes, taken from real
+// agy 1.5.14 conversations (every word and folder here is invented):
+//   <home>/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl
+// one step per line ({ step_index, source, type, status, created_at, ... }):
+// USER_INPUT wraps the typed words in <USER_REQUEST>; PLANNER_RESPONSE carries the
+// model slug, token counts and either `content` (the answer) or `tool_calls`
+// ({ name, args }); each call's result is a GENERIC step that names no tool.
+// A TYPED conversation also has what only the interactive TUI writes, and the
+// rail needs it to tell it from a print-mode run: an annotations file, history
+// lines, and a summaries row whose title is set. The summaries database is
+// written when this Node has node:sqlite (it is how the rail learns the folder);
+// history.jsonl and last_conversations.json name the folder when it has not.
+function writeGeminiSession(session, { home, cwd, id, startMs }) {
+  const store = path.join(home, '.gemini', 'antigravity-cli');
+  const logs = path.join(store, 'brain', id, '.system_generated', 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+  const at = (n) => new Date(startMs + n * MINUTE).toISOString().replace(/\.\d+Z$/, 'Z');
+  const steps = [];
+  const push = (step) => steps.push({ step_index: steps.length, ...step });
+  const lastIndex = session.blocks.length - 1;
+  let firstUser = true;
+  let cached = 9000;
+  const planner = (n, extra) => {
+    cached += 400;
+    push({ source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: at(n), model: session.model, input_tokens: 2200, cache_read_tokens: cached, output_tokens: 80, ...extra });
+  };
+  session.blocks.forEach(([kind, spec], n) => {
+    if (kind === 'user') {
+      const change = firstUser
+        ? '\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Neon (High). No need to comment on this change if the user doesn\'t ask about it.\n</USER_SETTINGS_CHANGE>'
+        : '';
+      firstUser = false;
+      push({ source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: at(n), content: `<USER_REQUEST>\n${spec}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: ${at(n)}.\n</ADDITIONAL_METADATA>${change}` });
+      return;
+    }
+    if (kind === 'assistant') { planner(n, { content: spec }); return; }
+    const call = kind === 'read' ? { name: 'read_file', args: { Path: `"${path.join(cwd, spec.file)}"`, StartLine: 1, EndLine: 80 } }
+      : kind === 'edit' ? { name: 'replace_file_content', args: { TargetFile: path.join(cwd, spec.file), Instruction: 'Update the file', TargetContent: spec.old, ReplacementContent: spec.new } }
+        : kind === 'shell' ? { name: 'run_command', args: { CommandLine: spec, WaitMsBeforeAsync: 5000, toolSummary: 'Run the test suite' } }
+          : null;
+    if (!call) throw new Error(`demo-corpus: unknown gemini block '${kind}'`);
+    planner(n, { tool_calls: [call] });
+    // A session that ENDS on a call with no result is mid-turn.
+    if (n === lastIndex && session.ends === 'working') return;
+    const output = kind === 'shell' ? 'Command exited with code 0.\n\nCommand output:\nok\n' : 'ok\n';
+    push({ source: 'MODEL', type: 'GENERIC', status: 'DONE', created_at: at(n), content: `Created At: ${at(n)}\nCompleted At: ${at(n)}\n${output}` });
+  });
+  const text = `${steps.map((step) => JSON.stringify(step)).join('\n')}\n`;
+  const file = path.join(logs, 'transcript_full.jsonl');
+  fs.writeFileSync(file, text);
+  fs.writeFileSync(path.join(logs, 'transcript.jsonl'), text);
+  const ended = new Date(startMs + (session.blocks.length + 1) * MINUTE);
+  fs.utimesSync(file, ended, ended);
+  // What only a typed conversation has.
+  fs.mkdirSync(path.join(store, 'annotations'), { recursive: true });
+  fs.writeFileSync(path.join(store, 'annotations', `${id}.pbtxt`), `title:${JSON.stringify(session.title)}\n`);
+  fs.mkdirSync(path.join(store, 'cache'), { recursive: true });
+  fs.writeFileSync(path.join(store, 'cache', 'last_conversations.json'), `${JSON.stringify({ [cwd]: id }, null, 2)}\n`);
+  fs.appendFileSync(path.join(store, 'history.jsonl'), `${JSON.stringify({ display: session.blocks[0][1], timestamp: startMs, workspace: cwd })}\n`);
+  const sqlite = require('../../src/main/providers/gemini-store.js').loadSqlite();
+  if (sqlite) {
+    const db = new sqlite.DatabaseSync(path.join(store, 'conversation_summaries.db'));
+    try {
+      db.exec('CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id text, title text NOT NULL DEFAULT "", preview text NOT NULL DEFAULT "", step_count integer NOT NULL DEFAULT 0, last_modified_time datetime NOT NULL, workspace_uris text NOT NULL, status text NOT NULL DEFAULT "", source text NOT NULL DEFAULT "", project_id text NOT NULL DEFAULT "", agent_name text NOT NULL DEFAULT "", parent_conversation_id text NOT NULL DEFAULT "", nesting_depth integer NOT NULL DEFAULT 0)');
+      db.prepare('INSERT INTO conversation_summaries (conversation_id, title, preview, step_count, last_modified_time, workspace_uris, status, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, session.title, session.title, steps.length, ended.toISOString(), JSON.stringify([require('node:url').pathToFileURL(cwd).href]), 'CASCADE_RUN_STATUS_IDLE', 'default-cli-project');
+    } finally { db.close(); }
+  }
+  return file;
+}
+
 // The one artifact that cannot be authored as text: a video. Rendered from the
 // SAME page palette-preview.html is, once in each palette, and crossfaded, so it
 // is a real recording of a real artifact rather than a test pattern standing in
@@ -799,7 +848,7 @@ function writeArtifact(artifact, outDir) {
     return true;
   }
   if (artifact.kind === 'html') {
-    fs.writeFileSync(target, artifact.name === 'palette-preview.html' ? PALETTE_HTML : COVERAGE_HTML);
+    fs.writeFileSync(target, PALETTE_HTML);
     return true;
   }
   const source = path.join(outDir, `${path.parse(artifact.name).name}.typ`);
@@ -861,7 +910,8 @@ function buildCorpus(root, options = {}) {
     const context = { projectsDir, home, cwd, outDir, id, startMs };
     const file = session.provider === 'codex' ? writeCodexSession(session, context)
       : session.provider === 'cursor' ? writeCursorSession(session, context)
-        : writeClaudeSession(session, context);
+        : session.provider === 'gemini' ? writeGeminiSession(session, context)
+          : writeClaudeSession(session, context);
     return { ...session, id, cwd, file, artifacts: written };
   });
 
@@ -975,7 +1025,7 @@ function seedTeam(root, { projectsDir, home }, now = Date.now()) {
 
 // The isolated config an app or server reads for these captures. Every provider
 // is enabled because the whole point of the pictures is that Harbor drives
-// three of them.
+// four of them.
 function buildConfig(root, { projectsDir, home, cacheDir, userData }) {
   return {
     version: 1,
@@ -989,6 +1039,7 @@ function buildConfig(root, { projectsDir, home, cacheDir, userData }) {
       claude: { enabled: true, bin: 'claude' },
       codex: { enabled: true, bin: 'codex' },
       cursor: { enabled: true, bin: 'cursor-agent' },
+      gemini: { enabled: true, bin: 'agy' },
     },
     paths: {
       projectsDir,
@@ -1060,6 +1111,7 @@ module.exports = {
   DEFAULT_ROOT,
   prepareRoot,
   buildCorpus,
+  writeGeminiSession,
   buildVideoArtifacts,
   buildConfig,
   seedTasks,

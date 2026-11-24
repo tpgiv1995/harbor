@@ -11,7 +11,8 @@ import { PromptForm } from './PromptForm.jsx';
 import { useTerminalDialogs } from './use-dialog-state.js';
 import { cacheFreshness, describeCacheFreshness } from './cache-freshness.cjs';
 import { WorkflowStrip } from './WorkflowStrip.jsx';
-import { terminalView, windowClickArms, headerKeepsKeys } from './terminal-view.cjs';
+import { terminalView, terminalFallbackNote, windowClickArms, headerKeepsKeys } from './terminal-view.cjs';
+import { planInChip } from './provider-rules.cjs';
 import { CopySessionId } from './CopySessionId.jsx';
 import RenameField, { PencilIcon } from '../RenameField.jsx';
 import { runStateCue } from '../../shared/session-run-state.cjs';
@@ -19,10 +20,9 @@ import { createPortal } from 'react-dom';
 
 const EFFORT_LABEL = { low: 'low', medium: 'med', high: 'high', xhigh: 'xhigh', max: 'max' };
 
-// Providers whose plan badge rides inside the model chip, so a codex window's
-// header reads like a claude one (2026-10-31). Any other provider that has a
-// home keeps the trailing pill.
-const PLAN_IN_CHIP = new Set(['claude', 'codex']);
+// Which providers carry the plan badge inside the model chip lives in provider-rules.cjs (claude,
+// codex since 2026-10-31, gemini since 2026-11-23); any other provider that has a home keeps the
+// trailing pill.
 
 // Compact token count for the gauge's honest no-percent state ("151k").
 function formatContextTokens(tokens) {
@@ -106,7 +106,7 @@ function ModelChip({ model, effort, provider = 'claude', home, profiles, onClick
           effort tag and plan badge whole (styles.css, the 300px tier). */}
       <span className="model-name">{label}</span>
       {effort ? <span className="eff">{EFFORT_LABEL[effort] || effort}</span> : null}
-      {PLAN_IN_CHIP.has(provider) && home ? (
+      {planInChip(provider) && home ? (
         <ProfileBadge profileId={home} profiles={profiles} className="model-acct" />
       ) : null}
     </button>
@@ -447,7 +447,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           {/* Account shown once: the ModelChip already carries a `.model-acct`
               badge for a claude or codex session, so the standalone `.apill`
               shows ONLY for a provider whose chip carries none. */}
-          {session.home && !PLAN_IN_CHIP.has(session.provider || 'claude') ? (
+          {session.home && !planInChip(session.provider) ? (
             <ProfileBadge profileId={session.home} profiles={profiles} className="apill" />
           ) : null}
         </div>
@@ -457,7 +457,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
         <div className="tile-tty">
           {terminalFallback ? (
             <div className="terminal-provider-note">
-              {`this ${providerIdentity(session.provider).label.toLowerCase()} pane has not named its session yet; showing its terminal`}
+              {terminalFallbackNote(providerIdentity(session.provider).label)}
             </div>
           ) : null}
           <XtermPane

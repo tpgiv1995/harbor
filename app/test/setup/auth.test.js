@@ -41,7 +41,7 @@ test('NOTHING in a login plan can carry a credential', () => {
   // Structural, not a spot check: this is the single most important property
   // of the whole wizard, so it is walked rather than eyeballed.
   const forbidden = /(api[-_]?key|secret|token|password|credential|bearer)/i;
-  for (const provider of ['claude', 'codex', 'cursor']) {
+  for (const provider of ['claude', 'codex', 'cursor', 'gemini']) {
     const plan = auth.loginPlan(provider, { configHome: '/h/.claude' });
     for (const key of Object.keys(plan.env)) {
       assert.ok(!forbidden.test(key), `${provider} login env carries ${key}`);
@@ -51,7 +51,29 @@ test('NOTHING in a login plan can carry a credential', () => {
 });
 
 test('an unknown provider throws instead of composing a nonsense command', () => {
-  assert.throws(() => auth.loginPlan('gemini'), /unknown provider/);
+  // Gemini used to be the example here; it is a real provider now (2026-11-23).
+  assert.throws(() => auth.loginPlan('nonesuch'), /unknown provider/);
+});
+
+// Gemini (Google's Antigravity CLI): its sign-in is the CLI's own. Plain `agy` is the command (no
+// login subcommand, and never the worker's unattended `acp --login`); Harbor names no credential,
+// pins the version, and moves agy's state root only when a home is named.
+test('gemini sign-in is plain agy in a terminal, with no credential and no self-update', () => {
+  const plain = auth.loginPlan('gemini', {}, { platform: 'linux' });
+  assert.deepEqual(plain.argv, ['agy']);
+  assert.deepEqual(plain.env, { AGY_CLI_DISABLE_AUTO_UPDATE: 'true' });
+  assert.equal(plain.display, 'AGY_CLI_DISABLE_AUTO_UPDATE=true agy');
+  assert.ok(!plain.argv.includes('acp') && !plain.argv.includes('--login'));
+
+  const rooted = auth.loginPlan('gemini', { configHome: 'D:/agy-root', bin: 'agy' }, { platform: 'win32' });
+  assert.deepEqual(rooted.env, { AGY_CLI_DISABLE_AUTO_UPDATE: 'true', USERPROFILE: 'D:/agy-root' });
+  assert.equal(rooted.display, "$env:AGY_CLI_DISABLE_AUTO_UPDATE = 'true'; $env:USERPROFILE = 'D:/agy-root'; agy");
+});
+
+test('a gemini home is pinned to USERPROFILE, never to another provider’s variable', () => {
+  assert.deepEqual(auth.loginEnv('gemini', '/r'), { AGY_CLI_DISABLE_AUTO_UPDATE: 'true', USERPROFILE: '/r' });
+  assert.equal(auth.loginEnv('claude', '/r').USERPROFILE, undefined);
+  assert.equal(auth.loginEnv('codex', '/r').USERPROFILE, undefined);
 });
 
 test('an ISOLATED profile refuses to launch a real login, and says why', async () => {

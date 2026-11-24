@@ -9,6 +9,10 @@ const { SessionClient } = require('../app/src/daemon/client.js');
 const { defaultConfigFile } = require('../app/src/shared/tasks-file.cjs');
 const { cursorAuthEnv } = require('../app/src/shared/cursor-auth.cjs');
 const { poolSlotRefusal } = require('../app/src/shared/lane/resume-guard.cjs');
+const { resolveGeminiConfigSync, geminiChildEnv, geminiStateDir } = require('../app/src/main/providers/gemini-config.js');
+const { settingsPathFor, prepareGeminiLaunch, lastGeminiModel } = require('../app/src/main/providers/gemini-launch.js');
+const { contextDirFromEnv } = require('../app/src/main/providers/gemini-status-tee.cjs');
+const { splitGeminiModel } = require('../app/src/main/providers/gemini-model-catalog.js');
 
 const BIN_DIR = __dirname;
 const ROOT = path.dirname(BIN_DIR);
@@ -326,6 +330,15 @@ function sessiondChildEnv(sourceEnv = process.env, { agent = null } = {}) {
   // on any run without it, 2026-10-13). Cursor panes only: the allowlist exists
   // to keep keys out of every other child.
   if (agent === 'cursor' && sourceEnv.CURSOR_API_KEY) env.CURSOR_API_KEY = sourceEnv.CURSOR_API_KEY;
+  // A Gemini pane (agy, 2026-11-23): never self-updates under a pane, and only moves USERPROFILE (the one variable that
+  // relocates its state; HOME does nothing) when ai handed it another root. HARBOR_CONTEXT_DIR tells the status tee
+  // where Harbor's context store is, the same relocation switch the Claude tee honours. Gemini panes only: the
+  // allowlist exists to keep other variables out of every other child.
+  if (agent === 'gemini') {
+    Object.assign(env, geminiChildEnv({}, { root: null }));
+    if (sourceEnv.USERPROFILE) env.USERPROFILE = sourceEnv.USERPROFILE;
+    if (sourceEnv.HARBOR_CONTEXT_DIR) env.HARBOR_CONTEXT_DIR = sourceEnv.HARBOR_CONTEXT_DIR;
+  }
   if (sourceEnv.CLAUDE_CONFIG_DIR) env.CLAUDE_CONFIG_DIR = sourceEnv.CLAUDE_CONFIG_DIR;
   if (sourceEnv.CODEX_HOME) env.CODEX_HOME = sourceEnv.CODEX_HOME;
   // Claude's prompt suggestions (the command bar offers them on Tab, see
@@ -717,6 +730,40 @@ function withCodexPaneControls(argv, controls) {
   return [...argv.slice(0, at + 1), ...controls, ...argv.slice(at + 1)];
 }
 
+// GEMINI (Google's Antigravity CLI, 2026-11-23). The binary and home come from the ONE shared resolver
+// (providers/gemini-config.js), the same one the plans dropdown, the new-session registry and the model catalog read.
+function geminiBin() {
+  const found = resolveGeminiConfigSync({ configuredBin: runtime().config.providers?.gemini?.bin });
+  if (!found) throw new Error('Gemini\'s CLI (agy) was not found: install it, or point HARBOR_AGY_BIN or ~/.harbor/gemini.json at it');
+  return found.bin;
+}
+
+const GEMINI_CONVERSATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// --model takes a FAMILY with --effort beside it, or one full slug alone; never a slug plus a different --effort: agy
+// answers that with a soft "conflicts with --effort" notice and silently starts its quota-expensive default (Neon High).
+function geminiModelFlags(model, effort) {
+  const slug = model ? splitGeminiModel(model) : null;
+  if (slug && effort && slug.effort !== effort) {
+    throw new Error(`--model ${model} already carries the effort ${slug.effort}, which conflicts with --effort ${effort}: pass the family ${slug.family} with --effort, or the slug alone`);
+  }
+  if (slug) return ['--model', model];
+  return [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])];
+}
+
+// `-i` is agy's initial-prompt-then-interactive flag. `--prompt` is an alias for `--print` (headless, exits after one
+// answer), so it must never be used for a pane.
+function geminiArgv({ resumeId = '', model = '', effort = '', prompt = '' }) {
+  if (resumeId && !GEMINI_CONVERSATION_RE.test(resumeId)) throw new Error(`--resume-id ${resumeId} is not a conversation id`);
+  return [
+    geminiBin(), '--dangerously-skip-permissions',
+    '--settings', settingsPathFor(process.cwd(), runtime().cacheDir),
+    ...(resumeId ? ['--conversation', resumeId] : []),
+    ...geminiModelFlags(model, effort),
+    ...(prompt ? ['-i', prompt] : []),
+  ];
+}
+
 function parseAi(args) {
   let provider = 'claude';
   let model = '';
@@ -750,8 +797,8 @@ function parseAi(args) {
     else if (!arg.startsWith('-') && !prompt) prompt = arg;
     else throw new Error(`unknown option: ${arg} (see --help)`);
   }
-  if (!['claude', 'codex', 'cursor'].includes(provider)) throw new Error(`unknown provider: ${provider}`);
-  if (provider === 'claude' && resumeId) throw new Error('--resume-id is codex/cursor only; claude resumes via claude-sessions');
+  if (!['claude', 'codex', 'cursor', 'gemini'].includes(provider)) throw new Error(`unknown provider: ${provider}`);
+  if (provider === 'claude' && resumeId) throw new Error('--resume-id is codex/cursor/gemini only; claude resumes via claude-sessions');
   if (provider !== 'claude' && sessionId) throw new Error('--session-id is claude only');
   let argv;
   if (provider === 'claude') argv = [claudeBin(), '--dangerously-skip-permissions', ...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), ...(sessionId ? ['--session-id', sessionId] : [])];
@@ -773,18 +820,19 @@ function parseAi(args) {
   // with no install session behind it). Harbor's rule, the one --no-daemon
   // enforces for codex, is that no
   // CLI updates itself under a pane. A hidden flag, present from 2026.08.11.
+  else if (provider === 'gemini') argv = geminiArgv({ resumeId, model, effort, prompt });
   else argv = resumeId
     ? [providerBin('cursor'), '--force', '--trust', '--disable-auto-update', '--resume', resumeId]
     : [providerBin('cursor'), '--force', '--trust', '--disable-auto-update', ...(model ? ['--model', model] : [])];
-  if (prompt) argv.push(prompt);
-  return { argv, here, configHome, provider, resumeId, sessionId, prompt };
+  if (prompt && provider !== 'gemini') argv.push(prompt);
+  return { argv, here, configHome, provider, resumeId, sessionId, prompt, model, effort };
 }
 
 async function ai(args) {
   resolveSessionBackend();
   const parsed = parseAi(args);
   if (parsed.help) {
-    process.stdout.write('ai [--home PROFILE|CONFIG_HOME] [--provider claude|codex|cursor] [--model MODEL] [--effort LEVEL] [--resume-id ID] [--session-id UUID] [--here] [PROMPT]\n');
+    process.stdout.write('ai [--home PROFILE|CONFIG_HOME] [--provider claude|codex|cursor|gemini] [--model MODEL] [--effort LEVEL] [--resume-id ID] [--session-id UUID] [--here] [PROMPT]\n');
     return 0;
   }
   const childEnv = { ...process.env };
@@ -803,6 +851,8 @@ async function ai(args) {
     }
     if (parsed.provider === 'claude') childEnv.CLAUDE_CONFIG_DIR = selected.configHome;
     if (parsed.provider === 'codex') childEnv.CODEX_HOME = selected.configHome;
+    // Gemini's only relocation switch is USERPROFILE (HOME does nothing for agy); without --home it stays the user's own.
+    if (parsed.provider === 'gemini') childEnv.USERPROFILE = selected.configHome;
   }
   // A cursor pane or resume carries a stored API key: cursor-agent DELETES an
   // API-key sign-in on any run that does not pass the key (2026-10-13).
@@ -815,18 +865,36 @@ async function ai(args) {
       codexHome: childEnv.CODEX_HOME || path.join(os.homedir(), '.codex'),
     }));
   }
+  const geminiRoot = parsed.provider === 'gemini' ? (childEnv.USERPROFILE || os.homedir()) : null;
+  // A Gemini resume reopens the conversation on the model it last answered with, as Codex's does (agy's own default
+  // is the quota-expensive one). Named flags win; nothing readable means no --model, said by omission.
+  if (parsed.provider === 'gemini' && parsed.resumeId && !parsed.model && !parsed.effort) {
+    const recovered = lastGeminiModel(geminiStateDir(geminiRoot), parsed.resumeId);
+    if (recovered) {
+      const at = parsed.argv.indexOf('--conversation');
+      parsed.argv.splice(at + 2, 0, '--model', recovered);
+    }
+  }
   // Never in a workspace-pool slot, new or resumed: the slot belongs to a lane (docs/claude/lanes.md).
   const slotRefusal = poolSlotRefusal({
     provider: parsed.provider,
     session: parsed.resumeId || null,
     configHome: parsed.provider === 'claude' ? (childEnv.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'))
-      : parsed.provider === 'codex' ? (childEnv.CODEX_HOME || path.join(os.homedir(), '.codex')) : null,
+      : parsed.provider === 'codex' ? (childEnv.CODEX_HOME || path.join(os.homedir(), '.codex'))
+        : geminiRoot,
     cwd: process.cwd(),
   });
   if (slotRefusal) throw new Error(slotRefusal);
   if (process.env.HARBOR_AI_DRY_RUN === '1') {
     process.stdout.write(`${commandString(parsed.argv)}\n`);
     return 0;
+  }
+  if (parsed.provider === 'gemini') {
+    // After the dry-run exit on purpose: a dry run writes nothing. The tee reads agy's environment, which is the
+    // child's, so the context dir travels in it (the same HARBOR_CONTEXT_DIR switch the Claude tee honours).
+    const contextDir = contextDirFromEnv(process.env);
+    prepareGeminiLaunch({ cwd: process.cwd(), cacheDir: runtime().cacheDir, contextDir });
+    Object.assign(childEnv, geminiChildEnv({}), { HARBOR_CONTEXT_DIR: contextDir });
   }
   if (parsed.resumeId) {
     const holder = await liveSessiondHolder(parsed.resumeId);

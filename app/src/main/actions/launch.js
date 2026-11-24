@@ -67,13 +67,15 @@ function buildResumeArgv({ id, detectedHome, profiles = legacyConfig().profiles,
   return argv;
 }
 
-// Codex/cursor resume rides bin/ai;
+// Codex/cursor/gemini resume rides bin/ai;
 // claude resume stays on bin/claude-sessions (live-guard, config homes).
 function buildProviderResumeArgv({ provider, id, detectedHome = null, profiles = legacyConfig().profiles }) {
   const argv = ['--provider', String(provider), '--resume-id', String(id)];
-  if (provider === 'codex' && detectedHome) {
+  // A Gemini home is a USERPROFILE root (agy's only relocation switch); bin/ai exports it as such. No home, no flag: the
+  // session resumes under the user's own profile, which is where a default Gemini pane ran.
+  if ((provider === 'codex' || provider === 'gemini') && detectedHome) {
     const profile = profiles.find((item) => (
-      item.provider === 'codex'
+      item.provider === provider
       && (item.id === detectedHome || item.configHome === detectedHome)
     ));
     const home = profile?.configHome || (path.isAbsolute(detectedHome) ? detectedHome : null);
@@ -195,7 +197,7 @@ function createLaunchActions(options = {}) {
 
   // Same single-flight map as claude resumes: one id, one resume process.
   async function resumeProviderSession({ provider, cwd, id, profileId = null, configHome = null }) {
-    if (!provider || provider === 'claude') throw new TypeError('resumeProviderSession is codex/cursor only');
+    if (!provider || provider === 'claude') throw new TypeError('resumeProviderSession is codex/cursor/gemini only');
     if (!cwd) throw new TypeError(`resuming a ${provider} session requires its working folder`);
     if (!id) throw new TypeError('resumeProviderSession requires id');
     // A deleted project dir makes execFile throw a misleading binary ENOENT

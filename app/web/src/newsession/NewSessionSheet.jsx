@@ -4,17 +4,13 @@ import React, {
 import { CONNECTION } from '../rpc/client.js';
 import { sessionEffortOptions } from '../../../src/renderer/session-model-options.cjs';
 import './newsession.css';
-import { providerPlans, selectedPlan } from '../../../src/shared/plan-options.cjs';
+import { providerPlans, selectedPlan, showPlanChoice } from '../../../src/shared/plan-options.cjs';
 import { folderLabel, groupFolderCandidates } from '../../../src/shared/project-root.cjs';
 import { isOrchestrationCwd } from '../../../src/shared/sidebar-model.js';
 import { PlanChoices } from '../capability/PlanChoices.jsx';
 import { presetChoices, withPresetFolder } from './preset.cjs';
+import { providerLabel } from '../provider-labels.cjs';
 
-const PROVIDER_LABEL = {
-  claude: 'Claude',
-  codex: 'Codex',
-  cursor: 'Cursor',
-};
 
 function Chevron({ open }) {
   return (
@@ -48,7 +44,7 @@ function groupKeyHolding(folders, folder) {
 // `sidebar:update` whenever a session appears, carrying the same model, so the
 // answer arrives for free.
 //
-// Only reached for codex and cursor. A claude session's id is MINTED by Harbor
+// Only reached for codex, cursor and gemini. A claude session's id is MINTED by Harbor
 // before the CLI is launched (`claude --session-id <uuid>`) and `new-session`
 // returns it, so for claude there is nothing to wait for and nothing to guess.
 function waitForSessionInFolder(client, folder, { timeoutMs = 12000, sinceMs } = {}) {
@@ -419,13 +415,14 @@ export function NewSessionSheet({
                   className={`newsession-provider${provider === key ? ' on' : ''}`}
                   onClick={() => { setProvider(key); setAccount(selectedPlan(options, key)?.id || ''); }}
                 >
-                  {PROVIDER_LABEL[key] || key}
+                  <span className="newsession-provider-mark" data-provider={key} aria-hidden="true" />
+                  {providerLabel(key, key)}
                 </button>
               ))}
             </div>
           </fieldset>
 
-          {provider !== 'cursor' && profileOptions.length > 0 ? <fieldset className="newsession-field"><legend>Plan</legend><PlanChoices plans={profileOptions} value={plan?.id} onChange={setAccount} disabled={starting} /></fieldset> : null}
+          {showPlanChoice(provider, profileOptions) ? <fieldset className="newsession-field"><legend>Plan</legend><PlanChoices plans={profileOptions} value={plan?.id} onChange={setAccount} disabled={starting} /></fieldset> : null}
 
           <fieldset className="newsession-field">
             <legend>Model</legend>
@@ -463,7 +460,7 @@ export function NewSessionSheet({
         </div>
 
         <footer className="newsession-foot">
-          <p className="newsession-summary">{PROVIDER_LABEL[provider] || provider}{plan && provider !== 'cursor' ? ` · ${plan.label || plan.id}` : ''} · {modelOptions.find(row => row.value === model)?.label || model}{folder ? ` · ${folderLabel(folder)}` : ''}</p>
+          <p className="newsession-summary">{providerLabel(provider, provider)}{plan && showPlanChoice(provider, profileOptions) ? ` · ${plan.label || plan.id}` : ''} · {modelOptions.find(row => row.value === model)?.label || model}{folder ? ` · ${folderLabel(folder)}` : ''}</p>
           <button
             type="submit"
             className="btn-primary newsession-start"

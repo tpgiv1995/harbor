@@ -386,11 +386,17 @@ function setAppBadgeCount(count) {
 // cannot receive an id at launch, so it still opens on a provisional pane key
 // and upgrades when the first message materializes its rollout.
 async function launchNewSession({ account, cwd, provider = 'claude', model, effort = 'default', command = null, prompt = null, stageSlot }) {
+  // A Gemini profile may name its own profile root (agy keeps its store under
+  // <root>\.gemini); its new conversation is looked for there, never in the
+  // default profile.
+  const providerHome = provider === 'gemini'
+    ? ((harborConfig?.profiles || []).find((p) => p.provider === 'gemini' && p.id === account)?.configHome || os.homedir())
+    : undefined;
   const [preIds, knownIds] = await Promise.all([
     sessionSend.paneIdSet(),
     provider === 'claude'
       ? Promise.resolve(new Set())
-      : sessionSend.listTranscriptIds(cwd, provider),
+      : sessionSend.listTranscriptIds(cwd, provider, providerHome),
   ]);
   const sinceMs = Date.now();
   const result = await launchActions.newSession({ account, cwd, provider, model, effort, prompt });
@@ -405,6 +411,7 @@ async function launchNewSession({ account, cwd, provider = 'claude', model, effo
     preIds,
     knownIds,
     sinceMs,
+    providerHome,
     findFreshPane: (args) => sessionSend.findFreshPane(args),
     findFreshTranscript: (args) => sessionSend.findFreshTranscript(args),
     setLink: (id, pane) => paneLinks.set(id, pane),
@@ -2441,6 +2448,7 @@ app.whenReady().then(async () => {
   configureModelCatalog(harborConfig);
   const { createCursorModelCatalog } = require('./providers/cursor-model-catalog.js');
   const { createCodexModelDiscovery } = require('./providers/codex-model-catalog.js');
+  const { createGeminiModelCatalog } = require('./providers/gemini-model-catalog.js');
   const { createProviderModelRefresh } = require('./providers/provider-model-refresh.js');
   const providerCatalogs = {
     claude: modelCatalog,
@@ -2449,6 +2457,13 @@ app.whenReady().then(async () => {
       bin: harborConfig.providers?.cursor?.bin,
     }),
     codex: createCodexModelDiscovery({ profiles: harborConfig.profiles, bin: harborConfig.providers?.codex?.bin }),
+    // agy models -> gemini-models.json (providers/gemini-model-catalog.js). Gemini is NOT in cli-updates: its version is
+    // pinned by hand, so no install event ever feeds this catalog and the boot and interval refreshes below are its only
+    // signal.
+    gemini: createGeminiModelCatalog({
+      cacheFile: path.join(harborConfig.paths.cacheDir, 'gemini-models.json'),
+      bin: harborConfig.providers?.gemini?.bin,
+    }),
   };
   for (const id of Object.keys(providerCatalogs)) {
     if (harborConfig.providers?.[id]?.enabled === false) delete providerCatalogs[id];
@@ -2461,7 +2476,7 @@ app.whenReady().then(async () => {
   });
   const refreshOtherModels = async (alreadyRefreshed = []) => {
     const state = await cliUpdates.state();
-    await Promise.all(['codex', 'cursor'].filter((provider) => !alreadyRefreshed.includes(provider)).map((provider) => refreshProviderModels({
+    await Promise.all(['codex', 'cursor', 'gemini'].filter((provider) => !alreadyRefreshed.includes(provider)).map((provider) => refreshProviderModels({
       provider, installed: state.providers[provider]?.installed,
     })));
   };

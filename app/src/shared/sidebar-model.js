@@ -26,6 +26,9 @@ const AGENT_PROVIDERS = {
   codex: 'codex',
   cursor: 'cursor',
   'cursor-agent': 'cursor',
+  // Google's Antigravity CLI: the daemon names the agent 'gemini' (the executable basename 'agy' maps to it there).
+  gemini: 'gemini',
+  agy: 'gemini',
 };
 
 export function paneProvider(pane) {

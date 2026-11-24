@@ -16,6 +16,11 @@
 //   claude auth login      (claude auth --help: "Sign in to your Anthropic account")
 //   codex login            (codex --help: "Manage login")
 //   cursor-agent login     (cursor-agent --help: "Authenticate with Cursor")
+//   agy                    (Google's Antigravity CLI, Harbor's Gemini provider: it has no login
+//                          subcommand Harbor runs. It signs in through Google in its OWN first-run
+//                          flow, and shows Google's own consent screens there, which only the person
+//                          answers. The wizard opens the CLI itself in a terminal and gets out of the
+//                          way: nothing in this module sees, reads or answers that sign-in.)
 //
 // The second rule is NEVER DEAD-END. A machine with no terminal emulator we
 // recognize is common (a bare Windows install, a stripped container), so every
@@ -29,6 +34,9 @@ const PROVIDER_LOGIN = {
   claude: { args: ['auth', 'login'], defaultBin: 'claude' },
   codex: { args: ['login'], defaultBin: 'codex' },
   cursor: { args: ['login'], defaultBin: 'cursor-agent' },
+  // No arguments: plain `agy` IS its sign-in. `agy acp --login` (the worker's out-of-band flow) is
+  // deliberately NOT used: it is a different, unattended flow and is not what a person signs in with.
+  gemini: { args: [], defaultBin: 'agy' },
 };
 
 // ---------------------------------------------------------------------------
@@ -170,6 +178,12 @@ function powerShellQuote(value) {
 // uses, so the wizard and the launcher can never disagree about what a home is.
 // Nothing secret is added here and nothing is read back out.
 function loginEnv(provider, configHome) {
+  // Gemini: agy's one environment fact besides where it keeps state. Its sign-in is the Windows
+  // user's own (one Credential Manager entry every USERPROFILE shares), so a named root only moves
+  // where its state folder is, and no self-update runs under Harbor's pinned version.
+  if (provider === 'gemini') {
+    return { AGY_CLI_DISABLE_AUTO_UPDATE: 'true', ...(configHome ? { USERPROFILE: configHome } : {}) };
+  }
   if (!configHome) return {};
   if (provider === 'claude') return { CLAUDE_CONFIG_DIR: configHome };
   if (provider === 'codex') return { CODEX_HOME: configHome };
@@ -211,7 +225,7 @@ function loginPlan(provider, options = {}, deps = {}) {
     // POSIX assignments or invoke a quoted executable path without &.
     const assignments = Object.entries(env).map(([key, value]) => `$env:${key} = ${powerShellQuote(value)}; `).join('');
     const invocation = BARE_COMMAND_RE.test(bin) ? bin : `& ${powerShellQuote(bin)}`;
-    display = `${assignments}${invocation} ${spec.args.join(' ')}`;
+    display = `${assignments}${invocation} ${spec.args.join(' ')}`.trim();
   }
   return {
     provider,

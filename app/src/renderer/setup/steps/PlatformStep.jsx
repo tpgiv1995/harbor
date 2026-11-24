@@ -51,6 +51,7 @@ export function PlatformStep({ detected }) {
           <Detected label="claude" found={Boolean(providers.claude?.found)} value={providers.claude?.path} missing="Not on PATH" />
           <Detected label="codex" found={Boolean(providers.codex?.found)} value={providers.codex?.path} missing="Not on PATH" />
           <Detected label="cursor-agent" found={Boolean(providers.cursor?.found)} value={providers.cursor?.path} missing="Not on PATH" />
+          <Detected label="agy (Gemini)" found={Boolean(providers.gemini?.found)} value={providers.gemini?.path} missing="Not found" />
         </div>
         <p className="setup-note-fine">
           You pick which of these Harbor uses on the next two steps. A CLI that is not installed can

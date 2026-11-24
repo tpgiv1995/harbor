@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const { cursorAuthFile } = require('../../shared/cursor-auth.cjs');
+const { resolveGeminiConfig, AGY_NO_UPDATE_ENV } = require('./gemini-config.js');
 
 const STALE_MS = 180_000;
 const COOLDOWN_MS = 60_000;
@@ -246,7 +247,7 @@ function runAgyUsage(bin, agyHome) {
     const { execFile } = require('node:child_process');
     execFile(bin, ['-p', '/usage', '--output-format', 'json', '--settings', '{"disableSlashCommands":false}'], {
       cwd: agyHome || undefined,
-      env: { ...process.env, ...(agyHome ? { USERPROFILE: agyHome, HOME: agyHome } : {}), AGY_CLI_DISABLE_AUTO_UPDATE: 'true' },
+      env: { ...process.env, ...(agyHome ? { USERPROFILE: agyHome, HOME: agyHome } : {}), ...AGY_NO_UPDATE_ENV },
       windowsHide: true, timeout: 10_000, maxBuffer: 1 << 20, encoding: 'utf8',
     }, (error, stdout) => resolve({ error, stdout: String(stdout || '') }));
   });
@@ -581,21 +582,9 @@ function createPlanUsageProvider({
       lastGood: lastGood || null,
     };
   }
-  // Where Gemini's CLI is: HARBOR_AGY_BIN and HARBOR_AGY_HOME, else ~/.harbor/gemini.json ({ "bin": ..., "home": ... },
-  // a machine's own pinned install and the profile folder that holds its sign-in), else the CLI installer's default
-  // %LOCALAPPDATA%\agy\bin\agy.exe (the install target agy 1.5.14 itself names) with the user's own profile. No CLI
-  // found: no Gemini row at all.
-  async function geminiConfig() {
-    const saved = await readJson(path.join(home, '.harbor', 'gemini.json'));
-    const bin = env.HARBOR_AGY_BIN || saved?.bin
-      || (platform === 'win32' && env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'agy', 'bin', 'agy.exe') : path.join(home, '.local', 'bin', 'agy'));
-    const agyHome = env.HARBOR_AGY_HOME || saved?.home || null;
-    try {
-      await io.stat(bin);
-    } catch {
-      return null;
-    }
-    return { bin, agyHome };
+  // Where Gemini's CLI is: the one shared resolver (gemini-config.js); no CLI found means no Gemini row at all.
+  function geminiConfig() {
+    return resolveGeminiConfig({ env, home, platform, io });
   }
 
   async function geminiPlan() {

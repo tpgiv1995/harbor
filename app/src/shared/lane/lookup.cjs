@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const PROVIDERS = ['claude', 'codex', 'cursor'];
+const PROVIDERS = ['claude', 'codex', 'cursor', 'gemini'];
 // Every pool root is a folder named `pool` (init-repo insists), so a slot is recognisable by its
 // shape when the registry snapshot cannot be read: ...\pool\<repo id>\slot-NN.
 const SLOT_SHAPE = /[\\/]pool[\\/][a-z0-9][a-z0-9_-]{0,63}[\\/]slot-\d{2}(?:[\\/]|$)/i;

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { SCHEMA, mergeConfig, validateConfig } = require('./schema.js');
+const { resolveGeminiConfigSync } = require('../providers/gemini-config.js');
 
 function findBinary(name, env = process.env) {
   if (path.isAbsolute(name)) return name;
@@ -61,9 +62,15 @@ function deriveDefaults(supplied = {}, overrides = {}) {
     ...profile,
     configHome: profile.configHome ?? claudeHome,
   }));
+  // Gemini: true exactly where the CLI is, null where it is not (undecided, retried at every load), and a user's own
+  // boolean is never overridden (a user who turned it off stays off).
+  const gemini = resolveGeminiConfigSync({
+    env: runtime.env, home: runtime.homedir, platform: runtime.platform, fsImpl: overrides.fsImpl, configuredBin: supplied?.providers?.gemini?.bin,
+  });
+  if (typeof supplied?.providers?.gemini?.enabled !== 'boolean') config.providers.gemini.enabled = gemini ? true : null;
   for (const [id, provider] of Object.entries(config.providers)) {
     if (provider.bin === null) {
-      provider.bin = runtime.findBinary(id === 'cursor' ? 'cursor-agent' : id);
+      provider.bin = id === 'gemini' ? (gemini?.bin || 'agy') : runtime.findBinary(id === 'cursor' ? 'cursor-agent' : id);
     }
   }
   return validateConfig(config);

@@ -119,7 +119,7 @@ function annotateProviderIdentity(params) {
   const allowed = new Set(['id', 'agent', 'agent_session']);
   const foreign = Object.keys(params).filter((key) => !allowed.has(key));
   if (foreign.length) throw new Error(`annotate accepts only agent and agent_session; refused: ${foreign.join(', ')}`);
-  if (!['codex', 'cursor'].includes(params.agent)) throw new Error('annotate agent must be codex or cursor');
+  if (!['codex', 'cursor', 'gemini'].includes(params.agent)) throw new Error('annotate agent must be codex, cursor or gemini');
   if (config.agent !== params.agent) {
     throw new Error(`annotate agent ${params.agent} conflicts with keeper agent ${config.agent ?? 'null'}`);
   }
@@ -155,6 +155,8 @@ function persist(extra = {}) {
     agent: config.agent ?? null,
     agent_session: config.agent_session ?? null,
     ...(config.agent === 'codex' ? { provider_home: codexHomeFromEnv(config.env) } : {}),
+    // agy's state follows USERPROFILE (nothing else relocates it), so that is a Gemini pane's home.
+    ...(config.agent === 'gemini' && config.env?.USERPROFILE ? { provider_home: config.env.USERPROFILE } : {}),
     ...(codexTitle ? { codex_title: codexTitle } : {}),
     cols: screen.terminal.cols,
     rows: screen.terminal.rows,

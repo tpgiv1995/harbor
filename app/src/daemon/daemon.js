@@ -142,7 +142,7 @@ function keeperLogPath(id) { return path.join(paths.sessions, `${id}.keeper.log`
 
 function derivedIdentity(argv) {
   const executable = path.win32.basename(path.basename(argv[0] || '')).toLowerCase().replace(/\.exe$/, '');
-  const providers = { claude: 'claude', codex: 'codex', 'cursor-agent': 'cursor' };
+  const providers = { claude: 'claude', codex: 'codex', 'cursor-agent': 'cursor', agy: 'gemini' };
   const agent = providers[executable] || null;
   let agentSession = null;
   if (agent === 'claude') {
@@ -1090,17 +1090,25 @@ const providerTranscriptRoots = {
     .split(path.delimiter).filter(Boolean),
   cursor: (process.env.HARBOR_CURSOR_TRANSCRIPT_ROOTS || path.join(os.homedir(), '.cursor', 'projects'))
     .split(path.delimiter).filter(Boolean),
+  // agy's state folder under the user's own profile; a pane run under another USERPROFILE is found through the keeper's
+  // provider_home (dormancy.js providerTranscriptFresh). The status tee dir is the one Harbor's Claude tee uses.
+  gemini: (process.env.HARBOR_GEMINI_STATE_ROOTS || path.join(os.homedir(), '.gemini', 'antigravity-cli'))
+    .split(path.delimiter).filter(Boolean),
 };
+const geminiContextDir = () => (process.env.HARBOR_CONTEXT_DIR
+  ? path.resolve(process.env.HARBOR_CONTEXT_DIR) : path.join(os.homedir(), '.cache', 'harbor', 'context'));
 
 async function sessionWorkFresh(state) {
   const agent = state.agent === 'cursor-agent' ? 'cursor' : state.agent;
-  if (agent === 'codex' || agent === 'cursor') {
+  if (agent === 'codex' || agent === 'cursor' || agent === 'gemini') {
     // Rejections (unresolved identity, transcript not found) propagate to the
     // sweep's catch, which leaves the session alone: fail closed, per the
     // provider-keeper design.
     return providerTranscriptFresh(state, {
       codexRoots: providerTranscriptRoots.codex,
       cursorRoots: providerTranscriptRoots.cursor,
+      geminiRoots: providerTranscriptRoots.gemini,
+      contextDir: geminiContextDir(),
       now: Date.now(),
       freshMs: dormancyPolicy.afterMs,
     });

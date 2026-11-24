@@ -24,6 +24,13 @@
 //   cursor  ~/.cursor/projects/<munged-cwd>/agent-transcripts/<id>/<id>.jsonl
 //                                         the cwd is the directory name and
 //                                         the file's birth time is the start.
+//   gemini  argv `agy --conversation <id>` on a resume. A NEW conversation has no id until its first prompt, and agy
+//           cannot be handed one, so the status tee (gemini-status-tee.cjs) is the source: the pane's own agy
+//           writes <contextDir>/gemini-<id>.json {conversation_id, cwd, stateDir} on every state change, and the
+//           brain folder's birth time is the start. Same folder-and-start-time rule as the others; without a tee (a
+//           pane whose status line could not be installed) the home's cache/last_conversations.json (cwd -> id) is the
+//           weaker fallback. The tee carries no pane pid (agy is its grandparent and Node cannot read that cheaply),
+//           so two panes in one folder are told apart by the screen, exactly as for codex and cursor.
 //
 // The rule for a session Harbor did not launch: it belongs to the pane whose
 // agent PROCESS started last before that session began, in the same cwd. A
@@ -37,6 +44,8 @@ const { EventEmitter } = require('node:events');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { geminiStateDir } = require('./gemini-config.js');
+const { contextDirFromEnv } = require('./gemini-status-tee.cjs');
 
 // One prompt line is small; this tail covers weeks of interactive codex use
 // and bounds the read on a history file that only ever grows.
@@ -196,6 +205,78 @@ async function listCursorSessions(cwd, { home = os.homedir() } = {}) {
   return out;
 }
 
+// ---- Gemini candidates ---------------------------------------------------------------------------------------
+const GEMINI_TEE_RE = /^gemini-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i;
+const GEMINI_HEAD_BYTES = 64 * 1024;
+const cwdKey = (cwd) => {
+  const flat = String(cwd || '').replace(/[\\/]+/g, '/').replace(/\/$/, '');
+  return process.platform === 'win32' ? flat.toLowerCase() : flat;
+};
+
+// The first prompts of a conversation (the `<USER_REQUEST>` inside each USER_INPUT step), from the head of the
+// uncut transcript: the needles that tell two panes in one folder apart. Bounded read, never the whole file.
+async function readGeminiPrompts(stateDir, id) {
+  const file = path.join(stateDir, 'brain', id, '.system_generated', 'logs', 'transcript_full.jsonl');
+  let handle = null;
+  try {
+    handle = await fsp.open(file, 'r');
+    const buffer = Buffer.alloc(GEMINI_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const texts = [];
+    for (const line of buffer.toString('utf8', 0, bytesRead).split('\n')) {
+      if (!line.includes('"USER_INPUT"')) continue;
+      try {
+        const record = JSON.parse(line);
+        if (record.type !== 'USER_INPUT') continue;
+        const match = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/.exec(String(record.content || ''));
+        if (match?.[1]) texts.push(match[1]);
+      } catch { /* the cut last line */ }
+      if (texts.length >= 4) break;
+    }
+    return texts;
+  } catch {
+    return [];
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+// Conversations that could belong to one of these panes: `{ id, cwd, startedMs, texts, stateDir }`, each cwd spelled
+// the way its pane spells it so assignSessionsToPanes' exact match holds. Per-id facts are immutable, so they are read
+// once (`cache`); a tick pays one readdir of the context folder plus a read for each gemini file it has not seen.
+async function listGeminiSessions(panes, { home = os.homedir(), contextDir = contextDirFromEnv(), cache = new Map() } = {}) {
+  const byCwd = new Map(panes.map((pane) => [cwdKey(pane.cwd), pane.cwd]));
+  const found = new Map();
+  const consider = async (id, cwd, stateDir) => {
+    if (!cwd || !byCwd.has(cwdKey(cwd)) || found.has(id)) return;
+    let facts = cache.get(id);
+    if (!facts) {
+      const stat = await fsp.stat(path.join(stateDir, 'brain', id)).catch(() => null);
+      if (!stat) return;
+      facts = { id, stateDir, startedMs: stat.birthtimeMs || stat.mtimeMs, texts: await readGeminiPrompts(stateDir, id) };
+      cache.set(id, facts);
+    }
+    found.set(id, { ...facts, cwd: byCwd.get(cwdKey(cwd)) });
+  };
+  for (const name of await fsp.readdir(contextDir).catch(() => [])) {
+    const match = GEMINI_TEE_RE.exec(name);
+    if (!match || found.has(match[1])) continue;
+    let tee = null;
+    try { tee = JSON.parse(await fsp.readFile(path.join(contextDir, name), 'utf8')); } catch { continue; }
+    await consider(match[1], tee?.cwd, tee?.stateDir || geminiStateDir(tee?.home || null, home));
+  }
+  // No tee for this pane's folder: the home's own cwd -> latest-conversation map (race-prone, so a fallback only).
+  const roots = new Set(panes.map((pane) => geminiStateDir(pane.providerHome || null, home)));
+  for (const stateDir of roots) {
+    let map = null;
+    try { map = JSON.parse(await fsp.readFile(path.join(stateDir, 'cache', 'last_conversations.json'), 'utf8')); } catch { continue; }
+    for (const [cwd, id] of Object.entries(map || {})) {
+      if (typeof id === 'string' && UUID_RE.test(id)) await consider(id, cwd, stateDir);
+    }
+  }
+  return [...found.values()];
+}
+
 function normalizeForScreen(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
@@ -272,6 +353,8 @@ function createProviderSessionLinker(options = {}) {
     clock = Date.now,
   } = options;
   const emitter = new EventEmitter();
+  const geminiContextDir = options.contextDir || contextDirFromEnv();
+  const geminiFacts = new Map(); // conversation id -> { stateDir, startedMs, texts }, immutable once read
   const links = new Map();      // paneId -> sessionId
   const rolloutCwd = new Map(); // sessionId -> cwd | null (null retried: the rollout may not exist yet)
   const identityMeta = new Map(); // sessionId -> owning provider-home facts
@@ -444,7 +527,7 @@ function createProviderSessionLinker(options = {}) {
 
   const resolveOnce = async (titleOnly = false) => {
     const panes = (listPanes?.() || []).filter((pane) => (
-      ['codex', 'cursor'].includes(pane?.agent) && !pane.exited
+      ['codex', 'cursor', 'gemini'].includes(pane?.agent) && !pane.exited
     ));
     // A link outlives neither its pane nor its agent: a stale one would keep a
     // dead session green in the rail and route the next send at it.
@@ -517,6 +600,18 @@ function createProviderSessionLinker(options = {}) {
           cwd: pane.cwd, providerHome: pane.provider_home }, panes, true)) changed = true;
         continue;
       }
+      // A Gemini pane's process IS agy (bin/ai resolves the exe, no node shim above it), so the pane's own start and argv
+      // are the agent's. The process walk below picks the NEWEST child, and agy runs its status line as a short-lived
+      // cmd.exe child about every 300 ms while it works: asking the tree would mostly answer with that child's start
+      // time (never before the conversation) and its argv.
+      const paneStartedMs = pane.agent === 'gemini' ? Date.parse(pane.created_at || '') : NaN;
+      if (Number.isFinite(paneStartedMs)) {
+        withStart.push({
+          paneId: pane.pane_id, agent: pane.agent, cwd: pane.cwd || null, startedMs: paneStartedMs,
+          argv: pane.argv || [], providerHome: pane.provider_home || null,
+        });
+        continue;
+      }
       const info = await paneAgentProcess(pane.pane_id).catch(() => null);
       if (!info || !Number.isFinite(info.startedMs)) continue;
       withStart.push({
@@ -569,6 +664,13 @@ function createProviderSessionLinker(options = {}) {
       for (const session of await listCursorSessions(pane.cwd, { home })) {
         if (claimed.has(session.id)) continue;
         if (candidates.some((item) => item.id === session.id)) continue;
+        candidates.push(session);
+      }
+    }
+    const geminiPanes = inferred.filter((pane) => pane.agent === 'gemini' && pane.cwd);
+    if (geminiPanes.length) {
+      for (const session of await listGeminiSessions(geminiPanes, { home, contextDir: geminiContextDir, cache: geminiFacts })) {
+        if (claimed.has(session.id) || candidates.some((item) => item.id === session.id)) continue;
         candidates.push(session);
       }
     }
@@ -658,6 +760,8 @@ module.exports = {
   readCodexRolloutMeta,
   codexLineage,
   listCursorSessions,
+  listGeminiSessions,
+  readGeminiPrompts,
   assignSessionsToPanes,
   sessionIdFromArgv,
   cursorProjectDir,

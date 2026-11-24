@@ -6,7 +6,7 @@ const { sessionTitleText } = require('./session-title.cjs');
 
 const { watchPath } = require('../watch-path.js');
 
-// Provider history: codex and cursor sessions for the rail. The rail is the
+// Provider history: codex, cursor and gemini sessions for the rail. The rail is the
 // ONLY session browser, and until this module existed it listed Claude
 // sessions alone (harbor-index.py indexes ~/.claude/projects), so a codex or
 // cursor session had no identity in Harbor: its window could never resolve a
@@ -18,6 +18,9 @@ const { watchPath } = require('../watch-path.js');
 //
 //   codex:  ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
 //   cursor: ~/.cursor/projects/<munged-cwd>/agent-transcripts/<id>/<id>.jsonl
+//   gemini: <profile>/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl
+//           (Google's Antigravity CLI; the folder a conversation started in and whether a
+//           person typed it come from the store's own side files, see gemini-store.js)
 //
 // Titles come from the first user block the REAL parser produces (the same
 // TranscriptParser the conversation window uses), so what the rail shows is
@@ -31,11 +34,16 @@ const os = require('node:os');
 const path = require('node:path');
 const { TranscriptParser } = require('./transcript.js');
 const { readCodexRolloutMeta } = require('./provider-session-link.js');
+const { geminiStoresFor, geminiTranscriptPath, createStoreMeta } = require('./gemini-store.js');
 
 const CODEX_ID_RE = /([0-9a-f]{8}-[0-9a-f-]{27})\.jsonl$/i;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEAD_BYTES = 4 * 1024 * 1024;
 const HEAD_LINES = 120;
+// A conversation written to this recently is taken for an interactive one even
+// before agy has written the interactive-only files that prove it (about a
+// second after the first prompt), so a session never blinks out of the rail.
+const GEMINI_GRACE_MS = 20_000;
 const TITLE_MAX = 96;
 
 // Same local format harbor-index emits ("2026-07-24 20:18"); the sidebar's
@@ -87,7 +95,7 @@ function oneLine(text, max = TITLE_MAX) {
 // envelope that is not a reader fingerprint is never trusted.
 const FACTS_FORMAT = (() => {
   const hash = require('node:crypto').createHash('sha1');
-  for (const file of [__filename, './transcript.js', './session-title.cjs', './provider-session-link.js', '../../shared/claude-turn-state.cjs']) {
+  for (const file of [__filename, './transcript.js', './session-title.cjs', './provider-session-link.js', './gemini-store.js', '../../shared/claude-turn-state.cjs']) {
     try { hash.update(fs.readFileSync(file === __filename ? file : require.resolve(file))); } catch { hash.update(file); }
   }
   return hash.digest('hex').slice(0, 16);
@@ -158,6 +166,18 @@ function createProviderHistory(options = {}) {
     || (options.codexRoot ? [{ root: options.codexRoot, profileId: null, configHome: null }] : null)
     || (configuredCodexRoots.length ? configuredCodexRoots : [{ root: path.join(homedir, '.codex', 'sessions'), profileId: null, configHome: path.join(homedir, '.codex') }]);
   const cursorRoot = options.cursorRoot || path.join(homedir, '.cursor', 'projects');
+  // Gemini: the machine's own profile (an interactive agy runs with USERPROFILE
+  // unchanged), then each Gemini profile that names another root. A store that
+  // does not exist lists nothing and costs nothing. A headless worker's home is
+  // named nowhere here; only a profile can put it on the rail.
+  // A caller that names its own codex/cursor roots (a test, a harness) is not
+  // asking for the machine's real profile to be read as well, unless it names a homedir.
+  const geminiHome = options.homedir || (options.codexRoot || options.codexRoots || options.cursorRoot ? null : homedir);
+  const geminiStores = geminiStoresFor({ homedir: geminiHome, profiles, roots: options.geminiRoots });
+  const geminiRankBase = codexRoots.length + 1;
+  const now = options.now || Date.now;
+  const geminiMetas = geminiStores.map((store) => createStoreMeta({ root: store.root, now, sqlite: options.sqlite }));
+  const geminiWatched = geminiStores.map(() => false);
   const metadataFile = options.metadataFile || process.env.HARBOR_PROVIDER_METADATA_FILE
     || path.join(homedir, '.cache', 'harbor', 'provider-session-metadata.json');
   const projectLabelForCwd = options.projectLabelForCwd || ((cwd) => {
@@ -339,6 +359,23 @@ function createProviderHistory(options = {}) {
     if (parts.length === 1 || (parts.length === 3 && parts[1] === 'agent-transcripts')) fullScanNeeded = true;
   };
 
+  // A Gemini store's watcher names files under brain/<id>/.system_generated/logs/.
+  // Only the transcript itself, or a conversation folder appearing, can change
+  // what is listed; the churn beside it (chunks, the databases, media) cannot.
+  const noteGeminiEvent = (storeIndex) => (filename) => {
+    const store = geminiStores[storeIndex];
+    if (filename == null) { fullScanNeeded = true; return; }
+    const parts = relParts(filename);
+    if (parts[0] !== 'brain' || !UUID_RE.test(parts[1] || '')) return;
+    if (parts.length === 5 && parts[2] === '.system_generated' && parts[3] === 'logs' && parts[4] === 'transcript_full.jsonl') {
+      dirty.add(path.join(store.root, ...parts));
+    } else if (parts.length <= 4 && !/\.[^\\/]+$/.test(parts[parts.length - 1])) {
+      // A conversation folder (or its .system_generated) appearing: its
+      // transcript may not exist yet, and a stat that finds nothing lists nothing.
+      dirty.add(geminiTranscriptPath(store.root, parts[1]));
+    }
+  };
+
   // Codex's native title index is re-read only when it changes.
   const titlesByHome = new Map(); // home -> { size, mtimeMs, titles }
   const titlesFor = async (home) => {
@@ -361,8 +398,8 @@ function createProviderHistory(options = {}) {
   };
 
   const rememberKeeperIdentity = async (fact) => {
-    if (!fact?.id || !['codex', 'cursor'].includes(fact.provider)) {
-      throw new TypeError('provider metadata requires id and codex/cursor provider');
+    if (!fact?.id || !['codex', 'cursor', 'gemini'].includes(fact.provider)) {
+      throw new TypeError('provider metadata requires id and codex/cursor/gemini provider');
     }
     const metadata = await loadMetadata();
     const prior = metadata[fact.id] || {};
@@ -477,6 +514,23 @@ function createProviderHistory(options = {}) {
     }
   };
 
+  // brain/<uuid>/.system_generated/logs/transcript_full.jsonl of each store. A
+  // store with no brain folder (agy never ran there) is an empty readdir.
+  const walkGemini = async (into, stats) => {
+    for (let storeIndex = 0; storeIndex < geminiStores.length; storeIndex += 1) {
+      const { root, profileId = null, configHome = null } = geminiStores[storeIndex];
+      const ids = await fsp.readdir(path.join(root, 'brain')).catch(() => []);
+      for (const id of ids) {
+        if (!UUID_RE.test(id)) continue;
+        const file = geminiTranscriptPath(root, id);
+        const stat = await fsp.stat(file).catch(() => null);
+        if (!stat || !stat.isFile()) continue;
+        into.set(file, { provider: 'gemini', id, profileId, configHome, projectHint: null, rank: geminiRankBase + storeIndex, storeIndex });
+        stats.set(file, stat);
+      }
+    }
+  };
+
   // Which listed log a reported path is, or null (the same tests the walk applies).
   const entryForPath = (file) => {
     for (let rank = 0; rank < codexRoots.length; rank += 1) {
@@ -485,6 +539,15 @@ function createProviderHistory(options = {}) {
       const parts = relParts(file.slice(root.length + 1));
       const id = parts.length === 4 ? parts[3].match(CODEX_ID_RE)?.[1] : null;
       return id ? { provider: 'codex', id, profileId, configHome, projectHint: null, rank } : null;
+    }
+    for (let storeIndex = 0; storeIndex < geminiStores.length; storeIndex += 1) {
+      const { root, profileId = null, configHome = null } = geminiStores[storeIndex];
+      if (!file.startsWith(root + path.sep)) continue;
+      const parts = relParts(file.slice(root.length + 1));
+      if (parts.length === 5 && parts[0] === 'brain' && UUID_RE.test(parts[1]) && parts.slice(2).join('/') === '.system_generated/logs/transcript_full.jsonl') {
+        return { provider: 'gemini', id: parts[1], profileId, configHome, projectHint: null, rank: geminiRankBase + storeIndex, storeIndex };
+      }
+      return null;
     }
     if (file.startsWith(cursorRoot + path.sep)) {
       const parts = relParts(file.slice(cursorRoot.length + 1));
@@ -505,6 +568,7 @@ function createProviderHistory(options = {}) {
       const next = new Map();
       for (let rank = 0; rank < codexRoots.length; rank += 1) await walkCodexRoot(next, stats, rank);
       await walkCursor(next, stats);
+      await walkGemini(next, stats);
       for (const file of cache.keys()) if (!next.has(file)) cache.delete(file);
       known.clear();
       for (const [file, entry] of next) known.set(file, entry);
@@ -529,9 +593,42 @@ function createProviderHistory(options = {}) {
   const listingOrder = (a, b) => (a[1].rank - b[1].rank)
     || (a[0].toLowerCase() < b[0].toLowerCase() ? -1 : a[0].toLowerCase() > b[0].toLowerCase() ? 1 : 0);
 
+  // What a Gemini transcript cannot say, added to its rows on EVERY listing (the
+  // cached row is the transcript's own facts and never carries these): the
+  // folder the conversation started in, and whether a person typed it. A
+  // print-mode `agy -p` run (a headless worker's whole traffic) is the same
+  // records in the same store, so it is told apart by what only the interactive
+  // TUI writes (an annotations file, a history.jsonl line, a summaries title) or
+  // by Harbor's own sidecar. A conversation written to in the last
+  // GEMINI_GRACE_MS is given the benefit of the doubt, so a session just typed
+  // into never flickers out of the rail while agy writes those files.
+  const overlayGemini = async (rows) => {
+    if (!geminiMetas.length || !rows.some((row) => row.provider === 'gemini')) return;
+    const fresh = new Set();
+    for (let i = 0; i < rows.length; i += 1) {
+      if (rows[i].provider !== 'gemini') continue;
+      // A copy: the cached row is the transcript's own facts and stays that.
+      const row = { ...rows[i] };
+      rows[i] = row;
+      const index = known.get(row.path)?.storeIndex;
+      if (index == null) continue;
+      if (!fresh.has(index)) { fresh.add(index); await geminiMetas[index].refresh().catch(() => {}); }
+      const facts = geminiMetas[index].factsFor(row.id);
+      if (!row.cwd && facts.cwd) {
+        row.cwd = facts.cwd;
+        row.project = projectLabelForCwd(facts.cwd) || row.project;
+      }
+      const remembered = Boolean(durableMetadata?.[row.id]);
+      const recent = now() - (row.lastWriteMs || 0) < GEMINI_GRACE_MS;
+      row.headless = !(facts.interactive || remembered || recent);
+      if (facts.parentId) row.delegatedBy = facts.parentId;
+    }
+  };
+
   const listSessions = async ({ knownCwds } = {}) => {
     const rows = [];
     await loadMetadata();
+    if (watchersStarted && geminiWatched.some((on) => !on)) armGeminiWatchers();
     const fresh = await refreshKnown();
     // Reverse the cwd munge from cwds Harbor already knows (claude history,
     // codex session_meta, live workspaces): a cursor transcript itself never
@@ -567,6 +664,7 @@ function createProviderHistory(options = {}) {
         configHome: entry.configHome,
       }));
     }
+    await overlayGemini(rows);
     const nativeByHome = new Map();
     for (const item of codexRoots) {
       const home = typeof item === 'string' ? path.dirname(item) : item.configHome || path.dirname(item.root);
@@ -598,7 +696,17 @@ function createProviderHistory(options = {}) {
   // straight from the scan, no hints needed from the renderer.
   const metaFor = (id) => metaById.get(id) || null;
 
+  const armGeminiWatchers = () => {
+    for (let storeIndex = 0; storeIndex < geminiStores.length; storeIndex += 1) {
+      if (geminiWatched[storeIndex] || !fs.existsSync(geminiStores[storeIndex].root)) continue;
+      geminiWatched[storeIndex] = watchDir(geminiStores[storeIndex].root, { recursive: true, onEvent: noteGeminiEvent(storeIndex) });
+      if (geminiWatched[storeIndex]) fullScanNeeded = true;
+    }
+  };
+
+  let watchersStarted = false;
   const start = () => {
+    watchersStarted = true;
     // EXACTLY two watchers. A per-project watcher set was the first design
     // and it exhausted inotify instances (fs.watch = one instance each;
     // ~50 cursor projects pushed a single app past the 128 default alongside
@@ -614,6 +722,11 @@ function createProviderHistory(options = {}) {
       watchDir(path.dirname(root));
     }
     if (!watchDir(cursorRoot, { recursive: true, onEvent: noteCursorEvent })) rootsUnwatched += 1;
+    // ONE more watcher per Gemini store (never one per conversation). A store
+    // that is not there yet is NOT an unwatched root: that would force a full
+    // walk of every codex and cursor log on every refresh of a machine that
+    // never ran agy. It is looked for again whenever the rail lists.
+    armGeminiWatchers();
     fullScanNeeded = true;
   };
 
@@ -659,6 +772,8 @@ function createProviderHistory(options = {}) {
     clearTimeout(changedTimer);
     for (const watcher of watchers) watcher.close();
     watchers.length = 0;
+    watchersStarted = false;
+    geminiWatched.fill(false);
   };
 
   return {

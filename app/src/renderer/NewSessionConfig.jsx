@@ -2,13 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { providerIdentity, useProfiles, profileStyle, ProfileBadge } from './providers.js';
 import { sessionModelOptions, sessionEffortOptions } from './session-model-options.cjs';
-import { watchProviderOptions } from './provider-options.cjs';
+import { showPlanChoice } from '../shared/plan-options.cjs';
+import { watchProviderOptions, SESSION_PROVIDER_KEYS } from './provider-options.cjs';
 import { folderLabel as labelFolder } from './folder-label.cjs';
 import {
   currentEffort, currentModel, isReconfigure, pendingSwitch,
 } from './session-config-mode.cjs';
 
-const PROVIDER_KEYS = ['claude', 'codex', 'cursor'];
 const DEFAULT_KEY = 'harbor-new-session-default';
 // Retain the existing format on explicit saves; never reseed on read.
 const DEFAULT_VERSION = 3;
@@ -277,11 +277,11 @@ export function NewSessionConfig({ request, onClose, onStart, onReconfigure }) {
           <button type="button" className="new-session-close" onClick={onClose} aria-label="Close">×</button>
         </div>
         <fieldset className="new-session-field"><legend>Provider</legend><div className="new-session-providers">
-          {PROVIDER_KEYS.map((key) => { const ident = providerIdentity(key); return <button type="button" key={key} className={provider === key ? 'active' : ''} style={{ '--provider-color': ident.color }} onClick={() => setProvider(key)}><img src={ident.logo} alt="" />{ident.label}</button>; })}
+          {SESSION_PROVIDER_KEYS.map((key) => { const ident = providerIdentity(key); return <button type="button" key={key} className={provider === key ? 'active' : ''} style={{ '--provider-color': ident.color }} onClick={() => setProvider(key)}><img src={ident.logo} alt="" />{ident.label}</button>; })}
         </div></fieldset>
 
         <div className="config-modal-scroll">
-          {provider !== 'cursor' && !reconfiguring && providerProfiles.length > 0 ? <section className="cap-sec">
+          {!reconfiguring && showPlanChoice(provider, providerProfiles) ? <section className="cap-sec">
             <div className="cap-sec-h">Plan</div>
             <div className="config-account" role="group" aria-label="Plan">
               {providerProfiles.map((profile) => (

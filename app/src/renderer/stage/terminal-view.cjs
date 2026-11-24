@@ -14,15 +14,24 @@
 // A surface that renders a terminal and a surface that feeds one must be the
 // same decision, or the next divergence is another silent blank screen.
 
+// Providers whose window is a transcript the daemon's pane does not feed (codex, cursor, gemini).
+const NON_CLAUDE_PROVIDERS = ['codex', 'cursor', 'gemini'];
+
 function terminalView({ session, data, pane, tty } = {}) {
   const hasPane = Boolean(pane);
-  const nonClaude = ['codex', 'cursor'].includes(session?.provider);
+  const nonClaude = NON_CLAUDE_PROVIDERS.includes(session?.provider);
   const noTranscript = !data || Boolean(data.missing);
   // The one designed fallback: a live pane Harbor cannot name (a `live:` row
   // no evidence resolved). With no id there is no transcript to render, and
   // the terminal is the only truthful view of what that agent is doing.
-  const fallback = Boolean(hasPane && nonClaude && noTranscript
-    && String(session?.id || '').startsWith('live:'));
+  //
+  // Gemini (2026-11-23, DESIGN D12) also falls back for a PROVISIONAL pane: a profile that never ran
+  // agy shows Google's colour-scheme and Terms screens before any conversation exists, the person
+  // answers them (Harbor never does), and a send refuses until they have. That answer is typed in
+  // this terminal, so a Gemini pane with no transcript yet must show it, not an empty window.
+  const id = String(session?.id || '');
+  const unnamed = id.startsWith('live:') || (session?.provider === 'gemini' && id.startsWith('pane:'));
+  const fallback = Boolean(hasPane && nonClaude && noTranscript && unnamed);
   return {
     fallback,
     showTerminal: Boolean(hasPane && (tty || fallback)),
@@ -50,4 +59,11 @@ function headerKeepsKeys({ showTerminal = false, onButton = false } = {}) {
   return Boolean(showTerminal && onButton);
 }
 
-module.exports = { terminalView, windowClickArms, headerKeepsKeys };
+// The line above a fallback terminal. Gemini's says where its first-run screens are answered.
+function terminalFallbackNote(label) {
+  const name = String(label || '').toLowerCase();
+  const base = `this ${name} pane has not named its session yet; showing its terminal`;
+  return name === 'gemini' ? `${base}. Answer Google's first-run screens here` : base;
+}
+
+module.exports = { terminalView, terminalFallbackNote, NON_CLAUDE_PROVIDERS, windowClickArms, headerKeepsKeys };

@@ -16,8 +16,8 @@
 //    while it is half-filled.
 //
 // 2. NO CREDENTIAL EVER ENTERS THIS STATE. There is no field here for an API
-//    key, a token or a password, and none may be added. Claude, codex and
-//    cursor each own their own auth; the wizard points at config homes and
+//    key, a token or a password, and none may be added. Claude, codex,
+//    cursor and gemini each own their own auth; the wizard points at config homes and
 //    launches the vendors' own login flows. The only auth-shaped value we ever
 //    hold is an email address READ BACK from a home's .claude.json, which is
 //    confirmation of what the user picked, not a secret.
@@ -43,6 +43,13 @@ const PROFILE_SEEDS = [
 const EXTRA_COLORS = ['#7bd3a0', '#c9a6ff', '#e8973f', '#79a6ff'];
 
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// Gemini (Google's Antigravity CLI, `agy`): its registry's first row is 'default' (no --model flag: agy's
+// own Neon family) and its own default effort is high. These are used only while the model registry
+// has not loaded; the registry's own `defaultModel` and `defaultEffort` always win when it is there.
+const GEMINI_FALLBACK = { model: 'default', effort: 'high' };
+// Gemini's profile colour and badge letter, as the plans menu already draws it.
+const GEMINI_PROFILE = { id: 'gemini', label: 'Gemini', letter: 'G', color: '#8ab4f8' };
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 // A profile id becomes a config key and a rail selector, so it is restricted to
 // what is safe in both rather than trusted from a text field.
@@ -51,7 +58,7 @@ const PROFILE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const STEPS = [
   { id: 'platform', title: 'Welcome', subtitle: 'What Harbor found on this machine' },
   { id: 'claude', title: 'Claude plans', subtitle: 'Config homes and the account in each' },
-  { id: 'providers', title: 'Codex and Cursor', subtitle: 'Other agent CLIs' },
+  { id: 'providers', title: 'Codex, Cursor and Gemini', subtitle: 'Other agent CLIs' },
   { id: 'catalog', title: 'Commands', subtitle: 'Your skills and slash commands' },
   { id: 'symlinks', title: 'Shared config', subtitle: 'Optional: share settings across homes' },
   { id: 'orchestration', title: 'Orchestration', subtitle: 'Optional: the Orch view' },
@@ -98,6 +105,12 @@ function seedProfile(home, index, existingIds = []) {
     exists: home?.exists !== false,
     isDefault: index === 0,
   };
+}
+
+// Two spellings of one folder: Windows paths differ by case and slash direction.
+function samePath(a, b) {
+  const norm = (value) => String(value || '').replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+  return Boolean(a && b) && norm(a) === norm(b);
 }
 
 function slugId(label) {
@@ -197,6 +210,7 @@ function initialState(detected = {}, config = null) {
   const savedClaude = savedProfiles.filter((profile) => profile?.provider === 'claude');
   const savedCodex = savedProfiles.filter((profile) => profile?.provider === 'codex');
   const savedCursor = savedProfiles.find((profile) => profile?.provider === 'cursor') || null;
+  const savedGemini = savedProfiles.find((profile) => profile?.provider === 'gemini') || null;
   const ids = [];
   const profiles = savedClaude.length
     ? mergeSavedProfiles(savedClaude, homes)
@@ -207,6 +221,7 @@ function initialState(detected = {}, config = null) {
     });
   const codexFound = detected.providers?.codex?.found;
   const cursorFound = detected.providers?.cursor?.found;
+  const geminiFound = detected.providers?.gemini?.found;
   return {
     platform: {
       os: detected.os || null,
@@ -245,6 +260,17 @@ function initialState(detected = {}, config = null) {
       configHome: savedCursor?.configHome
         || detected.providers?.cursor?.home
         || (cursorFound && detected.homedir ? `${detected.homedir}/.cursor` : ''),
+    },
+    gemini: {
+      enabled: completed ? Boolean(config?.providers?.gemini?.enabled) : Boolean(geminiFound),
+      bin: (completed && config?.providers?.gemini?.bin) || detected.providers?.gemini?.path || '',
+      // A root agy keeps its state under INSTEAD of the user's own profile folder. Empty is the normal
+      // case: agy runs under the user's own profile and every profile shares one Google sign-in. A
+      // saved profile whose home IS the user's profile folder is that same empty case.
+      home: savedGemini?.configHome && !samePath(savedGemini.configHome, detected.homedir)
+        ? savedGemini.configHome : '',
+      // Read only: what an empty home means, and what the saved profile's configHome becomes then.
+      userProfile: detected.homedir || '',
     },
     // On a RE-RUN, seeded from what is already saved, because Finish REPLACES
     // config.workflows with whatever this list holds and starting empty would
@@ -287,11 +313,11 @@ function initialState(detected = {}, config = null) {
     // re-open and Finish wrote that back over their choice.
     defaults: {
       provider: (completed && config?.newSessionDefaults?.provider)
-        || (profiles.length ? 'claude' : (codexFound ? 'codex' : 'cursor')),
+        || (profiles.length ? 'claude' : (codexFound ? 'codex' : (cursorFound || !geminiFound ? 'cursor' : 'gemini'))),
       model: (completed && config?.newSessionDefaults?.model)
         || (profiles.length ? 'opus' : 'default'),
       effort: (completed && config?.newSessionDefaults?.effort)
-        || (profiles.length ? 'xhigh' : 'medium'),
+        || (profiles.length ? 'xhigh' : (!codexFound && !cursorFound && geminiFound ? GEMINI_FALLBACK.effort : 'medium')),
     },
   };
 }
@@ -384,11 +410,22 @@ function validateProviders(state) {
   if (state.cursor.enabled && !isNonEmptyString(state.cursor.bin)) {
     errors.push(err('cursor.bin', 'Enter the cursor-agent binary path, or turn Cursor off.'));
   }
+  if (state.gemini?.enabled) {
+    if (!isNonEmptyString(state.gemini.bin)) {
+      errors.push(err('gemini.bin', 'Enter the agy binary path, or turn Gemini off.'));
+    }
+    const home = String(state.gemini.home || '').trim();
+    if (home && (!/^([a-zA-Z]:[\\/]|\/)/.test(home))) {
+      errors.push(err('gemini.home', 'Enter an absolute folder path, or leave this empty to use your own profile folder.'));
+    } else if (!home && !isNonEmptyString(state.gemini.userProfile)) {
+      errors.push(err('gemini.home', 'Harbor could not read your profile folder; enter the folder Gemini keeps its state under.'));
+    }
+  }
   // The floor the whole app rests on: Harbor with no account at all has
   // nothing to show and nothing to drive, so this is the one thing the wizard
   // will not let the user finish without.
   if (accountCount(state) === 0) {
-    errors.push(err('accounts', 'Harbor needs at least one account. Add a Claude plan on the previous step, or enable Codex or Cursor here.'));
+    errors.push(err('accounts', 'Harbor needs at least one account. Add a Claude plan on the previous step, or enable Codex, Cursor or Gemini here.'));
   }
   return { ok: errors.length === 0, errors };
 }
@@ -396,7 +433,8 @@ function validateProviders(state) {
 function accountCount(state) {
   return (state.claude.profiles || []).length
     + (state.codex.enabled ? Math.max(1, (state.codex.accounts || []).length) : 0)
-    + (state.cursor.enabled ? 1 : 0);
+    + (state.cursor.enabled ? 1 : 0)
+    + (state.gemini?.enabled ? 1 : 0);
 }
 
 function validateCatalog(state) {
@@ -463,6 +501,7 @@ function enabledProviders(state) {
   if ((state.claude.profiles || []).length) out.push('claude');
   if (state.codex.enabled) out.push('codex');
   if (state.cursor.enabled) out.push('cursor');
+  if (state.gemini?.enabled) out.push('gemini');
   return out;
 }
 
@@ -587,6 +626,17 @@ function configFromWizard(state, base = {}, meta = {}) {
       isDefault: false,
     });
   }
+  if (state.gemini?.enabled) {
+    profiles.push({
+      ...GEMINI_PROFILE,
+      provider: 'gemini',
+      // validateConfig wants a folder. With no root named it is the user's own profile folder, the
+      // folder agy already uses, so a launch changes nothing about where agy keeps its state.
+      configHome: String(state.gemini.home || '').trim() || state.gemini.userProfile,
+      email: null,
+      isDefault: false,
+    });
+  }
   // validateConfig requires a non-empty list, and validateProviders already
   // refuses a zero-account finish, so this only ever fires on a caller that
   // skipped validation.
@@ -625,6 +675,12 @@ function configFromWizard(state, base = {}, meta = {}) {
       cursor: {
         enabled: Boolean(state.cursor.enabled),
         bin: isNonEmptyString(state.cursor.bin) ? state.cursor.bin.trim() : 'cursor-agent',
+      },
+      // The CLI's real path when one is known (the config resolver treats a bare name as the schema's
+      // placeholder and goes looking itself); null otherwise, never a made-up path.
+      gemini: {
+        enabled: Boolean(state.gemini?.enabled),
+        bin: isNonEmptyString(state.gemini?.bin) ? state.gemini.bin.trim() : null,
       },
     },
     workflows: (state.catalog.workflows || []).map((entry) => ({
@@ -715,6 +771,22 @@ function removeProfile(state, index) {
   return reconcileDefaults(next);
 }
 
+// The model and effort a new default starts from when its provider is picked. Claude, Codex and
+// Cursor keep the fixed starting points they always had. Gemini starts from the registry's own
+// default model and effort when that is loaded, else agy's own (no --model, effort high).
+function defaultsFor(provider, registry = null) {
+  if (provider === 'claude') return { model: 'opus', effort: 'xhigh' };
+  if (provider === 'codex') return { model: 'default', effort: 'medium' };
+  if (provider === 'gemini') {
+    const entry = registry?.gemini;
+    return {
+      model: entry?.defaultModel || entry?.models?.[0]?.value || GEMINI_FALLBACK.model,
+      effort: entry?.defaultEffort || GEMINI_FALLBACK.effort,
+    };
+  }
+  return { model: 'default', effort: 'default' };
+}
+
 // After any change to which providers exist, pull newSessionDefaults back onto
 // something real. Without this, disabling a provider left the last step in a
 // permanently invalid state the user had to discover for themselves.
@@ -722,9 +794,7 @@ function reconcileDefaults(state) {
   const providers = enabledProviders(state);
   if (!providers.length || providers.includes(state.defaults.provider)) return state;
   const provider = providers[0];
-  const model = provider === 'claude' ? 'opus' : 'default';
-  const effort = provider === 'claude' ? 'xhigh' : (provider === 'codex' ? 'medium' : 'default');
-  return { ...state, defaults: { provider, model, effort } };
+  return { ...state, defaults: { provider, ...defaultsFor(provider, state.modelRegistry) } };
 }
 
 // The sharing step's source and targets are SEEDED from the homes that existed
@@ -774,4 +844,6 @@ module.exports = {
   removeProfile,
   reconcileDefaults,
   reconcileSymlinks,
+  defaultsFor,
+  GEMINI_FALLBACK,
 };

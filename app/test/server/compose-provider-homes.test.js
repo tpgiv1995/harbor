@@ -53,6 +53,11 @@ const LIVE_MAIN = '01900000-aaaa-7000-8000-00000000000a';
 const LIVE_OTHER = '01900000-bbbb-7000-8000-00000000000b';
 const LIVE_THIRD = '01900000-cccc-7000-8000-00000000000c';
 const OLD_OTHER = '01900000-dddd-7000-8000-00000000000d';
+// Gemini (Antigravity): one conversation in the machine's own profile, one in a
+// second Gemini profile's home. A print-mode run in the same store is not a session.
+const GEM_MAIN = '7c1d2e3f-0a1b-4c2d-8e3f-00000000000a';
+const GEM_OTHER = '7c1d2e3f-0a1b-4c2d-8e3f-00000000000b';
+const GEM_PRINT = '7c1d2e3f-0a1b-4c2d-8e3f-00000000000c';
 const WORK = path.join(root, 'work', 'demo-site');
 
 function rollout(id, cwd, prompt) {
@@ -67,6 +72,21 @@ async function writeRollout(codexHome, id, prompt) {
   const day = path.join(codexHome, 'sessions', '2026', '10', '31');
   await fs.mkdir(day, { recursive: true });
   await fs.writeFile(path.join(day, `rollout-2026-10-31T10-00-00-${id}.jsonl`), rollout(id, WORK, prompt));
+}
+
+async function writeGemini(profileRoot, id, prompt, { typed = true } = {}) {
+  const store = path.join(profileRoot, '.gemini', 'antigravity-cli');
+  const file = path.join(store, 'brain', id, '.system_generated', 'logs', 'transcript_full.jsonl');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const step = { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-23T10:00:00Z', content: `<USER_REQUEST>\n${prompt}\n</USER_REQUEST>` };
+  await fs.writeFile(file, `${JSON.stringify(step)}\n`);
+  // Long enough ago that the print-run grace period has passed.
+  const old = new Date(Date.now() - 3600_000);
+  await fs.utimes(file, old, old);
+  if (typed) {
+    await fs.mkdir(path.join(store, 'annotations'), { recursive: true });
+    await fs.writeFile(path.join(store, 'annotations', `${id}.pbtxt`), 'title:"x"\n');
+  }
 }
 
 function rowsOf(model) {
@@ -85,12 +105,17 @@ async function compose(t) {
   await writeRollout(codexMain, LIVE_MAIN, 'Draft the release checklist for the widget');
   await writeRollout(codexOther, LIVE_OTHER, 'Summarize the quarterly widget report');
   await writeRollout(codexOther, OLD_OTHER, 'Archived question about the gadget spec');
+  const geminiOther = path.join(root, 'gemini-other');
+  await writeGemini(home, GEM_MAIN, 'Sketch the pricing page for the widget');
+  await writeGemini(geminiOther, GEM_OTHER, 'Outline the gadget onboarding emails');
+  await writeGemini(home, GEM_PRINT, 'Reply with the word OK', { typed: false });
   await fs.writeFile(configFile, JSON.stringify({
     version: 1,
     profiles: [
       { id: 'personal', label: 'Personal', letter: 'P', color: '#437FFE', provider: 'claude', configHome: path.join(root, 'claude-personal'), email: null, isDefault: true },
       { id: 'codex-main', label: 'Codex', letter: 'X', color: '#10A37F', provider: 'codex', configHome: codexMain, email: null, isDefault: true },
       { id: 'codex-other', label: 'Codex Other', letter: 'O', color: '#7A5AF8', provider: 'codex', configHome: codexOther, email: null, isDefault: false },
+      { id: 'gemini-other', label: 'Gemini Other', letter: 'G', color: '#8AB4F8', provider: 'gemini', configHome: geminiOther, email: null, isDefault: false },
     ],
     paths: { cacheDir, projectsDir: path.join(root, 'projects') },
   }, null, 2));
@@ -140,7 +165,7 @@ async function compose(t) {
     tasks: { read: async () => ({}), mutate: async () => ({}), subscribe() {}, close() {} },
   });
   t.after(() => composed.close());
-  return { composed, cacheDir, codexMain, codexOther };
+  return { composed, cacheDir, codexMain, codexOther, geminiOther };
 }
 
 test.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -182,6 +207,29 @@ test('the phone lists FINISHED Codex sessions from every Codex home, not only th
   assert.equal(old.isLive, false);
 });
 
+test('the phone lists Gemini conversations from the real profile and from a second Gemini profile, as Gemini and not as Claude', async (t) => {
+  const { composed } = await compose(t);
+  const rows = rowsOf((await composed.router.call('sidebar:get-state', { days: 'all' })).model);
+  const main = rows.find((row) => row.id === GEM_MAIN);
+  const other = rows.find((row) => row.id === GEM_OTHER);
+  assert.ok(main, 'the machine\'s own profile is listed');
+  assert.ok(other, 'a second Gemini profile\'s home is listed');
+  assert.equal(main.provider, 'gemini');
+  assert.equal(other.provider, 'gemini');
+  assert.match(main.title, /pricing page/);
+  assert.match(other.title, /onboarding emails/);
+  assert.equal(other.home, 'gemini-other', 'its row names the plan its transcript was found under');
+  assert.equal(main.home ?? null, null, 'the real profile is no profile\'s home');
+  const meta = await composed.router.call('sidebar:get-state', { query: 'onboarding emails', days: 'all' });
+  assert.ok(rowsOf(meta.model).some((row) => row.id === GEM_OTHER), 'phone search finds it');
+});
+
+test('a print-mode Gemini run in the same store is not a rail session on the phone', async (t) => {
+  const { composed } = await compose(t);
+  const rows = rowsOf((await composed.router.call('sidebar:get-state', { days: 'all' })).model);
+  assert.ok(!rows.some((row) => row.id === GEM_PRINT), 'headless runs belong to Orch, like codex exec runs');
+});
+
 test('the phone hands the real bridge every provider option the desktop hands it (the drift that caused this)', async (t) => {
   const { cacheDir, codexMain, codexOther } = await compose(t);
   assert.equal(bridgeCalls.length, 1, 'composeServer built exactly one real bridge');
@@ -214,4 +262,5 @@ test('the persisted scan caches are written where the desktop reads them', async
   const facts = JSON.parse(await fs.readFile(path.join(cacheDir, 'provider-row-facts.json'), 'utf8'));
   const cached = Object.keys(facts.files || {}).map((file) => path.basename(file));
   assert.ok(cached.some((name) => name.includes(LIVE_OTHER)), 'the second home\'s rollout is in the facts cache');
+  assert.ok(Object.keys(facts.files || {}).some((file) => file.includes(GEM_OTHER)), 'and so is the second Gemini home\'s transcript');
 });

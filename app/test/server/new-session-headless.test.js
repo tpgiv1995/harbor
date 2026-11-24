@@ -102,9 +102,20 @@ async function fixture(t, { fakeLaunch = true } = {}) {
 }
 
 test('headless new-session options and candidate folders are available without a native dialog', async (t) => {
+  // Gemini is offered only where agy resolves, so this spec names the machine: no agy first (the three older
+  // providers alone), then a stand-in agy file (Gemini appears, as the fourth tab). Never the real install.
+  const previous = process.env.HARBOR_AGY_BIN;
+  t.after(() => { if (previous === undefined) delete process.env.HARBOR_AGY_BIN; else process.env.HARBOR_AGY_BIN = previous; });
+  process.env.HARBOR_AGY_BIN = path.join(os.tmpdir(), 'harbor-no-such-agy', 'agy.exe');
   const h = await fixture(t);
   const options = (await call(h.url, 'new-session:options')).result;
   assert.deepEqual(Object.keys(options.providers), ['claude', 'codex', 'cursor']);
+  const stand = path.join(h.root, 'agy.exe');
+  await fs.writeFile(stand, '');
+  process.env.HARBOR_AGY_BIN = stand;
+  const withGemini = (await call(h.url, 'new-session:options')).result;
+  assert.deepEqual(Object.keys(withGemini.providers), ['claude', 'codex', 'cursor', 'gemini']);
+  assert.equal(withGemini.providers.gemini.bin, stand);
   assert.equal(options.providers.claude.models.some(({ value }) => value === 'opus'), true);
   assert.deepEqual(await h.composed.router.call('new-session:folder'), [h.recent, h.older]);
 });

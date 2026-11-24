@@ -142,10 +142,37 @@ async function detectClaudeHomes(options) {
   return out;
 }
 
+// Google's Antigravity CLI (`agy`, Harbor's Gemini provider). It is looked for the way the rest of
+// Harbor looks for it: the shared resolver (HARBOR_AGY_BIN, the saved ~/.harbor/gemini.json, the
+// installer's own default path), then PATH, because a machine whose agy sits on PATH but nowhere
+// the resolver knows still has Gemini. The resolver ships in providers/gemini-config.js; a checkout
+// that has not got it yet falls back to PATH alone rather than failing the whole detection.
+async function detectGemini(options) {
+  let resolved = null;
+  try {
+    const resolver = options.geminiResolver
+      || require('../providers/gemini-config.js').resolveGeminiConfig;
+    resolved = await resolver({ env: options.env, home: options.homedir, platform: options.platformName });
+  } catch { resolved = null; }
+  const found = resolved?.bin
+    ? { found: true, path: resolved.bin, source: 'resolver' }
+    : await detectBinary('agy', options);
+  // agy keeps its state under <profile>/.gemini/antigravity-cli; there is nothing to read back from
+  // it (no account email Harbor may read: the sign-in is the CLI's own).
+  const stateDir = path.join(resolved?.agyHome || options.homedir, '.gemini', 'antigravity-cli');
+  return {
+    ...found,
+    home: (await statOrNull(stateDir)) ? (resolved?.agyHome || options.homedir) : null,
+    email: null,
+    emailReason: 'Gemini signs in through Google in its own CLI; Harbor does not read or store that sign-in.',
+  };
+}
+
 async function detectProviders(options) {
   const claude = await detectBinary('claude', options);
   const codex = await detectBinary('codex', options);
   const cursor = await detectBinary('cursor-agent', options);
+  const gemini = await detectGemini(options);
   const codexHome = path.join(options.homedir, '.codex');
   const cursorHome = path.join(options.homedir, '.cursor');
   return {
@@ -164,6 +191,7 @@ async function detectProviders(options) {
       email: null,
       emailReason: 'Cursor does not record an account email Harbor can read.',
     },
+    gemini,
   };
 }
 
@@ -236,7 +264,9 @@ async function detectEnvironment(deps = {}) {
   const homedir = deps.homedir || os.homedir();
   const platformName = deps.platform || os.platform();
   const readFile = deps.readFile || fsp.readFile;
-  const options = { env, homedir, platformName, readFile, probeVersion: deps.probeVersion };
+  const options = {
+    env, homedir, platformName, readFile, probeVersion: deps.probeVersion, geminiResolver: deps.geminiResolver,
+  };
 
   const [providers, claudeHomes, orchestration] = await Promise.all([
     detectProviders(options),

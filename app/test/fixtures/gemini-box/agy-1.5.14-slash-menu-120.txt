@@ -1,0 +1,24 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       <account> (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Hydrogen (Low)
+   ▄▀▀    ▀▀▄     C:/work/proof
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> pasted one
+  pasted two/help
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> /
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> /add-dir             Add a directory to the workspace
+  /agents              List available custom agents
+  /artifact            View and review artifacts
+  /btw                 Ask a side question without interrupting the current task
+  /changelog           Show release notes and changes
+   ↓ 46 more
+
+  ↑/↓ Navigate · enter Select · tab Complete
+esc to cancel                                                                             auto · Gemini 4 Hydrogen · low

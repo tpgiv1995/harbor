@@ -316,7 +316,7 @@ test('resumeProviderSession: bin/ai resume argv in the session cwd, claude and c
     () => launch.resumeProviderSession({ provider: 'codex', cwd: '/nonexistent/deleted-project', id: 'zz' }),
     /no longer exists/,
   );
-  await assert.rejects(() => launch.resumeProviderSession({ provider: 'claude', cwd: '/x', id: 'i' }), /codex\/cursor only/);
+  await assert.rejects(() => launch.resumeProviderSession({ provider: 'claude', cwd: '/x', id: 'i' }), /codex\/cursor\/gemini only/);
   await assert.rejects(() => launch.resumeProviderSession({ provider: 'cursor', id: 'i' }), /working folder/);
 });
 

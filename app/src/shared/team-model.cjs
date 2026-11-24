@@ -416,7 +416,7 @@ function deriveTeam(inputs = {}, now = Date.now()) {
       // A worker only the process table knows has no title yet; its worktree
       // folder (foundation-rebuild-L5) says more than "Untitled session".
       || (member.runMode === 'worker' && member.cwd ? slashes(member.cwd).replace(/\/+$/, '').split('/').at(-1) || null : null)
-      || (member.provider === 'cursor' ? 'Cursor worker' : 'Untitled session');
+      || (member.provider === 'cursor' ? 'Cursor worker' : member.provider === 'gemini' ? 'Gemini worker' : 'Untitled session');
     member.role = declared?.role || null;
     member.declaredTeam = declared?.team || null;
     const description = member.sessionId ? descriptions[member.sessionId] : null;

@@ -39,7 +39,7 @@ function raiseToInteractive(pid = 0, { platform = process.platform, os = require
 // is a known agent CLI, and nothing deeper: the CLI's own tools and servers
 // stay at NORMAL. A child that predates its parent is a recycled-pid stranger.
 const path = require('node:path');
-const AGENT_CLI_RE = /^(codex|claude|cursor-agent)\.exe$/i;
+const AGENT_CLI_RE = /^(codex|claude|cursor-agent|agy)\.exe$/i;
 function raiseLaunchedCli(rootPid, { table, platform = process.platform, os = require('node:os') } = {}) {
   if (platform !== 'win32' || !table || !table.get) return [];
   const root = table.get(rootPid);

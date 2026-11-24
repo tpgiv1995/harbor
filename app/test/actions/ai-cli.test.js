@@ -63,5 +63,5 @@ test('ai --resume-id builds provider resume argv and rejects it for claude', () 
     parse('--provider', 'codex', '--model', 'gpt-5.6-sol', '--effort', 'high', '--resume-id', 'x').stdout.trim(),
     'codex resume --dangerously-bypass-approvals-and-sandbox x',
   );
-  assert.match(parse('--resume-id', 'x').stderr, /codex\/cursor only/);
+  assert.match(parse('--resume-id', 'x').stderr, /codex\/cursor\/gemini only/);
 });

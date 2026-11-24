@@ -96,7 +96,7 @@ async function makeFixture(root, realHome) {
   }));
   const config = {
     setup: { completed: true }, profiles,
-    providers: { claude: { enabled: true }, codex: { enabled: true }, cursor: { enabled: true } },
+    providers: { claude: { enabled: true }, codex: { enabled: true }, cursor: { enabled: true }, gemini: { enabled: false } }, // Gemini is drive-mobile-gemini-win.js's; off here so the count below holds on any machine
     paths: { cacheDir, projectsDir: path.join(home, 'projects'), projectIconsDir: path.join(root, 'icons') },
   };
   await fs.writeFile(process.env.HARBOR_CONFIG_FILE, JSON.stringify(config));

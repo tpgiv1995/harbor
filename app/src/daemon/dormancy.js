@@ -689,6 +689,18 @@ const PROVIDER_ANSWER_MARKERS = {
     /Do you trust the contents/i,
     /Trust this workspace/i,
   ],
+  // Gemini (Google's Antigravity CLI, agy 1.5.14), captured from real screens 2026-11-23 (AGY-FACTS section 2). A
+  // pending permission menu writes NOTHING to the transcript until it is answered, so the screen (and the status
+  // tee's tool_confirmation_pending, read in geminiTranscriptFresh) are the only evidence of it. The file-edit prompt's
+  // wording is from Google's docs, not a capture.
+  gemini: [
+    /Run this command\?/i,
+    /Accept this file edit\?/i,
+    /Do you trust the contents of this project\?/i,
+    /^\s*>\s*\d+\.\s+Yes\b/m,
+    /↑\/↓ Navigate · (?:tab Amend|enter (?:Confirm|Select))/,
+    /Terms of Service & Data Use/i,
+  ],
 };
 
 function awaitingAnswer(screenText, agent = null) {
@@ -758,7 +770,7 @@ async function newestCompleteRecord(file, { chunkBytes = 64 * 1024, maxBytes = 8
   throw new Error(`provider transcript has no complete JSON record: ${file}`);
 }
 
-async function newestTimestampedRecord(file) {
+async function newestTimestampedRecord(file, field = 'timestamp') {
   const handle = await fsp.open(file, 'r');
   try {
     const stat = await handle.stat();
@@ -777,7 +789,7 @@ async function newestTimestampedRecord(file) {
         if (!lines[i].trim()) continue;
         try {
           const record = JSON.parse(lines[i]);
-          const timestamp = Date.parse(record?.timestamp || '');
+          const timestamp = Date.parse(record?.[field] || '');
           if (Number.isFinite(timestamp)) return { record, timestamp, text: lines[i] };
         } catch {}
       }
@@ -812,15 +824,52 @@ async function cursorTranscriptFresh({ sessionId, roots, now = Date.now(), fresh
   return now - previous.observedAt < freshMs;
 }
 
+// GEMINI (2026-11-23). agy's conversation is a FOLDER, brain/<id>/, not a file named for the id, and its records carry
+// `created_at` (UTC, whole seconds), so it needs its own locator and clock. A pane is busy while its newest record is
+// fresh OR the status tee (written by the pane's own agy, gemini-status-tee.cjs) says it is working or holding a
+// permission menu, which writes no record at all. An unresolved identity or an unlocatable transcript THROWS: the sweep
+// reads that as leave-it-awake, so a Gemini pane that cannot be resumed is never put to sleep (the daemon doctrine's
+// provider-sessions bullet).
+const GEMINI_TRANSCRIPT = path.join('.system_generated', 'logs', 'transcript_full.jsonl');
+const GEMINI_CONVERSATION_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function findGeminiTranscript(sessionId, roots) {
+  if (!GEMINI_CONVERSATION_RE.test(String(sessionId || ''))) throw new Error('gemini session identity is unresolved');
+  for (const root of roots || []) {
+    const file = path.join(root, 'brain', sessionId, GEMINI_TRANSCRIPT);
+    try { await fsp.access(file); return file; } catch { /* next root */ }
+  }
+  throw new Error(`provider transcript not found for ${sessionId}`);
+}
+
+async function geminiStatusTee(sessionId, contextDir) {
+  if (!contextDir) return null;
+  try { return JSON.parse(await fsp.readFile(path.join(contextDir, `gemini-${sessionId}.json`), 'utf8')); } catch { return null; }
+}
+
+async function geminiTranscriptFresh({ sessionId, roots, now = Date.now(), freshMs, contextDir = null }) {
+  if (!sessionId) throw new Error('gemini session identity is unresolved');
+  const file = await findGeminiTranscript(sessionId, roots);
+  const tee = await geminiStatusTee(sessionId, contextDir);
+  if (tee && (tee.agent_state === 'working' || tee.agent_state === 'tool_use' || tee.tool_confirmation_pending === true)) return true;
+  const { timestamp } = await newestTimestampedRecord(file, 'created_at');
+  return now - timestamp < freshMs;
+}
+
 async function providerTranscriptFresh(state, options = {}) {
   const agent = state?.agent === 'cursor-agent' ? 'cursor' : state?.agent;
-  if (!['codex', 'cursor'].includes(agent)) return false;
+  if (!['codex', 'cursor', 'gemini'].includes(agent)) return false;
   const common = {
     sessionId: state.agent_session,
     now: options.now ?? Date.now(),
     freshMs: options.freshMs,
   };
   if (!Number.isFinite(common.freshMs) || common.freshMs < 0) throw new Error('provider freshness requires freshMs');
+  if (agent === 'gemini') {
+    // The keeper records the USERPROFILE a Gemini pane runs under (provider_home), which is where its brain folder is.
+    const roots = [...(state.provider_home ? [path.join(state.provider_home, '.gemini', 'antigravity-cli')] : []), ...(options.geminiRoots || options.roots || [])];
+    return geminiTranscriptFresh({ ...common, roots, contextDir: options.contextDir || null });
+  }
   return agent === 'codex'
     ? codexTranscriptFresh({ ...common, roots: options.codexRoots || options.roots || [] })
     : cursorTranscriptFresh({
@@ -924,5 +973,6 @@ module.exports = {
   lastRecordAtMs, transcriptWrittenWithin, transcriptTreeFresh,
   applyBackgroundRecord, outstandingBackgroundWork, transcriptBackgroundWork, BACKGROUND_IDLE_MARKER,
   findProviderTranscript, newestCompleteRecord, codexTranscriptFresh, cursorTranscriptFresh,
+  geminiTranscriptFresh, findGeminiTranscript,
   providerTranscriptFresh, PROVIDER_ANSWER_MARKERS,
 };

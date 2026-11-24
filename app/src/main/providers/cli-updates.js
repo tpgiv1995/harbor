@@ -38,6 +38,8 @@ const CODEX_RELEASES_URL = 'https://api.github.com/repos/openai/codex/releases?p
 // bundle) and it answers { version, url } with no credential.
 const CURSOR_LATEST_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCliDownloadUrl';
 
+// Gemini (agy) is deliberately NOT here (2026-11-23): its version is pinned by hand, never moved by an update chip, so the chip
+// never offers it. Its model catalog follows the boot and six-hour refresh instead (gemini-model-catalog.js).
 const PROVIDER_IDS = ['claude', 'codex', 'cursor'];
 
 const PROVIDERS = {

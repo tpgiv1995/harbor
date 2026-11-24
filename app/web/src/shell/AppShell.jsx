@@ -35,6 +35,7 @@ import { CopySessionIdButton, NewSessionHereButton } from './SessionActions.jsx'
 import { newSessionHerePreset } from './session-actions.cjs';
 import { ErrorBoundary } from '../../../src/renderer/ErrorBoundary.jsx';
 import './shell.css';
+import { providerLabel } from '../provider-labels.cjs';
 
 // The plan chip used to render String(home).slice(0, 1).toUpperCase(): a bare
 // "P". It means nothing to anyone who has not read the source, and it was the
@@ -105,7 +106,6 @@ function OfflineScreen({ error, onRetry }) {
   );
 }
 
-const PROVIDER_NAME = { claude: 'Claude', codex: 'Codex', cursor: 'Cursor' };
 
 // The effort as the desktop's model chip badges it (MED, not "medium"), so the
 // facts strip has room for the status.
@@ -418,7 +418,7 @@ export function AppShell({ settings, auth, onRequestSetup, onSignOut }) {
       const provider = activeSession.provider || 'claude';
       const hasPlan = provider !== 'cursor' && (activeSession.home || activeSession.account);
       const project = activeSession.project && activeSession.project !== '~' ? activeSession.project : 'home';
-      return `New ${PROVIDER_NAME[provider] || provider} session${hasPlan ? ` (${planLabel(activeSession, planProfiles)})` : ''} in ${project}`;
+      return `New ${providerLabel(provider, provider)} session${hasPlan ? ` (${planLabel(activeSession, planProfiles)})` : ''} in ${project}`;
     })()
     : 'New session';
 

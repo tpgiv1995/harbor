@@ -1,0 +1,16 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       <account> (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Hydrogen (Low)
+   ▄▀▀    ▀▀▄     C:/work/proof
+  ▄▀▀      ▀▀▄
+
+
+ ┃ Introducing Gemini 4 Neon
+ ┃ Our best balance of intelligence, cost, and latency. Get building today with Neon.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> pasted one
+  pasted two
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                          auto · Gemini 4 Hydrogen · low

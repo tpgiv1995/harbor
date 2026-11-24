@@ -10,7 +10,7 @@
 //
 // Composed rather than generated. A model can draw a banner, but it cannot set
 // a wordmark in the product's own typeface, place the product's own icon, or
-// keep the three provider marks pixel-accurate, and a README banner that gets
+// keep the four provider marks pixel-accurate, and a README banner that gets
 // any of those slightly wrong reads as a mock-up of a product rather than the
 // product. So the layout, the type (Schibsted Grotesk, the same family the app
 // ships) and the marks are all real assets laid out in CSS; the only generated
@@ -61,6 +61,7 @@ const PROVIDERS = [
   ['logo-claude.svg', 'Claude Code'],
   ['logo-openai.svg', 'Codex'],
   ['logo-cursor.svg', 'Cursor'],
+  ['logo-gemini.svg', 'Gemini'],
 ];
 
 // Nine lines, each of which is a thing Harbor actually does and the README
@@ -219,7 +220,7 @@ function socialHtml() {
     <h1>Many agent sessions.<br>One place to work.</h1>
     <div class="sub">Run and monitor coding agents on your desktop. Pick up from your phone.</div>
     <div class="providers">${PROVIDERS.map(([file,label]) => `<div class="provider"><img src="${dataUri(path.join(ASSETS,file))}" alt="">${label}</div>`).join('')}</div>
-    </div><div class="product"><img src="${dataUri(path.join(REPO_ROOT,'docs','screenshot.png'))}" alt="Harbor with Claude, Codex and Cursor sessions"></div></body>`;
+    </div><div class="product"><img src="${dataUri(path.join(REPO_ROOT,'docs','screenshot.png'))}" alt="Harbor with Claude, Codex, Cursor and Gemini sessions"></div></body>`;
 }
 
 main().catch((error) => {

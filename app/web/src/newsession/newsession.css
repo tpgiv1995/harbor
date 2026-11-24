@@ -380,3 +380,42 @@
 .newsession-chosen-change:active {
   background: rgba(255, 255, 255, 0.06);
 }
+
+/* Four provider tabs share one row on a phone (they used to wrap, three and one, once Gemini made four):
+   equal columns that fall back to wrapping only when the screen is too narrow for four. */
+.newsession-providers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
+  gap: 6px;
+}
+
+.newsession-providers .newsession-provider {
+  justify-content: center;
+  min-width: 0;
+  padding: 8px 6px;
+  gap: 5px;
+}
+
+/* The provider's mark beside its name on each tab (the same marks the desktop draws; Gemini's
+   was missing everywhere on the phone before 2026-11-23). Fixed box so a 24px-viewBox mark and
+   a 20px one sit at the same size. */
+.newsession-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.newsession-provider-mark {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: center / contain no-repeat;
+}
+
+/* The marks are the desktop's own svgs. They are CSS backgrounds, not script imports, so the unit tests that
+   bundle the sheet with a bare esbuild (no asset loader) keep working. A provider with no rule here draws no mark. */
+.newsession-provider-mark[data-provider="claude"] { background-image: url("../../../assets/logo-claude.svg"); }
+.newsession-provider-mark[data-provider="codex"] { background-image: url("../../../assets/logo-openai.svg"); }
+.newsession-provider-mark[data-provider="cursor"] { background-image: url("../../../assets/logo-cursor.svg"); }
+.newsession-provider-mark[data-provider="gemini"] { background-image: url("../../../assets/logo-gemini.svg"); }

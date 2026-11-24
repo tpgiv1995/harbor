@@ -3,10 +3,15 @@
 // Reveals the pane created by a new-session launch under the identity the
 // provider can honestly supply. Claude receives a caller-minted id at launch,
 // so its first window is real. Codex has no launch-time id and must retain the
-// pane-keyed identity until its rollout appears.
+// pane-keyed identity until its rollout appears. Gemini (agy) cannot take a
+// caller-chosen id either (`--conversation` only resumes an existing one) and
+// its conversation id appears after the first prompt, so it opens provisional
+// like Codex and upgrades when the linker (the status tee) or the fresh-
+// conversation finder names it.
 async function revealNewSessionWindow({
   result,
   provider,
+  providerHome,
   cwd,
   account,
   model,
@@ -54,6 +59,7 @@ async function revealNewSessionWindow({
     sinceMs,
     knownIds,
     timeoutMs: 10 * 60_000,
+    ...(providerHome ? { home: providerHome } : {}),
   });
   if (!freshSessionId) return;
   setLink(freshSessionId, fresh);

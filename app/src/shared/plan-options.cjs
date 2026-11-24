@@ -11,6 +11,16 @@ function selectedPlan(options, provider, id) {
   return plans.find(p => p.id === id || p.configHome === id)
     || plans.find(p => p.isDefault) || plans[0] || null;
 }
+// Whether the New session form offers a Plan choice for this provider's plans. Cursor never does (its
+// rows have no home). A Gemini 'plan' is only a Windows-profile root a profile MAY name (the sign-in
+// is the Windows user's own, so every root is signed in): one plan is no choice, so the section
+// shows only when there are two to pick between. Claude and Codex show from one plan up.
+function showPlanChoice(provider, plans) {
+  const count = (plans || []).length;
+  if (provider === 'cursor') return false;
+  if (provider === 'gemini') return count > 1;
+  return count > 0;
+}
 // A plan's own name from the configured plan list (the `profiles` of
 // new-session:options): "Claude C", "EB Smart", "Ren 2", never the folder id
 // title-cased into "Claudec", "Ebsmart", "Ren2" (the phone's plan chip and Plans
@@ -32,4 +42,4 @@ function planMoveReason(session, header) {
   if (cue?.kind !== 'ready' || header?.working !== false) return 'Wait until this session is idle before changing its plan.';
   return '';
 }
-module.exports = { providerPlans, selectedPlan, planName, planMoveReason };
+module.exports = { providerPlans, selectedPlan, showPlanChoice, planName, planMoveReason };

@@ -276,7 +276,7 @@ function MeterBar({ pct, reset, title, short = false, stale = false }) {
 // since 2026-09-05; it sat here for one evening and Pat moved it up.
 // Claude profiles only (2026-09-28): these donuts read the Claude statusline
 // and OAuth usage, which a codex home does not have, so a codex profile's row
-// could only ever read "--". Codex and cursor plans live in the title-bar menu.
+// could only ever read "--". Codex, cursor and gemini plans live in the title-bar menu.
 // No heading (2026-11-09, Pat: "users know which is which and what they are
 // for"): the "Plans" title and the "5 hours" / "This week" column labels are
 // gone, so the first plan's row is the top of the pane. The left meter is the
@@ -1399,7 +1399,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
                 role="menuitem"
                 data-plan="other"
                 className="rail-menu-item plan-pick plan-pick-other"
-                title={`New session on another plan${planPicker?.folder ? ` in ${planPicker.folder}` : ''}: choose Codex, Cursor or any plan`}
+                title={`New session on another plan${planPicker?.folder ? ` in ${planPicker.folder}` : ''}: choose Codex, Cursor, Gemini or any plan`}
                 onClick={pickOther}
               >
                 <span className="rail-menu-mark" aria-hidden="true" />
@@ -1412,7 +1412,7 @@ export function Sidebar({ onOpenSession, onCloseSession, onNewSession, openSessi
                     <circle cx="12.5" cy="8" r="1.4" fill="currentColor" />
                   </svg>
                 </span>
-                <span className="rail-menu-label">Other: Codex, Cursor…</span>
+                <span className="rail-menu-label">Other: Codex, Cursor, Gemini…</span>
               </button>
             </>
           ) : null}

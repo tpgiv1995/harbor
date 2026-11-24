@@ -10,7 +10,7 @@ const COLORS = ['#6fa8d8', '#d68a5a', '#F962BA', '#7bd3a0', '#c9a6ff', '#e8973f'
 // step: it is how the user confirms they pointed at the right account. It is
 // confirmation, not a credential, and nothing else in that file is read.
 //
-// Zero plans is a supported answer. A codex-only or cursor-only install walks
+// Zero plans is a supported answer. A codex-only, cursor-only or gemini-only install walks
 // straight through this screen, which is why nothing here is required.
 function ProfileCard({ profile, index, patch, errors, count, bin }) {
   const [checking, setChecking] = useState(false);
@@ -160,7 +160,7 @@ export function ClaudeStep({ state, patch, detected, errors, showErrors }) {
     <div className="setup-pane">
       <p className="setup-lede">
         A Claude plan is one config home: the folder holding that account&apos;s <code>.claude.json</code>.
-        Add one per plan you want to run. Adding none is fine if you only use Codex or Cursor.
+        Add one per plan you want to run. Adding none is fine if you only use Codex, Cursor or Gemini.
       </p>
 
       {profiles.length ? (
@@ -212,7 +212,7 @@ export function ClaudeStep({ state, patch, detected, errors, showErrors }) {
       {profiles.length === 0 ? (
         <p className="setup-note-fine">
           No Claude plans yet. Harbor still needs at least one account overall, so if you leave this
-          empty you will need to enable Codex or Cursor on the next step.
+          empty you will need to enable Codex, Cursor or Gemini on the next step.
         </p>
       ) : null}
     </div>

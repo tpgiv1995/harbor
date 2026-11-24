@@ -15,6 +15,8 @@ const { createModelCatalog } = require('./model-catalog.js');
 const { legacyConfig } = require('../config/migrate.js');
 const { codexHomes, readCodexCache } = require('./codex-model-catalog.js');
 const { cursorModelOptions } = require('./cursor-model-catalog.js');
+const { geminiModelOptions } = require('./gemini-model-catalog.js');
+const { resolveGeminiConfigSync } = require('./gemini-config.js');
 
 // The ONE list allowed to go stale: Claude Code's built-in slash commands,
 // written against v2.1.214 and re-checked against the v2.1.284 binary on
@@ -203,8 +205,20 @@ function newSessionOptions(rawConfig, deps = {}) {
         efforts: [],
       },
     };
+  // GEMINI IS OFFERED ONLY WHERE ITS CLI IS (2026-11-23): the other three have a bare name a PATH lookup can still
+  // fail on, but a Gemini row for a machine with no agy would be a launch button that dies. The ONE resolver
+  // (gemini-config.js) decides, the same one bin/ai launches with and the plans dropdown reads; a user who turned the
+  // provider off in config stays off. Models are agy's own families (gemini-model-catalog.js), Default first.
+  const gemini = configured.gemini?.enabled === false ? null : (deps.resolveGemini || resolveGeminiConfigSync)({
+    env: deps.env, home: deps.homedir ? deps.homedir() : undefined, platform: deps.platform, configuredBin: configured.gemini?.bin,
+  });
+  if (gemini) {
+    const options = geminiModelOptions(config.paths?.cacheDir && path.join(config.paths.cacheDir, 'gemini-models.json'));
+    registry.gemini = { defaultModel: 'default', ...options };
+  }
   for (const [id, provider] of Object.entries(registry)) {
     if (configured[id]?.enabled === false) delete registry[id];
+    else if (id === 'gemini') provider.bin = gemini.bin;
     else provider.bin = configured[id]?.bin || (id === 'cursor' ? 'cursor-agent' : id);
   }
   // textColor is optional (a dark plan colour fills the badge and the letter
@@ -377,6 +391,26 @@ function createCapabilitiesProvider(deps = {}) {
     commands: BUILTIN_COMMANDS.map(([name, description]) => ({ name, source: 'built-in', description })),
   });
 
+  // A Gemini session's menu is NOT Claude's (2026-11-23): its slash commands are agy's own (typed raw into agy's own
+  // menu, and /model, /effort and "always allow" PERSIST into the profile's settings.json, so Harbor never lists or
+  // runs them), it has no Claude plugins, MCP servers, effort levels or fast mode, and a model switch is a new session
+  // started from the new-session registry. Same field shape as the Claude answer so no consumer breaks; `provider`
+  // says which it is, and the surfaces that only mean something for Claude gate on it.
+  const geminiShell = (sessionId, cwd) => ({
+    sessionId,
+    provider: 'gemini',
+    account: null,
+    home: null,
+    cwd,
+    models: { cached: [], families: [], versions: [] },
+    effort: { levels: [], note: null },
+    fastMode: { available: false, reason: 'Fast mode is not offered for Gemini sessions' },
+    dynamicWorkflow: { keyword: '', note: '' },
+    plugins: [],
+    mcpServers: [],
+    commands: [],
+  });
+
   const get = async (sessionId) => {
     let resolved = null;
     try {
@@ -384,6 +418,7 @@ function createCapabilitiesProvider(deps = {}) {
     } catch {
       resolved = null;
     }
+    if (resolved?.meta?.provider === 'gemini') return geminiShell(sessionId, resolved.meta.cwd || null);
     const account = resolved?.account || null;
     const home = resolved?.home || null;
     const cwd = resolved?.meta?.cwd || null;

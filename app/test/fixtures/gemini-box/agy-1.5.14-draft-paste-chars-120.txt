@@ -1,0 +1,15 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       <account> (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Hydrogen (Low)
+   ▄▀▀    ▀▀▄     C:/work/proof
+  ▄▀▀      ▀▀▄
+
+
+ ┃ Auto is now the default agent mode
+ ┃ Press Shift+Tab to switch agent modes, or change Agent Mode in /config.
+ ┃ esc to dismiss
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+> [Pasted text #1 1890 chars]
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                          auto · Gemini 4 Hydrogen · low

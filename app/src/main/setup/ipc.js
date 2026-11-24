@@ -44,6 +44,7 @@ async function knownConfigHomes({ getConfig, detect }) {
     }
     if (detected?.providers?.codex?.home) homes.push(detected.providers.codex.home);
     if (detected?.providers?.cursor?.home) homes.push(detected.providers.cursor.home);
+    if (detected?.providers?.gemini?.home) homes.push(detected.providers.gemini.home);
   } catch { /* detection failing is survivable here too */ }
   return homes;
 }

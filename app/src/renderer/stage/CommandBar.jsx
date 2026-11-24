@@ -45,6 +45,7 @@ const SOURCE_LABEL = {
 // Permission-mode display copy lives in shared/perm-mode.cjs so this bar and
 // the config popover cannot disagree about it again.
 import { permModeStatus } from '../../shared/perm-mode.cjs';
+import { planInChip, nonClaudeDead as nonClaudeDeadRule } from './provider-rules.cjs';
 
 const PlusIcon = ({ children, ...props }) => (
   <svg className="plus-action-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
@@ -274,12 +275,11 @@ export function CommandBar({
 
 
   const dead = session && !pane && !externalLive;
-  // Dead codex/cursor sessions resume-on-send like claude (bin/ai --resume-id)
+  // Dead codex/cursor/gemini sessions resume-on-send like claude (bin/ai --resume-id)
   // EXCEPT when the working folder is unknown (a cursor transcript never
   // records its cwd; an unmatched project cannot be resumed anywhere honest).
-  const nonClaudeDead = Boolean(
-    dead && ['codex', 'cursor'].includes(session?.provider) && !session?.cwd,
-  );
+  // The rule lives in provider-rules.cjs, shared with the tile header.
+  const nonClaudeDead = nonClaudeDeadRule({ dead, session });
   // Settings that TYPE into the pty need a Harbor-controlled pane; lists and
   // current-state reads work for any session.
   const drivable = Boolean(session && pane && !readOnly && !externalLive && !externallyControlled);
@@ -1125,7 +1125,7 @@ export function CommandBar({
               <img className="logomk" src={provider.logo} alt="" aria-hidden="true" />
               {displayModel?.name || provider.label}
               {curEffort ? <span className="eff">{EFFORT_LABEL[curEffort] || curEffort}</span> : null}
-              {(session.provider === 'claude' || session.provider === 'codex') && session.home ? (
+              {planInChip(session.provider) && session.home ? (
                 <ProfileBadge profileId={session.home} profiles={profiles} className="model-acct" />
               ) : null}
               <span className="mswitch-caret" aria-hidden="true">▾</span>

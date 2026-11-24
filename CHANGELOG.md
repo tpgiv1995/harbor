@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Gemini is Harbor's fourth provider, beside Claude Code, Codex and Cursor, through
+  Google's Antigravity CLI (`agy`). New session has a Gemini tab with its own
+  models and effort levels; a Gemini session opens in a conversation window with
+  the Gemini mark on its model chip and its rail row, takes messages from the
+  command bar, resumes, and sleeps and wakes like the others. Harbor reads
+  Antigravity's own records for the conversation and a status line for whether it
+  is idle, working or waiting for an approval. The first session in a profile
+  that never ran Antigravity shows Google's own terms screens in the window's
+  terminal; Harbor never answers them. The setup wizard and the phone know
+  Gemini too. Antigravity is installed and updated by hand; Harbor's update chip
+  leaves it alone.
+- A Harbor built from this repository starts again: since the session-rename
+  change it stopped at launch with "resolveConfigFile is not defined".
 - Copy and paste keep their formatting. Pasting from Teams, Outlook, Word,
   Google Docs, a web page or another Harbor window brings real bullets,
   nesting, numbering, bold, italics, links, headings and quotes into the
@@ -30,7 +43,8 @@
   were, and every prompt and reply shows its time.
 
 - Harbor has a new look on desktop and phone: a dark coastal night scene behind
-  glass panels, the Inter typeface, plan usage shown as bars, and a roomier
+  the windows (solid panes in the Schibsted Grotesk typeface on desktop, glass
+  panels in Inter on the phone), plan usage shown as bars, and a roomier
   message box with its buttons on the right. Everything works the way it did,
   the glass is drawn without a live blur so it costs no more graphics power
   than before, and the whiteboard is now a dark canvas.

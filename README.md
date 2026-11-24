@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/tpgiv1995/harbor/actions/workflows/ci.yml/badge.svg)](https://github.com/tpgiv1995/harbor/actions/workflows/ci.yml)
 
-![Harbor: Claude Code, Codex and Cursor on one stage, with question forms, a rich composer, Tasks, Notes, whiteboards, file previews and a self-hosted phone client](docs/hero.png)
+![Harbor: Claude Code, Codex, Cursor and Gemini on one stage, with question forms, a rich composer, Tasks, Notes, whiteboards, file previews and a self-hosted phone client](docs/hero.png)
 
-Harbor runs and monitors **Claude Code**, **OpenAI Codex** and **Cursor** CLI
-sessions side by side. Open a session from the project rail to read its live
-transcript in a conversation window. The stage holds up to sixteen windows;
-one command bar drives the selected session. Each window also has a `>_`
-toggle for its real terminal.
+Harbor runs and monitors **Claude Code**, **OpenAI Codex**, **Cursor** and
+**Gemini** (Google's Antigravity CLI) sessions side by side. Open a session
+from the project rail to read its live transcript in a conversation window.
+The stage holds up to sixteen windows; one command bar drives the selected
+session. Each window also has a `>_` toggle for its real terminal.
 
 Harbor can read sessions started outside the app. Sending to one adopts or
 resumes it through Harbor's session daemon.
@@ -33,7 +33,8 @@ resumes it through Harbor's session daemon.
   CLI home's model cache, with fallback choices when it is unavailable.
 - **Files rendered inside Harbor.** Preview HTML, images, PDFs and video, with
   search, filters, sorting and project grouping. Discovery currently reads
-  **Claude Code transcripts only**; Codex and Cursor outputs are not indexed.
+  **Claude Code transcripts only**; Codex, Cursor and Gemini outputs are not
+  indexed.
 - **A phone client you host yourself.** Read and send to provider sessions,
   manage Tasks and edit Notes over loopback or your own tailnet. Phone Notes
   does not yet show desktop groups.
@@ -45,9 +46,9 @@ Session workflow strips open phase inspectors when run records exist. On
 Windows, the taskbar badge draws attention to open sessions needing a response
 or with an unseen completion.
 
-![Four synthetic conversations on the current Harbor stage, across Claude Code, Codex and Cursor](docs/screenshot.png)
+![Four synthetic conversations on the current Harbor stage, across Claude Code, Codex, Cursor and Gemini](docs/screenshot.png)
 
-<sub><b>One stage, three providers.</b> Four conversation windows share the current six-view rail. The selected window receives the command bar's draft. The orchestration chip describes the fixture project's queue; it is separate from a session's workflow strip.</sub>
+<sub><b>One stage, four providers.</b> Four conversation windows share the current six-view rail. The selected window receives the command bar's draft. The orchestration chip describes the fixture project's queue; it is separate from a session's workflow strip.</sub>
 
 <table>
 <tr>
@@ -64,10 +65,10 @@ or with an unseen completion.
 </tr>
 <tr>
 <td width="50%"><a href="docs/screenshots/whiteboard.png"><img src="docs/screenshots/whiteboard.png" alt="An Excalidraw release-workflow board with a flowchart and checklist stickies"></a><br><sub><b>Board.</b> Shapes, stickies, connectors, frames and templates on an Excalidraw canvas. This synthetic scene was written through Harbor's board store and CLI.</sub></td>
-<td width="50%"><a href="docs/screenshots/files.png"><img src="docs/screenshots/files.png" alt="Files discovered from synthetic Claude transcripts, with previews and filters"></a><br><sub><b>Files.</b> Outputs named in recent Claude Code transcripts, previewed inside Harbor. Codex and Cursor discovery remains a known gap.</sub></td>
+<td width="50%"><a href="docs/screenshots/files.png"><img src="docs/screenshots/files.png" alt="Files discovered from synthetic Claude transcripts, with previews and filters"></a><br><sub><b>Files.</b> Outputs named in recent Claude Code transcripts, previewed inside Harbor. Codex, Cursor and Gemini discovery remains a known gap.</sub></td>
 </tr>
 <tr>
-<td width="50%"><a href="docs/screenshots/orch.png"><img src="docs/screenshots/orch.png" alt="An optional project orchestration queue with workers, batches and events"></a><br><sub><b>Optional orchestration.</b> Inspect batches, workers and events. Kickoff needs a companion delegation CLI that this repository does not ship; the wizard disables the view when it finds none.</sub></td>
+<td width="50%"><a href="docs/screenshots/orch.png"><img src="docs/screenshots/orch.png" alt="The Orch view's Team chart: each running agent as a card, with who launched whom, its model, effort and plan, and its sub-workers under the agent that started them"></a><br><sub><b>The Team chart.</b> Every running agent is a card showing who launched whom, its model, effort and plan, with sub-workers under the agent that started them; a run's batch list opens from its card. Kickoff needs a companion delegation CLI that this repository does not ship; the wizard disables the view when it finds none.</sub></td>
 <td width="50%"><a href="docs/screenshots/mobile.png"><img src="docs/screenshots/mobile.png" alt="The current phone client showing a Codex conversation and session switcher"></a><br><sub><b>The phone client.</b> An installable web app served beside your sessions, with Chat, Tasks and Notes. The two screens use the same synthetic corpus as the desktop.</sub></td>
 </tr>
 </table>
@@ -80,7 +81,7 @@ and hidden-window rules are in [the visual guide](docs/VISUALS.md).
 - **Node.js 22.12.0 or newer.** Earlier Node 22 releases do not meet the Vite
   build requirement. Development and CI currently use Node 24.
 - **An installed, signed-in coding-agent CLI.** Configure the providers you use
-  in setup. The standard path uses Claude Code; Codex and Cursor are optional.
+  in setup. The standard path uses Claude Code; Codex, Cursor and Gemini are optional.
 - Harbor's own session daemon, `sessiond`, ships in this repository. It needs
   no separate backend installation.
 
@@ -142,7 +143,7 @@ a second normal launch activates the existing instance. See the
 - **Tasks:** lists, subtasks, due dates and Assign to Claude.
 - **Notes:** a formatted scratchpad with groups, topics, pins and copy controls.
 - **Board:** saved whiteboards with drawing tools, templates and board management.
-- **Orch:** project queues and kickoff controls, shown only when enabled. It
+- **Orch:** the Team chart of running agents and project queue kickoff controls, shown only when enabled. It
   requires an external companion; see [Commands](docs/COMMANDS.md).
 - **Files:** previews of outputs discovered in recent Claude Code transcripts.
 

@@ -3,6 +3,10 @@ function subSessionKind(row) {
   if (!row) return null;
   if (row.isChildTask || /^BATCH TITLE:/i.test(String(row.firstPrompt || '')) || /^BATCH TITLE:/i.test(String(row.title || ''))) return 'batch worker';
   if ((row.provider || 'claude') === 'claude' && row.entrypoint === 'sdk-cli') return 'headless Claude';
+  // A print-mode `agy -p` run lands in the same store as a typed conversation with
+  // the same records. Provider history marks it headless when none of the files only
+  // the interactive TUI writes (annotations, history.jsonl, a summaries title) name it.
+  if (row.provider === 'gemini' && row.headless === true && !row.delegatedBy) return 'headless Gemini';
   if (row.provider === 'codex') {
     const lineage = row.lineage || {};
     const source = row.source?.subagent;
@@ -24,12 +28,15 @@ function subSessionReadOnly(row) {
 function interactiveAgentArgv(provider, argv) {
   if (!Array.isArray(argv) || !argv.length) return null;
   const binaryPattern = provider === 'claude' ? /(?:^|[/\\])claude(?:\.exe|\.cmd|\.js)?$|claude-code[/\\]cli\.js$/i
-    : provider === 'codex' ? /(?:^|[/\\])codex(?:\.exe|\.cmd|\.js)?$/i : null;
+    : provider === 'codex' ? /(?:^|[/\\])codex(?:\.exe|\.cmd|\.js)?$/i
+      : provider === 'gemini' ? /(?:^|[/\\])agy(?:\.exe|\.cmd)?$/i : null;
   const binary = binaryPattern ? argv.findIndex((arg) => binaryPattern.test(arg)) : -1;
   if (binary < 0) return null;
   const args = argv.slice(binary + 1);
   if (provider === 'claude') return !args.some((arg) => arg === '-p' || arg === '--print' || arg.startsWith('--print='));
   if (provider === 'codex') return !args.some((arg) => arg === 'exec' || arg === 'e');
+  // agy: -p / --print is a headless run; acp, models and update are not a TUI either.
+  if (provider === 'gemini') return !args.some((arg) => arg === '-p' || arg === '--print' || arg.startsWith('--print=')) && !['acp', 'models', 'update'].includes(args[0]);
   return null;
 }
 

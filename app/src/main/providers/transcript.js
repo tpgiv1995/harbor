@@ -22,6 +22,7 @@ const { processAliveFromEvidence } = require('../../shared/session-run-state.cjs
 const { pastTense, progressive } = require('./plain-english.js');
 const { imageStore } = require('./image-store.js');
 const { readCodexInheritedHistory } = require('./codex-inherited-history.js');
+const { UUID_RE: GEMINI_ID_RE, geminiStoreRoot, geminiTranscriptPath, unwrapUserRequest } = require('./gemini-store.js');
 
 
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
@@ -145,6 +146,28 @@ function modelDisplay(modelId) {
   return { id: modelId, name: modelName(modelId), tone: modelTone(modelId) };
 }
 
+// Antigravity writes the model as a slug with its effort baked in
+// ('gemini-4-hydrogen-low', 'claude-opus-5-5-high', 'gpt-oss-120b-medium'; the
+// list `agy models` prints). The family is the slug without that suffix, and
+// the suffix is the effort, so the chip reads "Gemini 4 Hydrogen" and the
+// effort badge reads "low" the way a Claude window's do. The NAME is derived
+// from the slug, never from a table, so a new model needs no code change.
+const GEMINI_EFFORT_SUFFIX = /-(low|medium|high|xhigh|max)$/;
+function geminiModelParts(slug) {
+  const id = String(slug || '').trim();
+  if (!id) return null;
+  const match = GEMINI_EFFORT_SUFFIX.exec(id);
+  return { id, family: match ? id.slice(0, match.index) : id, effort: match ? match[1] : null };
+}
+function geminiModelName(family) {
+  return String(family || '')
+    .split('-')
+    .filter(Boolean)
+    .map((part) => (/^(gpt|oss)$/i.test(part) ? part.toUpperCase() : /^\d/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(' ')
+    .replace(/(\d) (\d)\b/g, '$1.$2');
+}
+
 // The inverse of modelName, for the cap-menu current-row highlight: a friendly
 // "Fable 5.1" back to its canonical id. Standard versioned Claude names
 // round-trip (spaces and dots become hyphens); an alias with no version
@@ -254,6 +277,15 @@ function transcriptPathFor({ provider = 'claude', sessionId, cwd, home = os.home
   if (provider === 'cursor') {
     return path.join(home, '.cursor', 'projects', cursorProjectDir(cwd), 'agent-transcripts', sessionId, `${sessionId}.jsonl`);
   }
+  if (provider === 'gemini') {
+    // brain/<uuid>/... under the profile's store: derivable from the id alone,
+    // no cwd. An id that is not a uuid names no conversation (and could climb out of the store).
+    return GEMINI_ID_RE.test(String(sessionId || '')) ? geminiTranscriptPath(geminiStoreRoot(home), String(sessionId).toLowerCase()) : null;
+  }
+  // A provider this function does not know has NO path. It used to fall through
+  // to Claude's project-dir path, so a fourth provider's session was looked up
+  // as a Claude conversation (2026-11-23: the silent fallback Gemini's arrival would have hit).
+  if (provider !== 'claude') return null;
   // Claude's path is deterministic: the cwd munged into a project dir, then
   // <session id>.jsonl. Deriving it is what lets a window render a session the
   // INDEX has not caught up to yet (see findProviderTranscript).
@@ -298,6 +330,15 @@ async function firstExistingPath(candidates, concurrency = STORE_SCAN_CONCURRENC
 }
 
 async function findProviderTranscript({ provider, sessionId, cwd, home = os.homedir(), scanStore = true }) {
+  if (provider === 'gemini') {
+    // The profile's store, derived from the id alone. Null when the file is not
+    // there yet (a new conversation writes it on its first prompt), never Claude's
+    // path. A conversation in another Gemini profile's home is found through the
+    // provider history's row (meta.path), which names its own store.
+    const candidate = transcriptPathFor({ provider, sessionId, home });
+    if (!candidate) return null;
+    try { await fsp.access(candidate); return candidate; } catch { return null; }
+  }
   if (provider === 'cursor') {
     const candidate = transcriptPathFor({ provider, sessionId, cwd, home });
     try { await fsp.access(candidate); return candidate; } catch { return null; }
@@ -488,6 +529,8 @@ function actionForToolUse(block) {
       return mk('Searched', input.pattern, { cv: input.path ? basename(input.path) : null });
     case 'Glob':
       return mk('Globbed', input.pattern);
+    case 'list_dir':
+      return mk('Listed', basename(input.path) || input.path || null);
     case 'Task':
     case 'Agent':
       return mk('Delegated', input.description || input.subagent_type || 'subagent');
@@ -586,6 +629,75 @@ function actionForToolUse(block) {
   const mcp = name.match(/^mcp__(.+?)__(.+)$/);
   if (mcp) return mk(prettyToolName(mcp[2]), null, { cv: mcp[1].replace(/^claude_ai_/, '') });
   return mk(prettyToolName(name), primaryInputValue(input));
+}
+
+// Antigravity's tool calls ({ name, args }) in the shape actionForToolUse already
+// draws, so a Gemini window's rows use the SAME verbs as every other provider's.
+// Names seen in real transcripts: read_file, write_file, run_command,
+// manage_task, send_message, invoke_subagent. The rest are the names agy's own
+// hooks page lists for its other tools. A Path can arrive wrapped in an extra
+// pair of quotes ('"C:\\dev\\x"'), so they are stripped. An unknown tool keeps
+// its own name, drawn as a plain row.
+function geminiToolUse(call) {
+  const name = String(call?.name || 'Tool');
+  const args = call?.args && typeof call.args === 'object' ? call.args : {};
+  const text = (value) => (typeof value === 'string' ? value.replace(/^"+|"+$/g, '') : null);
+  const file = text(args.Path ?? args.AbsolutePath ?? args.TargetFile ?? args.FilePath ?? args.file_path ?? args.path);
+  switch (name) {
+    case 'read_file':
+    case 'view_file': {
+      const start = Number(args.StartLine);
+      return { name: 'Read', input: { file_path: file, ...(Number.isFinite(start) && start > 1 ? { offset: start } : {}) } };
+    }
+    case 'write_file':
+    case 'write_to_file':
+      return { name: 'Write', input: { file_path: file, content: args.Content ?? args.CodeContent } };
+    case 'edit_file':
+    case 'replace_file_content':
+      return { name: 'Edit', input: { file_path: file, old_string: args.TargetContent ?? args.OldString ?? args.old_string, new_string: args.ReplacementContent ?? args.NewString ?? args.new_string } };
+    case 'multi_replace_file_content': {
+      const chunks = Array.isArray(args.ReplacementChunks) ? args.ReplacementChunks : [];
+      return { name: 'Edit', input: {
+        file_path: file,
+        old_string: chunks.map((chunk) => chunk?.TargetContent ?? '').join('\n'),
+        new_string: chunks.map((chunk) => chunk?.ReplacementContent ?? '').join('\n'),
+      } };
+    }
+    case 'run_command':
+      return { name: 'Bash', input: { command: args.CommandLine ?? args.command, description: args.toolSummary } };
+    case 'list_dir':
+      return { name: 'list_dir', input: { path: text(args.DirectoryPath ?? args.Path) } };
+    case 'find_by_name':
+      return { name: 'Glob', input: { pattern: args.Pattern } };
+    case 'grep_search':
+      return { name: 'Grep', input: { pattern: args.Query, path: text(args.SearchPath) } };
+    case 'search_web':
+      return { name: 'WebSearch', input: { query: args.query ?? args.Query } };
+    case 'read_url_content':
+      return { name: 'WebFetch', input: { url: args.Url } };
+    case 'manage_task': {
+      const action = String(args.Action || '').toLowerCase();
+      return action === 'kill'
+        ? { name: 'TaskStop', input: { task_id: args.TaskId } }
+        : { name: 'TaskOutput', input: { task_id: args.TaskId } };
+    }
+    case 'invoke_subagent': {
+      const first = Array.isArray(args.Subagents) ? args.Subagents[0] : args;
+      return { name: 'Agent', input: { description: first?.Role || first?.TypeName || 'subagent' } };
+    }
+    case 'send_message':
+      return { name: 'send_message', input: { recipient: args.Recipient } };
+    case 'manage_subagents':
+      return { name: 'list_agents', input: {} };
+    case 'schedule':
+      return args.CronExpression
+        ? { name: 'CronCreate', input: { cron: args.CronExpression } }
+        : { name: 'ScheduleWakeup', input: { delaySeconds: args.DurationSeconds, reason: args.Prompt } };
+    case 'ask_permission':
+      return { name: 'request_user_input_async', input: { questions: [{ question: args.Reason || args.Target }] } };
+    default:
+      return { name, input: args };
+  }
 }
 
 // A shell command row. Claude writes a plain-English description on almost
@@ -1069,6 +1181,7 @@ const PRESENT_TENSE = {
   Read: 'Reading',
   Searched: 'Searching',
   Globbed: 'Globbing',
+  Listed: 'Listing',
   Delegated: 'Delegating',
   Fetched: 'Fetching',
   'Searched web': 'Searching the web',
@@ -1533,6 +1646,10 @@ class TranscriptParser {
     if (!obj || typeof obj !== 'object') return changed;
     if (this.provider === 'codex') return this.applyCodexLine(obj);
     if (this.provider === 'cursor') return this.applyCursorLine(obj);
+    if (this.provider === 'gemini') return this.applyGeminiLine(obj);
+    // Only Claude's own records reach the parser below; a provider this file does
+    // not parse renders nothing rather than being read as Claude's shape.
+    if (this.provider !== 'claude') return changed;
     if (obj.isSidechain) return changed;
     if (turnSignal(obj) === 'idle') this.header.lastSignal = 'idle';
     const ts = obj.timestamp || null;
@@ -1967,6 +2084,77 @@ class TranscriptParser {
       }
     }
     this.header.lastSignal = this.pendingTools.size ? 'tool-pending' : 'idle';
+    return changed;
+  }
+
+  // Antigravity's transcript_full.jsonl: one step per line, { step_index, source,
+  // type, status, created_at, ... } (measured 2026-11-23 over every record in a
+  // real corpus: USER_INPUT, PLANNER_RESPONSE, GENERIC, SYSTEM_MESSAGE).
+  //  - USER_INPUT: the typed words inside <USER_REQUEST> (unwrapUserRequest).
+  //  - PLANNER_RESPONSE: the model's step. `content` with no `tool_calls` is the
+  //    answer and ends the turn (no real step carried both). `tool_calls` are
+  //    action rows; each carries { name, args }. `model` is the slug the step
+  //    ran on (header chip + effort), the token counts are the prompt size.
+  //    `thinking` is the model's private reasoning: not drawn, like Claude's.
+  //  - GENERIC: a tool's RESULT. It names no tool, and results arrive one per
+  //    call in the order the calls were made, so they settle the oldest pending
+  //    row first (the same order pendingTools holds them). status ERROR, or a
+  //    "Command exited with code N" with N not 0, is a failed row.
+  //  - SYSTEM_MESSAGE: bookkeeping. "...stopped due to server restart" after a
+  //    resume means the calls still pending will never finish.
+  // The step schema has no id to pair on and no context window: the percentage
+  // comes only from the status tee (DESIGN D5), never from a guess (C21).
+  applyGeminiLine(obj) {
+    const changed = [];
+    const ts = obj.created_at || null;
+    if (ts) this.header.lastEventTs = ts;
+    if (obj.type === 'USER_INPUT') {
+      const text = unwrapUserRequest(obj.content);
+      if (!text) return changed;
+      const peer = typedSenderParts(text);
+      this.push({ kind: 'user', text: clipProse(peer ? peer.body : text), ts, ...(peer ? { peer: true, peerFrom: peer.from } : {}) });
+      this.header.lastSignal = 'user-turn';
+    } else if (obj.type === 'PLANNER_RESPONSE') {
+      const parts = geminiModelParts(obj.model);
+      if (parts) {
+        this.header.model = { id: parts.id, name: geminiModelName(parts.family), tone: 'other' };
+        if (parts.effort) this.header.effort = parts.effort;
+      }
+      const tokens = (Number(obj.input_tokens) || 0) + (Number(obj.cache_read_tokens) || 0);
+      if (tokens > 0) {
+        this.header.contextTokens = tokens;
+        this.header.contextPct = this.learnedWindow
+          ? Math.max(1, Math.min(99, Math.round((tokens / this.learnedWindow) * 100)))
+          : null;
+      }
+      const text = typeof obj.content === 'string' ? obj.content.trim() : '';
+      if (text) this.push({ kind: 'assistant', text: clipProse(text), ts });
+      const calls = Array.isArray(obj.tool_calls) ? obj.tool_calls : [];
+      calls.forEach((call, index) => {
+        const toolId = `gemini-${obj.step_index ?? this.seq}-${index}`;
+        const action = this.push({ kind: 'action', toolId, status: 'run', ts, ...actionForToolUse(geminiToolUse(call)) });
+        this.pendingTools.set(toolId, action);
+      });
+      if (calls.length) this.header.lastSignal = 'tool-pending';
+      else if (text) this.header.lastSignal = 'idle';
+    } else if (obj.type === 'GENERIC') {
+      const first = this.pendingTools.keys().next();
+      if (!first.done) {
+        const action = this.pendingTools.get(first.value);
+        const failed = obj.status === 'ERROR' || Boolean(obj.error) || /Command exited with code [1-9]/.test(String(obj.content || ''));
+        action.status = failed ? 'err' : 'ok';
+        this.pendingTools.delete(first.value);
+        changed.push(action.key);
+        // More results owed: still running tools. None owed: the model reads them next.
+        this.header.lastSignal = this.pendingTools.size ? 'tool-pending' : 'user-turn';
+      }
+    } else if (obj.type === 'SYSTEM_MESSAGE' && /stopped due to server restart/i.test(String(obj.content || ''))) {
+      for (const action of this.pendingTools.values()) {
+        action.status = 'err';
+        changed.push(action.key);
+      }
+      this.pendingTools.clear();
+    }
     return changed;
   }
 
@@ -2929,7 +3117,11 @@ function createTranscriptProvider(options = {}) {
       // 2026-07-20: real 20% of a 1M window rendered as 99% of 200k every time
       // Pat glanced at a busy young session).
       try {
-        const teeFile = path.join(contextCacheDir, `${entry.sessionId}.json`);
+        // A Gemini window's tee is the status-line payload agy itself hands the
+        // command, written by Harbor's tee script as gemini-<id>.json (DESIGN D5):
+        // the numbers sit under context_window, not at the top level.
+        const gemini = entry.provider === 'gemini';
+        const teeFile = path.join(contextCacheDir, gemini ? `gemini-${entry.sessionId}.json` : `${entry.sessionId}.json`);
         const teeStat = await fsp.stat(teeFile);
         const teeRecentlyRendered = (Date.now() - teeStat.mtimeMs) < TEE_RECENT_MS;
         const transcriptHasGrownPastTee = stat.mtimeMs > (teeStat.mtimeMs + TEE_TRANSCRIPT_SKEW_MS);
@@ -2943,13 +3135,16 @@ function createTranscriptProvider(options = {}) {
           entry.teeCache = { mtimeMs: teeStat.mtimeMs, size: teeStat.size, raw };
         }
         if (teeRecentlyRendered || !transcriptHasGrownPastTee) {
-          const pct = raw?.used_percentage;
+          const pct = gemini ? raw?.context_window?.used_percentage : raw?.used_percentage;
           entry.teedContextPct = (typeof pct === 'number' && pct >= 1 && pct <= 99)
             ? Math.round(pct) : null;
           // A pairable tee also TEACHES the window size (pct = tokens/window,
           // Claude's own math), applied after this read parses the tokens it
           // describes. pct >= 5 keeps rounding noise from implying nonsense.
-          entry.teeWindowTeacherPct = (typeof pct === 'number' && pct >= 5 && pct <= 99) ? pct : null;
+          // Not taught from Gemini's: its percentage counts what agy counts, and the
+          // transcript's token fields are not guaranteed to add up to the same
+          // figure, so the implied window would be a guess. It brings its own size.
+          entry.teeWindowTeacherPct = (!gemini && typeof pct === 'number' && pct >= 5 && pct <= 99) ? pct : null;
         } else {
           entry.teedContextPct = null;
           entry.teeWindowTeacherPct = null;
@@ -2960,12 +3155,14 @@ function createTranscriptProvider(options = {}) {
         // first statusline repaint, before any percentage exists. Still
         // Claude's own number — never a Harbor guess — so the no-invented-
         // denominator rule holds. Same clamp and drift rule as the learner.
-        const teeWindow = raw?.context_window_size;
+        const teeWindow = gemini ? raw?.context_window?.context_window_size : raw?.context_window_size;
         if (Number.isFinite(teeWindow) && teeWindow >= 50_000 && teeWindow <= 5_000_000) {
           const current = entry.parser.learnedWindow;
           if (!current || Math.abs(teeWindow - current) / current > 0.1) {
             entry.parser.setLearnedWindow(teeWindow);
-            fsp.writeFile(path.join(contextCacheDir, `${entry.sessionId}.learned.json`), JSON.stringify({
+            // agy's window is held in memory only: Claude's learned.json is the
+            // Claude window store, and a Gemini id has none.
+            if (!gemini) fsp.writeFile(path.join(contextCacheDir, `${entry.sessionId}.learned.json`), JSON.stringify({
               window_tokens: teeWindow,
               source: 'context_window_size',
               learned_at: new Date().toISOString(),
@@ -2974,7 +3171,11 @@ function createTranscriptProvider(options = {}) {
         }
         // Owner pid (statusline runs as the claude process's child and tees
         // $PPID): the EXACT liveness signal, regardless of tee freshness.
-        entry.ownerPid = Number.isInteger(raw?.pid) && raw.pid > 1 ? raw.pid : null;
+        // Not for Gemini: readOwnerProcessAlive matches the process's command line
+        // against 'claude', so an agy pid would read as a DEAD owner (and a dead
+        // owner means "not working") everywhere /proc answers. Its liveness is the
+        // transcript's recency, like codex and cursor.
+        entry.ownerPid = !gemini && Number.isInteger(raw?.pid) && raw.pid > 1 ? raw.pid : null;
       } catch { entry.teedContextPct = null; entry.ownerPid = null; entry.teeCache = null; }
       // Liveness beacon: Claude Code re-renders the statusline every ~3 min
       // while a session's composer is OPEN, stamping statusline-state/<id>.json
@@ -3451,6 +3652,8 @@ module.exports = {
   imagesFromContent,
   buildDiffPreview,
   transcriptPathFor,
+  geminiToolUse,
+  geminiModelParts,
   findProviderTranscript,
   readTranscriptTailRecords,
   readTranscriptLastSignal,

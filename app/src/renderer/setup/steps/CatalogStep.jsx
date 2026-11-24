@@ -107,8 +107,8 @@ export function CatalogStep({ state, patch, errors, showErrors }) {
 
       {!homes.length ? (
         <div className="setup-note">
-          No Claude config home was configured, so there is no command catalogue to read. Codex and
-          Cursor sessions do not expose one to Harbor.
+          No Claude config home was configured, so there is no command catalogue to read. Codex,
+          Cursor and Gemini sessions do not expose one to Harbor.
         </div>
       ) : (
         <div className="setup-card">

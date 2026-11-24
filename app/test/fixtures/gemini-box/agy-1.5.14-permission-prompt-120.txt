@@ -1,0 +1,26 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       <account> (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Hydrogen (Low)
+   ▄▀▀    ▀▀▄     C:/work/proof
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Use the shell to run exactly: echo hi   Then reply with only the output.
+
+● Ran (echo hi) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Requesting permission for:
+   echo hi
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'echo hi'
+  3. Yes, and always allow for commands that start with 'echo hi' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+probe-status tool_use

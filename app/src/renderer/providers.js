@@ -28,7 +28,8 @@ export const PROVIDERS = {
     color: '#a78bfa',
     logo: new URL('../../assets/logo-cursor.svg', import.meta.url).href,
   },
-  // Usage only (the plans dropdown): Gemini through Google's Antigravity CLI has no Harbor panes.
+  // Gemini through Google's Antigravity CLI (agy): a full session provider since 2026-11-23, like
+  // claude, codex and cursor (rail rows, window chip, new-session tab, phone, Team chart, plans menu).
   gemini: {
     label: 'Gemini',
     color: '#8ab4f8',

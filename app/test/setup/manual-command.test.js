@@ -16,7 +16,7 @@ test('every offered Windows sign-in fallback runs in hidden PowerShell', { skip:
   fs.mkdirSync(binDir);
   for (const spec of Object.values(PROVIDER_LOGIN)) {
     fs.writeFileSync(path.join(binDir, spec.defaultBin + '.cmd'),
-      '@echo off\r\necho STUB:%~n0:%*\r\necho CLAUDE_HOME=%CLAUDE_CONFIG_DIR%\r\necho CODEX_HOME=%CODEX_HOME%\r\nexit /b 0\r\n');
+      '@echo off\r\necho STUB:%~n0:%*\r\necho CLAUDE_HOME=%CLAUDE_CONFIG_DIR%\r\necho CODEX_HOME=%CODEX_HOME%\r\necho AGY_ROOT=%USERPROFILE%\r\necho AGY_NO_UPDATE=%AGY_CLI_DISABLE_AUTO_UPDATE%\r\nexit /b 0\r\n');
   }
   const shell = path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe');
   const env = { ...process.env, PATH: binDir + path.delimiter + path.join(process.env.SystemRoot, 'System32'), PATHEXT: '.COM;.EXE;.BAT;.CMD', HOME: root, USERPROFILE: root, APPDATA: root, LOCALAPPDATA: root, TEMP: root, TMP: root };
@@ -80,7 +80,12 @@ test('every offered Windows sign-in fallback runs in hidden PowerShell', { skip:
             assert.equal(alive, false);
             assert.equal(run.status, 0, run.stderr);
             assert.ok(run.stdout.includes(`STUB:${spec.defaultBin}:${spec.args.join(' ')}`), run.stdout);
-            if (provider !== 'cursor') assert.ok(run.stdout.includes(`${provider === 'claude' ? 'CLAUDE_HOME' : 'CODEX_HOME'}=${home}`), run.stdout);
+            // Gemini's displayed fallback moves agy's state root with USERPROFILE and pins its version.
+            if (provider === 'gemini') {
+              assert.ok(run.stdout.includes(`AGY_ROOT=${home}`), run.stdout);
+              assert.ok(run.stdout.includes('AGY_NO_UPDATE=true'), run.stdout);
+            }
+            if (provider !== 'cursor' && provider !== 'gemini') assert.ok(run.stdout.includes(`${provider === 'claude' ? 'CLAUDE_HOME' : 'CODEX_HOME'}=${home}`), run.stdout);
           });
         }
       }

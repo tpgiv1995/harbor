@@ -26,6 +26,7 @@ const { readCodexRolloutCwd: codexRolloutCwd } = require('./providers/provider-s
 const { readTranscriptTailRecords } = require('./providers/transcript.js');
 const { planResumeNudge } = require('./resume-nudge.js');
 const { stripInvisible, dropAllInvisible } = require('../shared/invisible-chars.cjs');
+const { resolveContextDir } = require('./isolation.js');
 
 // Claude Code's project-dir munge: every non-alphanumeric cwd character
 // becomes '-' ('/home/you/dev/harbor' -> '-home-you-dev-harbor').
@@ -42,7 +43,31 @@ function codexDayDir(home, date) {
   );
 }
 
+// Antigravity CLI (`agy`, the Gemini provider) keeps every conversation under
+// its home's brain folder, whatever folder it ran in:
+// <home>\.gemini\antigravity-cli\brain\<uuid>\.system_generated\logs\transcript_full.jsonl
+// (the plain transcript.jsonl cuts long fields, so it can never confirm a long
+// message). The home is the profile root, which agy follows through USERPROFILE.
+const GEMINI_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const geminiStoreDir = (home = os.homedir()) => path.join(home, '.gemini', 'antigravity-cli');
+const geminiBrainDir = (home = os.homedir()) => path.join(geminiStoreDir(home), 'brain');
+const geminiTranscriptFile = (home, id) => path.join(geminiBrainDir(home), String(id), '.system_generated', 'logs', 'transcript_full.jsonl');
+// A transcript path the rail may hold as the CUT copy names the sibling that is
+// whole; anything else is returned as it came.
+const GEMINI_CUT_COPY_RE = /([\\/]\.system_generated[\\/]logs[\\/])transcript\.jsonl$/;
+function geminiWholeTranscriptPath(file) {
+  const named = String(file || '');
+  if (!GEMINI_CUT_COPY_RE.test(named)) return named;
+  const whole = named.replace(GEMINI_CUT_COPY_RE, '$1transcript_full.jsonl');
+  return fsSync.existsSync(whole) ? whole : named;
+}
+
+// Where each provider keeps the transcripts a NEW pane could have just written.
+// A provider this module does not know lists NOTHING: it used to fall through to
+// the Claude project folder, so a fourth provider launched in a folder that had
+// Claude sessions was linked to a Claude conversation (2026-11-23 map, item 2).
 function providerTranscriptDirs(provider, cwd, home = os.homedir(), date = new Date()) {
+  if (!provider || provider === 'claude') return [claudeProjectDir(cwd, home)];
   if (provider === 'codex') {
     // Yesterday too: a session launched before midnight writes its rollout
     // into the NEXT day's directory, and a scan of today alone would then
@@ -51,18 +76,26 @@ function providerTranscriptDirs(provider, cwd, home = os.homedir(), date = new D
     return [codexDayDir(home, date), codexDayDir(home, yesterday)];
   }
   if (provider === 'cursor') {
-    const project = String(cwd || '').replace(/^\/+/, '').replace(/[^a-zA-Z0-9]/g, '-');
+    // Runs of non-alphanumerics collapse to ONE dash, as Cursor names the
+    // folder and as provider-history.js, transcript.js and provider-session-
+    // link.js all read it: 'C:\dev\x' is 'C-dev-x'. The per-character form
+    // made 'C--dev-x', which no Windows path ever produces.
+    const project = String(cwd || '').replace(/^\/+/, '').replace(/[^a-zA-Z0-9]+/g, '-');
     return [path.join(home, '.cursor', 'projects', project, 'agent-transcripts')];
   }
-  return [claudeProjectDir(cwd, home)];
+  if (provider === 'gemini') return [geminiBrainDir(home)];
+  return [];
 }
 
-async function transcriptFiles(provider, cwd) {
+async function transcriptFiles(provider, cwd, home = os.homedir()) {
   const files = [];
-  for (const dir of providerTranscriptDirs(provider, cwd)) {
+  for (const dir of providerTranscriptDirs(provider, cwd, home)) {
     if (provider === 'cursor') {
       const ids = await fs.readdir(dir).catch(() => []);
       for (const id of ids) files.push({ id, file: path.join(dir, id, `${id}.jsonl`) });
+    } else if (provider === 'gemini') {
+      const ids = await fs.readdir(dir).catch(() => []);
+      for (const id of ids.filter((name) => GEMINI_ID_RE.test(name))) files.push({ id, file: geminiTranscriptFile(home, id) });
     } else {
       const names = await fs.readdir(dir).catch(() => []);
       for (const name of names.filter((item) => item.endsWith('.jsonl'))) {
@@ -74,6 +107,20 @@ async function transcriptFiles(provider, cwd) {
     }
   }
   return files;
+}
+
+// A folder path as one comparable string: slashes one way, no trailing slash, a
+// file:/// URI undone, case folded on Windows. Used to ask "did this
+// conversation start in the pane's folder".
+function sameFolder(a, b, platform = process.platform) {
+  const norm = (value) => {
+    let text = String(value || '').trim();
+    if (/^file:\/\/\//i.test(text)) { try { text = decodeURIComponent(text.replace(/^file:\/\/\//i, '')); } catch { text = text.replace(/^file:\/\/\//i, ''); } }
+    text = text.replace(/\\/g, '/').replace(/\/+$/, '');
+    return platform === 'win32' ? text.toLowerCase() : text;
+  };
+  const left = norm(a);
+  return Boolean(left) && left === norm(b);
 }
 
 // Provisional session<->pane links. The sidebar model learns pane<->session
@@ -775,6 +822,151 @@ function codexBoxState(screen, sent = {}) {
   return codexBoxMatch(screen, sent).state;
 }
 
+// ---- ANTIGRAVITY CLI (`agy`, the Gemini provider): THE BOX AND ITS DIALOGS ----
+// Measured on agy 1.5.14 in a 120-column ConPTY (docs/orchestration/2026-11-23-
+// gemini-provider/AGY-FACTS.md section 2; real screens in test/fixtures/
+// gemini-box/). The prompt box is the rows BETWEEN THE LAST TWO full-width
+// rules (U+2500 only, never the hyphens of the Terms page or the corners of the
+// colour-scheme preview): a first row that starts "> " (or is a bare ">"), and
+// continuation rows indented two spaces (no ">"). The empty box draws a dim
+// mode placeholder ("Auto mode: ... (shift+tab to cycle)") or, in default
+// mode, a bare ">". A submitted prompt is echoed ABOVE the box as "> text"
+// under a SHORT rule, so the echo is never the box.
+// What a dialog looks like: no box at all (the permission menu draws one rule
+// under "Command" and a numbered list with a pointer under it; the trust,
+// colour-scheme and Terms pages draw no rule), and the rows below the last rule
+// are the dialog's own. A numbered row or a "Navigate" hint there therefore
+// means a dialog owns the keys, and digits typed into it ANSWER it (probe p16:
+// the key 1 approved a command). The slash menu is the one list that hangs
+// under a real box: its footer says "tab Complete".
+// A custom statusLine REPLACES the bottom status row ("? for shortcuts" idle,
+// "esc to cancel" working), so the status words are a hint, never a gate.
+const GEMINI_RULE_RE = /^\s*\u2500{10,}\s*$/u;
+const GEMINI_PROMPT_ROW_RE = /^>(?:[ \t]|$)/;
+const GEMINI_MODE_HINT_RE = /^(?:Auto|Accept-edits|Plan) mode:.*\(shift\+tab to cycle\)$/;
+const GEMINI_NUMBERED_ROW_RE = /^\s*>?\s*\d{1,2}\.\s+\S/;
+const GEMINI_DIALOG_WORDS_RE = /Run this command\?|Accept this file edit\?|Requesting permission for/;
+const GEMINI_NAVIGATE_RE = /\u2191\/\u2193 Navigate/;
+const GEMINI_SLASH_MENU_RE = /tab Complete/;
+const GEMINI_FIRST_RUN_RE = /Terms of Service & Data Use|Choose your color scheme|Welcome to Antigravity CLI/;
+const GEMINI_TRUST_RE = /Do you trust the contents of this project/;
+// A big paste is drawn as ONE placeholder, not as text (measured 2026-11-23: a
+// single line over 1,000 characters is "[Pasted text #1 1001 chars]", 999 shows
+// whole; 16 or more lines is "[Pasted text #1 +16 lines]", 15 shows whole; the
+// count is the characters or lines pasted, though a 1,853-character line drew
+// 1,871). What the placeholder holds cannot be read off the screen.
+const GEMINI_PASTE_RE = /^\[Pasted text #(\d+) (?:(\d+) chars|\+(\d+) lines)\]$/;
+const GEMINI_STATUS_IDLE_RE = /^\s*\? for shortcuts\b/;
+const GEMINI_STATUS_WORKING_RE = /^\s*esc to cancel\b/;
+function geminiDialogRows(rows) {
+  return rows.some((row) => GEMINI_NUMBERED_ROW_RE.test(row) || GEMINI_DIALOG_WORDS_RE.test(row)
+    || (GEMINI_NAVIGATE_RE.test(row) && !rows.some((other) => GEMINI_SLASH_MENU_RE.test(other))));
+}
+// The prompt box, or null when none is drawn (a dialog, a first-run page, a
+// pane still starting). `inside` is the draft with whitespace dropped ('' for
+// an empty box or its mode placeholder); `raw` keeps the rows' own spacing.
+function geminiPromptBox(screen) {
+  const lines = String(screen || '').split('\n');
+  while (lines.length && !lines.at(-1).trim()) lines.pop();
+  const rules = [];
+  lines.forEach((line, i) => { if (GEMINI_RULE_RE.test(line)) rules.push(i); });
+  if (rules.length < 2) return null;
+  const bottom = rules.at(-1);
+  const top = rules.at(-2);
+  const below = lines.slice(bottom + 1);
+  if (bottom - top < 2 || geminiDialogRows(below)) return null;
+  const rows = lines.slice(top + 1, bottom).map((row) => row.replace(/\s+$/, ''));
+  if (!GEMINI_PROMPT_ROW_RE.test(rows[0])) return null;
+  const raw = rows.map((row, i) => (i === 0 ? row.replace(/^>[ \t]?/, '') : row.replace(/^ {1,2}/, ''))).join('\n');
+  const hint = GEMINI_MODE_HINT_RE.test(raw.replace(/\s+/g, ' ').trim());
+  const pasted = GEMINI_PASTE_RE.exec(raw.trim());
+  const status = below.filter((row) => row.trim()).at(-1) || '';
+  return {
+    raw,
+    inside: hint ? '' : squashSpace(raw),
+    paste: pasted ? { n: Number(pasted[1]), chars: pasted[2] ? Number(pasted[2]) : null, lines: pasted[3] ? Number(pasted[3]) : null } : null,
+    menuOpen: below.some((row) => GEMINI_SLASH_MENU_RE.test(row)),
+    status: GEMINI_STATUS_IDLE_RE.test(status) ? 'idle' : GEMINI_STATUS_WORKING_RE.test(status) ? 'working' : 'unknown',
+  };
+}
+// A paste placeholder is compatible with a message when its count could be that
+// message's: the line count to within one (a swallowed Enter may add a row), the
+// character count to within the 1% agy was seen to add and a little more. It
+// proves nothing about WHICH text it holds; the caller decides whose paste it is.
+function geminiPasteFits(paste, text) {
+  const body = String(text || '');
+  if (!paste || !body) return false;
+  if (paste.lines != null) return Math.abs(paste.lines - body.split('\n').length) <= 1;
+  const chars = [...body].length;
+  return paste.chars >= Math.floor(chars * 0.98) - 2 && paste.chars <= Math.ceil(chars * 1.1) + 64;
+}
+// What a draft is, for a person: a paste by its size, text by its start.
+function describeGeminiDraft(raw) {
+  const pasted = GEMINI_PASTE_RE.exec(String(raw || '').trim());
+  if (pasted) return pasted[2] ? `a pasted block of ${Number(pasted[2]).toLocaleString('en-US')} characters` : `a pasted block of ${pasted[3]} lines`;
+  const words = String(raw || '').replace(/\s+/g, ' ').trim();
+  return `text ("${words.slice(0, 40)}${words.length > 40 ? '...' : ''}")`;
+}
+// What the box says about this message: 'noprompt' (no box), 'exact' (it holds
+// this message and nothing else), 'placeholder' (it holds ONE paste placeholder
+// whose size fits this message), 'empty' (nothing, or its mode placeholder) or
+// 'other' (some other draft). Whitespace is dropped on both sides, as the box
+// re-wraps and indents what was typed. There is no "ends with": whether a long
+// draft clips or collapses in the box is not measured, so a partial match is
+// never enough to press Enter.
+function geminiBoxMatch(screen, { text = '' } = {}) {
+  const box = geminiPromptBox(screen);
+  if (!box) return { state: 'noprompt', draft: null, menuOpen: false, status: 'unknown' };
+  const shown = squashSpace(text);
+  const state = box.inside === '' ? 'empty' : box.inside === shown ? 'exact' : box.paste && geminiPasteFits(box.paste, text) ? 'placeholder' : 'other';
+  return { state, draft: box.inside, raw: box.raw, paste: box.paste, menuOpen: box.menuOpen, status: box.status };
+}
+const geminiBoxState = (screen, sent = {}) => geminiBoxMatch(screen, sent).state;
+// Why there is no box: 'first-run' (colour scheme, Terms of Service & Data Use:
+// the person's consent, never answered by Harbor), 'trust' (the folder dialog),
+// 'permission' (a numbered question), 'menu' (another list) or 'unknown'.
+function geminiBlockedKind(screen) {
+  const text = String(screen || '');
+  if (!text.trim()) return 'blank';
+  if (GEMINI_FIRST_RUN_RE.test(text)) return 'first-run';
+  if (GEMINI_TRUST_RE.test(text)) return 'trust';
+  const lines = text.split('\n');
+  let last = -1;
+  lines.forEach((line, i) => { if (GEMINI_RULE_RE.test(line)) last = i; });
+  const below = last >= 0 ? lines.slice(last + 1) : lines;
+  if (geminiDialogRows(below)) return 'permission';
+  if (GEMINI_NAVIGATE_RE.test(text)) return 'menu';
+  return 'unknown';
+}
+// A Gemini dialog owns the screen: its question words, or a first-run or trust
+// page, in the last rows, and no Claude composer glyph under them (Claude can
+// QUOTE these words in prose above its own composer). parseMenu is shaped for
+// Claude's pointer: it reads agy's permission menu as a menu with options 2 to
+// 4 (the pointer row "> 1." is not its pointer), and a card built on that would
+// steer by arrow keys it has no way to check, onto "Persist to settings.json".
+// The window shows the generic answer panel (raw screen, direct keys) instead.
+function geminiDialogOwnsScreen(screen) {
+  const lines = String(screen || '').split('\n').filter((line) => line.trim()).slice(-30);
+  const tail = lines.join('\n');
+  if (/[\u276f\u256d]/u.test(lines.slice(-10).join('\n'))) return false;
+  return GEMINI_DIALOG_WORDS_RE.test(tail) || GEMINI_FIRST_RUN_RE.test(tail) || GEMINI_TRUST_RE.test(tail);
+}
+// The words a USER_INPUT record holds: agy wraps what was typed in
+// <USER_REQUEST>...</USER_REQUEST> and follows it with its own metadata
+// sections. The closing tag counts only when a metadata section or the end
+// follows it, so a message that quotes the tag is read whole.
+// Gemini's name in messages; the other providers keep the id they always showed.
+const providerLabel = (provider) => (provider === 'gemini' ? 'Gemini' : provider);
+// Written into the profile's settings.json by agy itself (docs: "persists across
+// sessions"), or purges the sign-in the Carrier Bridge worker shares: Harbor never
+// types them for anyone (AGY-FACTS sections 2 and 5).
+const GEMINI_PERSISTING_COMMAND_RE = /^\/(model|effort|logout)(?=\s|$)/i;
+function geminiUserRequest(content) {
+  if (typeof content !== 'string') return null;
+  const found = /^\s*<USER_REQUEST>\n?([\s\S]*?)\n?<\/USER_REQUEST>(?=\s*(?:<ADDITIONAL_METADATA>|<USER_SETTINGS_CHANGE>|$))/.exec(content);
+  return found ? found[1] : null;
+}
+
 // CLAUDE'S SESSIONS VIEW IS NOT THIS CONVERSATION (measured on CLI 2.1.295,
 // 2026-10-09). The ← key at an empty prompt moves the conversation "to the
 // background" and opens a list of sessions whose input reads "describe a task
@@ -1051,12 +1243,12 @@ function createSessionSend(deps) {
   // A brand-new session's id is unknowable until Claude writes its transcript
   //; which happens on the FIRST MESSAGE, not at boot (live-caught). Poll
   // fast at first (the common case: Pat types right away), then back off.
-  const findFreshTranscript = async ({ cwd, provider = 'claude', sinceMs, knownIds = new Set(), timeoutMs = 45_000 }) => {
+  const findFreshTranscript = async ({ cwd, provider = 'claude', sinceMs, knownIds = new Set(), timeoutMs = 45_000, home = os.homedir() }) => {
     const start = Date.now();
     const deadline = start + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const candidates = await transcriptFiles(provider, cwd);
+        const candidates = await transcriptFiles(provider, cwd, home);
         for (const { id, file } of candidates) {
           if (knownIds.has(id)) continue;
           try {
@@ -1067,6 +1259,12 @@ function createSessionSend(deps) {
             // in the same project would otherwise hand this pane a delegate's
             // id; the rollout's own session_meta.cwd is the honest test.
             if (provider === 'codex' && cwd && await codexRolloutCwd(file) !== cwd) continue;
+            // Antigravity keeps every conversation of the profile in ONE brain
+            // folder and its transcript holds no folder, so a new conversation
+            // is this pane's only when the tee, the prompt history or the
+            // folder map says it started here. No evidence yet is not a match:
+            // keep polling, never guess.
+            if (provider === 'gemini' && !(await geminiFolders(home, id)).some((folder) => sameFolder(folder, cwd, platform))) continue;
             return id;
           } catch { /* raced a delete */ }
         }
@@ -1076,9 +1274,9 @@ function createSessionSend(deps) {
     return null;
   };
 
-  const listTranscriptIds = async (cwd, provider = 'claude') => {
+  const listTranscriptIds = async (cwd, provider = 'claude', home = os.homedir()) => {
     try {
-      return new Set((await transcriptFiles(provider, cwd)).map(({ id }) => id));
+      return new Set((await transcriptFiles(provider, cwd, home)).map(({ id }) => id));
     } catch {
       return new Set();
     }
@@ -1408,9 +1606,11 @@ function createSessionSend(deps) {
     if (String(sessionId).startsWith('pane:')) return { skip: true };
     const meta = await getSessionMeta(sessionId).catch(() => null);
     if (!meta?.path) return { skip: true };
+    // An Antigravity row may name the cut copy; only the whole one can hold a long message.
+    const wholePath = geminiWholeTranscriptPath(meta.path);
     let preSize = 0;
-    try { preSize = (await fs.stat(meta.path)).size; } catch { preSize = 0; }
-    return { path: meta.path, preSize };
+    try { preSize = (await fs.stat(wholePath)).size; } catch { preSize = 0; }
+    return { path: wholePath, preSize };
   };
 
   const confirmDelivery = async (
@@ -1424,7 +1624,7 @@ function createSessionSend(deps) {
     let transcriptPath = prepared?.path || null;
     if (!transcriptPath) {
       const meta = await getSessionMeta(sessionId).catch(() => null);
-      transcriptPath = meta?.path || null;
+      transcriptPath = meta?.path ? geminiWholeTranscriptPath(meta.path) : null;
     }
     if (!transcriptPath) return true; // nothing to confirm against
     const envTimeout = process.env.HARBOR_CONFIRM_TIMEOUT_MS
@@ -1579,6 +1779,15 @@ function createSessionSend(deps) {
       const framed = said.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/i);
       return exactWords(framed ? framed[1] : said) === want;
     }
+    // Antigravity's transcript_full.jsonl: a USER_EXPLICIT USER_INPUT step whose
+    // <USER_REQUEST> IS the typed words (its metadata sections follow it). A
+    // model, tool or system step never confirms, and a send that carried
+    // pictures reaches Gemini as a path line inside its words, never as items.
+    if (rec.type === 'USER_INPUT') {
+      if (rec.source !== 'USER_EXPLICIT' || images) return false;
+      const said = geminiUserRequest(rec.content);
+      return said !== null && exactWords(said) === want;
+    }
     return false;
   };
   // PICTURE BYTES ARE DROPPED AS THE TRANSCRIPT STREAMS IN (Sol's review,
@@ -1682,7 +1891,7 @@ function createSessionSend(deps) {
         let lines = cut >= 0 ? complete.split('\n') : [];
         if (skipTail && cut >= 0) { lines = lines.slice(1); skipTail = false; }
         for (const line of lines) {
-          if (!line.trim() || (!nearby(line) && !line.includes('queue-operation') && !line.includes('user_message') && !line.includes('"user"') && !line.includes('queued_command'))) continue;
+          if (!line.trim() || (!nearby(line) && !line.includes('queue-operation') && !line.includes('user_message') && !line.includes('"user"') && !line.includes('queued_command') && !line.includes('USER_INPUT'))) continue;
           let rec = null;
           try { rec = JSON.parse(line); } catch { rec = null; } // never confirms (recordConfirms)
           if (forms.some((one) => recordConfirms(rec, line, one.needle, one.text, one.images, { strict: Boolean(one.strict), chips: one.chips, paths: one.paths }))) return true;
@@ -2737,11 +2946,272 @@ function createSessionSend(deps) {
     return drafts.some((draft) => squashSpace(draft).replace(IMAGE_CHIPS_RE, '') === chipped.rest);
   };
 
+  // ---- GEMINI (ANTIGRAVITY CLI) SENDS: THE CODEX-LEVEL GATE ----------------
+  // Not Cursor's blind Enter. A Gemini send types into a DRAWN box only (a
+  // dialog takes keys: digits answer a permission menu, probe p16), refuses a
+  // box that already holds other text, presses Enter only once the box shows
+  // exactly this message (agy drops keys typed within about a second of startup
+  // or of a dialog closing, so "typed" is not "shown"), watches the box let go
+  // of it, and leaves delivery to the conversation's own transcript: a
+  // USER_EXPLICIT USER_INPUT step whose <USER_REQUEST> holds the typed words
+  // (recordConfirms). Consent and permission screens are the person's:
+  // Harbor never answers them (design decision D12), it says where to.
+  // Measured on agy 1.5.14, docs/orchestration/2026-11-23-gemini-provider/
+  // AGY-FACTS.md section 2; screens in test/fixtures/gemini-box/.
+  const GEMINI_POLL_MS = 150;
+  const GEMINI_PROMPT_POLLS = 40;
+  const GEMINI_HOLD_POLLS = 80;
+  const GEMINI_ENTER_SETTLE_MS = 160;
+  const GEMINI_ENTER_POLLS = 16;
+  const GEMINI_ENTER_POLL_MS = 250;
+  const GEMINI_ENTER_QUIET_READS = 3;
+  const GEMINI_ENTER_SPARES = 2;
+  // The status tee is rewritten about every 300 ms while agy's state changes,
+  // so a pending-permission reading this fresh is current.
+  const GEMINI_TEE_FRESH_MS = 3000;
+  // A paste placeholder hides its text, so a box holding one is this send's only
+  // on Harbor's own word: what it typed into that pane, and when. In memory, per
+  // process, like Codex's: a restart forgets it and the placeholder is "busy".
+  const GEMINI_OWN_PASTE_MS = 10 * 60_000;
+  const geminiTyped = new Map(); // paneId -> { text, at }
+  const geminiHolds = (match) => match.state === 'exact' || match.state === 'placeholder';
+  const geminiHoldPolls = (text) => GEMINI_HOLD_POLLS + Math.ceil([...String(text || '')].length * 2 / GEMINI_POLL_MS);
+  const geminiNeedsAnswerError = (kind, { late = false } = {}) => {
+    const first = kind === 'first-run';
+    const error = new Error(first
+      ? 'Gemini is on its first-run screens (colour scheme, Terms of Service & Data Use). Those choices are yours to make, so Harbor typed and sent nothing. Your text is kept. Open the >_ terminal for this window, answer them there, then send again'
+      : kind === 'trust'
+        ? 'Gemini is asking whether to trust this folder, so Harbor typed and sent nothing. Your text is kept. Open the >_ terminal for this window and answer it there, then send again'
+        : late
+          ? 'A question appeared in Gemini while Harbor was typing, so it did not press Enter and nothing was sent. Your text is kept. Open the >_ terminal for this window and answer the question there first'
+          : 'Gemini is waiting on a question (a permission or a choice), so Harbor typed and sent nothing; keys typed there would answer it. Your text is kept. Open the >_ terminal for this window and answer it there, then send again');
+    error.code = first ? 'GEMINI_FIRST_RUN' : 'GEMINI_NEEDS_ANSWER';
+    return error;
+  };
+  const geminiNoPromptError = () => {
+    const error = new Error('Gemini is not showing its prompt box (a dialog or a list may be open, or it is still starting), so Harbor typed and sent nothing. Your text is kept. Check the >_ terminal');
+    error.code = 'GEMINI_NO_PROMPT';
+    return error;
+  };
+  const geminiBoxBusyError = (draft) => {
+    const error = new Error(`Gemini's box already holds ${describeGeminiDraft(draft)} that is not this message, so Harbor typed and sent nothing (Enter would have sent both). Your text is kept. Send or clear what is in the box from the >_ terminal first`);
+    error.code = 'GEMINI_BOX_BUSY';
+    return error;
+  };
+  const geminiNeverHeldError = () => {
+    const error = new Error('Gemini\'s box never showed your text (it ignores keys typed in its first second or just after a dialog closes), so Harbor did not press Enter and nothing was sent. Your text is kept. If it appears in the box later, sending again presses Enter for it without typing it twice. Check the >_ terminal');
+    error.code = 'PROMPT_NEVER_HELD';
+    return error;
+  };
+  const geminiBoxChangedError = () => {
+    const error = new Error('Gemini\'s box does not show exactly your message (other text in it, or part of it missing), so Harbor did not press Enter and nothing was sent. Your text is kept. Check the >_ terminal before sending again');
+    error.code = 'GEMINI_BOX_CHANGED';
+    return error;
+  };
+  const geminiNotSubmittedError = () => {
+    const error = new Error('Your message is in Gemini\'s box, but Gemini did not take the Enter (three tries). Open the >_ terminal and press Enter there; sending again presses Enter for it without typing it twice');
+    error.code = 'GEMINI_NOT_SUBMITTED';
+    return error;
+  };
+  const geminiUnconfirmedError = () => {
+    const error = new Error('Harbor pressed Enter, but Gemini\'s box did not come back empty, so Harbor cannot tell whether your message went. Your text is kept. Check the >_ terminal before sending again');
+    error.code = 'GEMINI_UNCONFIRMED';
+    error.submission = 'unknown';
+    return error;
+  };
+  const geminiCommandRefusedError = (command) => {
+    const error = new Error(`Harbor does not run ${command} in a Gemini window: agy writes it into the profile's settings (${command === '/logout' ? 'and it signs every Gemini session on this machine out' : 'so it would change every later Gemini session too'}). Start a new Gemini session with the model or effort you want, or run it yourself in the >_ terminal`);
+    error.code = 'GEMINI_COMMAND_REFUSED';
+    return error;
+  };
+  // The statusLine tee Harbor's launcher wires for every Gemini session:
+  // gemini-<conversation id>.json in the context folder (the payload agy pipes
+  // in, plus ownerPid and writtenAt). Absent before the first prompt, and when
+  // the session is a provisional pane: that is no evidence, never a refusal.
+  const geminiContextDir = deps.contextDir || resolveContextDir();
+  const readGeminiTee = async (conversationId) => {
+    if (!GEMINI_ID_RE.test(String(conversationId || ''))) return null;
+    const file = path.join(geminiContextDir, `gemini-${conversationId}.json`);
+    try {
+      const [raw, stat] = await Promise.all([fs.readFile(file, 'utf8'), fs.stat(file)]);
+      const tee = JSON.parse(raw.replace(/^﻿/, ''));
+      const written = typeof tee.writtenAt === 'number' ? tee.writtenAt : Date.parse(tee.writtenAt);
+      return {
+        state: String(tee.agent_state || ''),
+        pending: tee.tool_confirmation_pending === true,
+        cwd: typeof tee.cwd === 'string' ? tee.cwd : null,
+        ageMs: Math.max(0, Date.now() - (Number.isFinite(written) ? written : stat.mtimeMs)),
+      };
+    } catch {
+      return null;
+    }
+  };
+  // Folders a conversation is known to have started in, from the three places
+  // agy leaves one (the transcript itself holds none): Harbor's own status tee,
+  // the prompt history (its first line has no conversation id, later ones do),
+  // and the folder-to-latest-conversation map.
+  const geminiFolders = async (home, id) => {
+    const folders = new Set();
+    const tee = await readGeminiTee(id);
+    if (tee?.cwd) folders.add(tee.cwd);
+    try {
+      const handle = await fs.open(path.join(geminiStoreDir(home), 'history.jsonl'), 'r');
+      try {
+        const { size } = await handle.stat();
+        const length = Math.min(size, 256 * 1024);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, size - length);
+        for (const line of buffer.toString('utf8').split('\n')) {
+          if (!line.includes(id)) continue;
+          try {
+            const entry = JSON.parse(line);
+            if (entry?.conversationId === id && typeof entry.workspace === 'string') folders.add(entry.workspace);
+          } catch { /* a cut first line or a partial one */ }
+        }
+      } finally {
+        await handle.close();
+      }
+    } catch { /* no history yet */ }
+    try {
+      const last = JSON.parse(await fs.readFile(path.join(geminiStoreDir(home), 'cache', 'last_conversations.json'), 'utf8'));
+      for (const [folder, value] of Object.entries(last || {})) if (value === id) folders.add(folder);
+    } catch { /* no map yet */ }
+    return [...folders];
+  };
+  const waitForGeminiBox = async (paneId, sent, done, polls, { onWait = null, noticeAt = 20 } = {}) => {
+    let screen = '';
+    let match = geminiBoxMatch('', sent);
+    let noBox = 0;
+    for (let poll = 0; poll < polls; poll += 1) {
+      if (poll === noticeAt && onWait) {
+        try { onWait(); } catch { /* a status line must never break a send */ }
+      }
+      screen = await readScreen(paneId, MENU_READ_LINES);
+      match = geminiBoxMatch(screen, sent);
+      noBox = match.state === 'noprompt' ? noBox + 1 : 0;
+      if (done(match)) break;
+      // A dialog that stays up is not coming back in this send's time.
+      if (noBox >= 8 && geminiBlockedKind(screen) !== 'unknown') break;
+      await sleep(GEMINI_POLL_MS);
+    }
+    return { ...match, screen };
+  };
+  // After Enter: an EMPTY box means agy took it; the same text still there on
+  // three quiet reads means the Enter was swallowed (a spare goes only on a
+  // frame that still shows exactly this message, at most twice); anything else
+  // in the box, or no box, is left to the transcript and gets no more keys.
+  // A slash command never gets a spare: its menu would take it as a choice.
+  const watchGeminiEnter = async (paneId, workspaceId, sent, checkTarget = async () => {}, { spares: allowed = GEMINI_ENTER_SPARES } = {}) => {
+    let held = 0;
+    let spares = 0;
+    for (let poll = 0; poll < GEMINI_ENTER_POLLS * (1 + allowed); poll += 1) {
+      await sleep(GEMINI_ENTER_POLL_MS);
+      const screen = await readScreen(paneId, MENU_READ_LINES);
+      const match = geminiBoxMatch(screen, sent);
+      if (match.state === 'empty') { geminiTyped.delete(paneId); return spares ? 'taken-after-retry' : 'taken'; }
+      if (match.state === 'noprompt') return 'unconfirmed';
+      if (match.state === 'other') {
+        logSend({ paneId, phase: 'gemini-box-changed-after-enter' });
+        await captureSendScreen(paneId, 'gemini-box-changed', screen);
+        return 'unconfirmed';
+      }
+      held += 1;
+      if (!allowed || held < GEMINI_ENTER_QUIET_READS) continue;
+      if (spares >= allowed) {
+        logSend({ paneId, phase: 'gemini-not-submitted' });
+        await captureSendScreen(paneId, 'gemini-not-submitted', screen);
+        throw geminiNotSubmittedError();
+      }
+      spares += 1;
+      held = 0;
+      logSend({ paneId, phase: 'enter-retry', attempt: spares });
+      await checkTarget();
+      await typeInto(paneId, workspaceId, '\r');
+    }
+    return 'unconfirmed';
+  };
+  // Single-line text is typed; multi-line (and anything long enough to be at
+  // risk when typed) goes as ONE bracketed paste, which agy draws as a
+  // multi-line prompt without submitting. A first character the prompt treats
+  // as a key ("?" opens the help panel on an empty box) also goes as a paste.
+  const geminiPayload = (text, slash) => (slash ? text
+    : /^[?!@#]/.test(text) && !mayCollapseToPlaceholder(text) ? asPaste(text) : typedPayload(text));
+  const deliverGemini = async (paneId, workspaceId, text, images, { onWait = null, checkTarget = async () => {}, sessionId = null, markEnter = () => {} } = {}) => {
+    if (images.length) throw new Error('pictures reach a Gemini window as a path line in the message; none can be pasted');
+    const slash = isSlashCommand(text);
+    const sent = { text };
+    // 1. A drawn box, or a plain reason there is none.
+    const drawn = await waitForGeminiBox(paneId, { text: '' }, (match) => match.state !== 'noprompt', GEMINI_PROMPT_POLLS, {
+      onWait: onWait ? () => onWait('Gemini has not drawn its prompt box yet. Harbor waits for it before typing') : null,
+    });
+    if (drawn.state === 'noprompt') {
+      const kind = geminiBlockedKind(drawn.screen);
+      logSend({ paneId, phase: 'gemini-no-prompt', kind });
+      await captureSendScreen(paneId, `gemini-${kind}`, drawn.screen);
+      throw kind === 'first-run' || kind === 'trust' || kind === 'permission' || kind === 'menu'
+        ? geminiNeedsAnswerError(kind === 'menu' ? 'permission' : kind)
+        : geminiNoPromptError();
+    }
+    // 2. The tee's word: a permission question the screen does not show yet.
+    const tee = await readGeminiTee(sessionId);
+    if (tee?.pending && tee.ageMs < GEMINI_TEE_FRESH_MS) {
+      logSend({ paneId, phase: 'gemini-tee-pending' });
+      throw geminiNeedsAnswerError('permission');
+    }
+    // 3. What the box holds. This very message (an earlier try that showed up
+    // late) gets Enter only; anything else is never typed behind.
+    const here = geminiBoxMatch(drawn.screen, sent);
+    const own = geminiTyped.get(paneId);
+    const ownPaste = here.state === 'placeholder' && Boolean(own) && own.text === text && clock() - own.at < GEMINI_OWN_PASTE_MS;
+    if (here.state === 'other' || (here.state === 'placeholder' && !ownPaste)) {
+      logSend({ paneId, phase: 'gemini-box-busy' });
+      await captureSendScreen(paneId, 'gemini-box-busy', drawn.screen);
+      throw geminiBoxBusyError(here.raw);
+    }
+    const alreadyInBox = here.state === 'exact' || ownPaste;
+    if (alreadyInBox) logSend({ paneId, phase: 'already-in-prompt' });
+    if (!alreadyInBox) {
+      await checkTarget();
+      geminiTyped.set(paneId, { text, at: clock() });
+      await typeInto(paneId, workspaceId, geminiPayload(text, slash));
+      debug('deliver: gemini text written');
+      // 4. Enter only once the box shows the message (or, for a big paste, its
+      // placeholder: the box was verified empty a moment ago under the pane lock,
+      // so a placeholder of this size is this send's own).
+      const held = await waitForGeminiBox(paneId, sent, geminiHolds, geminiHoldPolls(text), {
+        onWait: onWait ? () => onWait('Gemini is still taking in your message. Harbor presses Enter as soon as its box shows it') : null,
+        noticeAt: 40,
+      });
+      if (!geminiHolds(held)) {
+        logSend({ paneId, phase: 'prompt-never-held', state: held.state });
+        await captureSendScreen(paneId, `gemini-${held.state}`, held.screen);
+        if (held.state === 'noprompt') throw geminiNeedsAnswerError(geminiBlockedKind(held.screen) === 'first-run' ? 'first-run' : 'permission', { late: true });
+        throw held.state === 'other' ? geminiBoxChangedError() : geminiNeverHeldError();
+      }
+    }
+    await sleep(GEMINI_ENTER_SETTLE_MS);
+    // 5. The last look before the Enter, and the target after it.
+    const last = await readScreen(paneId, MENU_READ_LINES);
+    if (!geminiHolds(geminiBoxMatch(last, sent))) {
+      logSend({ paneId, phase: 'draft-changed-before-enter' });
+      await captureSendScreen(paneId, 'draft-changed-before-enter', last);
+      throw geminiBoxChangedError();
+    }
+    await checkTarget();
+    markEnter();
+    await typeInto(paneId, workspaceId, '\r');
+    deliveredPanes.add(paneId);
+    debug('deliver: gemini enter written');
+    const enterState = await watchGeminiEnter(paneId, workspaceId, sent, checkTarget, { spares: slash ? 0 : GEMINI_ENTER_SPARES });
+    logSend({ paneId, phase: 'enter-state', state: enterState });
+    return enterState;
+  };
+
   // No default. A silent `= 'claude'` here is what let a codex pane be driven
   // down the claude path: wrong readiness test, wrong composer guard, and a
   // Claude chip on a gpt-5.6-sol session. Callers resolve it explicitly.
   // `onWait(detail)` lets a caller say why a send is taking minutes.
-  const deliverUnlocked = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null, exactDraftOnly = false, verifyTarget = null, onVerified = null } = {}) => {
+  const deliverUnlocked = async (paneId, workspaceId, text, images = [], provider = 'claude', { onWait = null, exactDraftOnly = false, verifyTarget = null, onVerified = null, sessionId = null } = {}) => {
     // The target is checked again at the input boundary (Sol's review, round
     // eleven): the composer reads between the in-lock check and the first
     // keystroke take long enough for a /clear typed in the raw terminal.
@@ -2802,7 +3272,7 @@ function createSessionSend(deps) {
       // since 2026-10-09 its Enter waits until the prompt SHOWS the text
       // (waitForPromptToHold), which a TUI still starting cannot fake.
       if (provider !== 'claude' && !deliveredPanes.has(paneId)) {
-        const label = provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : provider;
+        const label = provider === 'codex' ? 'Codex' : provider === 'cursor' ? 'Cursor' : provider === 'gemini' ? 'Gemini' : provider;
         const outcome = {};
         const settled = await waitForProviderReady(paneId, {
           timeoutMs: 15_000,
@@ -2818,6 +3288,10 @@ function createSessionSend(deps) {
           throw error;
         }
         if (!settled) debug('deliver: fresh', provider, 'pane never settled; sending anyway');
+      }
+      // A Gemini send has its own gate (deliverGemini) and shares nothing below.
+      if (provider === 'gemini') {
+        return await deliverGemini(paneId, workspaceId, text, images, { onWait, checkTarget, sessionId, markEnter: () => { enterWritten = true; } });
       }
       // Every Codex send starts at a drawn composer. Slash commands can open
       // their own popup after typing, but must not type into a pre-existing
@@ -3496,6 +3970,7 @@ function createSessionSend(deps) {
     for (const source of ['recent', 'visible']) {
       let screen = '';
       try { screen = await readPane(paneId, MENU_READ_LINES, source); } catch { return null; }
+      if (geminiDialogOwnsScreen(screen)) continue;
       const menu = parseMenu(screen);
       if (menu) return menu;
     }
@@ -4662,8 +5137,21 @@ function createSessionSend(deps) {
         trimmed = clean;
       }
     }
-    const imagePaths = Array.isArray(images) ? images.filter(Boolean) : [];
+    let imagePaths = Array.isArray(images) ? images.filter(Boolean) : [];
     if (!trimmed && imagePaths.length === 0 && !resumeOnly) throw new Error('nothing to send');
+    // A GEMINI PICTURE IS A PATH LINE IN THE MESSAGE (agy attaches from the
+    // clipboard only, and Harbor never writes Pat's clipboard): the words, with
+    // the line, are THE message from here on, typed, matched in the box and
+    // confirmed in the transcript as one text. Whether agy's own file tools
+    // open the picture is not measured (REPORT-send.md).
+    if (provider === 'gemini' && imagePaths.length) {
+      for (const imagePath of imagePaths) {
+        if (!(await imageFileReady(imagePath))) throw imageMissingError();
+      }
+      const named = imagePaths.map((imagePath) => (/\s/.test(imagePath) ? `"${imagePath}"` : imagePath));
+      trimmed = `${named.length === 1 ? 'Image:' : 'Images:'} ${named.join(' ')}${trimmed ? `\n${trimmed}` : ''}`;
+      imagePaths = [];
+    }
     // A Claude send carrying a picture is a message (see deliver's typedAsSlash).
     const slash = isSlashCommand(trimmed) && !((provider || 'claude') === 'claude' && imagePaths.length);
     // CODEX ON WINDOWS DROPS SMART PUNCTUATION AND SYMBOLS (codexSafeText), so
@@ -4673,6 +5161,10 @@ function createSessionSend(deps) {
     // (confirming the original instead reported a delivered send as failed;
     // Astra's round-2 review). A removal that would turn the message into a
     // Codex command ("✓/exit" -> "/exit") or into nothing sends nothing.
+    if (provider === 'gemini' && slash) {
+      const persisting = GEMINI_PERSISTING_COMMAND_RE.exec(trimmed);
+      if (persisting) throw geminiCommandRefusedError(`/${persisting[1].toLowerCase()}`);
+    }
     const target = await resolvePane(sessionId, pane);
     let normalizedNote = null;
     let exactDraftOnly = false;
@@ -4750,15 +5242,15 @@ function createSessionSend(deps) {
         const confirmation = trimmed ? await prepareDeliveryConfirmation(sessionId) : null;
         try {
           const verifyTarget = () => verifyPaneServes(sessionId, target, { strict: strictTarget });
-          const enterState = await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly, verifyTarget, onVerified });
+          const enterState = await deliver(target.paneId, target.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly, verifyTarget, onVerified, sessionId });
           const pictureOnly = claudePictureOutcome(enterState);
           if (pictureOnly) {
             status(sessionId, 'sent', pictureOnly === 'unconfirmed' ? PICTURE_UNCONFIRMED_NOTE : undefined);
             return { ok: true, paneId: target.paneId, delivery: pictureOnly };
           }
-          if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && enterState === 'unconfirmed') {
-            if (!trimmed || !confirmation || confirmation.skip) throw codexUnconfirmedError();
-            status(sessionId, 'sending', 'checking that Codex took it');
+          if ((provider === 'codex' || provider === 'gemini') && !slash && (trimmed || imagePaths.length) && enterState === 'unconfirmed') {
+            if (!trimmed || !confirmation || confirmation.skip) throw provider === 'gemini' ? geminiUnconfirmedError() : codexUnconfirmedError();
+            status(sessionId, 'sending', `checking that ${provider === 'gemini' ? 'Gemini' : 'Codex'} took it`);
             // Only while this send still owns the status: a newer send's
             // outcome is never overwritten by this one's late answer.
             const checkingSeq = statusSeq.get(sessionId);
@@ -4803,7 +5295,7 @@ function createSessionSend(deps) {
     if (provider && provider !== 'claude') {
       const providerMeta = await getSessionMeta(sessionId).catch(() => null);
       if (!providerMeta?.cwd || typeof launchActions.resumeProviderSession !== 'function') {
-        throw new Error(`this ${provider} session is not running in a pane and its working folder is unknown; cannot resume it`);
+        throw new Error(`this ${providerLabel(provider)} session is not running in a pane and its working folder is unknown; cannot resume it`);
       }
       status(sessionId, 'resuming');
       // One resume launch at a time across Harbor processes (round four): the
@@ -4820,7 +5312,7 @@ function createSessionSend(deps) {
         });
         return findFreshPane({ preIds: providerPreIds, cwd: providerMeta.cwd, sessionId });
       });
-      if (!providerFresh) throw new Error(`resumed the ${provider} session, but the new pane never appeared`);
+      if (!providerFresh) throw new Error(`resumed the ${providerLabel(provider)} session, but the new pane never appeared`);
       links.set(sessionId, providerFresh);
       await terminalBridge.requestFocusPane({
         paneId: providerFresh.paneId,
@@ -4830,18 +5322,18 @@ function createSessionSend(deps) {
       // The same boot budget as a first send: a resumed cursor pane is blank
       // while its MCP servers start. A drawn pane keeps its 45 s.
       const providerReady = await waitForProviderReady(providerFresh.paneId, { timeoutMs: 45_000, blankTimeoutMs: 90_000 });
-      if (!providerReady) throw new Error(`${provider} resumed, but its composer never settled; message NOT sent. Your text is kept`);
+      if (!providerReady) throw new Error(`${providerLabel(provider)} resumed, but its composer never settled; message NOT sent. Your text is kept`);
       if (resumeOnly) {
         if (provider === 'codex' && codexReadOnlyNotice(await readScreen(providerFresh.paneId, MENU_READ_LINES))) {
           status(sessionId, 'sent', 'codex session resumed and needs your answer in its window');
           return { ok: true, paneId: providerFresh.paneId, resumed: true };
         }
-        status(sessionId, 'sent', `${provider} session resumed and ready`);
+        status(sessionId, 'sent', `${providerLabel(provider)} session resumed and ready`);
         return { ok: true, paneId: providerFresh.paneId, resumed: true };
       }
       status(sessionId, 'sending');
-      const freshEnter = await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly, verifyTarget: () => verifyPaneServes(sessionId, providerFresh) });
-      if (provider === 'codex' && !slash && (trimmed || imagePaths.length) && freshEnter === 'unconfirmed') throw codexUnconfirmedError();
+      const freshEnter = await deliver(providerFresh.paneId, providerFresh.workspaceId, trimmed, imagePaths, provider, { onWait: waitNotice, exactDraftOnly, verifyTarget: () => verifyPaneServes(sessionId, providerFresh), sessionId });
+      if ((provider === 'codex' || provider === 'gemini') && !slash && (trimmed || imagePaths.length) && freshEnter === 'unconfirmed') throw provider === 'gemini' ? geminiUnconfirmedError() : codexUnconfirmedError();
       status(sessionId, 'sent', normalizedNote || undefined);
       return { ok: true, paneId: providerFresh.paneId, resumed: true, delivery: 'delivered' };
     }
@@ -5258,6 +5750,8 @@ function createSessionSend(deps) {
 
 module.exports = {
   createSessionSend,
+  geminiPasteFits,
+  describeGeminiDraft,
   createLinkRegistry,
   claudeProjectDir,
   providerTranscriptDirs,
@@ -5269,6 +5763,15 @@ module.exports = {
   codexBoxMatch,
   codexBoxDraft,
   codexStartupEcho,
+  geminiPromptBox,
+  geminiDialogOwnsScreen,
+  geminiBoxMatch,
+  geminiBoxState,
+  geminiBlockedKind,
+  geminiUserRequest,
+  geminiBrainDir,
+  geminiWholeTranscriptPath,
+  sameFolder,
   codexSafeText,
   codexChangeNote,
   codexAbsorbAllowanceMs,

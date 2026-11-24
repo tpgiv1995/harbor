@@ -29,7 +29,7 @@ derived defaults in memory, and logs where the copy went.
   "setup":     { "completed": true, "completedAt": "...", "appVersion": "..." },
   "platform":  { "os": "linux", "shell": "..." },
   "profiles":  [ /* see below, at least one */ ],
-  "providers": { "claude": {...}, "codex": {...}, "cursor": {...} },
+  "providers": { "claude": {...}, "codex": {...}, "cursor": {...}, "gemini": {...} },
   "paths":     { /* all optional, all derived when null */ },
   "workflows": [ /* quick commands, ships empty */ ],
   "orchestration": { "enabled": false, "launcher": "...", "researchCommand": "...", "executionCommand": "...", "stateDir": null },
@@ -50,7 +50,7 @@ list of anybody's.
   "label": "Personal",           // display only
   "letter": "P",                 // rail badge, must be unique across profiles
   "color": "#6fa8d8",            // rail badge colour, #rrggbb
-  "provider": "claude",          // claude | codex | cursor
+  "provider": "claude",          // claude | codex | cursor | gemini
   "configHome": "/home/you/.claude",
   "email": null,                 // read back from the account, display only
   "isDefault": false             // exactly one profile should be true
@@ -72,14 +72,47 @@ flags.
 "providers": {
   "claude": { "enabled": true, "bin": "claude" },
   "codex":  { "enabled": true, "bin": "codex" },
-  "cursor": { "enabled": true, "bin": "cursor-agent" }
+  "cursor": { "enabled": true, "bin": "cursor-agent" },
+  "gemini": { "enabled": false, "bin": null }
 }
 ```
 
 `bin` may be a bare name resolved on `PATH` or an absolute path. Precedence at
-launch is `HARBOR_CLAUDE_BIN` / `HARBOR_CODEX_BIN` / `HARBOR_CURSOR_BIN`, then
-this value, then the conventional name. Setting `enabled: false` removes that
+launch is `HARBOR_CLAUDE_BIN` / `HARBOR_CODEX_BIN` / `HARBOR_CURSOR_BIN` /
+`HARBOR_AGY_BIN`, then this value, then the conventional name (Gemini resolves
+its own, below). Setting `enabled: false` removes that
 provider from every menu.
+
+### `gemini`: Google's Antigravity CLI (`agy`)
+
+Gemini is the one provider that ships **off**: Harbor turns it on only when it
+finds the CLI and the config has not already said either way, so a machine
+without `agy` never shows a Gemini tab. Its `bin` is `null` until resolved. The
+lookup, in order: `HARBOR_AGY_BIN`, a real path in `providers.gemini.bin`, the
+`bin` in `~/.harbor/gemini.json`, then the installer's own default location
+(`%LOCALAPPDATA%\agy\bin\agy.exe` on Windows, `~/.local/bin/agy` elsewhere). The
+setup wizard's Gemini card shows what it found and lets you point at another
+copy.
+
+- **Sign-in.** `agy` signs in through Google in its own flow. Harbor never
+  handles that credential and no key or token appears in the config.
+- **First run.** The first time `agy` runs on a machine it shows Google's own
+  colour-scheme and terms screens. Answer them in the session's terminal (the
+  `>_` button on its window): Harbor never answers or pre-fills them, and a
+  message sent before they are answered is refused with a note saying so.
+- **Where its state lives.** By default `agy` keeps everything under your own
+  profile folder, in `.gemini/antigravity-cli`, and one Google sign-in serves
+  every folder. A `gemini` profile whose `configHome` is a different folder
+  moves that state there for its sessions (`HARBOR_AGY_HOME` or the `home` in
+  `~/.harbor/gemini.json` does the same for everything); with your own profile
+  folder, or no named folder at all, nothing moves.
+- **Models and effort.** The model list is `agy`'s own, read from `agy models`
+  and kept as a cache beside the others: each model family appears once, with
+  the effort levels that family has. A launch passes the family and the effort
+  together; `default` omits the model and lets `agy` choose.
+- **Updates.** Gemini is not part of the CLI update notices. Harbor never updates
+  `agy` itself, and it sets `AGY_CLI_DISABLE_AUTO_UPDATE` for every Gemini session
+  it starts.
 
 ## `paths`
 
@@ -148,8 +181,8 @@ What a fresh session launches with, before you change it in the popover.
 ```
 
 For Claude, prefer a family alias such as `opus`, `sonnet` or `haiku` so the
-CLI resolves the current family version. Codex and Cursor use their own model
-identifiers. `"default"` selects the provider default and omits the model flag.
+CLI resolves the current family version. Codex, Cursor and Gemini use their own
+model identifiers (for Gemini, a model family such as the ones `agy models` lists). `"default"` selects the provider default and omits the model flag.
 
 ## Settings that are environment variables, not config keys
 
@@ -160,7 +193,8 @@ Harbor's own session daemon, `sessiond`.
 | --- | --- |
 | `HARBOR_SESSION_BACKEND` | Unset or `sessiond`. Any other value is rejected. |
 | `HARBOR_CONFIG_FILE` | Use this config file instead of the platform default. |
-| `HARBOR_CLAUDE_BIN` / `HARBOR_CODEX_BIN` / `HARBOR_CURSOR_BIN` | Pin a provider binary, outranking `providers.<id>.bin`. |
+| `HARBOR_CLAUDE_BIN` / `HARBOR_CODEX_BIN` / `HARBOR_CURSOR_BIN` / `HARBOR_AGY_BIN` | Pin a provider binary, outranking `providers.<id>.bin`. |
+| `HARBOR_AGY_HOME` | Run Gemini sessions with this folder as their profile root (where `agy` keeps `.gemini/antigravity-cli`) instead of your own. |
 | `HARBOR_NO_TRUST_PREACCEPT` | Set to `1` to stop Harbor pre-accepting Claude Code's per-folder trust dialog, and answer it by hand instead. |
 | `HARBOR_PROJECT_ICONS_DIR`, `HARBOR_TASKS_FILE`, `HARBOR_NOTES_FILE`, `HARBOR_BOARDS_DIR` | Relocate the corresponding store, outranking `paths.*`. |
 

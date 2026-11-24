@@ -36,6 +36,9 @@ const LAUNCHERS = [
   { needle: 'astra-run.mjs', launcher: 'astra-run' },
   { needle: 'cursor-worker.mjs', launcher: 'cursor-worker' },
   { needle: 'cursor-run.mjs', launcher: 'cursor-run' },
+  // Carrier Bridge's Gemini workers (outside this repo, takes the same --cd/--model/--effort words as cursor-worker).
+  // Their conversations live in the worker's own home and are not rail sessions; they only get team-chart cards.
+  { needle: 'gemini-worker.mjs', launcher: 'gemini-worker' },
 ];
 // A test run is a test RUNNER process, never a command line that merely
 // mentions one (a worker's brief, a shell wrapper, `timeout ... npx vitest`).
@@ -372,11 +375,11 @@ function createTeamProvider(options = {}) {
         if (!/node(\.exe)?$/i.test(proc.name || '') && !/node(\.exe)?"?\s/i.test(proc.cmdline || '')) continue;
         const words = commandWords(proc.cmdline);
         const tree = await request('proc-tree', { pid: proc.pid }).catch(() => null);
-        const childProc = (tree?.processes || []).find((row) => row.pid !== proc.pid && /(claude|codex|cursor-agent)(\.exe|\.js|\.cmd)?/i.test(row.cmdline || row.name || '')
-          && !/claude-worker|astra-run|cursor-worker|cursor-run/i.test(row.cmdline || ''));
+        const childProc = (tree?.processes || []).find((row) => row.pid !== proc.pid && /(claude|codex|cursor-agent|(?<![\w-])agy)(\.exe|\.js|\.cmd)?/i.test(row.cmdline || row.name || '')
+          && !/claude-worker|astra-run|cursor-worker|cursor-run|gemini-worker/i.test(row.cmdline || ''));
         const childWords = commandWords(childProc?.cmdline || '');
-        const provider = launcher === 'astra-run' ? 'codex' : launcher.startsWith('cursor') ? 'cursor' : 'claude';
-        const resume = wordValue(childWords, '--resume', '-r') || (childWords.includes('resume') ? childWords[childWords.indexOf('resume') + 1] : null);
+        const provider = launcher === 'astra-run' ? 'codex' : launcher.startsWith('cursor') ? 'cursor' : launcher === 'gemini-worker' ? 'gemini' : 'claude';
+        const resume = (provider === 'gemini' ? wordValue(childWords, '--conversation') : null) || wordValue(childWords, '--resume', '-r') || (childWords.includes('resume') ? childWords[childWords.indexOf('resume') + 1] : null);
         const sessionId = provider === 'claude' ? (wordValue(childWords, '--session-id') || resume || wordValue(words, '--session-id', '--resume')) : (resume && /^[0-9a-f-]{36}$/i.test(resume) ? resume : null);
         const prompt = wordValue(words, '--prompt');
         found.push({

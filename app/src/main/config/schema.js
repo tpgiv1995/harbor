@@ -20,6 +20,12 @@ const SCHEMA = Object.freeze({
     claude: { enabled: true, bin: 'claude' },
     codex: { enabled: true, bin: 'codex' },
     cursor: { enabled: true, bin: 'cursor-agent' },
+    // Gemini (Google's Antigravity CLI) ships UNDECIDED (null), never a persisted false: deriveDefaults makes it true when
+    // the CLI resolves on this machine (providers/gemini-config.js) and leaves it null when it does not, so installing
+    // agy later turns it on at the next load. Only a user's own boolean is ever kept. The resolved path is copied into
+    // `bin` (the setup wizard validates every enabled provider's bin), and gemini.json outranks it, so a re-pin there
+    // still moves every reader.
+    gemini: { enabled: null, bin: null },
   },
   // projectIconsDir stays null by default and is resolved against the Electron
   // userData directory at use, which keeps it correct on all three platforms

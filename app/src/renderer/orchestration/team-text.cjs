@@ -124,6 +124,7 @@ const LAUNCHER_WORDS = {
   'astra-run': 'Astra run',
   'cursor-worker': 'Cursor worker',
   'cursor-run': 'Cursor run',
+  'gemini-worker': 'Gemini worker',
 };
 
 function runModeText(member) {
@@ -131,6 +132,7 @@ function runModeText(member) {
   if (member.launcher && LAUNCHER_WORDS[member.launcher]) return LAUNCHER_WORDS[member.launcher];
   if (member.provider === 'codex') return 'Codex run';
   if (member.provider === 'cursor') return 'Cursor worker';
+  if (member.provider === 'gemini') return 'Gemini worker';
   return 'Headless worker';
 }
 

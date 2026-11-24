@@ -584,3 +584,169 @@ test('setup accepts discovered Codex Ultra and rejects it for a model without it
   state.defaults.model='older';
   assert.equal(model.stepValidation('defaults',state).ok,false);
 });
+
+// -- Gemini (Google's Antigravity CLI, `agy`), 2026-11-23 ------------------------------------------------
+
+const GEMINI_BIN = '/opt/agy/agy';
+function withGemini(state, patch = {}) {
+  return { ...state, gemini: { ...state.gemini, enabled: true, bin: GEMINI_BIN, home: '', ...patch } };
+}
+
+test('the providers step is named for all three optional CLIs', () => {
+  assert.equal(model.STEPS.find((step) => step.id === 'providers').title, 'Codex, Cursor and Gemini');
+});
+
+test('Gemini opens on only when agy was found, with the found path and no home named', () => {
+  const absent = model.initialState(detectedLinux());
+  assert.equal(absent.gemini.enabled, false);
+  assert.equal(absent.gemini.bin, '');
+  assert.equal(absent.gemini.home, '', 'empty means: your own profile folder');
+  assert.equal(absent.gemini.userProfile, '/home/tester');
+
+  const found = model.initialState(detectedLinux({
+    providers: { ...detectedLinux().providers, gemini: { found: true, path: GEMINI_BIN, home: '/home/tester' } },
+  }));
+  assert.equal(found.gemini.enabled, true);
+  assert.equal(found.gemini.bin, GEMINI_BIN);
+  // A detection payload from before Gemini existed (no gemini key) is the absent case, not a crash.
+  assert.equal(model.initialState({ providers: { claude: { found: true } } }).gemini.enabled, false);
+});
+
+test('a Gemini-only install is a valid account, and its default provider is Gemini at agy’s own defaults', () => {
+  const state = model.initialState(detectedLinux({
+    providers: { claude: { found: false }, codex: { found: false }, cursor: { found: false }, gemini: { found: true, path: GEMINI_BIN } },
+    claudeHomes: [],
+  }));
+  assert.equal(state.defaults.provider, 'gemini');
+  assert.equal(state.defaults.model, 'default');
+  assert.equal(state.defaults.effort, 'high');
+  assert.equal(model.accountCount(state), 1);
+  assert.deepEqual(model.enabledProviders(state), ['gemini']);
+  assert.equal(model.canFinish(state), true, model.blockingSteps(state).join(','));
+});
+
+test('the old provider fallback chain is unchanged when Gemini is absent', () => {
+  // Nothing detected at all still falls back to cursor, as it always did.
+  assert.equal(model.initialState({}).defaults.provider, 'cursor');
+  const codexOnly = model.initialState(detectedLinux({
+    providers: { claude: { found: false }, codex: { found: true, path: '/c', home: '/h' }, cursor: { found: false }, gemini: { found: true, path: GEMINI_BIN } },
+    claudeHomes: [],
+  }));
+  assert.equal(codexOnly.defaults.provider, 'codex', 'codex still outranks Gemini');
+  assert.equal(codexOnly.defaults.effort, 'medium');
+});
+
+test('an enabled Gemini needs a binary, and a named home must be an absolute folder', () => {
+  const base = model.initialState(detectedLinux());
+  assert.equal(model.canAdvance('providers', withGemini(base)), true);
+  const noBin = model.stepValidation('providers', withGemini(base, { bin: '  ' }));
+  assert.deepEqual(noBin.errors.map((e) => e.field), ['gemini.bin']);
+  assert.match(noBin.errors[0].message, /agy binary path, or turn Gemini off/);
+  const relative = model.stepValidation('providers', withGemini(base, { home: 'agy-root' }));
+  assert.deepEqual(relative.errors.map((e) => e.field), ['gemini.home']);
+  assert.equal(model.canAdvance('providers', withGemini(base, { home: '/srv/agy-root' })), true);
+  assert.equal(model.canAdvance('providers', withGemini(base, { home: 'D:\\agy-root' })), true);
+  // No profile folder known and no home named: nothing to write for configHome.
+  const lost = model.stepValidation('providers', withGemini({ ...base, gemini: { ...base.gemini, userProfile: '' } }));
+  assert.deepEqual(lost.errors.map((e) => e.field), ['gemini.home']);
+  // Off, none of it matters.
+  assert.equal(model.canAdvance('providers', { ...base, gemini: { ...base.gemini, enabled: false, bin: '', home: 'relative' } }), true);
+});
+
+test('Gemini counts toward the one-account floor and can be the default provider', () => {
+  let state = model.initialState({ homedir: '/home/tester' });
+  assert.equal(model.accountCount(state), 0);
+  assert.equal(model.canAdvance('providers', state), false);
+  state = withGemini(state);
+  assert.equal(model.accountCount(state), 1);
+  assert.equal(model.canAdvance('providers', state), true);
+  state = model.reconcileDefaults(state);
+  assert.equal(state.defaults.provider, 'gemini');
+  assert.equal(model.canAdvance('defaults', state), true);
+  assert.equal(model.stepValidation('defaults', state).errors.length, 0);
+  // Efforts are checked for Gemini (unlike Cursor): one it does not have is refused.
+  const bad = { ...state, defaults: { ...state.defaults, effort: 'ultra' } };
+  assert.deepEqual(model.stepValidation('defaults', bad).errors.map((e) => e.field), ['defaults.effort']);
+  // With the registry loaded, a family's own levels decide.
+  const registry = { gemini: { effortsByModel: { 'gemini-4-hydrogen': ['low', 'medium'] }, efforts: ['low', 'medium', 'high'] } };
+  const hydrogen = { ...state, modelRegistry: registry, defaults: { provider: 'gemini', model: 'gemini-4-hydrogen', effort: 'high' } };
+  assert.deepEqual(model.stepValidation('defaults', hydrogen).errors.map((e) => e.field), ['defaults.effort']);
+});
+
+test('defaultsFor starts Gemini from the registry, else agy’s own default, and leaves the others as they were', () => {
+  assert.deepEqual(model.defaultsFor('gemini'), { model: 'default', effort: 'high' });
+  assert.deepEqual(
+    model.defaultsFor('gemini', { gemini: { defaultModel: 'gemini-4-neon', defaultEffort: 'medium', models: [{ value: 'x' }] } }),
+    { model: 'gemini-4-neon', effort: 'medium' },
+  );
+  assert.deepEqual(model.defaultsFor('claude'), { model: 'opus', effort: 'xhigh' });
+  assert.deepEqual(model.defaultsFor('codex'), { model: 'default', effort: 'medium' });
+  assert.deepEqual(model.defaultsFor('cursor'), { model: 'default', effort: 'default' });
+});
+
+test('Finish writes the Gemini provider and a Gemini profile that holds no credential', () => {
+  const state = withGemini(model.initialState(detectedLinux()));
+  const config = model.configFromWizard(state, {});
+  assert.deepEqual(config.providers.gemini, { enabled: true, bin: GEMINI_BIN });
+  const profile = config.profiles.find((p) => p.provider === 'gemini');
+  assert.ok(profile, 'a Gemini profile is written');
+  assert.deepEqual(
+    Object.keys(profile).sort(),
+    ['color', 'configHome', 'email', 'id', 'isDefault', 'label', 'letter', 'provider'],
+  );
+  assert.equal(profile.id, 'gemini');
+  assert.equal(profile.label, 'Gemini');
+  assert.equal(profile.email, null);
+  assert.equal(profile.isDefault, false);
+  // No home named: the folder is the user's own profile, the one agy already uses.
+  assert.equal(profile.configHome, '/home/tester');
+  assert.ok(!/token|secret|password|api[-_]?key|credential/i.test(JSON.stringify(config.providers.gemini) + JSON.stringify(profile)));
+  const derived = deriveDefaults(config, runtime());
+  assert.doesNotThrow(() => validateConfig(derived));
+  assert.equal(derived.providers.gemini.enabled, true);
+  assert.equal(derived.providers.gemini.bin, GEMINI_BIN);
+});
+
+test('a named Gemini home becomes the profile’s configHome', () => {
+  const config = model.configFromWizard(withGemini(model.initialState(detectedLinux()), { home: '/srv/agy-root ' }), {});
+  assert.equal(config.profiles.find((p) => p.provider === 'gemini').configHome, '/srv/agy-root');
+});
+
+test('Gemini off writes no Gemini profile and a disabled provider with no invented path', () => {
+  const config = model.configFromWizard(model.initialState(detectedLinux()), {});
+  assert.equal(config.profiles.some((p) => p.provider === 'gemini'), false);
+  assert.deepEqual(config.providers.gemini, { enabled: false, bin: null });
+});
+
+test('a Gemini-only Finish is a valid config on its own', () => {
+  let state = model.initialState({});
+  state = { ...state, platform: { ...state.platform, os: 'linux' }, gemini: { ...state.gemini, userProfile: '/home/tester' } };
+  state = model.reconcileDefaults(withGemini(state));
+  assert.equal(model.canFinish(state), true, model.blockingSteps(state).join(','));
+  const derived = deriveDefaults(model.configFromWizard(state, {}), runtime());
+  assert.doesNotThrow(() => validateConfig(derived));
+  assert.deepEqual(derived.profiles.map((p) => p.provider), ['gemini']);
+  assert.equal(derived.profiles[0].isDefault, true, 'the floor makes the only profile the default');
+  assert.equal(derived.newSessionDefaults.provider, 'gemini');
+  assert.equal(derived.newSessionDefaults.effort, 'high');
+});
+
+test('a re-run opens on what was saved: Gemini’s answer, binary and home survive', () => {
+  const first = withGemini(model.initialState(detectedLinux()), { home: '/srv/agy-root' });
+  const saved = { ...model.configFromWizard(first, {}), setup: { completed: true } };
+  const reopened = model.initialState(detectedLinux(), saved);
+  assert.equal(reopened.gemini.enabled, true);
+  assert.equal(reopened.gemini.bin, GEMINI_BIN);
+  assert.equal(reopened.gemini.home, '/srv/agy-root');
+
+  // A profile whose home IS the user's profile folder reads back as "no home named", in any spelling.
+  const plain = { ...model.configFromWizard(withGemini(model.initialState(detectedLinux())), {}), setup: { completed: true } };
+  assert.equal(model.initialState(detectedLinux(), plain).gemini.home, '');
+  const shouty = { ...plain, profiles: plain.profiles.map((p) => (p.provider === 'gemini' ? { ...p, configHome: '/HOME/tester/' } : p)) };
+  assert.equal(model.initialState(detectedLinux(), shouty).gemini.home, '');
+
+  // Turned off on purpose while the binary is still installed: stays off.
+  const off = { ...saved, providers: { ...saved.providers, gemini: { enabled: false, bin: GEMINI_BIN } } };
+  const found = detectedLinux({ providers: { ...detectedLinux().providers, gemini: { found: true, path: GEMINI_BIN } } });
+  assert.equal(model.initialState(found, off).gemini.enabled, false);
+});

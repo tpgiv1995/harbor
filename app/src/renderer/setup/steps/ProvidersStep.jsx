@@ -2,11 +2,11 @@ import React, { useState } from 'react';
 import model from '../wizard-model.cjs';
 import { Field, PathInput, TextInput, Toggle, errorFor, setupBadgeStyle } from './controls.jsx';
 
-// Step 3. Codex (up to two accounts) and Cursor, same shape as the Claude step:
+// Step 3. Codex (up to two accounts), Cursor and Gemini, same shape as the Claude step:
 // detect the binary, confirm the account where it can be read, allow zero.
 //
-// The honest part of this screen is what it does NOT show. Neither codex nor
-// cursor records an account email anywhere Harbor can read, so there is no
+// The honest part of this screen is what it does NOT show. None of codex, cursor or
+// gemini records an account email anywhere Harbor can read, so there is no
 // confirmation line to render for them. Inventing one, or quietly showing the
 // Claude email next to a Codex account, would be exactly the confident guess
 // this wizard refuses to make; instead each says where to confirm it.
@@ -107,6 +107,82 @@ function CodexAccounts({ state, patch, errors }) {
   );
 }
 
+// Gemini (Google's Antigravity CLI, `agy`). Its sign-in is the CLI's own, through Google, and the
+// first run shows Google's own colour-scheme and Terms of Service & Data Use screens: that consent
+// is the person's, so Harbor neither answers nor seeds it, and the note says where it is answered.
+function GeminiCard({ state, patch, providers, errors }) {
+  const [note, setNote] = useState(null);
+  const signIn = async () => {
+    const result = await window.harbor.setup.login({
+      provider: 'gemini',
+      bin: state.gemini.bin,
+      configHome: state.gemini.home || undefined,
+    });
+    setNote(result?.launched
+      ? { kind: 'ok', text: 'agy opened in a terminal. Sign in with Google and answer its first-run screens there; Harbor never sees them.', command: result.manualCommand, label: result.manualCommandLabel }
+      : { kind: 'warn', text: result?.reason || 'Harbor could not open a terminal.', command: result?.manualCommand, label: result?.manualCommandLabel });
+  };
+  return (
+    <div className="setup-card" data-provider="gemini">
+      <Toggle
+        name="gemini"
+        checked={state.gemini.enabled}
+        onChange={(value) => patch((prev) => ({ ...prev, gemini: { ...prev.gemini, enabled: value } }))}
+        label="Gemini"
+        description={providers.gemini?.found
+          ? `Found at ${providers.gemini.path}`
+          : 'Not found. You can still enable it and enter the path yourself.'}
+      />
+      {state.gemini.enabled ? (
+        <>
+          <div className="setup-grid">
+            <Field label="agy binary" error={errorFor(errors, 'gemini.bin')}>
+              <TextInput
+                value={state.gemini.bin}
+                onChange={(value) => patch((prev) => ({ ...prev, gemini: { ...prev.gemini, bin: value } }))}
+                mono
+                placeholder="agy"
+              />
+            </Field>
+            <Field
+              label="Gemini home"
+              error={errorFor(errors, 'gemini.home')}
+              hint="Optional. Leave empty to use your own profile folder, which is what agy does on its own."
+            >
+              <PathInput
+                value={state.gemini.home}
+                onChange={(value) => patch((prev) => ({ ...prev, gemini: { ...prev.gemini, home: value } }))}
+                placeholder={state.gemini.userProfile || 'your profile folder'}
+                title="Choose the folder Gemini keeps its state under"
+              />
+            </Field>
+          </div>
+          <div className="setup-account" data-authed="0">
+            <span className="setup-account-dot" aria-hidden="true" />
+            <span className="setup-account-note">
+              Gemini signs in through Google in its own CLI, and Harbor never handles that sign-in.
+            </span>
+            <button type="button" className="setup-btn ghost setup-signin" onClick={signIn}>
+              Sign in
+            </button>
+          </div>
+          <p className="setup-note-fine">
+            The first time agy runs it shows Google's own setup and terms screens: answer them in the
+            session's terminal (the &gt;_ button on its window). Harbor does not answer them for you.
+          </p>
+          {note ? (
+            <div className={`setup-note ${note.kind === 'ok' ? '' : 'warn'}`}>
+              <p>{note.text}</p>
+              {note.command ? <><div className="setup-note-fine">{note.label || 'Shell command'}</div>
+                <div className="setup-cmd"><code>{note.command}</code></div></> : null}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export function ProvidersStep({ state, patch, detected, errors, showErrors }) {
   const shown = showErrors ? errors : [];
   const providers = detected?.providers || {};
@@ -115,8 +191,8 @@ export function ProvidersStep({ state, patch, detected, errors, showErrors }) {
   return (
     <div className="setup-pane">
       <p className="setup-lede">
-        Harbor drives Codex and Cursor sessions the same way it drives Claude ones. Turn on the ones
-        you use. Both are optional, and you can leave both off.
+        Harbor drives Codex, Cursor and Gemini sessions the same way it drives Claude ones. Turn on the
+        ones you use. All three are optional, and you can leave them all off.
       </p>
 
       <div className="setup-card" data-provider="codex">
@@ -181,6 +257,8 @@ export function ProvidersStep({ state, patch, detected, errors, showErrors }) {
           </>
         ) : null}
       </div>
+
+      <GeminiCard state={state} patch={patch} providers={providers} errors={shown} />
 
       <div className="setup-summary" data-accounts={total}>
         <span className="setup-summary-count">{total}</span>
