@@ -859,6 +859,25 @@ const GEMINI_TRUST_RE = /Do you trust the contents of this project/;
 const GEMINI_PASTE_RE = /^\[Pasted text #(\d+) (?:(\d+) chars|\+(\d+) lines)\]$/;
 const GEMINI_STATUS_IDLE_RE = /^\s*\? for shortcuts\b/;
 const GEMINI_STATUS_WORKING_RE = /^\s*esc to cancel\b/;
+// agy's feedback survey ("proactive feedback"), measured live on agy 1.5.14
+// (2026-11-25; fixture agy-1.5.14-feedback-survey-120.txt).
+// After a turn it REPLACES the box, no rules drawn, with two rows just above the
+// status row, and it stays up until a key answers it:
+//    How's the CLI experience so far? Help us improve:
+//    [1] Good  [2] Fine  [3] Bad  [0] Skip
+// It is not consent or a permission, so a send presses 0 (Skip) and goes on.
+// Harbor's launches switch it off (showFeedbackSurvey: false, gemini-launch.js);
+// this is for sessions started before that, or a profile that turns it back on.
+const GEMINI_SURVEY_QUESTION_RE = /^\s*How['’]s the CLI experience so far\?/;
+const GEMINI_SURVEY_OPTIONS_RE = /^\s*\[1\] Good\s+\[2\] Fine\s+\[3\] Bad\s+\[0\] Skip\s*$/;
+// The survey owns the keys only when its two rows are the last thing drawn above
+// the status row (one row under them at most): words quoted higher up in a reply
+// are prose, never the survey.
+function geminiSurveyShown(screen) {
+  const rows = String(screen || '').split('\n').filter((row) => row.trim());
+  const options = rows.findLastIndex((row) => GEMINI_SURVEY_OPTIONS_RE.test(row));
+  return options > 0 && rows.length - 1 - options <= 1 && GEMINI_SURVEY_QUESTION_RE.test(rows[options - 1]);
+}
 function geminiDialogRows(rows) {
   return rows.some((row) => GEMINI_NUMBERED_ROW_RE.test(row) || GEMINI_DIALOG_WORDS_RE.test(row)
     || (GEMINI_NAVIGATE_RE.test(row) && !rows.some((other) => GEMINI_SLASH_MENU_RE.test(other))));
@@ -875,7 +894,9 @@ function geminiPromptBox(screen) {
   const bottom = rules.at(-1);
   const top = rules.at(-2);
   const below = lines.slice(bottom + 1);
-  if (bottom - top < 2 || geminiDialogRows(below)) return null;
+  // The survey draws no rules, so the last two can be the short ones over an
+  // earlier prompt's echo: with the survey at the bottom there is no box at all.
+  if (bottom - top < 2 || geminiDialogRows(below) || geminiSurveyShown(screen)) return null;
   const rows = lines.slice(top + 1, bottom).map((row) => row.replace(/\s+$/, ''));
   if (!GEMINI_PROMPT_ROW_RE.test(rows[0])) return null;
   const raw = rows.map((row, i) => (i === 0 ? row.replace(/^>[ \t]?/, '') : row.replace(/^ {1,2}/, ''))).join('\n');
@@ -925,12 +946,14 @@ function geminiBoxMatch(screen, { text = '' } = {}) {
 const geminiBoxState = (screen, sent = {}) => geminiBoxMatch(screen, sent).state;
 // Why there is no box: 'first-run' (colour scheme, Terms of Service & Data Use:
 // the person's consent, never answered by Harbor), 'trust' (the folder dialog),
-// 'permission' (a numbered question), 'menu' (another list) or 'unknown'.
+// 'survey' (the feedback survey, skipped), 'permission' (a numbered question),
+// 'menu' (another list) or 'unknown'.
 function geminiBlockedKind(screen) {
   const text = String(screen || '');
   if (!text.trim()) return 'blank';
   if (GEMINI_FIRST_RUN_RE.test(text)) return 'first-run';
   if (GEMINI_TRUST_RE.test(text)) return 'trust';
+  if (geminiSurveyShown(text)) return 'survey';
   const lines = text.split('\n');
   let last = -1;
   lines.forEach((line, i) => { if (GEMINI_RULE_RE.test(line)) last = i; });
@@ -2967,6 +2990,9 @@ function createSessionSend(deps) {
   const GEMINI_ENTER_POLL_MS = 250;
   const GEMINI_ENTER_QUIET_READS = 3;
   const GEMINI_ENTER_SPARES = 2;
+  // agy drops keys typed within about a second of a dialog closing (AGY-FACTS
+  // section 2), so typing waits this long after the survey lets go of the box.
+  const GEMINI_AFTER_DIALOG_MS = 1200;
   // The status tee is rewritten about every 300 ms while agy's state changes,
   // so a pending-permission reading this fresh is current.
   const GEMINI_TEE_FRESH_MS = 3000;
@@ -2992,6 +3018,13 @@ function createSessionSend(deps) {
   const geminiNoPromptError = () => {
     const error = new Error('Gemini is not showing its prompt box (a dialog or a list may be open, or it is still starting), so Harbor typed and sent nothing. Your text is kept. Check the >_ terminal');
     error.code = 'GEMINI_NO_PROMPT';
+    return error;
+  };
+  const geminiSurveyError = ({ late = false } = {}) => {
+    const error = new Error(late
+      ? 'Gemini\'s feedback survey opened while Harbor was typing, so it did not press Enter and nothing was sent. Your text is kept. Check the >_ terminal, then send again (Harbor skips the survey first)'
+      : 'Gemini\'s feedback survey ("How\'s the CLI experience so far?") did not close when Harbor pressed 0 (Skip), so Harbor typed and sent nothing. Your text is kept. Answer it in the >_ terminal, then send again');
+    error.code = 'GEMINI_SURVEY';
     return error;
   };
   const geminiBoxBusyError = (draft) => {
@@ -3142,16 +3175,31 @@ function createSessionSend(deps) {
     const slash = isSlashCommand(text);
     const sent = { text };
     // 1. A drawn box, or a plain reason there is none.
-    const drawn = await waitForGeminiBox(paneId, { text: '' }, (match) => match.state !== 'noprompt', GEMINI_PROMPT_POLLS, {
+    const waitForBox = () => waitForGeminiBox(paneId, { text: '' }, (match) => match.state !== 'noprompt', GEMINI_PROMPT_POLLS, {
       onWait: onWait ? () => onWait('Gemini has not drawn its prompt box yet. Harbor waits for it before typing') : null,
     });
+    let drawn = await waitForBox();
+    // The feedback survey sits where the box goes until a key answers it: one 0
+    // (Skip), then the box again, then agy's one-second deafness after a dialog.
+    // A survey that stays is refused below; it never gets a second key.
+    if (drawn.state === 'noprompt' && geminiBlockedKind(drawn.screen) === 'survey') {
+      await checkTarget();
+      logSend({ paneId, phase: 'gemini-survey-skip' });
+      await typeInto(paneId, workspaceId, '0');
+      drawn = await waitForBox();
+      if (drawn.state !== 'noprompt') {
+        await sleep(GEMINI_AFTER_DIALOG_MS);
+        const screen = await readScreen(paneId, MENU_READ_LINES);
+        drawn = { ...geminiBoxMatch(screen, { text: '' }), screen };
+      }
+    }
     if (drawn.state === 'noprompt') {
       const kind = geminiBlockedKind(drawn.screen);
       logSend({ paneId, phase: 'gemini-no-prompt', kind });
       await captureSendScreen(paneId, `gemini-${kind}`, drawn.screen);
       throw kind === 'first-run' || kind === 'trust' || kind === 'permission' || kind === 'menu'
         ? geminiNeedsAnswerError(kind === 'menu' ? 'permission' : kind)
-        : geminiNoPromptError();
+        : kind === 'survey' ? geminiSurveyError() : geminiNoPromptError();
     }
     // 2. The tee's word: a permission question the screen does not show yet.
     const tee = await readGeminiTee(sessionId);
@@ -3186,7 +3234,10 @@ function createSessionSend(deps) {
       if (!geminiHolds(held)) {
         logSend({ paneId, phase: 'prompt-never-held', state: held.state });
         await captureSendScreen(paneId, `gemini-${held.state}`, held.screen);
-        if (held.state === 'noprompt') throw geminiNeedsAnswerError(geminiBlockedKind(held.screen) === 'first-run' ? 'first-run' : 'permission', { late: true });
+        if (held.state === 'noprompt') {
+          const kind = geminiBlockedKind(held.screen);
+          throw kind === 'survey' ? geminiSurveyError({ late: true }) : geminiNeedsAnswerError(kind === 'first-run' ? 'first-run' : 'permission', { late: true });
+        }
         throw held.state === 'other' ? geminiBoxChangedError() : geminiNeverHeldError();
       }
     }
@@ -5789,6 +5840,7 @@ module.exports = {
   geminiBoxMatch,
   geminiBoxState,
   geminiBlockedKind,
+  geminiSurveyShown,
   geminiUserRequest,
   geminiBrainDir,
   geminiWholeTranscriptPath,

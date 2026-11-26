@@ -26,6 +26,7 @@ const {
   geminiBoxMatch,
   geminiBoxState,
   geminiBlockedKind,
+  geminiSurveyShown,
   geminiUserRequest,
   geminiBrainDir,
   geminiWholeTranscriptPath,
@@ -127,6 +128,32 @@ test('a numbered row below the last rule is a dialog even when a box-like echo s
 test('hyphens and rounded corners are not rules: the Terms page and the colour preview draw no box', { skip: !NEW_CODE }, () => {
   assert.equal(geminiPromptBox(`${'-'.repeat(100)}\n> [x] Yes, I agree\n${'-'.repeat(100)}`), null);
   assert.equal(geminiPromptBox(`╭${'─'.repeat(50)}╮\n│ > you: add a greeting │\n╰${'─'.repeat(50)}╯`), null);
+});
+
+// 2026-11-25: agy's feedback survey replaced the box after a long turn and every
+// send to that window failed "Gemini is not showing its prompt box".
+test('the feedback survey is its own kind of "no box", and only when its two rows are the last thing drawn', { skip: !NEW_CODE || typeof geminiSurveyShown !== 'function' }, () => {
+  const survey = fixture('agy-1.5.14-feedback-survey-120.txt');
+  assert.equal(geminiPromptBox(survey), null, 'the survey replaces the box: no rules are drawn');
+  // Its screen still shows the SHORT rules over earlier prompts' echoes; read as the box they would
+  // hold the last prompt, and a resend of that prompt would get a bare Enter into the survey.
+  assert.equal(geminiBoxState(survey, { text: 'pasted one\npasted two/help' }), 'noprompt');
+  assert.equal(geminiBoxState(survey, { text: '/Reply with exactly the word OK and nothing else. Use no tools.' }), 'noprompt');
+  assert.equal(geminiSurveyShown(survey), true);
+  assert.equal(geminiBlockedKind(survey), 'survey');
+  // The same words quoted in a reply above a real box are prose.
+  const quoted = `${BANNER}\n  The CLI asked me:\n How's the CLI experience so far? Help us improve:\n [1] Good  [2] Fine  [3] Bad  [0] Skip\n\n  and I skipped it.\n${RULE}\n> ${PLACEHOLDER}\n${RULE}\n? for shortcuts`;
+  assert.equal(geminiSurveyShown(quoted), false);
+  assert.notEqual(geminiBlockedKind(quoted), 'survey');
+  assert.equal(geminiBoxState(quoted, { text: 'x' }), 'empty');
+  // Rows under it that are not the status row: not the survey owning the keys.
+  assert.equal(geminiSurveyShown(`${survey}\nmore output\nand more`), false);
+  // A question row alone, or options alone, is not the survey.
+  assert.equal(geminiSurveyShown(" How's the CLI experience so far? Help us improve:\n\n? for shortcuts"), false);
+  assert.equal(geminiSurveyShown(' [1] Good  [2] Fine  [3] Bad  [0] Skip\n\n? for shortcuts'), false);
+  for (const name of ['agy-1.5.14-idle-empty-120.txt', 'agy-1.5.14-permission-prompt-120.txt', 'agy-1.5.14-trust-dialog-120.txt']) {
+    assert.equal(geminiSurveyShown(fixture(name)), false, name);
+  }
 });
 
 // ---- the record that confirms a send -----------------------------------------
@@ -341,6 +368,7 @@ const RULE = '─'.repeat(120);
 const SHORT_RULE = '─'.repeat(60);
 const BANNER = '\n      ▄▀▀▄        Antigravity CLI 1.5.14\n     ▀▀▀▀▀▀       <account> (Google AI Ultra)\n    ▀▀▀▀▀▀▀▀      Gemini 4 Hydrogen (Low)\n   ▄▀▀    ▀▀▄     C:/work/proof\n  ▄▀▀      ▀▀▄\n';
 const PLACEHOLDER = 'Auto mode: edits & safe commands auto-approved (shift+tab to cycle)';
+const SURVEY = 'agy-1.5.14-feedback-survey-120.txt';
 
 function makeHarness() {
   const dir = tempDir('send');
@@ -375,7 +403,7 @@ function makeHarness() {
 // the bottom status row (or a custom statusLine's one line).
 function geminiPane(h, {
   swallowEnters = 0, dropTypings = 0, status = 'shortcuts', working = false, prefill = '', placeholder = true,
-  dialog = null, dialogOnTyping = null, lateDraw = 0, collapse = true,
+  dialog = null, dialogOnTyping = null, lateDraw = 0, collapse = true, survey = null,
 } = {}) {
   let draft = prefill;
   let swallowed = 0;
@@ -383,7 +411,7 @@ function geminiPane(h, {
   let hidden = 0;
   const echoed = [];
   const typings = [];
-  const state = { reads: 0, dialog, working };
+  const state = { reads: 0, dialog: survey ? SURVEY : dialog, working };
   const boxRows = (text) => text.split('\n').map((line, i) => (i === 0 ? `>${line ? ' ' : ''}${line}` : `  ${line}`)).join('\n');
   // What the real agy 1.5.14 draws for a big paste (measured): a line over 1,000
   // characters is "[Pasted text #1 N chars]", 16 or more lines "[... +K lines]".
@@ -408,6 +436,12 @@ function geminiPane(h, {
   const sendInput = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => {
     const result = sendInput(paneId, text);
+    // The survey takes every key; 0 (Skip) closes it, unless this one is stuck.
+    if (state.dialog === SURVEY) {
+      typings.push(text);
+      if (text === '0' && survey !== 'stuck') state.dialog = null;
+      return result;
+    }
     if (text === '\r') {
       if (swallowed < swallowEnters) { swallowed += 1; } else if (draft.trim()) { echoed.push(draft); draft = ''; }
       return result;
@@ -551,6 +585,31 @@ test('a question that appears while Harbor is typing gets no Enter', async () =>
   await assert.rejects(s.send({ sessionId: 'pane:pane-1', provider: 'gemini', text: 'a message', pane: target }),
     (error) => error.code === 'GEMINI_NEEDS_ANSWER' && /while Harbor was typing/.test(error.message));
   assert.equal(enters(h), 0);
+});
+
+test('the feedback survey is skipped with one 0, then the message is typed and sent (old code: refused with no prompt box)', async () => {
+  const h = makeHarness();
+  const pane = geminiPane(h, { survey: 'skip' });
+  const result = await createSessionSend(h.deps).send({ sessionId: 'pane:pane-1', provider: 'gemini', text: 'how is that liquid glass?', pane: target });
+  assert.equal(result.ok, true);
+  assert.deepEqual(typedKeys(h), ['0', 'how is that liquid glass?', '\r'], 'one 0 for Skip, then the message, then Enter');
+  assert.deepEqual(pane.echoed, ['how is that liquid glass?']);
+});
+
+test('a survey that does not close on 0 gets no second key and no message', async () => {
+  const h = makeHarness();
+  geminiPane(h, { survey: 'stuck' });
+  await assert.rejects(createSessionSend(h.deps).send({ sessionId: 'pane:pane-1', provider: 'gemini', text: 'my message', pane: target }),
+    (error) => error.code === 'GEMINI_SURVEY' && /feedback survey/.test(error.message) && /Your text is kept/.test(error.message));
+  assert.deepEqual(typedKeys(h), ['0']);
+});
+
+test('a digit message is never typed into the survey: Skip comes first, so "1" reaches the box, not the Good answer', async () => {
+  const h = makeHarness();
+  const pane = geminiPane(h, { survey: 'skip' });
+  await createSessionSend(h.deps).send({ sessionId: 'pane:pane-1', provider: 'gemini', text: '1', pane: target });
+  assert.deepEqual(typedKeys(h), ['0', '1', '\r']);
+  assert.deepEqual(pane.echoed, ['1']);
 });
 
 test('the status tee: a fresh pending permission refuses even when the screen shows a box; stale or absent does not', async () => {

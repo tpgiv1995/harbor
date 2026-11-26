@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+> **OPEN DATA-LOSS BUG, fix it before other Notes work (Pat, 2026-11-25):** a device's stored unsaved note edit (the phone notes page) overwrites newer note text with no version check. Cause, files and the fix: `docs/BACKLOG.md`, row "Notes sync". Remove this line when the fix ships.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this is

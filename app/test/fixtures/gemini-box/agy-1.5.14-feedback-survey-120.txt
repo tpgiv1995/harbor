@@ -1,0 +1,20 @@
+
+      ▄▀▀▄        Antigravity CLI 1.5.14
+     ▀▀▀▀▀▀       <account> (Google AI Ultra)
+    ▀▀▀▀▀▀▀▀      Gemini 4 Hydrogen (Low)
+   ▄▀▀    ▀▀▄     C:/work/proof
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> pasted one
+  pasted two/help
+
+────────────────────────────────────────────────────────────
+> /Reply with exactly the word OK and nothing else. Use no tools.
+
+  OK
+
+ How's the CLI experience so far? Help us improve:
+ [1] Good  [2] Fine  [3] Bad  [0] Skip
+
+? for shortcuts · Gemini 4 Hydrogen (Low)

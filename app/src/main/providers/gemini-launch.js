@@ -5,7 +5,7 @@
 //   <cacheDir>/gemini/statusline.cmd         the status line command agy runs (a `.cmd` wrapper around the tee script)
 //   <cacheDir>/gemini/settings-<hash>.json   one file per working folder, handed to agy as `--settings <file>`:
 //                                            { statusLine: { type: 'command', command: <wrapper> },
-//                                              trustedWorkspaces: [<cwd>] }
+//                                              trustedWorkspaces: [<cwd>], showFeedbackSurvey: false }
 //
 // `--settings` is session-only (agy: "never saved"), so none of this touches the profile's own settings.json, and the
 // trust entry skips the per-folder trust dialog for THIS session only (a dialog that would take the first Harbor send).
@@ -85,7 +85,9 @@ function prepareGeminiLaunch({
   electron = Boolean(process.versions.electron), platform = process.platform, fsImpl = fs, now = Date.now,
 }) {
   const wrapper = wrapperPathFor(cacheDir);
-  const settings = { trustedWorkspaces: [cwd] };
+  // showFeedbackSurvey: agy's "How's the CLI experience so far?" survey replaces the prompt box after a turn and holds
+  // it until a key answers it, so every Harbor send to that window failed with "no prompt box" (2026-11-25).
+  const settings = { trustedWorkspaces: [cwd], showFeedbackSurvey: false };
   let statusLine = false;
   if (platform === 'win32' && CMD_SAFE.test(wrapper)) {
     writeIfDifferent(wrapper, wrapperText({ execPath, script, electron }), fsImpl);

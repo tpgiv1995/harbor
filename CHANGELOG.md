@@ -13,6 +13,11 @@
   terminal; Harbor never answers them. The setup wizard and the phone know
   Gemini too. Antigravity is installed and updated by hand; Harbor's update chip
   leaves it alone.
+- A Gemini window no longer refuses messages after Antigravity asks "How's the
+  CLI experience so far?". That survey takes the place of the message box until
+  it is answered, so every send failed with "Gemini is not showing its prompt
+  box". Harbor now starts Gemini sessions with the survey switched off, and a
+  send that finds one already open skips it first.
 - A Harbor built from this repository starts again: since the session-rename
   change it stopped at launch with "resolveConfigFile is not defined".
 - Copy and paste keep their formatting. Pasting from Teams, Outlook, Word,

@@ -34,6 +34,7 @@ test('on Windows the settings name the wrapper as the status line and trust only
   assert.equal(result.settingsFile, settingsPathFor(cwd, cache));
   const settings = JSON.parse(fs.readFileSync(result.settingsFile, 'utf8'));
   assert.deepEqual(settings.trustedWorkspaces, [cwd]);
+  assert.equal(settings.showFeedbackSurvey, false, 'agy\'s feedback survey would replace the prompt box after a turn and refuse every send');
   assert.deepEqual(settings.statusLine, { type: 'command', command: wrapperPathFor(cache) });
   assert.equal(CMD_SAFE.test(settings.statusLine.command), true, 'the command agy hands to cmd /c holds no space');
   // The paths WITH spaces live inside the wrapper, which cmd reads as a script, not as a command line.
@@ -57,6 +58,7 @@ test('a cache folder whose wrapper path would not survive cmd /c leaves the stat
   const settings = JSON.parse(fs.readFileSync(result.settingsFile, 'utf8'));
   assert.equal('statusLine' in settings, false);
   assert.deepEqual(settings.trustedWorkspaces, [path.join(root, 'w')], 'the trust entry still skips the folder dialog');
+  assert.equal(settings.showFeedbackSurvey, false, 'the survey is off without a status line too');
   assert.equal(fs.existsSync(wrapperPathFor(cache)), false);
 });
 
