@@ -27,6 +27,8 @@ const {
   geminiBoxState,
   geminiBlockedKind,
   geminiSurveyShown,
+  geminiQueuedShown,
+  geminiHistoryPathFor,
   geminiUserRequest,
   geminiBrainDir,
   geminiWholeTranscriptPath,
@@ -156,6 +158,52 @@ test('the feedback survey is its own kind of "no box", and only when its two row
   }
 });
 
+test('a message sent while agy works waits as a "▸" row over the box, and only that message reads as queued', { skip: !NEW_CODE || typeof geminiQueuedShown !== 'function' }, () => {
+  // Rows as agy 1.5.14 drew them (2026-11-25, scratch profile): the older one
+  // bare, the newest marked, a multi-line one cut after its first line.
+  const screen = [
+    '● Running (Start-Sleep -Seconds 4) (ctrl+o to expand)',
+    '⣯  Running command...',
+    '▸ Reply with exactly QUEUED-TWO and nothing else. Use no tools.',
+    '▸ Reply with exactly QPASTE-LINES and nothing else. Use no tools. Ignore the lines below.... (alt+m to send immediately)',
+    RULE, '>', RULE,
+    '  Press up to edit queued messages                                                        auto · Gemini 4 Hydrogen · low',
+  ].join('\n');
+  assert.equal(geminiQueuedShown(screen, 'Reply with exactly QUEUED-TWO and nothing else. Use no tools.'), true);
+  assert.equal(geminiQueuedShown(screen, 'Reply with exactly QPASTE-LINES and nothing else. Use no tools. Ignore the lines below.\nqline 1: the lazy dog'), true);
+  assert.equal(geminiQueuedShown(screen, 'Reply with exactly QUEUED-THREE and nothing else.'), false, 'another message is not this one');
+  assert.equal(geminiQueuedShown(screen, 'Re'), false, 'a short message is matched whole, never by a shared start');
+  assert.equal(geminiQueuedShown(fixture('agy-1.5.14-idle-empty-120.txt'), 'hello'), false);
+  assert.equal(geminiBoxState(screen, { text: 'x' }), 'empty', 'the queue rows are above the box, never in it');
+});
+
+test('a Gemini transcript names its home\'s prompt history; any other path names none', { skip: !NEW_CODE || typeof geminiHistoryPathFor !== 'function' }, () => {
+  const home = path.join('C:', 'Users', 'someone');
+  const store = path.join(home, '.gemini', 'antigravity-cli');
+  for (const name of ['transcript_full.jsonl', 'transcript.jsonl']) {
+    assert.equal(geminiHistoryPathFor(path.join(store, 'brain', ID_A, '.system_generated', 'logs', name)), path.join(store, 'history.jsonl'), name);
+  }
+  assert.equal(geminiHistoryPathFor(path.join(home, '.claude', 'projects', 'C--x', `${ID_A}.jsonl`)), null);
+  assert.equal(geminiHistoryPathFor(''), null);
+});
+
+test('the survey can also come up WHILE a turn runs, over the echoes of earlier prompts: still the survey, never a box', { skip: !NEW_CODE || typeof geminiSurveyShown !== 'function' }, () => {
+  // Shaped on a live capture (2026-11-26, send refused GEMINI_BOX_BUSY by the old reader,
+  // which took the rows between two echo rules for a box holding an earlier prompt's "Image:" line).
+  const echoRule = '─'.repeat(50);
+  const screen = [
+    echoRule, '> Image: C:\\work\\shot.png', '  make the dock icon-only', '', '  Done. Here is the dock.', '',
+    echoRule, '> redo and give me 3 different versions', '  give me 3 variations on this please',
+    '⣟  Comparing the generated designs reveals distinct spatial philosophies...',
+    '└ Tip: Use @ to mention files and give the model more context.',
+    " How's the CLI experience so far? Help us improve:", ' [1] Good  [2] Fine  [3] Bad  [0] Skip', '',
+    'esc to cancel · Gemini 4 Neon (High)',
+  ].join('\n');
+  assert.equal(geminiPromptBox(screen), null);
+  assert.equal(geminiBoxState(screen, { text: 'anything' }), 'noprompt');
+  assert.equal(geminiBlockedKind(screen), 'survey');
+});
+
 // ---- the record that confirms a send -----------------------------------------
 
 const sendFor = (extra = {}) => {
@@ -233,6 +281,97 @@ test('a long message confirms from transcript_full.jsonl even when the row names
 });
 
 // ---- the transcript store: listing and fresh-conversation discovery ----------
+
+// 2026-11-26, Pat: "Gemini sessions can't handle queue'd messages". A message
+// sent while agy works is queued; agy writes it to the transcript only when the
+// running turn ends, and then MERGED with every other queued message into one
+// prompt, so the 20-second transcript check called it "could not confirm" and
+// two queued messages never confirmed at all. agy's prompt history records each
+// one the moment it is queued (measured on agy 1.5.14).
+const geminiHome = (label) => {
+  const store = path.join(tempDir(label), '.gemini', 'antigravity-cli');
+  const logs = path.join(store, 'brain', ID_A, '.system_generated', 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+  const transcript = path.join(logs, 'transcript_full.jsonl');
+  const history = path.join(store, 'history.jsonl');
+  const userStep = (request) => `${JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: `<USER_REQUEST>\n${request}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nt\n</ADDITIONAL_METADATA>` })}\n`;
+  const historyLine = (display, { id = ID_A, timestamp = Date.now() } = {}) => `${JSON.stringify({ display, timestamp, workspace: 'C:\\work\\proof', conversationId: id })}\n`;
+  fs.writeFileSync(transcript, userStep('the first prompt'));
+  fs.writeFileSync(history, historyLine('the first prompt'));
+  return { transcript, history, userStep, historyLine };
+};
+
+test('a queued Gemini message is confirmed by agy\'s prompt history the moment it is queued (old code: "could not confirm")', { skip: !NEW_CODE }, async () => {
+  const home = geminiHome('queued-history');
+  const s = sendFor({ getSessionMeta: async () => ({ path: home.transcript, provider: 'gemini' }) });
+  const prepared = await s.prepareDeliveryConfirmation(ID_A);
+  assert.equal(prepared.history.path, home.history, 'the history of the home this transcript is in');
+  // agy queued it: a history line now, nothing in the transcript until the turn ends.
+  fs.appendFileSync(home.history, home.historyLine('Reply with exactly QUEUED-TWO. Use no tools.'));
+  assert.equal(await s.confirmDelivery(ID_A, 'Reply with exactly QUEUED-TWO. Use no tools.', { timeoutMs: 200, prepared }), true);
+});
+
+test('two queued messages each confirm from their own history line, though the transcript only ever holds them merged', { skip: !NEW_CODE }, async () => {
+  const home = geminiHome('queued-two');
+  const s = sendFor({ getSessionMeta: async () => ({ path: home.transcript, provider: 'gemini' }) });
+  const two = 'Reply with exactly QUEUED-TWO and nothing else. Use no tools.';
+  const three = 'Reply with exactly QUEUED-THREE and nothing else. Use no tools.';
+  const first = await s.prepareDeliveryConfirmation(ID_A);
+  fs.appendFileSync(home.history, home.historyLine(two));
+  const second = await s.prepareDeliveryConfirmation(ID_A);
+  fs.appendFileSync(home.history, home.historyLine(three));
+  // The turn ends: agy sends both as ONE prompt (real shape, 2026-11-25).
+  fs.appendFileSync(home.transcript, home.userStep(`${two}\n${three}`));
+  assert.equal(await s.confirmDelivery(ID_A, two, { timeoutMs: 200, prepared: first }), true);
+  assert.equal(await s.confirmDelivery(ID_A, three, { timeoutMs: 200, prepared: second }), true);
+  // Without the history the merged prompt confirms neither (why the history is read).
+  await assert.rejects(s.confirmDelivery(ID_A, two, { timeoutMs: 100, prepared: { path: first.path, preSize: first.preSize } }), (error) => error.code === 'UNCONFIRMED');
+});
+
+test('a pasted prompt\'s history carries NUL marks; without them it is the text exactly', { skip: !NEW_CODE }, async () => {
+  const home = geminiHome('queued-paste');
+  const s = sendFor({ getSessionMeta: async () => ({ path: home.transcript, provider: 'gemini' }) });
+  const text = 'Reply with exactly QPASTE-LINES and nothing else.\nqline 1: the lazy dog\nqline 2: the lazy dog';
+  const prepared = await s.prepareDeliveryConfirmation(ID_A);
+  // As agy 1.5.14 stored a bracketed paste: a NUL before some characters.
+  fs.appendFileSync(home.history, home.historyLine(text.replace(/([A-Z])/g, '\u0000$1')));
+  assert.equal(await s.confirmDelivery(ID_A, text, { timeoutMs: 200, prepared }), true);
+});
+
+test('the history confirms only this conversation\'s line, written after the send, with exactly the typed words', { skip: !NEW_CODE }, async () => {
+  const home = geminiHome('history-strict');
+  const s = sendFor({ getSessionMeta: async () => ({ path: home.transcript, provider: 'gemini' }) });
+  const text = 'continue';
+  const unconfirmed = (prepared) => assert.rejects(s.confirmDelivery(ID_A, text, { timeoutMs: 100, prepared }), (error) => error.code === 'UNCONFIRMED');
+  // Before the send's boundary: an identical earlier prompt.
+  fs.appendFileSync(home.history, home.historyLine(text));
+  await unconfirmed(await s.prepareDeliveryConfirmation(ID_A));
+  // Another conversation, a prefix, a longer message, an old timestamp.
+  let prepared = await s.prepareDeliveryConfirmation(ID_A);
+  fs.appendFileSync(home.history, home.historyLine(text, { id: ID_B }));
+  fs.appendFileSync(home.history, home.historyLine('cont'));
+  fs.appendFileSync(home.history, home.historyLine('continue please'));
+  fs.appendFileSync(home.history, home.historyLine(text, { timestamp: Date.now() - 60_000 }));
+  await unconfirmed(prepared);
+  // A Claude or Codex transcript has no prompt history.
+  const claude = sendFor({ getSessionMeta: async () => ({ path: path.join(tempDir('claude-home'), 'x.jsonl') }) });
+  prepared = await claude.prepareDeliveryConfirmation(ID_A);
+  assert.equal(prepared.history, undefined);
+});
+
+test('a message sent while Gemini works is typed, Enter pressed once, and reported as queued (old code: plain "sent", then "could not confirm")', async () => {
+  const h = makeHarness();
+  const pane = geminiPane(h, { working: true, queueing: true });
+  const s = createSessionSend(h.deps);
+  const statuses = [];
+  s.emitter.on('status', (event) => statuses.push([event.phase, event.detail]));
+  const result = await s.send({ sessionId: 'pane:pane-1', provider: 'gemini', text: 'and make the dock smaller', pane: target });
+  assert.equal(result.ok, true);
+  assert.deepEqual(typedKeys(h), ['and make the dock smaller', '\r'], 'no spare Enter: an empty box means agy took it');
+  assert.deepEqual(pane.queued, ['and make the dock smaller']);
+  const sent = statuses.find(([phase]) => phase === 'sent');
+  assert.match(String(sent?.[1]), /Gemini queued it/);
+});
 
 const writeConversation = (home, id, { lines = 1 } = {}) => {
   const logs = path.join(geminiBrainDir(home), id, '.system_generated', 'logs');
@@ -404,6 +543,7 @@ function makeHarness() {
 function geminiPane(h, {
   swallowEnters = 0, dropTypings = 0, status = 'shortcuts', working = false, prefill = '', placeholder = true,
   dialog = null, dialogOnTyping = null, lateDraw = 0, collapse = true, survey = null,
+  queueing = false, onQueued = null,
 } = {}) {
   let draft = prefill;
   let swallowed = 0;
@@ -411,6 +551,9 @@ function geminiPane(h, {
   let hidden = 0;
   const echoed = [];
   const typings = [];
+  // agy 1.5.14 while a turn runs: an Enter QUEUES the message as a "▸" row over
+  // the box (the newest one marked "alt+m"), and the status row says so.
+  const queued = [];
   const state = { reads: 0, dialog: survey ? SURVEY : dialog, working };
   const boxRows = (text) => text.split('\n').map((line, i) => (i === 0 ? `>${line ? ' ' : ''}${line}` : `  ${line}`)).join('\n');
   // What the real agy 1.5.14 draws for a big paste (measured): a line over 1,000
@@ -428,10 +571,11 @@ function geminiPane(h, {
     if (hidden > 0) hidden -= 1;
     const above = echoed.map((text) => `${SHORT_RULE}\n${boxRows(text)}\n\n  OK\n`).join('\n');
     const spinner = state.working ? '⢿  Generating...\n' : '';
+    const queueRows = queued.map((text, i) => `▸ ${text.split('\n')[0]}${text.includes('\n') ? '...' : ''}${i === queued.length - 1 ? ' (alt+m to send immediately)' : ''}\n`).join('');
     const inBox = shown ? (collapsed(shown) ? `> ${collapsed(shown)}` : boxRows(shown)) : (placeholder ? `> ${PLACEHOLDER}` : '>');
     const bottom = status === 'tee' ? `probe-status ${state.working ? 'working' : 'idle'}`
-      : `${state.working ? 'esc to cancel' : '? for shortcuts'}${' '.repeat(80)}auto · Gemini 4 Hydrogen · low`;
-    return `${BANNER}\n${above}${spinner}${RULE}\n${inBox}\n${RULE}\n${bottom}`;
+      : `${queued.length ? '  Press up to edit queued messages' : state.working ? 'esc to cancel' : '? for shortcuts'}${' '.repeat(80)}auto · Gemini 4 Hydrogen · low`;
+    return `${BANNER}\n${above}${spinner}${queueRows}${RULE}\n${inBox}\n${RULE}\n${bottom}`;
   };
   const sendInput = h.deps.terminalBridge.sendInput;
   h.deps.terminalBridge.sendInput = (paneId, text) => {
@@ -443,7 +587,11 @@ function geminiPane(h, {
       return result;
     }
     if (text === '\r') {
-      if (swallowed < swallowEnters) { swallowed += 1; } else if (draft.trim()) { echoed.push(draft); draft = ''; }
+      if (swallowed < swallowEnters) { swallowed += 1; } else if (draft.trim() && queueing) {
+        queued.push(draft);
+        if (onQueued) onQueued(draft);
+        draft = '';
+      } else if (draft.trim()) { echoed.push(draft); draft = ''; }
       return result;
     }
     typings.push(text);
@@ -454,7 +602,7 @@ function geminiPane(h, {
     return result;
   };
   Object.defineProperty(state, 'draft', { get: () => draft, set: (value) => { draft = value; }, enumerable: true });
-  return Object.assign(state, { echoed, typings });
+  return Object.assign(state, { echoed, typings, queued });
 }
 
 const target = { paneId: 'pane-1', workspaceId: 'ws-1' };

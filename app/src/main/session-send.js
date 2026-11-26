@@ -62,6 +62,13 @@ function geminiWholeTranscriptPath(file) {
   const whole = named.replace(GEMINI_CUT_COPY_RE, '$1transcript_full.jsonl');
   return fsSync.existsSync(whole) ? whole : named;
 }
+// The prompt history of the home a Gemini transcript lives in
+// (<home>\.gemini\antigravity-cli\history.jsonl), or null for any other path.
+const GEMINI_TRANSCRIPT_IN_HOME_RE = /^(.*[\\/]\.gemini[\\/]antigravity-cli)[\\/]brain[\\/][^\\/]+[\\/]\.system_generated[\\/]logs[\\/]transcript(?:_full)?\.jsonl$/i;
+function geminiHistoryPathFor(file) {
+  const found = GEMINI_TRANSCRIPT_IN_HOME_RE.exec(String(file || ''));
+  return found ? path.join(found[1], 'history.jsonl') : null;
+}
 
 // Where each provider keeps the transcripts a NEW pane could have just written.
 // A provider this module does not know lists NOTHING: it used to fall through to
@@ -878,6 +885,25 @@ function geminiSurveyShown(screen) {
   const options = rows.findLastIndex((row) => GEMINI_SURVEY_OPTIONS_RE.test(row));
   return options > 0 && rows.length - 1 - options <= 1 && GEMINI_SURVEY_QUESTION_RE.test(rows[options - 1]);
 }
+// A message sent while agy works is QUEUED, not refused (measured live on agy
+// 1.5.14, 2026-11-25): the box empties and the message waits as a row above it,
+// "▸ <first line>" (a longer one cut with "..."), the newest followed by
+// "(alt+m to send immediately)", and the status row says "Press up to edit
+// queued messages". When the turn ends agy sends EVERY queued message as ONE
+// prompt, joined by line breaks, so the transcript never holds one of them
+// alone; agy's prompt history (history.jsonl) records each the moment it is
+// queued, which is what confirms it (geminiHistoryScanner).
+const GEMINI_QUEUED_ROW_RE = /^▸ (.*?)(?:\s+\(alt\+m to send immediately\))?\s*$/u;
+function geminiQueuedShown(screen, text) {
+  const first = squashSpace(String(text || '').trim().split('\n')[0]);
+  if (!first) return false;
+  return String(screen || '').split('\n').some((row) => {
+    const found = GEMINI_QUEUED_ROW_RE.exec(row.replace(/\s+$/, ''));
+    if (!found) return false;
+    const shown = squashSpace(found[1].replace(/(?:\.\.\.|…)$/u, ''));
+    return shown.length > 0 && (shown === first || (shown.length >= Math.min(first.length, 12) && first.startsWith(shown)));
+  });
+}
 function geminiDialogRows(rows) {
   return rows.some((row) => GEMINI_NUMBERED_ROW_RE.test(row) || GEMINI_DIALOG_WORDS_RE.test(row)
     || (GEMINI_NAVIGATE_RE.test(row) && !rows.some((other) => GEMINI_SLASH_MENU_RE.test(other))));
@@ -1634,7 +1660,14 @@ function createSessionSend(deps) {
     const wholePath = geminiWholeTranscriptPath(meta.path);
     let preSize = 0;
     try { preSize = (await fs.stat(wholePath)).size; } catch { preSize = 0; }
-    return { path: wholePath, preSize };
+    // A Gemini message is also confirmed by agy's prompt history, which records
+    // it when agy takes it, queued or not (geminiQueuedShown). Its boundary is
+    // taken here, before typing, like the transcript's.
+    const geminiHistory = geminiHistoryPathFor(wholePath);
+    if (!geminiHistory) return { path: wholePath, preSize };
+    let historyPreSize = 0;
+    try { historyPreSize = (await fs.stat(geminiHistory)).size; } catch { historyPreSize = 0; }
+    return { path: wholePath, preSize, history: { path: geminiHistory, preSize: historyPreSize, conversationId: String(sessionId), since: Date.now() } };
   };
 
   const confirmDelivery = async (
@@ -1664,7 +1697,15 @@ function createSessionSend(deps) {
       try { preSize = (await fs.stat(transcriptPath)).size; } catch { preSize = 0; }
     }
     // Only a command confirms by its command tag; anything else is a message.
-    const scan = transcriptScanner(transcriptPath, preSize, text, images, { asCommand: optional && isSlashCommand(text), chips, paths });
+    const fromTranscript = transcriptScanner(transcriptPath, preSize, text, images, { asCommand: optional && isSlashCommand(text), chips, paths });
+    // Gemini: the transcript, or agy's prompt history (a queued message reaches
+    // the transcript only when the running turn ends, merged with the others).
+    const fromHistory = prepared?.history && !optional && !images ? geminiHistoryScanner(prepared.history, text) : null;
+    const scan = fromHistory ? async () => {
+      let found = false;
+      try { found = await fromTranscript(); } catch { /* the history may still say */ }
+      return found || fromHistory();
+    } : fromTranscript;
     const deadline = Date.now() + budget;
     while (Date.now() < deadline) {
       await sleep(500);
@@ -1924,6 +1965,51 @@ function createSessionSend(deps) {
           // Too long to judge whole: it never confirms.
           carry = '';
           skipTail = true;
+        }
+      }
+      return false;
+    };
+  };
+
+  // agy's prompt history (<home>\.gemini\antigravity-cli\history.jsonl): one
+  // JSON line per prompt it took, {display, timestamp, workspace,
+  // conversationId}, written the moment it takes the prompt, queued behind a
+  // running turn or not (measured on agy 1.5.14, 2026-11-25). A PASTED prompt's
+  // display carries NUL marks between some characters; without them it is the
+  // text exactly (four pastes of 469 to 1,289 characters, 20 lines among them).
+  // A line confirms only when it was written after the send (bytes past the
+  // boundary AND a timestamp from the send on, in case agy trims the file), is
+  // this conversation's, and holds exactly the typed words.
+  const geminiHistoryScanner = ({ path: historyPath, preSize, conversationId, since = 0 }, text) => {
+    const want = exactWords(text);
+    let offset = preSize;
+    let decoder = new StringDecoder('utf8');
+    let carry = '';
+    return async () => {
+      if (!want || !conversationId) return false;
+      const { size } = await fs.stat(historyPath);
+      if (size < offset) { offset = 0; carry = ''; decoder = new StringDecoder('utf8'); } // rewritten shorter: the timestamp decides
+      while (offset < size) {
+        const length = Math.min(size - offset, SCAN_SLICE_BYTES);
+        const buffer = Buffer.alloc(length);
+        const handle = await fs.open(historyPath, 'r');
+        try {
+          await handle.read(buffer, 0, length, offset);
+        } finally {
+          await handle.close();
+        }
+        offset += length;
+        const chunk = carry + decoder.write(buffer);
+        const cut = chunk.lastIndexOf('\n');
+        carry = cut >= 0 ? chunk.slice(cut + 1) : chunk;
+        if (carry.length > SCAN_CARRY_MAX) carry = '';
+        for (const line of cut >= 0 ? chunk.slice(0, cut).split('\n') : []) {
+          if (!line.includes(conversationId)) continue;
+          let rec = null;
+          try { rec = JSON.parse(line); } catch { continue; }
+          if (rec?.conversationId !== conversationId || typeof rec.display !== 'string') continue;
+          if (!(Number(rec.timestamp) >= since)) continue;
+          if (exactWords(rec.display.replace(/\u0000/g, '')) === want) return true;
         }
       }
       return false;
@@ -2550,6 +2636,9 @@ function createSessionSend(deps) {
     return error;
   };
   const PICTURE_UNCONFIRMED_NOTE = 'Harbor could not see Claude take the picture; check its window';
+  // agy holds a message sent mid-turn and sends it when the turn ends, together
+  // with any others queued behind it (geminiQueuedShown).
+  const GEMINI_QUEUED_NOTE = 'Gemini queued it: it goes in when the current turn ends, together with anything else queued (the window shows it then)';
   const codexUnconfirmedError = () => {
     const error = new Error('Harbor pressed Enter, but Codex\'s box did not come back empty, so Harbor cannot tell whether your message went. Your text is kept. Check the >_ terminal before sending again');
     error.code = 'CODEX_UNCONFIRMED';
@@ -3142,7 +3231,18 @@ function createSessionSend(deps) {
       await sleep(GEMINI_ENTER_POLL_MS);
       const screen = await readScreen(paneId, MENU_READ_LINES);
       const match = geminiBoxMatch(screen, sent);
-      if (match.state === 'empty') { geminiTyped.delete(paneId); return spares ? 'taken-after-retry' : 'taken'; }
+      if (match.state === 'empty') {
+        geminiTyped.delete(paneId);
+        // The queue row can land a frame after the box empties: one more look
+        // while a turn is still running. It only changes the words shown.
+        let queued = geminiQueuedShown(screen, sent.text);
+        if (!queued && match.status !== 'idle') {
+          await sleep(GEMINI_ENTER_POLL_MS);
+          queued = geminiQueuedShown(await readScreen(paneId, MENU_READ_LINES), sent.text);
+        }
+        if (queued) return 'queued';
+        return spares ? 'taken-after-retry' : 'taken';
+      }
       if (match.state === 'noprompt') return 'unconfirmed';
       if (match.state === 'other') {
         logSend({ paneId, phase: 'gemini-box-changed-after-enter' });
@@ -5331,7 +5431,7 @@ function createSessionSend(deps) {
             }, checkingSeq, imagePaths.length, { paths: imagePaths });
             return { ok: true, paneId: target.paneId, delivery: 'confirming' };
           }
-          status(sessionId, 'sent', normalizedNote || undefined);
+          status(sessionId, 'sent', (provider === 'gemini' && enterState === 'queued' ? GEMINI_QUEUED_NOTE : normalizedNote) || undefined);
           // Its own status only (Sol's review, round thirty-five: an older send's
           // late "could not confirm" overwrote a newer send's "sent").
           if (trimmed) reconcileDelivery(sessionId, trimmed, slash, confirmation, null, statusSeq.get(sessionId), imagePaths.length, { chips: verifiedChips, paths: imagePaths });
@@ -5815,6 +5915,7 @@ function createSessionSend(deps) {
     cyclePermissionMode,
     confirmNeedle,
     confirmDelivery, // exposed for the transcript-record specs
+    prepareDeliveryConfirmation, // and the Gemini prompt-history specs
     getQueueState,
     cancelQueued,
   };
@@ -5841,6 +5942,8 @@ module.exports = {
   geminiBoxState,
   geminiBlockedKind,
   geminiSurveyShown,
+  geminiQueuedShown,
+  geminiHistoryPathFor,
   geminiUserRequest,
   geminiBrainDir,
   geminiWholeTranscriptPath,

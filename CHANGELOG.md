@@ -18,6 +18,11 @@
   it is answered, so every send failed with "Gemini is not showing its prompt
   box". Harbor now starts Gemini sessions with the survey switched off, and a
   send that finds one already open skips it first.
+- A message sent to a Gemini window while Gemini is still working no longer
+  ends in "could not confirm the message reached the session". Antigravity
+  holds such a message and sends it when the current turn ends, together with
+  anything else sent meanwhile, so Harbor now checks Antigravity's own record
+  of what it took, and the status says the message is queued.
 - A Harbor built from this repository starts again: since the session-rename
   change it stopped at launch with "resolveConfigFile is not defined".
 - Copy and paste keep their formatting. Pasting from Teams, Outlook, Word,
