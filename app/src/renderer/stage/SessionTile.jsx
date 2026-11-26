@@ -535,6 +535,7 @@ export const SessionTile = memo(forwardRef(function SessionTile({
           selected={selected}
           watchOnly={showTerminal}
           blockedHint={Boolean(header?.blocked)}
+          providerName={providerIdentity(session.provider || 'claude').label}
         />
       ) : null}
     </div>

@@ -146,6 +146,16 @@ test('a Gemini window mounts the answer card, so its setup card and questions sh
   assert.match(tile, /session\.provider === 'claude' \|\| session\.provider === 'gemini'\) \? \(/);
 });
 
+// 2026-11-25: a card over a Gemini window read "Claude is asking".
+test("the answer card names the window's own provider, never Claude on a Gemini window", () => {
+  const tile = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'renderer', 'stage', 'SessionTile.jsx'), 'utf8');
+  const card = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'renderer', 'stage', 'AskCard.jsx'), 'utf8');
+  assert.match(tile, /<AskCard\n[^>]*providerName=\{providerIdentity\(session\.provider \|\| 'claude'\)\.label\}/);
+  assert.match(card, /const who = providerName;/);
+  assert.match(card, /`\$\{who\} is asking`/);
+  assert.doesNotMatch(card, /'Claude is asking'|Claude continues/);
+});
+
 test('the Gemini setup card counts as a dialog waiting on you, on the desktop and the phone', () => {
   const { liveDialog } = require('../../src/renderer/stage/dialog-state.cjs');
   const setup = { kind: 'gemini-setup', page: 'scheme', schemes: [{ label: 'terminal', selected: true }] };

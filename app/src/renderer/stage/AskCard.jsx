@@ -185,7 +185,7 @@ const rowKey = (q, row) => `${q}:${row}`;
 // there already, so the card renders nothing, but it keeps polling (with
 // `observe`, which never sends a key) so a window left on >_ still marks its
 // session as waiting on you.
-export function AskCard({ pane, sessionId, blockedHint, selected = false, watchOnly = false }) {
+export function AskCard({ pane, sessionId, blockedHint, selected = false, watchOnly = false, providerName = 'Claude' }) {
   const [menu, setMenu] = useState(null);
   // Any dialog this card would show means the session is waiting on you
   // (dialog-state.cjs); the tile, rail and taskbar read it from the store.
@@ -475,11 +475,13 @@ export function AskCard({ pane, sessionId, blockedHint, selected = false, watchO
   const total = sheet.questions.length;
   const done = staged ? answeredCount(sheet, state) : 0;
   const complete = staged && isComplete(sheet, state);
-  const eyebrow = sheet.kind === 'permission' ? 'Permission' : sheet.kind === 'resume' ? 'Resume' : sheet.kind === 'review' ? 'Review' : 'Claude is asking';
+  // The window's own provider is the one asking: a Gemini window read "Claude is asking" (2026-11-25).
+  const who = providerName;
+  const eyebrow = sheet.kind === 'permission' ? 'Permission' : sheet.kind === 'resume' ? 'Resume' : sheet.kind === 'review' ? 'Review' : `${who} is asking`;
   const hints = keyHints(sheet, state);
   const declineTitle = total > 1
-    ? 'Decline (Esc): Claude continues with NO answers to any of these questions, and everything staged here is dropped'
-    : 'Decline (Esc): Claude continues without an answer';
+    ? `Decline (Esc): ${who} continues with NO answers to any of these questions, and everything staged here is dropped`
+    : `Decline (Esc): ${who} continues without an answer`;
 
   return (
     <div

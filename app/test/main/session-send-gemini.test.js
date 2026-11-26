@@ -127,6 +127,19 @@ test('a numbered row below the last rule is a dialog even when a box-like echo s
   assert.equal(geminiBoxState(draft, { text: '1. first\n2. second' }), 'exact');
 });
 
+// A reply's numbered list is not a question (Pat, 2026-11-25). With no box drawn for a moment (a redraw, the survey
+// under a Harbor that predates its skip), the list under the last echo rule read as 'permission': the send stopped
+// waiting for the box after 8 polls and refused with "Gemini is waiting on a question (a permission or a choice)".
+// Every agy question measured draws "↑/↓ Navigate" or its own words (AGY-FACTS.md: trust, first-run, permission).
+test('a numbered list in a reply under the last rule is not a Gemini question (old code: "permission")', { skip: !NEW_CODE }, () => {
+  const rows = fixture('agy-1.5.14-working-numbered-reply-120.txt').split('\n');
+  const noBox = rows.slice(0, rows.findIndex((row) => row.startsWith('  Verification'))).join('\n');
+  assert.match(noBox, /^ {2}1\. Studio Command/m);
+  assert.equal(geminiPromptBox(noBox), null);
+  assert.equal(geminiBlockedKind(noBox), 'unknown');
+  assert.equal(geminiBlockedKind(fixture('agy-1.5.14-permission-prompt-120.txt')), 'permission', 'a real question still is one');
+});
+
 test('hyphens and rounded corners are not rules: the Terms page and the colour preview draw no box', { skip: !NEW_CODE }, () => {
   assert.equal(geminiPromptBox(`${'-'.repeat(100)}\n> [x] Yes, I agree\n${'-'.repeat(100)}`), null);
   assert.equal(geminiPromptBox(`╭${'─'.repeat(50)}╮\n│ > you: add a greeting │\n╰${'─'.repeat(50)}╯`), null);

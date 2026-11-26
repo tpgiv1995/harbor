@@ -23,6 +23,11 @@
   holds such a message and sends it when the current turn ends, together with
   anything else sent meanwhile, so Harbor now checks Antigravity's own record
   of what it took, and the status says the message is queued.
+- A Gemini window no longer shows a made-up question while Gemini works. A
+  numbered list in Gemini's reply was read as a question, so the window said
+  "needs your answer" and offered the list items as answers, under the label
+  "Claude is asking". Questions now come only from Gemini's own dialogs, and
+  the card names the provider that is asking.
 - A Harbor built from this repository starts again: since the session-rename
   change it stopped at launch with "resolveConfigFile is not defined".
 - Copy and paste keep their formatting. Pasting from Teams, Outlook, Word,

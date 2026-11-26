@@ -73,3 +73,27 @@ test('an idle, working, drafting or completing pane shows no card', async () => 
     assert.deepEqual(sent, [], name);
   }
 });
+
+// A NUMBERED LIST IN A REPLY IS NOT A QUESTION (Pat, 2026-11-25: "wtf? fix your shit for gemini"). While agy works,
+// its status row reads "esc to cancel", which Claude's menu reader takes for a question's footer, and a reply that
+// lists "1. Studio Command / 2. Liquid Slate / 3. Editorial Dock" became a card labelled "Claude is asking" with the
+// list as its options and "needs your answer" on the window, while Gemini was still working. agy's own questions
+// REPLACE its prompt box, so a drawn box means nothing is being asked. The fixture is agy's working screen (logo,
+// rules, box and status row as captured) around a reply shaped like the one on Pat's screen.
+test('a numbered list in a reply while agy works shows no card (old code: a "Claude is asking" card made of the list)', async () => {
+  const { shown, sent } = await poll(box('working-numbered-reply'));
+  assert.equal(shown, 'none');
+  assert.deepEqual(sent, []);
+});
+
+// The answer panel is the floor for screens nothing recognises, and it is raised by a dialog's own words anywhere on
+// the screen ("Esc to close", "Enter to select"). A Gemini reply can say those words; over agy's drawn box they are
+// prose, never a dialog.
+test("a dialog's words quoted in a reply over agy's box raise no answer panel", async () => {
+  const rows = box('working').split('\n');
+  const at = rows.findIndex((row) => row.startsWith('⢿'));
+  rows.splice(at, 0, '  The drawer closes on Esc to close, and the list takes Enter to select a row.', '');
+  const { shown, sent } = await poll(rows.join('\n'));
+  assert.equal(shown, 'none');
+  assert.deepEqual(sent, []);
+});

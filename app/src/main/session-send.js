@@ -852,7 +852,6 @@ function codexBoxState(screen, sent = {}) {
 const GEMINI_RULE_RE = /^\s*\u2500{10,}\s*$/u;
 const GEMINI_PROMPT_ROW_RE = /^>(?:[ \t]|$)/;
 const GEMINI_MODE_HINT_RE = /^(?:Auto|Accept-edits|Plan) mode:.*\(shift\+tab to cycle\)$/;
-const GEMINI_NUMBERED_ROW_RE = /^\s*>?\s*\d{1,2}\.\s+\S/;
 const GEMINI_DIALOG_WORDS_RE = /Run this command\?|Accept this file edit\?|Requesting permission for/;
 const GEMINI_NAVIGATE_RE = /\u2191\/\u2193 Navigate/;
 const GEMINI_SLASH_MENU_RE = /tab Complete/;
@@ -904,8 +903,11 @@ function geminiQueuedShown(screen, text) {
     return shown.length > 0 && (shown === first || (shown.length >= Math.min(first.length, 12) && first.startsWith(shown)));
   });
 }
+// agy's questions draw their own words or "↑/↓ Navigate" (every one measured: trust, first-run, permission;
+// AGY-FACTS.md). A numbered row alone is no mark: a reply's numbered list read as a permission question
+// (2026-11-25), and an echoed prompt that starts "1." would too.
 function geminiDialogRows(rows) {
-  return rows.some((row) => GEMINI_NUMBERED_ROW_RE.test(row) || GEMINI_DIALOG_WORDS_RE.test(row)
+  return rows.some((row) => GEMINI_DIALOG_WORDS_RE.test(row)
     || (GEMINI_NAVIGATE_RE.test(row) && !rows.some((other) => GEMINI_SLASH_MENU_RE.test(other))));
 }
 // The prompt box, or null when none is drawn (a dialog, a first-run page, a
@@ -4122,7 +4124,10 @@ function createSessionSend(deps) {
     for (const source of ['recent', 'visible']) {
       let screen = '';
       try { screen = await readPane(paneId, MENU_READ_LINES, source); } catch { return null; }
-      if (geminiDialogOwnsScreen(screen)) continue;
+      // agy's drawn prompt box: every agy question REPLACES it, so with the box up nothing is asked, and
+      // Claude's reader must not run. Its working status row "esc to cancel" reads as a dialog footer there,
+      // which made a reply's numbered list a question card with "needs your answer" (Pat, 2026-11-25).
+      if (geminiDialogOwnsScreen(screen) || geminiPromptBox(screen)) continue;
       const menu = parseMenu(screen);
       if (menu) return menu;
     }
@@ -4251,9 +4256,9 @@ function createSessionSend(deps) {
       const setup = parseGeminiFirstRun(grid) || parseGeminiFirstRun(screen);
       if (setup) return setup;
     }
-    // agy's slash-command completion list hangs under its own drawn prompt while "/" is typed: a draft being
-    // completed, not a question, so no panel (measured on test/fixtures/gemini-box, 2026-11-24).
-    if (geminiPromptBox(screen)?.menuOpen) return null;
+    // agy's own drawn prompt box means nothing is being asked (its questions replace the box): dialog words in a
+    // reply above it are prose, and its slash-command list under it is a draft being completed (2026-11-24/25).
+    if (geminiPromptBox(screen)) return null;
     const blocked = classifyBlocked(screen, blockedHint);
     if (!blocked) return null;
     // Claude's own first-run notices are handled here rather than shown: one
