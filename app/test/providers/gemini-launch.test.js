@@ -143,3 +143,32 @@ test('a long record at the tail does not hide an older model: the read is bounde
   assert.equal(lastGeminiModel(root, CONV, { maxBytes: 4000 }), null, 'outside the window it is simply not found');
   assert.equal(lastGeminiModel(root, CONV), 'gemini-4-neon-low');
 });
+
+// 2026-11-26: an orchestrator's steps run on other models, so the newest step's slug reopened "Orchestrator (Neon)" as plain
+// Gemini 4 Hydrogen (XHigh). The model agy's status line named (Harbor's tee) wins, mapped through the cached model list.
+test('a resume reopens on the model the session was given, not the one its last step ran on', (t) => {
+  const root = tmp(t);
+  const ctx = path.join(root, 'ctx');
+  fs.mkdirSync(ctx);
+  const modelsFile = path.join(root, 'gemini-models.json');
+  fs.writeFileSync(modelsFile, JSON.stringify({ rows: [
+    { id: 'gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh)' },
+    { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)' },
+  ] }));
+  writeTranscript(root, [
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-4-neon-xhigh', content: 'a', created_at: '2026-11-26T06:50:00Z' },
+    { step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-4-hydrogen-xhigh', content: 'b', created_at: '2026-11-26T06:56:55Z' },
+  ]);
+  const tee = (writtenAt) => fs.writeFileSync(path.join(ctx, `gemini-${CONV}.json`), JSON.stringify({
+    conversation_id: CONV, model: { id: 'Orchestrator (Neon)', display_name: 'Orchestrator (Neon)', effort: null },
+    writtenAt, writtenAtMs: Date.parse(writtenAt),
+  }));
+  const opts = { contextDir: ctx, modelsFile };
+  assert.equal(lastGeminiModel(root, CONV, opts), 'gemini-4-hydrogen-xhigh', 'no tee: the newest step, as before');
+  tee('2026-11-26T06:57:26Z');
+  assert.equal(lastGeminiModel(root, CONV, opts), 'gemini-pro-orchestrator-neon');
+  tee('2026-11-26T05:00:00Z');
+  assert.equal(lastGeminiModel(root, CONV, opts), 'gemini-4-hydrogen-xhigh', 'a tee long older than the steps is stale');
+  tee('2026-11-26T06:57:26Z');
+  assert.equal(lastGeminiModel(root, CONV, { contextDir: ctx, modelsFile: path.join(root, 'none.json') }), 'gemini-4-hydrogen-xhigh', 'a label with no id in the list cannot be launched');
+});

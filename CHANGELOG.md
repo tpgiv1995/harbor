@@ -31,6 +31,11 @@
   background agents or commands, which it lists under its message box; Harbor
   used to lose track of the box then, and messages sent to the window in that
   state could not find it either.
+- A Gemini session started on an Orchestrator model keeps that name on its
+  window. The orchestrator runs its own steps on other Gemini models, and the
+  window showed whichever one ran last (an "Orchestrator (Neon)" session read
+  "Gemini 4 Hydrogen"). Resuming such a session reopened it on that last model
+  too; it now reopens on the Orchestrator.
 - A Harbor built from this repository starts again: since the session-rename
   change it stopped at launch with "resolveConfigFile is not defined".
 - Copy and paste keep their formatting. Pasting from Teams, Outlook, Word,

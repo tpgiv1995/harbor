@@ -256,3 +256,49 @@ test('open window: with no tee there is a token count and no percentage', async 
   assert.equal(header.contextPct, null, 'Claude\'s tee for the same id is not Gemini\'s');
   assert.equal(header.contextTokens, 11400);
 });
+
+// 2026-11-26, Pat: "i started on the gemini orchestrator neon model option. but now its showing hydrogen?" An orchestrator
+// runs its steps on more than one model (Pat's: 45 Neon, 31 Hydrogen, 11 Neon, 21 Hydrogen, all xhigh), and the chip named
+// the newest step's. The model agy's status line names for the session outranks every step; without it the steps decide.
+test('an orchestrator session keeps its own name on the chip while its steps move between models', () => {
+  const parser = new TranscriptParser('gemini');
+  parser.applyGeminiLine(step('PLANNER_RESPONSE', { model: 'gemini-4-neon-xhigh', content: 'planning' }));
+  parser.applyGeminiLine(step('PLANNER_RESPONSE', { model: 'gemini-4-hydrogen-xhigh', content: 'building' }));
+  assert.equal(parser.header.model.name, 'Gemini 4 Hydrogen', 'the old reading: the newest step');
+  parser.setGeminiChosenModel({ id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)', name: 'Orchestrator (Neon)', effort: null });
+  assert.deepEqual(parser.header.model, { id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)', tone: 'other' });
+  assert.equal(parser.header.effort, null, 'an orchestrator has no effort of its own');
+  parser.applyGeminiLine(step('PLANNER_RESPONSE', { model: 'gemini-4-hydrogen-xhigh', content: 'more building' }));
+  assert.equal(parser.header.model.name, 'Orchestrator (Neon)', 'later steps do not take the chip back');
+  parser.setGeminiChosenModel(null);
+  assert.equal(parser.header.model.name, 'Gemini 4 Hydrogen', 'no status-line model: the steps decide again');
+  assert.equal(parser.header.effort, 'xhigh');
+});
+
+test('open window: an orchestrator session reads as the orchestrator, from agy\'s own status tee', async (t) => {
+  const dir = await fsp.mkdtemp(path.join(realTmpDir(), 'harbor-gemini-orch-'));
+  const home = path.join(dir, 'home');
+  const file = transcriptPathFor({ provider: 'gemini', sessionId: ID, home });
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const now = new Date();
+  const lines = ['gemini-4-neon-xhigh', 'gemini-4-hydrogen-xhigh', 'gemini-4-neon-xhigh', 'gemini-4-hydrogen-xhigh']
+    .map((model, i) => JSON.stringify(step('PLANNER_RESPONSE', { step_index: i, model, content: `step ${i}`, created_at: new Date(now.getTime() - (4 - i) * 1000).toISOString() })));
+  await fsp.writeFile(file, `${lines.join('\n')}\n`);
+  const ctx = path.join(dir, 'ctx');
+  await fsp.mkdir(ctx);
+  await fsp.writeFile(path.join(ctx, `gemini-${ID}.json`), JSON.stringify({
+    conversation_id: ID, agent_state: 'working', model: { id: 'Orchestrator (Neon)', display_name: 'Orchestrator (Neon)', effort: null },
+    context_window: { used_percentage: 28.1, context_window_size: 1048576 }, writtenAt: now.toISOString(), writtenAtMs: now.getTime(),
+  }));
+  const geminiModelsFile = path.join(dir, 'gemini-models.json');
+  await fsp.writeFile(geminiModelsFile, JSON.stringify({ rows: [{ id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)' }] }));
+  const provider = createTranscriptProvider({ getSessionMeta: async () => ({ path: file, provider: 'gemini' }), contextCacheDir: ctx, home, geminiModelsFile });
+  t.after(async () => { provider.closeAll(); await fsp.rm(dir, { recursive: true, force: true }); });
+  const updates = [];
+  provider.emitter.on('update', (update) => updates.push(update));
+  await provider.open(ID, { provider: 'gemini' });
+  const header = updates.at(-1).header;
+  assert.deepEqual(header.model, { id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)', tone: 'other' });
+  assert.equal(header.effort, null);
+  assert.equal(header.contextPct, 28);
+});

@@ -128,7 +128,37 @@ function createGeminiModelCatalog(options = {}) {
   return { models: () => geminiModelOptions(cacheFile), refresh };
 }
 
+// THE MODEL A GEMINI SESSION WAS GIVEN, NOT THE ONE ITS LAST STEP RAN ON (2026-11-26, Pat: "i started on the gemini
+// orchestrator neon model option. but now its showing hydrogen?"). An orchestrator (`gemini-pro-orchestrator-neon`) runs its
+// own steps on more than one model: Pat's stamped 56 steps `gemini-4-neon-xhigh` and 52 `gemini-4-hydrogen-xhigh`, in runs,
+// so the newest step's slug named Hydrogen on the window's chip, and a resume would have reopened it as plain Hydrogen.
+// agy's status-line payload (Harbor's tee, gemini-<id>.json) names the session's model by the LABEL `agy models` prints
+// beside its id ("Orchestrator (Neon)" with effort null, "Gemini 4 Neon (High)" with effort "high"), so the label maps back
+// to the id exactly. agy's own transcript does not help: its settings note said "Gemini 4 Neon (XHigh)" for that session.
+// The tee is trusted unless the transcript went on well past its last write (a conversation continued where no tee runs).
+const GEMINI_TEE_STALE_MS = 5 * 60 * 1000;
+function geminiIdForLabel(label, rows) {
+  const want = String(label || '').trim();
+  if (!want) return null;
+  const row = (Array.isArray(rows) ? rows : []).find((r) => r && typeof r.label === 'string' && r.label.trim() === want);
+  return row && typeof row.id === 'string' ? row.id : null;
+}
+// { id, label, name, effort } for the chip and a resume, or null when the tee names no model or is stale. `name` drops the
+// "(High)" agy appends for the effort, which the chip shows as its own badge; an orchestrator's "(Neon)" is its name.
+function geminiChosenModel(tee, rows, { lastStepMs = null } = {}) {
+  const label = typeof tee?.model?.display_name === 'string' ? tee.model.display_name.trim() : '';
+  if (!label) return null;
+  const writtenMs = Number(tee.writtenAtMs) || Date.parse(tee.writtenAt || '') || null;
+  if (Number.isFinite(lastStepMs) && writtenMs && lastStepMs - writtenMs > GEMINI_TEE_STALE_MS) return null;
+  const level = String(tee.model.effort || '').toLowerCase();
+  const effort = EFFORT_ORDER.includes(level) ? level : null;
+  const suffix = effort ? new RegExp(`\\s*\\(${effort}\\)$`, 'i') : null;
+  const name = suffix && suffix.test(label) ? label.replace(suffix, '') : label;
+  return { id: geminiIdForLabel(label, rows), label, name, effort };
+}
+
 module.exports = {
-  parseGeminiModels, geminiFamilies, splitGeminiModel, geminiModelOptions, createGeminiModelCatalog,
+  parseGeminiModels, geminiFamilies, splitGeminiModel, geminiModelOptions, createGeminiModelCatalog, readGeminiRows,
+  geminiIdForLabel, geminiChosenModel, GEMINI_TEE_STALE_MS,
   GEMINI_DEFAULT_EFFORT, GEMINI_DEFAULT_FAMILY, GEMINI_EFFORT_FLOOR,
 };

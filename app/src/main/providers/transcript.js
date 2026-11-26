@@ -23,6 +23,7 @@ const { pastTense, progressive } = require('./plain-english.js');
 const { imageStore } = require('./image-store.js');
 const { readCodexInheritedHistory } = require('./codex-inherited-history.js');
 const { UUID_RE: GEMINI_ID_RE, geminiStoreRoot, geminiTranscriptPath, unwrapUserRequest } = require('./gemini-store.js');
+const { readGeminiRows, geminiChosenModel } = require('./gemini-model-catalog.js');
 
 
 // Cap what one tile renders; a 2-day session transcript can be tens of MB.
@@ -1404,6 +1405,21 @@ class TranscriptParser {
     this.startTurn(block, ts, turnIndex);
   }
 
+  // The model a Gemini session was GIVEN, as agy's status line names it (geminiChosenModel, gemini-model-catalog.js): it
+  // beats the newest step's slug, which an orchestrator moves between models (2026-11-26, "Orchestrator (Neon)" read
+  // "Gemini 4 Hydrogen"). Null hands the chip back to the steps.
+  setGeminiChosenModel(chosen) {
+    this.geminiChosen = chosen || null;
+    const step = this.geminiStepModel || null;
+    if (chosen) {
+      this.header.model = { id: chosen.id, name: chosen.name, tone: 'other' };
+      this.header.effort = chosen.effort;
+    } else if (step) {
+      this.header.model = step.model;
+      if (step.effort) this.header.effort = step.effort;
+    }
+  }
+
   // Set the learned window (from the tee's math or its persisted file) and
   // reprice the gauge so the correction shows on the same update.
   setLearnedWindow(windowTokens) {
@@ -2117,8 +2133,13 @@ class TranscriptParser {
     } else if (obj.type === 'PLANNER_RESPONSE') {
       const parts = geminiModelParts(obj.model);
       if (parts) {
-        this.header.model = { id: parts.id, name: geminiModelName(parts.family), tone: 'other' };
-        if (parts.effort) this.header.effort = parts.effort;
+        this.geminiStepModel = { model: { id: parts.id, name: geminiModelName(parts.family), tone: 'other' }, effort: parts.effort };
+        if (ts && Number.isFinite(Date.parse(ts))) this.geminiLastStepMs = Date.parse(ts);
+        // The model the session was given (setGeminiChosenModel) outranks the one this step ran on.
+        if (!this.geminiChosen) {
+          this.header.model = this.geminiStepModel.model;
+          if (parts.effort) this.header.effort = parts.effort;
+        }
       }
       const tokens = (Number(obj.input_tokens) || 0) + (Number(obj.cache_read_tokens) || 0);
       if (tokens > 0) {
@@ -2900,6 +2921,16 @@ function createTranscriptProvider(options = {}) {
   // Claude Code's context_window field, bypassing the transcript model-id gap.
   const contextCacheDir = options.contextCacheDir
     ?? path.join(os.homedir(), '.cache', 'harbor', 'context');
+  // agy's model list (`agy models`, cached by gemini-model-catalog.js), which turns the label agy's status line names a
+  // session's model by back into its id. Reread only when the file changes; a missing file maps nothing.
+  const geminiModelsFile = options.geminiModelsFile ?? path.join(os.homedir(), '.cache', 'harbor', 'gemini-models.json');
+  let geminiRowsCache = { mtimeMs: -1, rows: [] };
+  const geminiModelRows = () => {
+    let mtimeMs = 0;
+    try { mtimeMs = fs.statSync(geminiModelsFile).mtimeMs; } catch { return []; }
+    if (mtimeMs !== geminiRowsCache.mtimeMs) geminiRowsCache = { mtimeMs, rows: readGeminiRows(geminiModelsFile) };
+    return geminiRowsCache.rows;
+  };
   const watchFactory = options.watchFactory || ((target, listener) => watchPath(target, listener));
   // Where the Claude and Codex stores live; tests point it at a scratch home.
   const providerHome = options.home || os.homedir();
@@ -3176,6 +3207,8 @@ function createTranscriptProvider(options = {}) {
         // owner means "not working") everywhere /proc answers. Its liveness is the
         // transcript's recency, like codex and cursor.
         entry.ownerPid = !gemini && Number.isInteger(raw?.pid) && raw.pid > 1 ? raw.pid : null;
+        // The model the session was given, whatever its newest step ran on (2026-11-26; geminiChosenModel).
+        if (gemini) entry.parser.setGeminiChosenModel(geminiChosenModel(raw, geminiModelRows(), { lastStepMs: entry.parser.geminiLastStepMs ?? null }));
       } catch { entry.teedContextPct = null; entry.ownerPid = null; entry.teeCache = null; }
       // Liveness beacon: Claude Code re-renders the statusline every ~3 min
       // while a session's composer is OPEN, stamping statusline-state/<id>.json

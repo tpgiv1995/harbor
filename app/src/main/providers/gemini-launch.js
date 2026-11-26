@@ -16,7 +16,10 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const { readGeminiRows, geminiChosenModel } = require('./gemini-model-catalog.js');
+const { contextDirFromEnv } = require('./gemini-status-tee.cjs');
 
 const TEE_SCRIPT = path.join(__dirname, 'gemini-status-tee.cjs');
 const TEE_MAX_AGE_MS = 14 * 24 * 3600 * 1000;
@@ -100,11 +103,27 @@ function prepareGeminiLaunch({
   return { settingsFile: file, wrapper: statusLine ? wrapper : null, statusLine };
 }
 
-// The model a conversation last answered with (the slug on its newest PLANNER_RESPONSE), so a resume reopens it on that
-// model. A resume with no --model starts agy's own default (Neon High, the quota-expensive one), the way a Codex resume
-// without its recovered model would. Null when nothing can be read: the launch then names no model, honestly.
+// The model a conversation was given, so a resume reopens it on that model. A resume with no --model starts agy's own
+// default (Neon High, the quota-expensive one), the way a Codex resume without its recovered model would. First choice is
+// the model agy's status line named for this conversation (Harbor's tee, mapped from its label to agy's id through the
+// cached `agy models` list): an orchestrator's steps run on other models, and the newest step's slug reopened
+// "Orchestrator (Neon)" as plain Hydrogen (2026-11-26; geminiChosenModel). Otherwise the slug on its newest
+// PLANNER_RESPONSE. Null when nothing can be read: the launch then names no model, honestly.
 const GEMINI_MODEL_RE = /^gemini-[\w.-]+$/;
-function lastGeminiModel(stateDir, conversationId, { fsImpl = fs, maxBytes = 2 * 1024 * 1024 } = {}) {
+function teeChosenModelId(contextDir, modelsFile, conversationId, lastStepMs, fsImpl) {
+  try {
+    const tee = JSON.parse(fsImpl.readFileSync(path.join(contextDir, `gemini-${conversationId}.json`), 'utf8'));
+    if (tee?.conversation_id && tee.conversation_id !== String(conversationId)) return null;
+    const chosen = geminiChosenModel(tee, readGeminiRows(modelsFile), { lastStepMs });
+    return chosen?.id && GEMINI_MODEL_RE.test(chosen.id) ? chosen.id : null;
+  } catch {
+    return null;
+  }
+}
+function lastGeminiModel(stateDir, conversationId, {
+  fsImpl = fs, maxBytes = 2 * 1024 * 1024,
+  contextDir = contextDirFromEnv(process.env), modelsFile = path.join(os.homedir(), '.cache', 'harbor', 'gemini-models.json'),
+} = {}) {
   const file = path.join(stateDir, 'brain', String(conversationId), '.system_generated', 'logs', 'transcript_full.jsonl');
   let handle = null;
   try {
@@ -119,12 +138,15 @@ function lastGeminiModel(stateDir, conversationId, { fsImpl = fs, maxBytes = 2 *
       if (!lines[i].includes('"PLANNER_RESPONSE"')) continue;
       try {
         const record = JSON.parse(lines[i]);
-        if (record.type === 'PLANNER_RESPONSE' && GEMINI_MODEL_RE.test(record.model || '')) return record.model;
+        if (record.type === 'PLANNER_RESPONSE' && GEMINI_MODEL_RE.test(record.model || '')) {
+          const stepMs = Date.parse(record.created_at || '');
+          return teeChosenModelId(contextDir, modelsFile, conversationId, Number.isFinite(stepMs) ? stepMs : null, fsImpl) || record.model;
+        }
       } catch { /* a torn or unparsable line is skipped */ }
     }
-    return null;
+    return teeChosenModelId(contextDir, modelsFile, conversationId, null, fsImpl);
   } catch {
-    return null;
+    return teeChosenModelId(contextDir, modelsFile, conversationId, null, fsImpl);
   } finally {
     if (handle !== null) { try { fsImpl.closeSync(handle); } catch { /* ignore */ } }
   }

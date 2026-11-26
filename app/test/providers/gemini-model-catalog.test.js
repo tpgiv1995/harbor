@@ -10,7 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   parseGeminiModels, geminiFamilies, geminiModelOptions, createGeminiModelCatalog, splitGeminiModel,
-  GEMINI_EFFORT_FLOOR,
+  GEMINI_EFFORT_FLOOR, geminiChosenModel, geminiIdForLabel, GEMINI_TEE_STALE_MS,
 } = require('../../src/main/providers/gemini-model-catalog.js');
 
 const AGY_MODELS = [
@@ -136,4 +136,30 @@ test('two refreshes at once share one agy run', async (t) => {
   });
   await Promise.all([catalog.refresh(), catalog.refresh()]);
   assert.equal(runs, 1);
+});
+
+// 2026-11-26, Pat: "i started on the gemini orchestrator neon model option. but now its showing hydrogen?" The session ran
+// as "Orchestrator (Neon)" (agy's own status line) while its steps were stamped gemini-4-neon-xhigh and gemini-4-hydrogen-xhigh
+// in runs; the window named the newest step's model. agy's status line names the model by the label `agy models` prints.
+test('the model a session was given comes from agy\'s status line, mapped from its label to agy\'s id', () => {
+  const rows = [
+    { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)' },
+    { id: 'gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh)' },
+    { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)' },
+    { id: 'gemini-pro-orchestrator', label: 'Orchestrator (Carbon)' },
+  ];
+  const now = Date.parse('2026-11-26T06:57:26Z');
+  const tee = (display_name, effort) => ({ model: { id: display_name, display_name, effort }, writtenAtMs: now });
+  assert.deepEqual(geminiChosenModel(tee('Orchestrator (Neon)', null), rows),
+    { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)', name: 'Orchestrator (Neon)', effort: null });
+  assert.deepEqual(geminiChosenModel(tee('Gemini 4 Neon (High)', 'high'), rows),
+    { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)', name: 'Gemini 4 Neon', effort: 'high' });
+  assert.equal(geminiChosenModel(tee('Gemini 5 Something (Low)', 'low'), rows).id, null, 'a label the list lacks maps to no id');
+  assert.equal(geminiChosenModel({ model: null }, rows), null);
+  assert.equal(geminiChosenModel(null, rows), null);
+  // A conversation that went on well past the tee's last write (continued where no tee runs) is the steps' to name.
+  assert.equal(geminiChosenModel(tee('Orchestrator (Neon)', null), rows, { lastStepMs: now + GEMINI_TEE_STALE_MS + 1 }), null);
+  assert.equal(geminiChosenModel(tee('Orchestrator (Neon)', null), rows, { lastStepMs: now + 60_000 }).id, 'gemini-pro-orchestrator-neon');
+  assert.equal(geminiIdForLabel(' Orchestrator (Carbon) ', rows), 'gemini-pro-orchestrator');
+  assert.equal(geminiIdForLabel('', rows), null);
 });
