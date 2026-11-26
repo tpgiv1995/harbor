@@ -1,0 +1,9 @@
+## Shared context (read first)
+- Harbor is the project in C:\dev\harbor. It is a Windows Electron desktop app plus a self-hosted phone web app that hosts many AI coding-agent CLI sessions at once: Claude Code (15 accounts), Codex CLI, Cursor CLI (cursor-agent) and Google's Antigravity CLI (agy). Its own session daemon keeps each CLI in a ConPTY; chat windows are built from each CLI's transcript files; messages are typed into the pty.
+- READ FIRST: C:\dev\harbor\docs\orchestration\2026-11-26-oss-survey\REPORT.md, the survey already done (15 sections, ranked). Your job is to go ONE LEVEL DEEPER than it: fill its "Not verified" list, replace search-summary claims with primary sources, and add what it missed. Do not repeat what it already says unless you correct it.
+- You can read Harbor's code under C:\dev\harbor\app\src (main/, renderer/, daemon/, shared/, server/) to check whether Harbor already has something before calling it a gap. Read-only: never edit Harbor's code, never run Harbor, never touch the session daemon.
+- Today is 2026-11-26. Every claim needs a URL you actually opened (or a file path and line you read), with a date or version. Mark anything from a search snippet as "(snippet only)".
+- Write plainly: one idea per sentence, no marketing words, no em dashes.
+- Write your report to the file named in your brief (create the folder if needed). That file is the deliverable; keep your final chat answer to a 10-line summary plus the file path.
+- God Chrome (the mcp__chrome__* tools, Pat's signed-in Chrome): work in your OWN tab, never bring the window to the front, never sign in, post, comment, vote, star or change anything anywhere (read-only), and call browser_close when you are done. Use it for pages that block Firecrawl or plain fetches.
+- Never print, log or write a token, key or cookie.
