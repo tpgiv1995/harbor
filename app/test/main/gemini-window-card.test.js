@@ -14,7 +14,7 @@ const { createSessionSend, createLinkRegistry } = require('../../src/main/sessio
 const tempDirs = [];
 test.after(() => { for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true }); });
 
-async function poll(screen) {
+async function poll(screen, { blockedHint = false } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-gemini-card-'));
   tempDirs.push(stateDir);
   const sent = [];
@@ -36,7 +36,7 @@ async function poll(screen) {
     captureDir: path.join(stateDir, 'unrecognized-dialogs'),
     sendLogFile: path.join(stateDir, 'send-log.jsonl'),
   });
-  const menu = await send.getMenu({ pane: { paneId: 'p', workspaceId: 'w' } });
+  const menu = await send.getMenu({ pane: { paneId: 'p', workspaceId: 'w' }, blockedHint });
   const shown = !menu ? 'none' : menu.kind === 'gemini-setup' ? `setup:${menu.page}` : menu.fallback ? 'panel' : 'menu';
   return { shown, sent };
 }
@@ -89,6 +89,35 @@ test('a numbered list in a reply while agy works shows no card (old code: a "Cla
 // The answer panel is the floor for screens nothing recognises, and it is raised by a dialog's own words anywhere on
 // the screen ("Esc to close", "Enter to select"). A Gemini reply can say those words; over agy's drawn box they are
 // prose, never a dialog.
+// GEMINI'S BACKGROUND AGENTS DID NOT HIDE THE BOX FROM HARBOR UNTIL 2026-11-25 (Pat: "still getting like q&a interface
+// popping up", after the fix above was live). While subagents run, agy lists them UNDER its box ("  ● Agent(self: ...) ·
+// Gemini 4 Neon  <activity> · 9m24s"), closed by a rule of its own, so the last two rules framed the agents and Harbor saw
+// no box: Claude's reader made the reply's "1. Batch 1 ... 4. Batch 4" list a "Gemini is asking" card, and a window whose
+// status read blocked showed the raw answer panel. The fixture is the working-numbered-reply screen with the agent panel
+// laid out exactly as captured live (pane b2f7675d, four agents, status row "esc to cancel · Gemini 4 Neon (High)").
+test('a numbered list in a reply while agy runs background agents shows no card or panel (old code: a card made of the list)', async () => {
+  for (const blockedHint of [false, true]) {
+    const { shown, sent } = await poll(box('agent-panel-numbered-reply'), { blockedHint });
+    assert.equal(shown, 'none', `blockedHint=${blockedHint}`);
+    assert.deepEqual(sent, []);
+  }
+  const idle = box('agent-panel-numbered-reply').replace(/^esc to cancel · Gemini 4 Neon \(High\)$/m, '? for shortcuts · Gemini 4 Neon (High)');
+  assert.equal((await poll(idle)).shown, 'none', 'the same screen with agy idle and the agents still running');
+});
+
+// The other side: a real agy question still gets its panel with the agent panel drawn under it. This layout is
+// CONSTRUCTED (the permission fixture over the captured panel): a question while subagents run was not measured.
+test("agy's own question still gets the answer panel with background agents listed under it", async () => {
+  const panel = box('agent-panel-numbered-reply').split('\n');
+  const from = panel.findIndex((row) => /^\s*● Agent\(/u.test(row)) - 1;
+  const rows = box('permission-prompt').split('\n');
+  while (rows.length && !rows.at(-1).trim()) rows.pop();
+  const screen = [...rows.slice(0, -1), ...panel.slice(from)].join('\n');
+  const { shown, sent } = await poll(screen);
+  assert.equal(shown, 'panel');
+  assert.deepEqual(sent, []);
+});
+
 test("a dialog's words quoted in a reply over agy's box raise no answer panel", async () => {
   const rows = box('working').split('\n');
   const at = rows.findIndex((row) => row.startsWith('⢿'));

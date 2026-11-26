@@ -140,6 +140,44 @@ test('a numbered list in a reply under the last rule is not a Gemini question (o
   assert.equal(geminiBlockedKind(fixture('agy-1.5.14-permission-prompt-120.txt')), 'permission', 'a real question still is one');
 });
 
+// agy's background-agent panel sits UNDER the box while subagents run (captured live 2026-11-25): one row per agent and a
+// rule of its own, then the status row. Harbor took the last two rules for the box, found agents between them, and saw no
+// box at all: a reply's numbered list became a question card, and a send to that window would have waited for a box that
+// was on screen the whole time. The box is found over the panel; the draft, the status and the slash menu read as before.
+test('the box is found with background agents listed under it, and a draft in it still matches', { skip: !NEW_CODE }, () => {
+  const screen = fixture('agy-1.5.14-agent-panel-numbered-reply-120.txt');
+  assert.deepEqual(geminiPromptBox(screen), { raw: '', inside: '', paste: null, menuOpen: false, status: 'working' });
+  const idle = screen.replace(/^esc to cancel · Gemini 4 Neon \(High\)$/m, '? for shortcuts · Gemini 4 Neon (High)');
+  assert.equal(geminiPromptBox(idle).status, 'idle');
+  const drafted = screen.replace(/^>$/m, '> check batch 2 again');
+  assert.equal(geminiBoxState(drafted, { text: 'check batch 2 again' }), 'exact');
+  assert.equal(geminiBoxState(drafted, { text: 'something else' }), 'other');
+  // The same panel lists a background command (captured live a few minutes later): "  ● [21:47:12] python "..." running".
+  const commands = screen.split('\n').filter((row) => !/^\s*● Agent\(/u.test(row) || row.includes('Studio Command'))
+    .map((row) => (row.includes('Studio Command') ? `  ● [21:47:12] python "C:\\work\\scratch\\shots.py" running`.padEnd(120) : row)).join('\n');
+  assert.match(commands, /^ {2}● \[21:47:12\] python/m);
+  assert.deepEqual(geminiPromptBox(commands), { raw: '', inside: '', paste: null, menuOpen: false, status: 'working' });
+  // An earlier prompt's echo under a SHORT rule, with agents listed below it, is not a box.
+  const rows = screen.split('\n');
+  const boxTop = rows.findLastIndex((row, i) => /^─{10,}$/u.test(row.trim()) && rows[i + 1] === '>');
+  const echoOnly = [...rows.slice(0, boxTop), '─'.repeat(60), '> make three layout drafts', '─'.repeat(120), ...rows.slice(boxTop + 3)].join('\n');
+  assert.equal(geminiPromptBox(echoOnly), null);
+});
+
+test('with background agents listed at the bottom, a question and the survey are still told apart from the box', { skip: !NEW_CODE }, () => {
+  const panelRows = fixture('agy-1.5.14-agent-panel-numbered-reply-120.txt').split('\n');
+  const panel = panelRows.slice(panelRows.findIndex((row) => /^\s*● Agent\(/u.test(row)) - 1);
+  const trimmed = (name) => { const rows = fixture(name).split('\n'); while (rows.length && !rows.at(-1).trim()) rows.pop(); return rows.slice(0, -1); };
+  // CONSTRUCTED layouts (the captured panel under the measured question and survey): neither was measured with agents running.
+  const permission = [...trimmed('agy-1.5.14-permission-prompt-120.txt'), ...panel].join('\n');
+  assert.equal(geminiPromptBox(permission), null);
+  assert.equal(geminiBlockedKind(permission), 'permission');
+  const survey = [...trimmed('agy-1.5.14-feedback-survey-120.txt'), ...panel].join('\n');
+  assert.equal(geminiSurveyShown(survey), true);
+  assert.equal(geminiPromptBox(survey), null);
+  assert.equal(geminiBlockedKind(survey), 'survey');
+});
+
 test('hyphens and rounded corners are not rules: the Terms page and the colour preview draw no box', { skip: !NEW_CODE }, () => {
   assert.equal(geminiPromptBox(`${'-'.repeat(100)}\n> [x] Yes, I agree\n${'-'.repeat(100)}`), null);
   assert.equal(geminiPromptBox(`╭${'─'.repeat(50)}╮\n│ > you: add a greeting │\n╰${'─'.repeat(50)}╯`), null);

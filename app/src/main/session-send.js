@@ -882,7 +882,9 @@ const GEMINI_SURVEY_OPTIONS_RE = /^\s*\[1\] Good\s+\[2\] Fine\s+\[3\] Bad\s+\[0\
 function geminiSurveyShown(screen) {
   const rows = String(screen || '').split('\n').filter((row) => row.trim());
   const options = rows.findLastIndex((row) => GEMINI_SURVEY_OPTIONS_RE.test(row));
-  return options > 0 && rows.length - 1 - options <= 1 && GEMINI_SURVEY_QUESTION_RE.test(rows[options - 1]);
+  // agy's background-task panel (its rows and rules) can sit between the survey and the status row (2026-11-25).
+  const after = rows.slice(options + 1).filter((row) => !GEMINI_PANEL_ROW_RE.test(row) && !GEMINI_RULE_RE.test(row));
+  return options > 0 && after.length <= 1 && GEMINI_SURVEY_QUESTION_RE.test(rows[options - 1]);
 }
 // A message sent while agy works is QUEUED, not refused (measured live on agy
 // 1.5.14, 2026-11-25): the box empties and the message waits as a row above it,
@@ -910,6 +912,26 @@ function geminiDialogRows(rows) {
   return rows.some((row) => GEMINI_DIALOG_WORDS_RE.test(row)
     || (GEMINI_NAVIGATE_RE.test(row) && !rows.some((other) => GEMINI_SLASH_MENU_RE.test(other))));
 }
+// agy's background-task panel (measured live on agy 1.5.14, 2026-11-25): while subagents or background commands run, agy
+// lists them UNDER the box, one indented row each behind a status mark, closed by a rule of its own, with the status row last:
+//   "  ● Agent(self: <name>) · Gemini 4 Neon  <activity> · 9m24s"
+//   "  ● [21:47:12] python "C:\...\scra... running"
+// The box's bottom rule is the panel's top, so the last two rules frame the TASKS, not the box: Harbor saw no box, and Claude's
+// reader made a reply's numbered list a "Gemini is asking" card (Pat, 2026-11-25, four agents running). The row test is the
+// shape, not the words, so a task kind not seen yet is still a panel row. The box's own rows never match it (its first row is
+// ">" at column 0), nor do a question's (numbered options, "↑/↓ Navigate") or the slash menu's ("/name").
+const GEMINI_PANEL_ROW_RE = /^\s{1,4}[^\w\s]\s+\S/u;
+// The index into `rules` of the last rule above agy's trailing panels: the task panel is stepped over (a run of rules with only
+// panel rows between them), so what is left at the end is the box's bottom rule, or a dialog's.
+function geminiLastRuleAbovePanels(lines, rules) {
+  let last = rules.length - 1;
+  while (last >= 1) {
+    const between = lines.slice(rules[last - 1] + 1, rules[last]).filter((row) => row.trim());
+    if (!between.length || !between.every((row) => GEMINI_PANEL_ROW_RE.test(row))) break;
+    last -= 1;
+  }
+  return last;
+}
 // The prompt box, or null when none is drawn (a dialog, a first-run page, a
 // pane still starting). `inside` is the draft with whitespace dropped ('' for
 // an empty box or its mode placeholder); `raw` keeps the rows' own spacing.
@@ -919,8 +941,13 @@ function geminiPromptBox(screen) {
   const rules = [];
   lines.forEach((line, i) => { if (GEMINI_RULE_RE.test(line)) rules.push(i); });
   if (rules.length < 2) return null;
-  const bottom = rules.at(-1);
-  const top = rules.at(-2);
+  const last = geminiLastRuleAbovePanels(lines, rules);
+  if (last < 1) return null;
+  const bottom = rules[last];
+  const top = rules[last - 1];
+  // Under a task panel the box is drawn full width like the panel's own rules; an earlier prompt's echo sits under a SHORT
+  // rule, so a pair of unequal rules there is not the box.
+  if (last < rules.length - 1 && lines[top].trim().length !== lines[bottom].trim().length) return null;
   const below = lines.slice(bottom + 1);
   // The survey draws no rules, so the last two can be the short ones over an
   // earlier prompt's echo: with the survey at the bottom there is no box at all.
@@ -983,8 +1010,11 @@ function geminiBlockedKind(screen) {
   if (GEMINI_TRUST_RE.test(text)) return 'trust';
   if (geminiSurveyShown(text)) return 'survey';
   const lines = text.split('\n');
-  let last = -1;
-  lines.forEach((line, i) => { if (GEMINI_RULE_RE.test(line)) last = i; });
+  const rules = [];
+  lines.forEach((line, i) => { if (GEMINI_RULE_RE.test(line)) rules.push(i); });
+  // With agy's background-task panel at the bottom, the dialog's rows sit above the panel's rules (2026-11-25).
+  const above = rules.length ? geminiLastRuleAbovePanels(lines, rules) : -1;
+  const last = above < 0 ? -1 : above < rules.length - 1 ? (above >= 1 ? rules[above - 1] : -1) : rules[above];
   const below = last >= 0 ? lines.slice(last + 1) : lines;
   if (geminiDialogRows(below)) return 'permission';
   if (GEMINI_NAVIGATE_RE.test(text)) return 'menu';

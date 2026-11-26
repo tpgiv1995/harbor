@@ -27,7 +27,10 @@
   numbered list in Gemini's reply was read as a question, so the window said
   "needs your answer" and offered the list items as answers, under the label
   "Claude is asking". Questions now come only from Gemini's own dialogs, and
-  the card names the provider that is asking.
+  the card names the provider that is asking. This also holds while Gemini runs
+  background agents or commands, which it lists under its message box; Harbor
+  used to lose track of the box then, and messages sent to the window in that
+  state could not find it either.
 - A Harbor built from this repository starts again: since the session-rename
   change it stopped at launch with "resolveConfigFile is not defined".
 - Copy and paste keep their formatting. Pasting from Teams, Outlook, Word,
