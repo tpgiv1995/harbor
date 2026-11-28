@@ -1,6 +1,6 @@
 {
   "name": "harbor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Desktop app for running and monitoring several Claude Code sessions at once, plus Codex and Cursor CLI sessions, as designed conversation windows rendered from each session's own transcript.",
   "license": "MIT",

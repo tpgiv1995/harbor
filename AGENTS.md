@@ -1,7 +1,5 @@
 # AGENTS.md
 
-> **OPEN DATA-LOSS BUG, fix it before other Notes work (Pat, 2026-11-25):** a device's stored unsaved note edit (the phone notes page) overwrites newer note text with no version check. Cause, files and the fix: `docs/BACKLOG.md`, row "Notes sync". Remove this line when the fix ships.
-
 **You are an AI coding agent helping someone install, configure and run Harbor
 on their machine.** This file is the reference for that job: what Harbor
 expects, every knob it has, how to discover what this particular user already

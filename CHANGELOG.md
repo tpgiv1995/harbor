@@ -1,6 +1,10 @@
 # Release notes
 
-## Unreleased
+## 0.2.0 (2026-11-27)
+
+Gemini joins Claude Code, Codex and Cursor as Harbor's fourth provider.
+Windows, macOS and Linux installers are attached to the GitHub release, built by
+`.github/workflows/build.yml` from the `v0.2.0` tag.
 
 - Gemini is Harbor's fourth provider, beside Claude Code, Codex and Cursor, through
   Google's Antigravity CLI (`agy`). New session has a Gemini tab with its own
@@ -9,10 +13,29 @@
   command bar, resumes, and sleeps and wakes like the others. Harbor reads
   Antigravity's own records for the conversation and a status line for whether it
   is idle, working or waiting for an approval. The first session in a profile
-  that never ran Antigravity shows Google's own terms screens in the window's
-  terminal; Harbor never answers them. The setup wizard and the phone know
-  Gemini too. Antigravity is installed and updated by hand; Harbor's update chip
-  leaves it alone.
+  that never ran Antigravity shows Google's two first-run pages (a colour
+  scheme, then the terms and the data-sharing choice) as a card in the window;
+  you make each choice, and Harbor never makes it for you. The setup wizard and
+  the phone know Gemini too. Antigravity is installed and updated by hand;
+  Harbor's update chip leaves it alone.
+- The plans menu shows Gemini beside Claude, Codex and Cursor: the 5-hour and
+  weekly windows of Antigravity's Gemini quota, read from the CLI itself with no
+  model turn. Cursor's row now shows its two pools separately (Auto and Composer,
+  and the named frontier models), so a spent frontier pool no longer hides behind
+  a low blended figure.
+- The Orch view's Team chart shows every running agent as a card: who launched
+  whom, its model, effort and plan, and its sub-workers under the agent that
+  started them.
+- Rename a session from the pencil on its rail row or window header, or Rename
+  in the row's right-click menu. The name is Harbor's own and shows on the rail,
+  window headers, notifications and the phone; it is never typed into the
+  session, and clearing it brings the automatic title back.
+- The rail has one launch button: "+" and a plan letter starts the plan you
+  picked last, and its arrow opens a picker listing every Claude plan with its
+  5-hour and weekly usage, then the other providers.
+- A note or task edited on the phone can no longer overwrite newer text. An edit
+  carries the text it started from and merges with changes made meanwhile; an
+  edit that cannot merge is kept as a "(conflicting copy)" beside the original.
 - A Gemini window no longer refuses messages after Antigravity asks "How's the
   CLI experience so far?". That survey takes the place of the message box until
   it is answered, so every send failed with "Gemini is not showing its prompt
