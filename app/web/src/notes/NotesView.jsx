@@ -23,13 +23,42 @@ function previewText(body) {
   return body.replace(/\s+/g, ' ').trim();
 }
 
+function sameTags(a, b) {
+  const key = (list) => (list || []).map((tag) => String(tag).trim().toLowerCase()).join('\n');
+  return key(a) === key(b);
+}
+
 // Apple-Notes-style editor: the note IS the screen. Title is the first line, the
 // body flows beneath with no field chrome, actions live behind a menu, and it
 // auto-saves on close. A note left completely empty is discarded (no litter).
+//
+// It never writes back text it only showed (2026-11-27, Pat: "I keep having mobile
+// harbor overwrite harbor notes"; docs/BACKLOG.md "Notes sync"). It used to load the
+// note once and, on close, send the whole title, body and tags it held, so an edit
+// made elsewhere while it was open (an agent updating a board note)
+// was erased by a body nobody here had typed in, and it showed a draft this phone had
+// kept in storage since Nov 23 AS the note, then saved it over the newer text. Now:
+//   * baseRef holds what the screen showed before the user typed; every edit carries
+//     it, and the store merges against it (shared/edit-merge.cjs), or keeps the
+//     user's version as its own "(conflicting copy)" note when both cannot be kept.
+//   * A field the user has not typed in follows the note live, base included.
+//   * Closing sends only the fields that differ from what was shown.
+//   * A draft restored from this phone's storage shows again only while it is current
+//     (the note has not changed since it was typed), so unsaved typing is never hidden.
+//     A stale one is never shown as the note: it is sent once, with its base, as the
+//     editor opens, and the screen shows the result (merged, or kept as its own note).
 function NoteEditor({ note, opener, onClosed, mutate }) {
   const edits = usePendingPatches('note', note.id, mutate);
-  const [title, setTitle] = useState(edits.draft.title ?? note.title);
-  const [tags, setTags] = useState((edits.draft.tags ?? note.tags).join(', '));
+  const startRef = useRef(null);
+  if (!startRef.current) {
+    const restored = edits.pending(note.id);
+    const stale = Boolean(restored) && edits.stale(note.id, note);
+    startRef.current = { stale, shown: restored && !stale ? { ...note, ...restored } : note };
+  }
+  const restoredRef = useRef(startRef.current.stale);
+  const baseRef = useRef({ title: note.title, body: note.body, tags: note.tags });
+  const [title, setTitle] = useState(startRef.current.shown.title);
+  const [tags, setTags] = useState((startRef.current.shown.tags || []).join(', '));
   const [menuOpen, setMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -38,14 +67,50 @@ function NoteEditor({ note, opener, onClosed, mutate }) {
   const closingRef = useRef(false);
   const finishRef = useRef(null);
 
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    restoredRef.current = false;
+    edits.flush().then((result) => {
+      if (!result?.ok) setSaveError(result?.reason || 'An edit kept on this phone did not save. Retry before closing.');
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // An edit made elsewhere lands in the doc while this note is open: every field the
+  // user has not typed in shows it, and it becomes that field's base.
+  const tagsKey = note.tags.join('\n');
+  useEffect(() => {
+    const typed = edits.pending(note.id) || {};
+    const base = { ...baseRef.current };
+    if (!('title' in typed) && note.title !== base.title) { base.title = note.title; setTitle(note.title); }
+    if (!('body' in typed) && note.body !== base.body) {
+      base.body = note.body;
+      if (bodyRef.current) bodyRef.current.value = note.body;
+    }
+    if (!('tags' in typed) && !sameTags(note.tags, base.tags)) { base.tags = note.tags; setTags(note.tags.join(', ')); }
+    baseRef.current = base;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [note.title, note.body, tagsKey]);
+
   const finish = async () => {
     if (closingRef.current) return;
     closingRef.current = true;
-    const body = bodyRef.current?.value ?? note.body;
+    const body = bodyRef.current?.value ?? baseRef.current.body;
     const parsedTags = tagsFromDraft(tags);
+    const base = baseRef.current;
     const empty = !title.trim() && !body.trim() && !parsedTags.length;
-    if (!empty) edits.queue({ title, body, tags: parsedTags });
-    const result = empty ? await mutate({ type: 'note.remove', noteId: note.id }) : await edits.flush();
+    // An emptied note is deleted only while nobody else has changed it since it was
+    // shown; otherwise the empty fields go through the merge like any other edit.
+    const unchangedElsewhere = note.title === base.title && note.body === base.body && sameTags(note.tags, base.tags);
+    const fields = {};
+    if (title !== base.title) fields.title = title;
+    if (body !== base.body) fields.body = body;
+    if (!sameTags(parsedTags, base.tags)) fields.tags = parsedTags;
+    const removing = empty && unchangedElsewhere;
+    if (!removing && Object.keys(fields).length) edits.queue(fields, base);
+    let result = { ok: true };
+    if (removing) result = await mutate({ type: 'note.remove', noteId: note.id });
+    else if (edits.pending(note.id)) result = await edits.flush();
     if (!result?.ok) {
       closingRef.current = false;
       setSaveError(result?.reason || 'That change did not save. Retry before closing.');
@@ -121,13 +186,13 @@ function NoteEditor({ note, opener, onClosed, mutate }) {
 
       <div className="ne-page">
         {saveError || edits.error ? <p className="notes-status" role="alert">{edits.error || saveError}</p> : null}
-        <input autoComplete="off" ref={titleRef} className="ne-title" value={title} onChange={(event) => { setTitle(event.target.value); edits.queue({ title: event.target.value }); }} maxLength={300} placeholder="Title" aria-label="Title" />
-        <textarea autoComplete="off" ref={bodyRef} key={note.id} className="ne-body" defaultValue={edits.draft.body ?? note.body} onChange={(event) => edits.queue({ body: event.target.value })} maxLength={MAX_BODY} placeholder="Start writing..." aria-label="Note" />
+        <input autoComplete="off" ref={titleRef} className="ne-title" value={title} onChange={(event) => { setTitle(event.target.value); edits.queue({ title: event.target.value }, baseRef.current); }} maxLength={300} placeholder="Title" aria-label="Title" />
+        <textarea autoComplete="off" ref={bodyRef} key={note.id} className="ne-body" defaultValue={startRef.current.shown.body} onChange={(event) => edits.queue({ body: event.target.value }, baseRef.current)} maxLength={MAX_BODY} placeholder="Start writing..." aria-label="Note" />
       </div>
 
       <footer className="ne-tags">
         <span className="ne-tags-hash" aria-hidden="true">#</span>
-        <input autoComplete="off" value={tags} onChange={(event) => { setTags(event.target.value); edits.queue({ tags: tagsFromDraft(event.target.value) }); }} placeholder="Add tags, comma separated" aria-label="Tags" />
+        <input autoComplete="off" value={tags} onChange={(event) => { setTags(event.target.value); edits.queue({ tags: tagsFromDraft(event.target.value) }, baseRef.current); }} placeholder="Add tags, comma separated" aria-label="Tags" />
       </footer>
 
       {menuOpen ? <button type="button" className="ne-scrim" tabIndex={-1} aria-hidden="true" onClick={() => setMenuOpen(false)} /> : null}

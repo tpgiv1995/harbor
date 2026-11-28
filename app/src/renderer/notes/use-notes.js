@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import notesModel from '../../shared/notes-model.cjs';
+
+const { conflictNotice } = notesModel;
 
 export function useNotes() {
   const [doc, setDoc] = useState(null);
@@ -33,7 +36,7 @@ export function useNotes() {
     // notes list for an empty one until the next outside event.
     if (result?.ok && result.doc) setDoc(result.doc);
     if (result?.recovery !== undefined) setRecovery(result.recovery || null);
-    setNotice(result?.ok ? null : (result?.reason || 'that change did not save'));
+    setNotice(result?.ok ? conflictNotice(result) : (result?.reason || 'that change did not save'));
     return result || { ok: false };
   }, []);
 

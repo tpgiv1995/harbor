@@ -165,7 +165,12 @@ function createNoteStore(options = {}) {
       };
     }
     const result = model.applyOp(doc, op, { now: now() });
-    if (!result.ok) return { ok: false, reason: result.reason, doc, recovery };
+    if (!result.ok) {
+      return {
+        ok: false, reason: result.reason, doc, recovery,
+        ...(result.conflict ? { conflict: true, conflictFields: result.conflictFields } : {}),
+      };
+    }
     try {
       await save(result.doc);
     } catch (error) {
@@ -185,6 +190,11 @@ function createNoteStore(options = {}) {
       groupId: result.groupId,
       removed: result.removed,
       movedNotes: result.movedNotes,
+      // An edit that carried its base (notes-model updateFromBase) says how it
+      // landed: merged with an edit made elsewhere, or kept as its own note.
+      merged: result.merged,
+      conflictCopyId: result.conflictCopyId,
+      conflictFields: result.conflictFields,
     };
   }
 

@@ -15,6 +15,8 @@
 // so a note can wear several. The two organizers compose the same way tasks'
 // lists and tags do: a group is the bucket, a topic is a cross-cutting filter.
 
+const edit = require('./edit-merge.cjs');
+
 const DOC_VERSION = 1;
 const MAX_TITLE = 300;
 const MAX_BODY = 100000;
@@ -259,6 +261,11 @@ function applyOp(input, op, ctx = {}) {
       // loud here (unlike note.add's tolerant fallback): the user picked a
       // group, and silently landing the note somewhere else would be a lie.
       if ('groupId' in patch && !findGroup(patch.groupId)) return fail('that group no longer exists');
+      // An edit that says what it started from (op.base) never overwrites a
+      // newer value: see updateFromBase and shared/edit-merge.cjs.
+      if (op.base && typeof op.base === 'object' && !Array.isArray(op.base)) {
+        return updateFromBase(doc, note, patch, op, { now, idFactory });
+      }
       if ('groupId' in patch) note.groupId = patch.groupId;
       if ('title' in patch) note.title = cleanTitle(patch.title);
       if ('body' in patch) note.body = cleanText(patch.body, MAX_BODY);
@@ -299,6 +306,114 @@ function applyOp(input, op, ctx = {}) {
     default:
       return fail(`unknown operation: ${type || '(none)'}`);
   }
+}
+
+const CONFLICT_SUFFIX = ' (conflicting copy)';
+
+/**
+ * What a view says after an edit was kept as its own note (updateFromBase):
+ * null for any other result.
+ */
+function conflictNotice(result) {
+  if (!result?.ok || !result.conflictCopyId) return null;
+  const copy = result.doc?.notes?.find((note) => note.id === result.conflictCopyId);
+  const name = copy?.title ? `\u201c${copy.title}\u201d` : 'a new note';
+  return `This note changed somewhere else while you were editing it, so your version is saved as its own note: ${name}.`;
+}
+
+/**
+ * note.update for an edit that carries `op.base`, the title, body and tags the
+ * editor showed before the user typed (2026-11-27, docs/BACKLOG.md "Notes
+ * sync"). Each based field is merged three ways against what the note holds
+ * now (shared/edit-merge.cjs), so an edit made elsewhere since the editor
+ * loaded the note survives: a phone that saves the body it loaded an hour ago,
+ * or a draft its browser kept since last week, can no longer erase it.
+ *
+ * When the two edits cannot both be kept, NOTHING is chosen to lose: the note
+ * keeps its current text and the user's version becomes a new note titled
+ * "<title> (conflicting copy)" in the same group (the result names it in
+ * conflictCopyId). A writer that would rather re-read than leave a copy (an
+ * agent's tool) passes `strict: true` and is refused whenever another writer
+ * changed a based field since its base, merged or not.
+ *
+ * A base field of null means "not known" (a draft stored before bases
+ * existed): it is kept only when it already equals the note, otherwise it is
+ * a conflict. Fields the patch carries without a base are applied as before,
+ * and groupId and pinned are single decisions, applied as given. updatedAt
+ * moves only when something actually changed.
+ */
+function updateFromBase(doc, note, patch, op, { now, idFactory }) {
+  const base = op.base;
+  const mine = {};
+  if ('title' in patch) mine.title = cleanTitle(patch.title);
+  if ('body' in patch) mine.body = cleanText(patch.body, MAX_BODY);
+  if ('tags' in patch) mine.tags = cleanTags(patch.tags);
+  const known = (field) => base[field] !== null && base[field] !== undefined;
+  const baseOf = {
+    title: () => (known('title') ? cleanTitle(base.title) : null),
+    body: () => (known('body') ? cleanText(base.body, MAX_BODY) : null),
+    tags: () => (known('tags') ? cleanTags(base.tags) : null),
+  };
+  const sameTags = (a, b) => a.map(tagKey).join('\n') === b.map(tagKey).join('\n');
+  const same = (field, a, b) => (field === 'tags' ? sameTags(a, b) : a === b);
+
+  if (op.strict === true) {
+    const moved = Object.keys(mine).filter((field) => field in base
+      && !same(field, mine[field], note[field])
+      && (!known(field) || !same(field, baseOf[field](), note[field])));
+    if (moved.length) {
+      return {
+        ok: false,
+        conflict: true,
+        conflictFields: moved,
+        reason: `this note changed after you read it (${moved.join(', ')}); read it again and redo the edit`,
+      };
+    }
+  }
+
+  const next = {};
+  const conflicts = [];
+  let merged = false;
+  for (const field of Object.keys(mine)) {
+    if (!(field in base)) { next[field] = mine[field]; continue; }
+    const result = field === 'body'
+      ? edit.mergeText(baseOf.body(), mine.body, note.body)
+      : field === 'title'
+        ? edit.mergeValue(baseOf.title(), mine.title, note.title)
+        : edit.mergeSet(baseOf.tags(), mine.tags, note.tags, tagKey);
+    if (!result.ok) { conflicts.push(field); continue; }
+    next[field] = field === 'body' ? result.text : result.value;
+    if (result.merged) merged = true;
+  }
+
+  let changed = false;
+  if ('groupId' in patch && note.groupId !== patch.groupId) { note.groupId = patch.groupId; changed = true; }
+  if ('pinned' in patch && note.pinned !== (patch.pinned === true)) { note.pinned = patch.pinned === true; changed = true; }
+
+  if (conflicts.length) {
+    const title = (mine.title ?? note.title) || 'Untitled';
+    const copy = {
+      id: idFactory('n'),
+      groupId: note.groupId,
+      title: cleanTitle(title.slice(0, MAX_TITLE - CONFLICT_SUFFIX.length) + CONFLICT_SUFFIX),
+      body: mine.body ?? note.body,
+      tags: mine.tags ?? [...note.tags],
+      pinned: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    doc.notes.push(copy);
+    if (changed) note.updatedAt = now;
+    return { ok: true, doc, noteId: note.id, conflictCopyId: copy.id, conflictFields: conflicts };
+  }
+
+  for (const [field, value] of Object.entries(next)) {
+    if (same(field, value, note[field])) continue;
+    note[field] = value;
+    changed = true;
+  }
+  if (changed) note.updatedAt = now;
+  return { ok: true, doc, noteId: note.id, merged };
 }
 
 /**
@@ -369,10 +484,12 @@ module.exports = {
   DEFAULT_GROUP_ID,
   DEFAULT_GROUP_NAME,
   DOC_VERSION,
+  EDIT_BASE_VERSION: edit.EDIT_BASE_VERSION,
   MAX_BODY,
   MAX_TITLE,
   applyOp,
   cleanColor,
+  conflictNotice,
   emptyDoc,
   groupCounts,
   makeId,

@@ -142,11 +142,20 @@ export function NotesView() {
     setOpenId(listRows(doc)[0]?.id || null);
   }, [doc, openId]);
 
+  // A draft this window kept in storage (a save that never landed) opens again only while it
+  // is current: the note has not changed since it was typed. A STALE draft (maybe days old)
+  // used to open AS the note and save over newer text (2026-11-27, docs/BACKLOG.md "Notes
+  // sync"); it now opens on the saved text and goes through the store's merge at once.
   useEffect(() => {
-    setTitle(note?.title || '');
-    setBody(note?.body || '');
+    const saved = doc?.notes?.find((item) => item.id === openId) || null;
+    const restored = openId ? edits.pending(openId) : null;
+    const stale = Boolean(restored) && edits.stale(openId, saved);
+    const shown = restored && !stale ? { ...saved, ...restored } : saved;
+    setTitle(shown?.title || '');
+    setBody(shown?.body || '');
     setArmedDelete(null);
     setCopyState(null);
+    if (stale) edits.flush();
   }, [openId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // An OUTSIDE edit (harbor-notes CLI, another window) lands in the doc while
@@ -169,8 +178,13 @@ export function NotesView() {
     return (await edits.flush()).ok;
   }, [edits.flush]);
 
-  const settle = useCallback((fields) => {
-    edits.queue(fields);
+  // `base` is what the editor showed just before this change (the value the user's edit
+  // started from): the store merges against it instead of overwriting an edit made elsewhere
+  // meanwhile (pending-patches.cjs, 2026-11-27). It must be the value shown at THIS change,
+  // never one remembered from when the note opened: after an autosave, the next keystroke
+  // starts from the saved text, and an older base would make every later save a conflict.
+  const settle = useCallback((fields, base) => {
+    edits.queue(fields, base);
     clearTimeout(settleRef.current);
     settleRef.current = setTimeout(flush, TYPING_SETTLE_MS);
   }, [edits.queue, flush]);
@@ -312,7 +326,7 @@ export function NotesView() {
   };
 
   const setNoteTopics = (tags) => {
-    settle({ tags });
+    settle({ tags }, { tags: note.tags });
     flush();
   };
 
@@ -553,7 +567,7 @@ export function NotesView() {
                 value={title}
                 placeholder="Untitled note"
                 aria-label="Note title"
-                onChange={(event) => { setTitle(event.target.value); settle({ title: event.target.value }); }}
+                onChange={(event) => { settle({ title: event.target.value }, { title }); setTitle(event.target.value); }}
                 onBlur={flush}
               />
               <button
@@ -587,7 +601,7 @@ export function NotesView() {
               <ComposeEditor
                 ref={editorRef}
                 value={body}
-                onChange={(value) => { setBody(value); settle({ body: value }); }}
+                onChange={(value) => { settle({ body: value }, { body }); setBody(value); }}
                 submitOnEnter={false}
                 formatOpen
                 knownCommandNames={[]}

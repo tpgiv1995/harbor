@@ -277,7 +277,12 @@ function createTaskStore(options = {}) {
       };
     }
     const result = model.applyOp(doc, op, { now: now() });
-    if (!result.ok) return { ok: false, reason: result.reason, doc, recovery };
+    if (!result.ok) {
+      return {
+        ok: false, reason: result.reason, doc, recovery,
+        ...(result.conflict ? { conflict: true, conflictFields: result.conflictFields } : {}),
+      };
+    }
     try {
       await save(result.doc);
     } catch (error) {
@@ -299,6 +304,11 @@ function createTaskStore(options = {}) {
       taskId: result.taskId,
       listId: result.listId,
       removed: result.removed,
+      // An edit that carried its base (tasks-model rebaseTaskPatch) says how it
+      // landed: merged with an edit made elsewhere, or kept as its own task.
+      merged: result.merged,
+      conflictCopyId: result.conflictCopyId,
+      conflictFields: result.conflictFields,
     };
   }
 }

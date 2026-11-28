@@ -3,7 +3,7 @@ import notesModel from '../../../src/shared/notes-model.cjs';
 import { CONNECTION } from '../rpc/client.js';
 import { readCachedDoc, writeCachedDoc } from '../rpc/local-cache.js';
 
-const { normalizeDoc } = notesModel;
+const { conflictNotice, normalizeDoc } = notesModel;
 
 export function useNotes(client) {
   // The last notes the phone read paint at once, offline included (local-cache.js).
@@ -64,7 +64,7 @@ export function useNotes(client) {
     const result = await client.call('notes:mutate', op)
       .catch((e) => ({ ok: false, reason: String(e?.message || e) }));
     if (result?.ok && result.doc) setDoc(normalizeDoc(result.doc));
-    setNotice(result?.ok ? null : (result?.reason || 'that change did not save'));
+    setNotice(result?.ok ? conflictNotice(result) : (result?.reason || 'that change did not save'));
     return result || { ok: false };
   }, [client, setDoc]);
 

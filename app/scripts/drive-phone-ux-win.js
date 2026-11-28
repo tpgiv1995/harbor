@@ -42,6 +42,7 @@ function launchBrowser(env) {
   return chromium.launch({ headless: true, executablePath: chromium.executablePath(), env });
 }
 const { realTmpDir } = require('../test/support/real-tmpdir.js');
+const { createNoteStore } = require('../src/main/providers/notes.js');
 const { parseMenu } = require('../src/main/menu-parse.js');
 
 const APP_ROOT = path.resolve(__dirname, '..');
@@ -848,7 +849,83 @@ const STATES = {
     await page.waitForTimeout(600);
     await shot(page, '15-notes');
   },
+
+  // The phone notes editor never writes back text it only showed (2026-11-27, Pat:
+  // "I keep having mobile harbor overwrite harbor notes"; docs/BACKLOG.md "Notes
+  // sync"). A second store on the same file plays the other writer (an agent's
+  // board tool, the desktop, the CLI), exactly as on the Legion. Run these against
+  // a bundle built before the fix and each one fails on its file check.
+  async 'notes-close-keeps-outside-edit'(page) {
+    const store = outsideNotes();
+    const added = await store.mutate({ type: 'note.add', title: 'Merge A', body: 'Q1: which carrier?\nYour answer:' });
+    await openPhoneNote(page, 'Merge A');
+    await store.mutate({ type: 'note.update', noteId: added.noteId, patch: { body: 'Q1: which carrier?\nYour answer:\n\nQ2: added by the board tool while the phone had it open' } });
+    await page.waitForTimeout(1500);
+    const shown = await page.locator('.ne-body').inputValue();
+    await shot(page, '17-notes-outside-edit-while-open');
+    await page.locator('.ne-back').click();
+    await page.locator('.ne-screen').waitFor({ state: 'detached' });
+    assert.match(fileNote(added.noteId).body, /Q2: added by the board tool/, 'closing without typing kept the edit made meanwhile');
+    assert.match(shown, /Q2: added by the board tool/, 'the open editor showed the edit made meanwhile');
+  },
+
+  async 'notes-typing-merges-outside-edit'(page) {
+    const store = outsideNotes();
+    const loaded = 'Q1: which carrier?\nYour answer:\n\n## Status\nrunning';
+    const added = await store.mutate({ type: 'note.add', title: 'Merge B', body: loaded });
+    await openPhoneNote(page, 'Merge B');
+    await page.locator('.ne-body').evaluate((el) => {
+      const at = el.value.indexOf('Your answer:') + 'Your answer:'.length;
+      el.focus();
+      el.setSelectionRange(at, at);
+    });
+    await page.keyboard.type(' Carrier A');
+    await store.mutate({ type: 'note.update', noteId: added.noteId, patch: { body: `${loaded}\nround 8 started` } });
+    await page.waitForTimeout(1500);
+    await page.locator('.ne-back').click();
+    await page.locator('.ne-screen').waitFor({ state: 'detached' });
+    assert.equal(fileNote(added.noteId).body, 'Q1: which carrier?\nYour answer: Carrier A\n\n## Status\nrunning\nround 8 started', 'the typed answer and the edit made meanwhile both landed');
+    await shot(page, '18-notes-typed-answer-merged');
+  },
+
+  async 'notes-stored-draft-never-overwrites'(page) {
+    const store = outsideNotes();
+    const added = await store.mutate({ type: 'note.add', title: 'Merge C', body: 'current text from the board tool' });
+    // A draft this phone kept in storage before the fix: no base recorded with it.
+    await page.evaluate((id) => localStorage.setItem('harbor-pending-note-edits', JSON.stringify({ [id]: { body: 'Nov 23 draft text' } })), added.noteId);
+    await page.reload();
+    await applyInsets(page);
+    await page.locator('.app-shell[data-connection="online"]').waitFor({ timeout: 20000 });
+    await openPhoneNote(page, 'Merge C');
+    await page.waitForTimeout(1500);
+    const shown = await page.locator('.ne-body').inputValue();
+    await page.locator('.ne-back').click();
+    await page.locator('.ne-screen').waitFor({ state: 'detached' });
+    const doc = fileDoc();
+    assert.equal(doc.notes.find((n) => n.id === added.noteId).body, 'current text from the board tool', 'the note kept its newer text');
+    assert.equal(shown, 'current text from the board tool', 'the editor showed the note, not the stored draft');
+    const copy = doc.notes.find((n) => n.title === 'Merge C (conflicting copy)');
+    assert.ok(copy, 'the stored draft was kept as its own note');
+    assert.equal(copy.body, 'Nov 23 draft text');
+    await page.locator('.app-toast').filter({ hasText: 'saved as its own note' }).waitFor({ timeout: 5000 });
+    await shot(page, '19-notes-stored-draft-kept-as-copy');
+  },
 };
+
+function outsideNotes() {
+  return createNoteStore({ file: process.env.HARBOR_NOTES_FILE, logger: { error() {}, warn() {}, log() {} } });
+}
+function fileDoc() {
+  return JSON.parse(require('node:fs').readFileSync(process.env.HARBOR_NOTES_FILE, 'utf8'));
+}
+function fileNote(id) {
+  return fileDoc().notes.find((note) => note.id === id);
+}
+async function openPhoneNote(page, title) {
+  await page.getByRole('button', { name: 'Notes' }).click();
+  await page.locator('.notes-mobile').getByText(title, { exact: true }).first().click();
+  await page.locator('.ne-body').waitFor();
+}
 
 async function coldOffline(browser, baseUrl, token) {
   const context = await browser.newContext({ viewport: PHONE, deviceScaleFactor: 2, isMobile: true, hasTouch: true, reducedMotion: 'reduce' });

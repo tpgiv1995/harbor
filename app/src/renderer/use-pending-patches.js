@@ -8,11 +8,13 @@ export function usePendingPatches(kind, id, mutate) {
   const edits = useMemo(() => {
     let storage;
     try { storage = window.localStorage; } catch { /* memory still retains edits */ }
-    return patches.createPendingPatches((entityId, patch) => mutateRef.current({
-      type: `${kind}.update`, [`${kind}Id`]: entityId, patch,
+    // `base` is what the editor showed before the user typed (pending-patches.cjs): the
+    // store merges against it instead of overwriting an edit made elsewhere meanwhile.
+    return patches.createPendingPatches((entityId, patch, base) => mutateRef.current({
+      type: `${kind}.update`, [`${kind}Id`]: entityId, patch, ...(base ? { base } : {}),
     }), { storage, key: `harbor-pending-${kind}-edits`, onChange: () => render(value => value + 1) });
   }, [kind]);
-  const queue = useCallback(fields => edits.queue(id, fields), [edits, id]);
+  const queue = useCallback((fields, base) => edits.queue(id, fields, base), [edits, id]);
   const flush = useCallback(() => edits.flush(id), [edits, id]);
   const failure = edits.error(id);
   const labels = { starred: 'importance', myDay: 'My Day', dueDate: 'due date', listId: 'list', groupId: 'group' };
@@ -31,5 +33,6 @@ export function usePendingPatches(kind, id, mutate) {
   }, [edits, pendingNow]);
   return { queue, flush, draft: pendingNow || {}, error, hasPending: Boolean(pendingNow),
     needsAttention: edits.needsAttention(id),
-    pending: entityId => edits.pending(entityId), discard: entityId => edits.discard(entityId) };
+    pending: entityId => edits.pending(entityId), stale: (entityId, current) => edits.stale(entityId, current),
+    discard: entityId => edits.discard(entityId) };
 }

@@ -126,23 +126,43 @@ export function TaskEditor({ doc, taskId, today, onNavigate, onClose, mutate, on
   const [armedDelete, setArmedDelete] = useState(null);
   const settleRef = useRef(null);
   const titleRef = useRef(null);
+  const [reseed, setReseed] = useState(0);
 
   // Seed on IDENTITY, not on every document change: re-seeding on each update
   // would fight the keyboard, because every keystroke causes an update.
+  //
+  // A draft this window kept in storage (a save that never landed) opens again only while it
+  // is current. A STALE one used to open AS the task and save over newer text (2026-11-27,
+  // docs/BACKLOG.md "Notes sync"); it now opens on the saved text and goes through the
+  // store's merge at once, and the fields reseed from the result if nothing was typed meanwhile.
   useEffect(() => {
-    setTitle(task?.title || '');
-    setNotes(task?.notes || '');
+    const restored = taskId ? edits.pending(taskId) : null;
+    const stale = Boolean(restored) && edits.stale(taskId, savedTask);
+    const shown = restored && !stale ? { ...savedTask, ...restored } : savedTask;
+    setTitle(shown?.title || '');
+    setNotes(shown?.notes || '');
     setSubDraft('');
     setArmedDelete(null);
+    if (stale) {
+      edits.flush().then((result) => { if (result?.ok) setReseed((n) => n + 1); });
+    }
   }, [taskId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!reseed || !savedTask || edits.pending(taskId)) return;
+    setTitle(savedTask.title || '');
+    setNotes(savedTask.notes || '');
+  }, [reseed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const flush = useCallback(async () => {
     clearTimeout(settleRef.current);
     return (await edits.flush()).ok;
   }, [edits.flush]);
 
-  const settle = useCallback((fields) => {
-    edits.queue(fields);
+  // `base` is what the editor showed just before this change: the store merges against it
+  // instead of overwriting an edit made elsewhere (pending-patches.cjs, 2026-11-27).
+  const settle = useCallback((fields, base) => {
+    edits.queue(fields, base);
     clearTimeout(settleRef.current);
     settleRef.current = setTimeout(flush, TYPING_SETTLE_MS);
   }, [edits.queue, flush]);
@@ -175,8 +195,8 @@ export function TaskEditor({ doc, taskId, today, onNavigate, onClose, mutate, on
 
   if (!task) return null;
 
-  const patch = async (fields) => {
-    settle(fields);
+  const patch = async (fields, base) => {
+    settle(fields, base);
     return flush();
   };
   const navigate = async (id) => { if (await flush()) onNavigate(id); };
@@ -232,7 +252,7 @@ export function TaskEditor({ doc, taskId, today, onNavigate, onClose, mutate, on
               className="task-editor-title"
               value={title}
               aria-label="Task name"
-              onChange={(e) => { setTitle(e.target.value); settle({ title: e.target.value }); }}
+              onChange={(e) => { settle({ title: e.target.value }, { title }); setTitle(e.target.value); }}
               onBlur={flush}
               onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); flush(); } }}
             />
@@ -304,7 +324,7 @@ export function TaskEditor({ doc, taskId, today, onNavigate, onClose, mutate, on
 
           <div className="task-editor-field">
             <span className="task-editor-label">Tags</span>
-            <TagField tags={task.tags} onChange={(tags) => patch({ tags })} />
+            <TagField tags={task.tags} onChange={(tags) => patch({ tags }, { tags: task.tags })} />
           </div>
 
           <label className="task-editor-field">
@@ -314,7 +334,7 @@ export function TaskEditor({ doc, taskId, today, onNavigate, onClose, mutate, on
               value={notes}
               rows={5}
               placeholder="Anything you will want in front of you when you pick this up"
-              onChange={(e) => { setNotes(e.target.value); settle({ notes: e.target.value }); }}
+              onChange={(e) => { settle({ notes: e.target.value }, { notes }); setNotes(e.target.value); }}
               onBlur={flush}
             />
           </label>

@@ -29,6 +29,7 @@
 //     inputs, not exceptions.
 
 const { DAY_ROLL_HOUR } = require('./date-roll.cjs');
+const edit = require('./edit-merge.cjs');
 
 const DOC_VERSION = 1;
 // Three levels of task, as asked: a level-1 task, its sub-task, and that
@@ -600,6 +601,76 @@ function touch(task, now) {
   return task;
 }
 
+const CONFLICT_SUFFIX = ' (conflicting copy)';
+
+/**
+ * The task twin of notes-model's updateFromBase (2026-11-27, docs/BACKLOG.md
+ * "Notes sync"): the task editor keeps unsaved edits in browser storage too,
+ * so a draft restored from there could write an old title or old notes over a
+ * newer one. `base` is the title, notes and tags the editor showed before the
+ * user typed; each based field merges three ways against the task as it is now
+ * (shared/edit-merge.cjs). Returns the patch to apply (fields that resolve to
+ * the task's current value are dropped, so a no-op edit does not touch
+ * updatedAt). When the edits cannot both be kept, the text fields leave the
+ * patch, `conflictFields` names them and `mine` carries the user's version for
+ * the caller's "(conflicting copy)" task; `strict` refuses instead whenever
+ * another writer changed a based field. A null base field means "not known"
+ * and merges only when it already equals the task.
+ */
+function rebaseTaskPatch(task, patch, base, strict) {
+  const mine = {};
+  if ('title' in patch) {
+    mine.title = cleanTitle(patch.title);
+    if (!mine.title) return fail('a task needs a name');
+  }
+  if ('notes' in patch) mine.notes = cleanText(patch.notes, MAX_NOTES);
+  if ('tags' in patch) mine.tags = cleanTags(patch.tags);
+  const known = (field) => base[field] !== null && base[field] !== undefined;
+  const baseOf = {
+    title: () => (known('title') ? cleanTitle(base.title) : null),
+    notes: () => (known('notes') ? cleanText(base.notes, MAX_NOTES) : null),
+    tags: () => (known('tags') ? cleanTags(base.tags) : null),
+  };
+  const same = (field, a, b) => (field === 'tags'
+    ? a.map(tagKey).join('\n') === b.map(tagKey).join('\n')
+    : a === b);
+  const based = Object.keys(mine).filter((field) => field in base);
+
+  if (strict) {
+    const moved = based.filter((field) => !same(field, mine[field], task[field])
+      && (!known(field) || !same(field, baseOf[field](), task[field])));
+    if (moved.length) {
+      return {
+        ok: false,
+        conflict: true,
+        conflictFields: moved,
+        reason: `this task changed after you read it (${moved.join(', ')}); read it again and redo the edit`,
+      };
+    }
+  }
+
+  const out = { ...patch };
+  const conflicts = [];
+  let merged = false;
+  for (const field of based) {
+    const result = field === 'notes'
+      ? edit.mergeText(baseOf.notes(), mine.notes, task.notes)
+      : field === 'title'
+        ? edit.mergeValue(baseOf.title(), mine.title, task.title)
+        : edit.mergeSet(baseOf.tags(), mine.tags, task.tags, tagKey);
+    if (!result.ok) { conflicts.push(field); continue; }
+    const value = field === 'notes' ? result.text : result.value;
+    if (result.merged) merged = true;
+    if (same(field, value, task[field])) delete out[field];
+    else out[field] = value;
+  }
+  if (conflicts.length) {
+    for (const field of ['title', 'notes', 'tags']) delete out[field];
+    return { ok: true, patch: out, merged, mine, conflictFields: conflicts };
+  }
+  return { ok: true, patch: out, merged, mine };
+}
+
 /**
  * Apply one operation and return a NEW document. Never mutates the input, so a
  * caller can keep the previous document for a retry or a diff, and always
@@ -705,7 +776,33 @@ function applyOp(input, op, ctx = {}) {
     case 'task.update': {
       const task = byId(op.taskId);
       if (!task) return fail('that task no longer exists');
-      const patch = op.patch && typeof op.patch === 'object' ? op.patch : {};
+      let patch = op.patch && typeof op.patch === 'object' ? op.patch : {};
+      // An edit that says what it started from (op.base) never overwrites a
+      // newer title, notes or tags: see rebaseTaskPatch.
+      let outcome = {};
+      if (op.base && typeof op.base === 'object' && !Array.isArray(op.base)) {
+        const based = rebaseTaskPatch(task, patch, op.base, op.strict === true);
+        if (!based.ok) return based;
+        patch = based.patch;
+        if (based.merged) outcome.merged = true;
+        if (based.conflictFields) {
+          const siblings = task.parentId ? childrenOf(doc, task.parentId) : rootsOf(doc, task.listId);
+          const title = based.mine.title ?? task.title;
+          const copy = {
+            ...task,
+            id: idFactory('t'),
+            title: cleanTitle(title.slice(0, MAX_TITLE - CONFLICT_SUFFIX.length) + CONFLICT_SUFFIX),
+            notes: based.mine.notes ?? task.notes,
+            tags: based.mine.tags ?? [...task.tags],
+            createdAt: now,
+            updatedAt: now,
+            order: nextOrder(siblings),
+          };
+          doc.tasks.push(copy);
+          outcome = { ...outcome, conflictCopyId: copy.id, conflictFields: based.conflictFields };
+        }
+        if (!Object.keys(patch).length) return { ok: true, doc, taskId: task.id, ...outcome };
+      }
       if ('title' in patch) {
         const title = cleanTitle(patch.title);
         if (!title) return fail('a task needs a name');
@@ -727,7 +824,7 @@ function applyOp(input, op, ctx = {}) {
         task.order = nextOrder(siblings);
         for (const item of moving) { item.listId = patch.listId; touch(item, now); }
       }
-      return { ok: true, doc, taskId: touch(task, now).id };
+      return { ok: true, doc, taskId: touch(task, now).id, ...outcome };
     }
 
     case 'task.appendAssignment': {
